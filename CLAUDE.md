@@ -46,3 +46,7 @@ Because Spring Security is on the classpath, any new HTTP endpoint is secured by
 ## Subagents
 
 - `database-architect` (`.claude/agents/database-architect.md`) — consult/delegate to this agent for any task touching schema design, PostgreSQL tables/indexes/constraints, Flyway/Liquibase migrations, JPA entities/repositories, transactions, locking, or query performance.
+- `backend-architect` (`.claude/agents/backend-architect.md`) — consult/delegate for system-level architecture: package/module structure, REST API design, auth/multi-tenancy architecture, self-hosted-vs-Cloud configuration strategy, new dependency choices.
+- `code-reviewer` (`.claude/agents/code-reviewer.md`) — consult/delegate for reviewing Java/Spring code changes (controllers, services, DTOs, config) for correctness, security, readability, and performance before merging.
+
+All three agents are advisory-only (Read/Grep/Glob/Bash, no edits) and cross-reference each other to avoid overlapping scope.
