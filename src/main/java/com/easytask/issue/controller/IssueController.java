@@ -2,6 +2,7 @@ package com.easytask.issue.controller;
 
 import com.easytask.issue.dto.ChangeIssueStatusRequest;
 import com.easytask.issue.dto.CreateIssueRequest;
+import com.easytask.issue.dto.IssueHistoryResponse;
 import com.easytask.issue.dto.IssueResponse;
 import com.easytask.issue.dto.MoveIssueRequest;
 import com.easytask.issue.dto.UpdateIssueRequest;
@@ -81,5 +82,13 @@ public class IssueController {
                                @PathVariable UUID issueId,
                                @Valid @RequestBody MoveIssueRequest request) {
         return issueService.moveIssue(currentUser, workspaceId, projectId, issueId, request);
+    }
+
+    @GetMapping("/{issueId}/history")
+    public List<IssueHistoryResponse> history(@AuthenticationPrincipal User currentUser,
+                                               @PathVariable UUID workspaceId,
+                                               @PathVariable UUID projectId,
+                                               @PathVariable UUID issueId) {
+        return issueService.listHistory(currentUser, workspaceId, projectId, issueId);
     }
 }

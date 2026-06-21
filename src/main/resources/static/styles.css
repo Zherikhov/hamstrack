@@ -346,3 +346,12 @@ button, input, select, textarea {
 }
 .link-btn:hover { color: var(--accent); }
 .comment-form textarea { width: 100%; min-height: 60px; }
+
+.history-section { margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--border); }
+.history-section h4 { margin: 0 0 10px; font-size: 14px; }
+.history-list { display: flex; flex-direction: column; gap: 6px; }
+.history-item { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+.history-author { font-weight: 600; color: var(--text); }
+.history-field { font-weight: 600; }
+.history-old, .history-new { color: var(--text); }
+.history-date { float: right; }

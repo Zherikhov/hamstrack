@@ -782,6 +782,10 @@
                 <button type="submit" class="btn btn-sm">Comment</button>
               </div>
             </form>` : ''}
+        </div>
+        <div class="history-section">
+          <h4>History</h4>
+          <div id="history-list" class="history-list"></div>
         </div>` : ''}`);
 
     body.querySelector('#cancel-btn').addEventListener('click', () => {
@@ -796,12 +800,16 @@
       statusSelect.innerHTML = options.map((s) =>
         `<option value="${s.id}" ${s.id === issue.statusId ? 'selected' : ''}>${escapeHtml(s.name)}</option>`).join('');
 
+      const historyList = document.getElementById('history-list');
+      loadHistory(workspace, project, issue, historyList);
+
       if (canWrite) {
         statusSelect.addEventListener('change', async () => {
           try {
             await api('PATCH', `/api/workspaces/${workspace.id}/projects/${project.id}/issues/${issue.id}/status`,
               { statusId: statusSelect.value });
             toast('Status updated', 'success');
+            loadHistory(workspace, project, issue, historyList);
           } catch (err) {
             toast(err.message);
           }
@@ -942,5 +950,44 @@
         toast(err.message);
       }
     });
+  }
+
+  // ---------- issue history ----------
+
+  const HISTORY_FIELD_LABELS = {
+    title: 'Title',
+    description: 'Description',
+    priority: 'Priority',
+    assignee: 'Assignee',
+    dueDate: 'Due date',
+    status: 'Status',
+  };
+
+  function historyValueText(field, value) {
+    if (value === null || value === undefined || value === '') return '—';
+    if (field === 'description' && value.length > 60) return `${value.slice(0, 60)}…`;
+    return value;
+  }
+
+  async function loadHistory(workspace, project, issue, listEl) {
+    listEl.innerHTML = '<div class="loading">Loading…</div>';
+    try {
+      const entries = await api('GET',
+        `/api/workspaces/${workspace.id}/projects/${project.id}/issues/${issue.id}/history`);
+
+      listEl.innerHTML = entries.length === 0
+        ? '<div class="empty-state">No history yet.</div>'
+        : entries.map((h) => `
+          <div class="history-item">
+            <span class="history-author">${escapeHtml(h.actorName)}</span>
+            changed <span class="history-field">${escapeHtml(HISTORY_FIELD_LABELS[h.field] || h.field)}</span>:
+            <span class="history-old">${escapeHtml(historyValueText(h.field, h.oldValue))}</span>
+            →
+            <span class="history-new">${escapeHtml(historyValueText(h.field, h.newValue))}</span>
+            <span class="history-date">${formatDate(h.createdAt)}</span>
+          </div>`).join('');
+    } catch (err) {
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(err.message)}</div>`;
+    }
   }
 })();

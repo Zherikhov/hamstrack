@@ -2,10 +2,12 @@ package com.easytask.issue.service;
 
 import com.easytask.issue.dto.ChangeIssueStatusRequest;
 import com.easytask.issue.dto.CreateIssueRequest;
+import com.easytask.issue.dto.IssueHistoryResponse;
 import com.easytask.issue.dto.IssueResponse;
 import com.easytask.issue.dto.MoveIssueRequest;
 import com.easytask.issue.dto.UpdateIssueRequest;
 import com.easytask.issue.entity.Issue;
+import com.easytask.issue.entity.IssueHistory;
 import com.easytask.issue.entity.IssuePriority;
 import com.easytask.project.entity.Project;
 import com.easytask.project.entity.ProjectIssueType;
@@ -22,6 +24,7 @@ import com.easytask.project.exception.ProjectAccessDeniedException;
 import com.easytask.project.exception.ProjectNotFoundException;
 import com.easytask.project.exception.UserNotProjectMemberException;
 import com.easytask.workspace.exception.WorkspaceNotFoundException;
+import com.easytask.issue.repository.IssueHistoryRepository;
 import com.easytask.issue.repository.IssueRepository;
 import com.easytask.project.repository.ProjectIssueTypeRepository;
 import com.easytask.project.repository.ProjectIssueTypeStatusRepository;
@@ -33,7 +36,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -42,6 +47,7 @@ public class IssueService {
     private static final BigDecimal POSITION_GAP = BigDecimal.valueOf(1024);
 
     private final IssueRepository issueRepository;
+    private final IssueHistoryRepository issueHistoryRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
     private final ProjectIssueTypeRepository projectIssueTypeRepository;
@@ -50,6 +56,7 @@ public class IssueService {
     private final UserRepository userRepository;
 
     public IssueService(IssueRepository issueRepository,
+                         IssueHistoryRepository issueHistoryRepository,
                          ProjectRepository projectRepository,
                          ProjectMemberRepository projectMemberRepository,
                          ProjectIssueTypeRepository projectIssueTypeRepository,
@@ -57,6 +64,7 @@ public class IssueService {
                          WorkspaceMemberRepository workspaceMemberRepository,
                          UserRepository userRepository) {
         this.issueRepository = issueRepository;
+        this.issueHistoryRepository = issueHistoryRepository;
         this.projectRepository = projectRepository;
         this.projectMemberRepository = projectMemberRepository;
         this.projectIssueTypeRepository = projectIssueTypeRepository;
@@ -124,6 +132,12 @@ public class IssueService {
         // resolved before any mutation: an assignee query issued against a dirty issue would
         // trigger Hibernate's auto-flush mid-method, double-incrementing the optimistic-lock version
         User assignee = resolveAssignee(projectId, request.assigneeId());
+        String oldTitle = issue.getTitle();
+        String oldDescription = issue.getDescription();
+        IssuePriority oldPriority = issue.getPriority();
+        String oldAssigneeName = displayName(issue.getAssignee());
+        String oldDueDate = dateString(issue.getDueDate());
+
         issue.setTitle(request.title());
         issue.setDescription(request.description());
         issue.setPriority(request.priority());
@@ -131,6 +145,12 @@ public class IssueService {
         issue.setDueDate(request.dueDate());
         issue.setUpdatedBy(currentUser);
         issueRepository.saveAndFlush(issue);
+
+        recordHistory(issue, currentUser, "title", oldTitle, issue.getTitle());
+        recordHistory(issue, currentUser, "description", oldDescription, issue.getDescription());
+        recordHistory(issue, currentUser, "priority", oldPriority.name(), issue.getPriority().name());
+        recordHistory(issue, currentUser, "assignee", oldAssigneeName, displayName(issue.getAssignee()));
+        recordHistory(issue, currentUser, "dueDate", oldDueDate, dateString(issue.getDueDate()));
 
         return toResponse(issue);
     }
@@ -148,11 +168,14 @@ public class IssueService {
                 .orElseThrow(InvalidIssueStatusException::new);
         // resolved before any mutation, see comment in updateIssue
         BigDecimal newPosition = nextPosition(projectId, request.statusId());
+        String oldStatusName = issue.getStatus().getName();
 
         issue.setStatus(combination.getStatus());
         issue.setPosition(newPosition);
         issue.setUpdatedBy(currentUser);
         issueRepository.saveAndFlush(issue);
+
+        recordHistory(issue, currentUser, "status", oldStatusName, issue.getStatus().getName());
 
         return toResponse(issue);
     }
@@ -172,13 +195,47 @@ public class IssueService {
         BigDecimal prevPos = resolveNeighborPosition(projectId, request.statusId(), request.prevIssueId());
         BigDecimal nextPos = resolveNeighborPosition(projectId, request.statusId(), request.nextIssueId());
         BigDecimal newPosition = betweenPosition(projectId, request.statusId(), prevPos, nextPos);
+        String oldStatusName = issue.getStatus().getName();
 
         issue.setStatus(combination.getStatus());
         issue.setPosition(newPosition);
         issue.setUpdatedBy(currentUser);
         issueRepository.saveAndFlush(issue);
 
+        recordHistory(issue, currentUser, "status", oldStatusName, issue.getStatus().getName());
+
         return toResponse(issue);
+    }
+
+    @Transactional(readOnly = true)
+    public List<IssueHistoryResponse> listHistory(User currentUser, UUID workspaceId, UUID projectId, UUID issueId) {
+        requireWorkspaceMembership(currentUser, workspaceId);
+        requireProject(workspaceId, projectId);
+        requireIssue(projectId, issueId);
+        return issueHistoryRepository.findByIssue_IdOrderByCreatedAt(issueId).stream()
+                .map(this::toHistoryResponse)
+                .toList();
+    }
+
+    private void recordHistory(Issue issue, User actor, String field, String oldValue, String newValue) {
+        if (Objects.equals(oldValue, newValue)) {
+            return;
+        }
+        IssueHistory history = new IssueHistory();
+        history.setIssue(issue);
+        history.setActor(actor);
+        history.setField(field);
+        history.setOldValue(oldValue);
+        history.setNewValue(newValue);
+        issueHistoryRepository.save(history);
+    }
+
+    private String displayName(User user) {
+        return user != null ? user.getDisplayName() : null;
+    }
+
+    private String dateString(LocalDate date) {
+        return date != null ? date.toString() : null;
     }
 
     private BigDecimal resolveNeighborPosition(UUID projectId, UUID statusId, UUID neighborIssueId) {
@@ -264,5 +321,17 @@ public class IssueService {
                 issue.getCreatedAt(),
                 issue.getUpdatedAt(),
                 issue.getVersion());
+    }
+
+    private IssueHistoryResponse toHistoryResponse(IssueHistory history) {
+        return new IssueHistoryResponse(
+                history.getId(),
+                history.getIssue().getId(),
+                history.getActor().getId(),
+                history.getActor().getDisplayName(),
+                history.getField(),
+                history.getOldValue(),
+                history.getNewValue(),
+                history.getCreatedAt());
     }
 }
