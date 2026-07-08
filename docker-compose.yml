@@ -1,0 +1,27 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hamstrack-postgres
+    environment:
+      POSTGRES_DB: hamstrack
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "1q2w#E$R"
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d hamstrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: hamstrack-mailhog
+    ports:
+      - "1025:1025"   # SMTP — настроить в Spring как spring.mail.host=localhost spring.mail.port=1025
+      - "8025:8025"   # Web UI — http://localhost:8025
+
+volumes:
+  postgres_data:

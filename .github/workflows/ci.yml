@@ -1,0 +1,50 @@
+name: CI
+
+# Runs on every push and on PRs targeting main
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # GitHub spins up a real PostgreSQL alongside the job
+    # so our Spring Boot tests have an actual DB to connect to
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: hamstrack_test
+          POSTGRES_USER: hamstrack
+          POSTGRES_PASSWORD: hamstrack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven          # caches ~/.m2 between runs — much faster
+
+      - name: Build (compile check)
+        run: ./mvnw clean package -DskipTests -B
+
+      - name: Run tests
+        run: ./mvnw test -B
+        env:
+          DB_URL: jdbc:postgresql://localhost:5432/hamstrack_test
+          DB_USERNAME: hamstrack
+          DB_PASSWORD: hamstrack

@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand / safety-state palette */
+  --color-brand: #0F6E63;
+  --color-brand-hover: #0C5950;
+  --color-pending: #B45309;
+  --color-sandbox: #64748B;
+
+  /* Warm neutrals */
+  --color-surface: #F7F6F3;
+  --color-surface-2: #EFEDE7;
+  --color-border: #E4E1DA;
+  --color-border-2: #CBC7BC;
+  --color-text-muted: #8B8680;
+  --color-text-secondary: #5C5950;
+  --color-text: #1C1B19;
+  --color-ink: #1C1B19;
+
+  /* Semantic */
+  --color-success: #15803D;
+  --color-warning: #B45309;
+  --color-error: #B91C1C;
+  --color-info: #64748B;
+
+  /* Typography */
+  --font-display: "Cabinet Grotesk", sans-serif;
+  --font-body: "Instrument Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+  --font-code: "JetBrains Mono", monospace;
+
+  /* Border radius (hierarchical) */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Spacing scale (8px base) */
+  --spacing-2xs: 2px;
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+  --spacing-2xl: 48px;
+  --spacing-3xl: 64px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: 15px;
+  color: var(--color-text);
+  background: var(--color-surface);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Monospace for data/keys */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }

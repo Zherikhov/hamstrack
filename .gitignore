@@ -34,3 +34,12 @@ build/
 
 ### gstack (Claude Code skills tool, not part of this project) ###
 .gstack/
+
+### Node ###
+src/main/frontend/node_modules/
+
+### Production secrets — never commit ###
+.env
+application-local.properties
+src/main/resources/application-local.properties
+
