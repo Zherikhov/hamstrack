@@ -7,6 +7,7 @@ services:
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
     depends_on:
       postgres:
         condition: service_healthy

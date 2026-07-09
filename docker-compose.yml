@@ -4,14 +4,14 @@ services:
     container_name: hamstrack-postgres
     environment:
       POSTGRES_DB: hamstrack
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "1q2w#E$R"
+      POSTGRES_USER: ${POSTGRES_USER:-hamstrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hamstrack}
     ports:
       - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d hamstrack"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hamstrack} -d hamstrack"]
       interval: 5s
       timeout: 5s
       retries: 10
