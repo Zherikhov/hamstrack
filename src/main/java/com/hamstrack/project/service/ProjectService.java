@@ -2,6 +2,7 @@ package com.hamstrack.project.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.exception.UserNotFoundException;
 import com.hamstrack.project.dto.*;
 import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
@@ -107,8 +108,11 @@ public class ProjectService {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = resolveProject(workspace, projectId);
         requireRole(actor, project, ProjectRole.MANAGER);
+        // Only workspace members can join a project — a bare findById would expose
+        // any user's email/name across tenants via the response
         var user = userRepository.findById(req.userId())
-                .orElseThrow(() -> new ProjectNotFoundException());
+                .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
+                .orElseThrow(UserNotFoundException::new);
         if (projectMemberRepository.existsByProjectAndUser(project, user)) {
             throw new ProjectKeyConflictException();
         }

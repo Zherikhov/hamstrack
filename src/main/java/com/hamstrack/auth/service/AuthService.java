@@ -96,6 +96,9 @@ public class AuthService {
         if (!stored.isValid()) {
             throw new InvalidTokenException();
         }
+        if (stored.getUser().getStatus() != UserStatus.ACTIVE) {
+            throw new InvalidTokenException();
+        }
         // Rotate: delete old token, issue new pair
         refreshTokenRepository.delete(stored);
         return issueTokens(stored.getUser(), response);

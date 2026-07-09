@@ -32,10 +32,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
         if (jwtService.isValid(token)) {
             var userId = jwtService.extractUserId(token);
-            userRepository.findById(userId).ifPresent(user -> {
-                var auth = new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
-                SecurityContextHolder.getContext().setAuthentication(auth);
-            });
+            // Only ACTIVE users authenticate — a disabled user's token must stop working immediately
+            userRepository.findById(userId)
+                    .filter(user -> user.isEnabled())
+                    .ifPresent(user -> {
+                        var auth = new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
+                        SecurityContextHolder.getContext().setAuthentication(auth);
+                    });
         }
         chain.doFilter(request, response);
     }

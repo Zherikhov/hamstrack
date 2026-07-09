@@ -90,10 +90,8 @@ public class CommentService {
     @Transactional
     public CommentResponse update(User actor, UUID workspaceId, UUID projectId, long issueNumber,
                                   UUID commentId, CreateCommentRequest req) {
-        resolveIssue(actor, workspaceId, projectId, issueNumber);
-        var comment = commentRepository.findById(commentId)
-                .orElseThrow(CommentNotFoundException::new);
-        if (comment.isDeleted()) throw new CommentNotFoundException();
+        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
         }
@@ -104,10 +102,8 @@ public class CommentService {
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID commentId) {
-        resolveIssue(actor, workspaceId, projectId, issueNumber);
-        var comment = commentRepository.findById(commentId)
-                .orElseThrow(CommentNotFoundException::new);
-        if (comment.isDeleted()) throw new CommentNotFoundException();
+        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
         }
@@ -128,6 +124,16 @@ public class CommentService {
                     .ifPresent(result::add);
         }
         return result;
+    }
+
+    // The comment must belong to the issue resolved from the URL — a global findById
+    // would let an author edit their comments in workspaces they were removed from
+    private IssueComment findCommentOnIssue(UUID commentId, com.hamstrack.issue.entity.Issue issue) {
+        var comment = commentRepository.findById(commentId)
+                .filter(c -> c.getIssue().getId().equals(issue.getId()))
+                .orElseThrow(CommentNotFoundException::new);
+        if (comment.isDeleted()) throw new CommentNotFoundException();
+        return comment;
     }
 
     private com.hamstrack.issue.entity.Issue resolveIssue(User actor, UUID workspaceId, UUID projectId, long issueNumber) {

@@ -74,11 +74,10 @@ public class IssueService {
         issue.setPosition(updated.getIssueSeq());
 
         if (req.assigneeId() != null) {
-            issue.setAssignee(userRepository.findById(req.assigneeId())
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown assignee")));
+            issue.setAssignee(resolveAssignee(workspace, req.assigneeId()));
         }
         if (req.parentId() != null) {
-            issue.setParent(issueRepository.findById(req.parentId())
+            issue.setParent(issueRepository.findByIdAndProject(req.parentId(), project)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown parent issue")));
         }
         issue.setDueDate(req.dueDate());
@@ -131,7 +130,7 @@ public class IssueService {
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
         var typeOpt = req.typeId() != null ? issueTypeRepository.findByIdAndWorkspace(req.typeId(), workspace) : null;
         var statusOpt = req.statusId() != null ? statusRepository.findByIdAndWorkspace(req.statusId(), workspace) : null;
-        var assigneeOpt = req.assigneeId() != null ? userRepository.findById(req.assigneeId()) : null;
+        var newAssignee = req.assigneeId() != null ? resolveAssignee(workspace, req.assigneeId()) : null;
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
@@ -169,9 +168,7 @@ public class IssueService {
                     issue.getPriority().name(), req.priority().name()));
             issue.setPriority(req.priority());
         }
-        if (assigneeOpt != null) {
-            var newAssignee = assigneeOpt.orElseThrow(
-                    () -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown assignee"));
+        if (newAssignee != null) {
             String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
             if (!newAssignee.getId().equals(issue.getAssignee() != null ? issue.getAssignee().getId() : null)) {
                 historyEntries.add(makeHistory(issue, actor, "assignee", oldName, newAssignee.getDisplayName()));
@@ -223,6 +220,14 @@ public class IssueService {
         h.setOldValue(oldVal);
         h.setNewValue(newVal);
         return h;
+    }
+
+    // Assignee must be a member of the workspace — a bare findById would let callers
+    // reference (and enumerate) users from other tenants
+    private User resolveAssignee(Workspace workspace, UUID assigneeId) {
+        return userRepository.findById(assigneeId)
+                .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown assignee"));
     }
 
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {

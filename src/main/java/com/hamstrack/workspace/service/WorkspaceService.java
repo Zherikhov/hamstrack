@@ -89,6 +89,10 @@ public class WorkspaceService {
         if (!actorMember.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
             throw new InsufficientWorkspaceRoleException();
         }
+        // OWNER is never grantable via invite, and no one can grant a role above their own
+        if (req.role() == WorkspaceRole.OWNER || !actorMember.getRole().isAtLeast(req.role())) {
+            throw new InsufficientWorkspaceRoleException();
+        }
         // Check not already a member
         userRepository.findByEmail(req.email().toLowerCase()).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {

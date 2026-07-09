@@ -15,6 +15,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
 
     Optional<Issue> findByProjectAndNumber(Project project, long number);
 
+    Optional<Issue> findByIdAndProject(UUID id, Project project);
+
     @Query("SELECT i FROM Issue i WHERE i.project = :project " +
            "AND (:statusId IS NULL OR i.status.id = :statusId) " +
            "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
