@@ -1,24 +1,32 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useParams } from 'react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Filter } from 'lucide-react'
-import { apiListIssues, apiListIssueTypes, apiListStatuses, apiGetProject } from '../api'
-import { Button, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
+import { apiListIssues, apiListIssueTypes, apiListStatuses, apiListStatusTransitions, apiUpdateIssue } from '../api'
+import { Button, PriorityBadge, Avatar } from '../components/ui'
+import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue } from '../types'
+import type { Issue, Status } from '../types'
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
+  const qc = useQueryClient()
   const [openIssueNumber, setOpenIssueNumber] = useState<number | null | undefined>(undefined)
   // undefined = panel closed, null = create mode, number = view/edit
-  const [filterStatusId, setFilterStatusId] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
+  const [dragging, setDragging] = useState<Issue | null>(null)
+  const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
+  const [moveError, setMoveError] = useState<string>('')
 
-  const { data: project } = useQuery({
-    queryKey: ['project', wsId, projectId],
-    queryFn: () => apiGetProject(wsId!, projectId!),
-    enabled: !!wsId && !!projectId,
-  })
+  // Global "+ Create" in the top bar signals issue creation for the open project
+  const createIssueSignal = useUiStore(s => s.createIssueSignal)
+  const lastSignal = useRef(createIssueSignal)
+  useEffect(() => {
+    if (createIssueSignal !== lastSignal.current) {
+      lastSignal.current = createIssueSignal
+      setOpenIssueNumber(null)
+    }
+  }, [createIssueSignal])
 
   const { data: issueTypes = [] } = useQuery({
     queryKey: ['issueTypes', wsId],
@@ -32,31 +40,80 @@ export default function BoardPage() {
     enabled: !!wsId,
   })
 
+  const { data: transitions = [] } = useQuery({
+    queryKey: ['statusTransitions', wsId],
+    queryFn: () => apiListStatusTransitions(wsId!),
+    enabled: !!wsId,
+  })
+
+  const issuesKey = ['issues', wsId, projectId, 'board', filterPriority]
   const { data: issues = [], isLoading } = useQuery({
-    queryKey: ['issues', wsId, projectId, filterStatusId, filterPriority],
-    queryFn: () => apiListIssues(wsId!, projectId!, {
-      statusId: filterStatusId || undefined,
-      priority: filterPriority || undefined,
-    }),
+    queryKey: issuesKey,
+    queryFn: () => apiListIssues(wsId!, projectId!, { priority: filterPriority || undefined }),
     enabled: !!wsId && !!projectId,
   })
 
+  const moveMutation = useMutation({
+    mutationFn: ({ issue, statusId }: { issue: Issue; statusId: string }) =>
+      apiUpdateIssue(wsId!, projectId!, issue.number, { statusId, version: issue.version }),
+    onMutate: async ({ issue, statusId }) => {
+      // Optimistic move: the card lands in the target column immediately
+      await qc.cancelQueries({ queryKey: issuesKey })
+      const previous = qc.getQueryData<Issue[]>(issuesKey)
+      const target = statuses.find(s => s.id === statusId)
+      if (target) {
+        qc.setQueryData<Issue[]>(issuesKey, old =>
+          old?.map(i => (i.id === issue.id ? { ...i, status: target } : i)) ?? [])
+      }
+      return { previous }
+    },
+    onError: (err, _vars, ctx) => {
+      if (ctx?.previous) qc.setQueryData(issuesKey, ctx.previous)
+      setMoveError(err instanceof Error ? err.message : 'Failed to move issue')
+    },
+    onSuccess: updated => {
+      setMoveError('')
+      // Replace with the server copy so the next drag carries a fresh version
+      qc.setQueryData<Issue[]>(issuesKey, old =>
+        old?.map(i => (i.id === updated.id ? updated : i)) ?? [])
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['issue', wsId, projectId] })
+    },
+  })
+
+  // Workflow rules: if a status has outgoing transitions defined, only those
+  // targets are allowed; a status with none defined can move anywhere.
+  function isMoveAllowed(from: Status, toStatusId: string): boolean {
+    if (from.id === toStatusId) return false
+    const outgoing = transitions.filter(t => t.fromStatusId === from.id)
+    if (outgoing.length === 0) return true
+    return outgoing.some(t => t.toStatusId === toStatusId)
+  }
+
+  function handleDrop(statusId: string) {
+    setDragOverStatusId(null)
+    if (!dragging) return
+    const issue = dragging
+    setDragging(null)
+    if (!isMoveAllowed(issue.status, statusId)) return
+    moveMutation.mutate({ issue, statusId })
+  }
+
   const panelOpen = openIssueNumber !== undefined
+  const ordered = [...statuses].sort((a, b) => a.position - b.position)
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {/* Main content */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* Topbar */}
+        {/* Page header */}
         <div
           className="flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0"
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-semibold text-sm truncate">{project?.name ?? '…'}</span>
-            <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
-              {project?.key}
-            </span>
+            <span className="font-display font-bold text-sm truncate">Board</span>
           </div>
           <div className="flex items-center gap-2">
             <Button variant="primary" size="sm" onClick={() => setOpenIssueNumber(null)}>
@@ -73,15 +130,6 @@ export default function BoardPage() {
         >
           <Filter size={13} style={{ color: 'var(--color-text-muted)' }} />
           <select
-            value={filterStatusId}
-            onChange={e => setFilterStatusId(e.target.value)}
-            className="text-xs px-2 py-1 rounded border cursor-pointer outline-none"
-            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
-          >
-            <option value="">All statuses</option>
-            {statuses.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <select
             value={filterPriority}
             onChange={e => setFilterPriority(e.target.value)}
             className="text-xs px-2 py-1 rounded border cursor-pointer outline-none"
@@ -90,66 +138,107 @@ export default function BoardPage() {
             <option value="">All priorities</option>
             {['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE'].map(p => <option key={p} value={p}>{p}</option>)}
           </select>
-          {(filterStatusId || filterPriority) && (
+          {filterPriority && (
             <button
               className="text-xs cursor-pointer hover:underline"
               style={{ color: 'var(--color-text-muted)' }}
-              onClick={() => { setFilterStatusId(''); setFilterPriority('') }}
+              onClick={() => setFilterPriority('')}
             >
               Clear
             </button>
+          )}
+          {moveError && (
+            <span className="text-xs" style={{ color: 'var(--color-error)' }}>{moveError}</span>
           )}
           <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
             {issues.length} issue{issues.length !== 1 ? 's' : ''}
           </span>
         </div>
 
-        {/* Issue list */}
-        <div className="flex-1 overflow-y-auto" style={{ background: 'var(--color-surface)' }}>
+        {/* Kanban columns */}
+        <div
+          className="flex-1 flex gap-3 overflow-x-auto overflow-y-hidden p-4"
+          style={{ background: 'var(--color-surface)' }}
+        >
           {isLoading ? (
-            <div className="flex items-center justify-center py-16">
+            <div className="flex-1 flex items-center justify-center">
               <span className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
             </div>
-          ) : issues.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 gap-3">
-              <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-                {filterStatusId || filterPriority ? 'No issues match the filter' : 'No issues yet'}
-              </span>
-              {!filterStatusId && !filterPriority && (
-                <Button variant="secondary" size="sm" onClick={() => setOpenIssueNumber(null)}>
-                  <Plus size={14} />
-                  Create first issue
-                </Button>
-              )}
-            </div>
           ) : (
-            <table className="w-full border-collapse">
-              <thead>
-                <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Assignee'].map(h => (
-                    <th
-                      key={h}
-                      className="text-left px-4 py-2 text-xs font-medium"
-                      style={{ color: 'var(--color-text-muted)', background: 'white', position: 'sticky', top: 0, borderBottom: '1px solid var(--color-border)' }}
-                    >
-                      {h}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {issues.map(issue => (
-                  <IssueRow
-                    key={issue.id}
-                    issue={issue}
-                    active={openIssueNumber === issue.number}
-                    onClick={() => setOpenIssueNumber(
-                      openIssueNumber === issue.number ? undefined : issue.number
+            ordered.map(status => {
+              const columnIssues = issues.filter(i => i.status.id === status.id)
+              const allowed = dragging ? isMoveAllowed(dragging.status, status.id) : false
+              const isOver = dragOverStatusId === status.id
+              return (
+                <div
+                  key={status.id}
+                  onDragOver={e => {
+                    if (!dragging) return
+                    if (allowed) {
+                      e.preventDefault()
+                      e.dataTransfer.dropEffect = 'move'
+                      setDragOverStatusId(status.id)
+                    }
+                  }}
+                  onDragLeave={e => {
+                    if (!e.currentTarget.contains(e.relatedTarget as Node) && isOver) {
+                      setDragOverStatusId(null)
+                    }
+                  }}
+                  onDrop={e => { e.preventDefault(); handleDrop(status.id) }}
+                  className="flex flex-col flex-shrink-0 rounded-xl border transition-colors"
+                  style={{
+                    width: 280,
+                    background: isOver && allowed ? '#e2efec' : 'var(--color-surface-2)',
+                    borderColor: isOver && allowed ? 'var(--color-brand)' : 'var(--color-border)',
+                    opacity: dragging && !allowed && dragging.status.id !== status.id ? 0.45 : 1,
+                    maxHeight: '100%',
+                  }}
+                >
+                  {/* Column header */}
+                  <div className="flex items-center gap-2 px-3 py-2.5 flex-shrink-0">
+                    <span
+                      className="rounded-full flex-shrink-0"
+                      style={{ width: 8, height: 8, background: status.color || 'var(--color-text-muted)' }}
+                    />
+                    <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-secondary)' }}>
+                      {status.name}
+                    </span>
+                    <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                      {columnIssues.length}
+                    </span>
+                  </div>
+
+                  {/* Cards */}
+                  <div className="flex-1 flex flex-col gap-2 px-2 pb-2 overflow-y-auto">
+                    {columnIssues.map(issue => (
+                      <IssueCard
+                        key={issue.id}
+                        issue={issue}
+                        active={openIssueNumber === issue.number}
+                        isDragging={dragging?.id === issue.id}
+                        onClick={() => setOpenIssueNumber(
+                          openIssueNumber === issue.number ? undefined : issue.number
+                        )}
+                        onDragStart={e => {
+                          e.dataTransfer.effectAllowed = 'move'
+                          setDragging(issue)
+                        }}
+                        onDragEnd={() => { setDragging(null); setDragOverStatusId(null) }}
+                      />
+                    ))}
+                    {columnIssues.length === 0 && (
+                      <div
+                        className="text-xs italic text-center rounded border border-dashed py-4 mx-1"
+                        style={{ color: 'var(--color-text-muted)', borderColor: 'var(--color-border-2)' }}
+                      >
+                        No issues
+                      </div>
                     )}
-                  />
-                ))}
-              </tbody>
-            </table>
+                  </div>
+                </div>
+              )
+            })
           )}
         </div>
       </div>
@@ -169,45 +258,48 @@ export default function BoardPage() {
   )
 }
 
-function IssueRow({ issue, active, onClick }: { issue: Issue; active: boolean; onClick: () => void }) {
+function IssueCard({
+  issue, active, isDragging, onClick, onDragStart, onDragEnd,
+}: {
+  issue: Issue
+  active: boolean
+  isDragging: boolean
+  onClick: () => void
+  onDragStart: (e: React.DragEvent) => void
+  onDragEnd: () => void
+}) {
   return (
-    <tr
+    <div
+      draggable
       onClick={onClick}
-      className="cursor-pointer border-b transition-colors"
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      className="rounded-lg border px-3 py-2.5 transition-colors select-none"
       style={{
-        borderColor: 'var(--color-border)',
-        background: active ? 'var(--color-surface-2)' : 'white',
+        background: 'white',
+        borderColor: active ? 'var(--color-brand)' : 'var(--color-border)',
+        cursor: 'grab',
+        opacity: isDragging ? 0.4 : 1,
+        boxShadow: '0 1px 2px rgba(28,27,25,0.05)',
       }}
-      onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--color-surface)' }}
-      onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'white' }}
+      onMouseEnter={e => { if (!active) e.currentTarget.style.borderColor = 'var(--color-border-2)' }}
+      onMouseLeave={e => { if (!active) e.currentTarget.style.borderColor = 'var(--color-border)' }}
     >
-      <td className="px-4 py-2.5">
+      <div className="flex items-center justify-between gap-2 mb-1">
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{issue.key}</span>
-      </td>
-      <td className="px-4 py-2.5 max-w-xs">
-        <span className="text-sm truncate block" style={{ color: 'var(--color-text)' }}>{issue.title}</span>
-      </td>
-      <td className="px-4 py-2.5">
-        <StatusBadge name={issue.status.name} category={issue.status.category} color={issue.status.color} />
-      </td>
-      <td className="px-4 py-2.5">
         <PriorityBadge priority={issue.priority} />
-      </td>
-      <td className="px-4 py-2.5">
+      </div>
+      <div className="text-sm mb-2" style={{ color: 'var(--color-text)', lineHeight: 1.35 }}>
+        {issue.title}
+      </div>
+      <div className="flex items-center justify-between gap-2">
         <span className="text-xs" style={{ color: issue.type.color }}>{issue.type.name}</span>
-      </td>
-      <td className="px-4 py-2.5">
         {issue.assignee ? (
-          <div className="flex items-center gap-1.5">
-            <Avatar name={issue.assignee.displayName} avatarUrl={issue.assignee.avatarUrl} size={20} />
-            <span className="text-xs truncate max-w-24" style={{ color: 'var(--color-text-secondary)' }}>
-              {issue.assignee.displayName}
-            </span>
-          </div>
+          <Avatar name={issue.assignee.displayName} avatarUrl={issue.assignee.avatarUrl} size={20} />
         ) : (
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
         )}
-      </td>
-    </tr>
+      </div>
+    </div>
   )
 }

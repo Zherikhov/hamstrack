@@ -75,6 +75,16 @@ export interface Comment {
   updatedAt: string;
 }
 
+export interface Attachment {
+  id: string;
+  filename: string;
+  sizeBytes: number;
+  contentType: string;
+  uploadedById: string;
+  uploadedByName: string;
+  createdAt: string;
+}
+
 export interface IssueHistoryEntry {
   id: string;
   field: string;

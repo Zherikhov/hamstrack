@@ -53,7 +53,7 @@ Differences between modes are config/profile-gated, never forked code.
 - [x] In-app notifications (bell icon in sidebar with unread badge, real-time via SSE)
 - [x] Real-time updates (SSE — issue create/update/delete, comment added, notification push)
 - [x] Workflow engine (status transition rules per workspace; open by default, restrict by defining allowed transitions)
-- [ ] File attachments
+- [x] File attachments (per-issue upload/download/delete; storage backend is profile-gated — local FS for DC, S3 for Cloud via `app.storage.type`)
 - [ ] Email notifications (requires Phase 7 mail infra)
 
 ## Phase 4A — Basic React Frontend ✅

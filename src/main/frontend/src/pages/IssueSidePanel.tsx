@@ -1,18 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { X, Trash2 } from 'lucide-react'
+import { X, Trash2, Paperclip } from 'lucide-react'
 import {
   apiGetIssue, apiCreateIssue, apiUpdateIssue, apiDeleteIssue,
   apiListComments, apiCreateComment, apiDeleteComment,
+  apiListAttachments, apiUploadAttachment, apiDownloadAttachment, apiDeleteAttachment,
   apiGetIssueHistory, apiListWorkspaceMembers,
 } from '../api'
 import { useAuthStore } from '../auth'
 import { Button, Input, Textarea, Select, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
-import type { Issue, IssueType, Status, Comment, IssueHistoryEntry, WorkspaceMember } from '../types'
+import type { Issue, IssueType, Status, Comment, Attachment, IssueHistoryEntry, WorkspaceMember } from '../types'
 
 const PRIORITIES = ['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE']
 
-type Tab = 'details' | 'comments' | 'history'
+type Tab = 'details' | 'comments' | 'files' | 'history'
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
 
 interface Props {
   wsId: string
@@ -30,6 +37,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
 
   const [issue, setIssue] = useState<Issue | null>(null)
   const [comments, setComments] = useState<Comment[]>([])
+  const [attachments, setAttachments] = useState<Attachment[]>([])
   const [history, setHistory] = useState<IssueHistoryEntry[]>([])
   const [loading, setLoading] = useState(!isCreate)
   const [tab, setTab] = useState<Tab>('details')
@@ -44,6 +52,9 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   const [editing, setEditing] = useState(isCreate)
   const [commentBody, setCommentBody] = useState('')
   const [postingComment, setPostingComment] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [fileError, setFileError] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const [error, setError] = useState('')
 
   // Mention autocomplete
@@ -91,9 +102,10 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     if (isCreate) return
     setLoading(true)
     try {
-      const [iss, cmts, hist] = await Promise.all([
+      const [iss, cmts, atts, hist] = await Promise.all([
         apiGetIssue(wsId, projectId, issueNumber!),
         apiListComments(wsId, projectId, issueNumber!),
+        apiListAttachments(wsId, projectId, issueNumber!),
         apiGetIssueHistory(wsId, projectId, issueNumber!),
       ])
       setIssue(iss)
@@ -103,6 +115,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setStatusId(iss.status.id)
       setPriority(iss.priority)
       setComments(cmts)
+      setAttachments(atts)
       setHistory(hist)
     } finally {
       setLoading(false)
@@ -158,6 +171,35 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   async function handleDeleteComment(commentId: string) {
     await apiDeleteComment(wsId, projectId, issueNumber!, commentId)
     setComments(prev => prev.filter(c => c.id !== commentId))
+  }
+
+  async function handleUploadFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    setFileError('')
+    setUploading(true)
+    try {
+      const att = await apiUploadAttachment(wsId, projectId, issueNumber!, file)
+      setAttachments(prev => [...prev, att])
+    } catch (err: unknown) {
+      setFileError(err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function handleDownloadAttachment(att: Attachment) {
+    try {
+      await apiDownloadAttachment(wsId, projectId, issueNumber!, att)
+    } catch {
+      setFileError('Download failed')
+    }
+  }
+
+  async function handleDeleteAttachment(attachmentId: string) {
+    await apiDeleteAttachment(wsId, projectId, issueNumber!, attachmentId)
+    setAttachments(prev => prev.filter(a => a.id !== attachmentId))
   }
 
   const panelStyle: React.CSSProperties = {
@@ -234,7 +276,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
           className="flex border-b flex-shrink-0"
           style={{ borderColor: 'var(--color-border)' }}
         >
-          {(['details', 'comments', 'history'] as Tab[]).map(t => (
+          {(['details', 'comments', 'files', 'history'] as Tab[]).map(t => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -246,6 +288,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
               }}
             >
               {t}{t === 'comments' ? ` (${comments.length})` : ''}
+              {t === 'files' ? ` (${attachments.length})` : ''}
               {t === 'history' ? ` (${history.length})` : ''}
             </button>
           ))}
@@ -415,6 +458,61 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
                 disabled={!commentBody.trim()}
               >
                 Post
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Files tab ── */}
+        {tab === 'files' && !isCreate && !editing && (
+          <div className="flex flex-col gap-3">
+            {attachments.length === 0 && (
+              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No files attached yet.</p>
+            )}
+            {attachments.map(a => (
+              <div key={a.id} className="flex gap-2.5 items-center group">
+                <Paperclip size={14} className="flex-shrink-0" style={{ color: 'var(--color-text-muted)' }} />
+                <div className="flex-1 min-w-0">
+                  <button
+                    onClick={() => handleDownloadAttachment(a)}
+                    className="text-sm font-medium truncate block max-w-full text-left cursor-pointer hover:underline"
+                    style={{ color: 'var(--color-brand)' }}
+                    title={`Download ${a.filename}`}
+                  >
+                    {a.filename}
+                  </button>
+                  <div className="flex items-baseline gap-2">
+                    <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                      {formatBytes(a.sizeBytes)}
+                    </span>
+                    <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                      {a.uploadedByName} · {new Date(a.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                </div>
+                {user?.id === a.uploadedById && (
+                  <button
+                    onClick={() => handleDeleteAttachment(a.id)}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
+                    style={{ color: 'var(--color-text-muted)' }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+
+            {fileError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{fileError}</p>}
+
+            <div className="pt-2 border-t" style={{ borderColor: 'var(--color-border)' }}>
+              <input ref={fileInputRef} type="file" className="hidden" onChange={handleUploadFile} />
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => fileInputRef.current?.click()}
+                loading={uploading}
+              >
+                <Paperclip size={13} /> Attach file
               </Button>
             </div>
           </div>

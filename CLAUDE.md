@@ -19,8 +19,8 @@ See `PLAN.md` for the full development roadmap and stack decisions.
 Phase 4A complete. Full-stack app is running — React frontend ships as a single JAR via Maven.
 
 - **Phase 2** — Auth (register, verify email, resend verification, login, refresh, logout, forgot/reset password) and Workspace (create, list, get, members, invite, accept invite — invite is bound to the invited email).
-- **Phase 3** — Projects (CRUD, archive, member roles), Issue Types and Statuses (workspace-scoped, seeded on workspace create), Issues (CRUD, filters, project-scoped sequence numbers, optimistic locking), Comments (CRUD, soft delete).
-- **Phase 4A** — React + TypeScript + Vite frontend. Pages: Login, Register, Workspaces, WorkspaceHome (project grid / auto-redirect), Board (issue table + side panel for create/view/edit/comments). Dark sidebar with user dropdown. Maven `frontend-maven-plugin` builds frontend into `src/main/resources/static/` during `generate-resources`. SPA fallback (`SpaController`) forwards all non-API, non-file paths to `index.html`.
+- **Phase 3** — Projects (CRUD, archive, member roles), Issue Types and Statuses (workspace-scoped, seeded on workspace create), Issues (CRUD, filters, project-scoped sequence numbers, optimistic locking), Comments (CRUD, soft delete), Attachments (per-issue upload/download/delete; delete allowed to uploader or project MANAGER; blobs cleaned up on issue delete).
+- **Phase 4A** — React + TypeScript + Vite frontend. Pages: Login, Register, Workspaces, WorkspaceHome (project grid / auto-redirect), Board (kanban: status columns ordered by position, draggable issue cards — native HTML5 DnD, drop PATCHes `statusId`+`version` with optimistic cache update and rollback on error; drop targets respect workflow transitions), Backlog (`p/:projectId/backlog` — flat table of issues whose status category ≠ DONE), issue side panel for create/view/edit/comments on both. App shell is two-level navigation (see DESIGN.md decision log 2026-07-09): global dark top bar (`TopBar` — logo, `ProjectSwitcher` dropdown, global search stub for future HQL, Create button via `uiStore` signal, `NotificationBell`, user menu, SSE subscription) + contextual light project sidebar (`Sidebar` — Board/Backlog links, Reports/Settings placeholders), rendered only on project routes. Maven `frontend-maven-plugin` builds frontend into `src/main/resources/static/` during `generate-resources`. SPA fallback (`SpaController`) forwards all non-API, non-file paths to `index.html`.
 
 Stack: Spring Boot 4.1.0 / Java 21, Spring Web MVC, Spring Data JPA, Spring Security, PostgreSQL, Flyway, Lombok, jjwt.
 
@@ -31,6 +31,8 @@ Frontend (`src/main/frontend/`): React 19, TypeScript, Vite 6, Tailwind v4 (`@ta
 Hamstrack ships as one codebase in two modes, controlled by Spring profile `dc` or `cloud` (`SPRING_PROFILES_ACTIVE=cloud`). Differences between modes must be config/profile-gated behavior, never forked code.
 
 The highest-severity bug class here is a query/service that forgets to scope by `workspace_id`/membership — in Cloud that leaks one tenant's data to another. Always resolve resources through workspace membership checks; return 404 whether the workspace doesn't exist or the caller isn't a member — never reveal existence via a 403.
+
+**File storage** (`common.storage.FileStorage`): backend selected by `app.storage.type` (`local` | `s3`), profile defaults — `dc` → local FS (`app.storage.local.base-dir`, default `./data/attachments`, gitignored), `cloud` → S3 (`app.storage.s3.*`: bucket, region, optional `endpoint` + `path-style-access` for MinIO/S3-compatible stores, optional static keys — empty falls back to the AWS SDK default credentials chain). Implementations are `@ConditionalOnProperty`-gated beans (`LocalFileStorage` / `S3FileStorage`); inject the `FileStorage` interface, never a concrete class. Storage keys are server-generated (`ws/{wsId}/issues/{issueId}/{uuid}`) — original filenames live only in the DB. Upload size limit via `spring.servlet.multipart.max-file-size` (env `ATTACHMENT_MAX_FILE_SIZE`, default 25MB).
 
 ## Local dev environment
 
@@ -116,6 +118,11 @@ POST   /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments           # cre
 GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments           # list (excludes soft-deleted)
 PATCH  /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments/{id}      # update (author only)
 DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments/{id}      # soft delete (author only)
+
+POST   /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments        # upload (multipart, field "file")
+GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments        # list
+GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # download (Content-Disposition: attachment)
+DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # delete (uploader or project MANAGER)
 ```
 
 Workspace creation auto-seeds 4 issue types (Bug, Task, Story, Epic) and 3 statuses (To Do/TODO, In Progress/IN_PROGRESS, Done/DONE).

@@ -1,4 +1,4 @@
-import type { User, Workspace, Project, IssueType, Status, Issue, Comment, IssueHistoryEntry, StatusTransition, Notification, WorkspaceMember } from './types'
+import type { User, Workspace, Project, IssueType, Status, Issue, Comment, Attachment, IssueHistoryEntry, StatusTransition, Notification, WorkspaceMember } from './types'
 import { useAuthStore } from './auth'
 
 const BASE = '/api'
@@ -9,16 +9,22 @@ export class ApiResponseError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+// FormData bodies must NOT get a JSON Content-Type — the browser sets
+// multipart/form-data with the boundary itself
+function buildHeaders(init: RequestInit, token: string | null): HeadersInit {
+  return {
+    ...(init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(init.headers ?? {}),
+  }
+}
+
+async function authFetch(path: string, init: RequestInit = {}): Promise<Response> {
   const token = useAuthStore.getState().accessToken
 
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init.headers ?? {}),
-    },
+    headers: buildHeaders(init, token),
     credentials: 'include',
   })
 
@@ -29,22 +35,24 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const newToken = useAuthStore.getState().accessToken
       const retry = await fetch(`${BASE}${path}`, {
         ...init,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),
-          ...(init.headers ?? {}),
-        },
+        headers: buildHeaders(init, newToken),
         credentials: 'include',
       })
       if (!retry.ok) {
         useAuthStore.getState().clear()
         throw new ApiResponseError(retry.status, 'Unauthorized')
       }
-      return retry.status === 204 ? (undefined as T) : retry.json()
+      return retry
     }
     useAuthStore.getState().clear()
     throw new ApiResponseError(401, 'Session expired')
   }
+
+  return res
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await authFetch(path, init)
 
   if (!res.ok) {
     let detail = res.statusText
@@ -213,6 +221,39 @@ export async function apiCreateComment(wsId: string, projectId: string, number: 
 
 export async function apiDeleteComment(wsId: string, projectId: string, number: number, commentId: string): Promise<void> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/comments/${commentId}`, { method: 'DELETE' })
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+export async function apiListAttachments(wsId: string, projectId: string, number: number): Promise<Attachment[]> {
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/attachments`)
+}
+
+export async function apiUploadAttachment(wsId: string, projectId: string, number: number, file: File): Promise<Attachment> {
+  const form = new FormData()
+  form.append('file', file)
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/attachments`, {
+    method: 'POST',
+    body: form,
+  })
+}
+
+export async function apiDownloadAttachment(wsId: string, projectId: string, number: number, attachment: Attachment): Promise<void> {
+  const res = await authFetch(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/attachments/${attachment.id}`)
+  if (!res.ok) throw new ApiResponseError(res.status, 'Download failed')
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = attachment.filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+export async function apiDeleteAttachment(wsId: string, projectId: string, number: number, attachmentId: string): Promise<void> {
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/attachments/${attachmentId}`, { method: 'DELETE' })
 }
 
 // ── Issue History ──────────────────────────────────────────────────────────────

@@ -44,6 +44,7 @@ public class IssueService {
     private final UserRepository userRepository;
     private final IssueHistoryRepository historyRepository;
     private final StatusTransitionRepository transitionRepository;
+    private final AttachmentService attachmentService;
     private final SseRegistry sseRegistry;
 
     @Transactional
@@ -204,6 +205,7 @@ public class IssueService {
         requireProjectRole(actor, project, ProjectRole.MANAGER);
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
+        attachmentService.removeStoredFilesForIssue(issue);
         issueRepository.delete(issue);
 
         sseRegistry.broadcast(workspaceId, "ISSUE_DELETED",

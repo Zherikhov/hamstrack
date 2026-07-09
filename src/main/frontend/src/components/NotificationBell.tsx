@@ -15,7 +15,7 @@ export default function NotificationBell({ incoming }: Props) {
   const [notifications, setNotifications] = useState<Notification[]>([])
   const menuRef = useRef<HTMLDivElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
-  const [dropPos, setDropPos] = useState<{ left: number; bottom: number } | null>(null)
+  const [dropPos, setDropPos] = useState<{ right: number; top: number } | null>(null)
 
   useEffect(() => {
     apiListNotifications().then(setNotifications).catch(() => {})
@@ -41,11 +41,11 @@ export default function NotificationBell({ incoming }: Props) {
     return () => document.removeEventListener('mousedown', handle)
   }, [open])
 
-  // Compute dropdown position when opening so it renders fixed above the button
+  // Compute dropdown position when opening so it renders fixed below the button
   function handleToggle() {
     if (!open && btnRef.current) {
       const r = btnRef.current.getBoundingClientRect()
-      setDropPos({ left: r.left, bottom: window.innerHeight - r.top + 4 })
+      setDropPos({ right: window.innerWidth - r.right, top: r.bottom + 8 })
     }
     setOpen(v => !v)
   }
@@ -100,17 +100,16 @@ export default function NotificationBell({ incoming }: Props) {
         <div
           style={{
             position: 'fixed',
-            bottom: dropPos.bottom,
-            left: dropPos.left,
+            top: dropPos.top,
+            right: dropPos.right,
             width: 320,
             maxHeight: 400,
             overflowY: 'auto',
             background: '#2a2927',
             border: '1px solid rgba(255,255,255,0.12)',
             borderRadius: 'var(--radius-md)',
-            boxShadow: '0 -8px 24px rgba(0,0,0,0.4)',
-            zIndex: 20,
-            marginBottom: 4,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            zIndex: 40,
           }}
         >
           <div

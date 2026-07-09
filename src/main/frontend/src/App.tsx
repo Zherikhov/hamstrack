@@ -7,6 +7,7 @@ import RegisterPage from './pages/RegisterPage'
 import WorkspacesPage from './pages/WorkspacesPage'
 import WorkspaceHomePage from './pages/WorkspaceHomePage'
 import BoardPage from './pages/BoardPage'
+import BacklogPage from './pages/BacklogPage'
 import AppShell from './components/AppShell'
 
 function AuthInit({ children }: { children: React.ReactNode }) {
@@ -65,6 +66,7 @@ export default function App() {
             <Route path="/w/:wsId" element={<AppShell />}>
               <Route index element={<WorkspaceHomePage />} />
               <Route path="p/:projectId" element={<BoardPage />} />
+              <Route path="p/:projectId/backlog" element={<BacklogPage />} />
             </Route>
           </Route>
         </Routes>

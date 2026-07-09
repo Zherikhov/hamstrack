@@ -38,7 +38,7 @@
 
 ## Layout
 - **Approach:** Grid-disciplined for the app (predictable alignment for data-dense board/list views). Hybrid — a bit more editorial — for the marketing site.
-- **Grid:** Desktop app shell is 3-column (sidebar / main / contextual AI panel); collapses to single column + drawer below 960px.
+- **Grid:** Desktop app shell is two-level: a global dark-ink top bar (52px — logo, project switcher dropdown, global search with future HQL query language, Create, notifications, user menu) over a row of [contextual project sidebar (200px, light, current project's sections only: Board / Backlog / Reports / Settings) / main / contextual AI panel]. The sidebar is scoped to the current project — it is NOT a project list; project switching lives in the top-bar dropdown. Collapses to single column + drawer below 960px.
 - **Max content width:** 1080px for marketing sections.
 - **Border radius (hierarchical, not uniform):** sm 4px (buttons, inputs) · md 8px (cards, diff blocks) · lg 12px (panels, app shell) · full 9999px (badges, chips, avatars only — never the default).
 
@@ -54,3 +54,4 @@
 | 2026-06-24 | Color as a safety-state machine (slate → amber → teal) instead of pure branding | Directly reinforces the product's core trust differentiator (sandbox → pending approval → production); chosen as a deliberate risk over category-standard branding-first color use |
 | 2026-06-24 | Monospace (IBM Plex Mono) for diff/audit data as a structural typographic choice, not just code blocks | Signals "inspectable, not magic" — no competitor in this category does this; ties directly to the validated trust gap from the office-hours premises |
 | 2026-06-24 | Avoided indigo/violet as primary accent | The existing draft UI and competitor Plane both default to indigo; a distinct teal keeps easyTask from reading as derivative |
+| 2026-07-09 | App shell: two-level navigation — dark "Ink Bar" global top bar + light contextual project sidebar (replaces the 220px dark project-list sidebar) | Users typically work in 1–2 projects, so a full sidebar of projects wasted prime space; the top bar gives global features (HQL search, Create, notifications) a permanent home, and the sidebar scales to future project sections (Backlog, Reports, Settings). Chosen via /design-shotgun (variant A of 3, wireframes in ~/.gstack/projects/Zherikhov-easyTask/designs/app-shell-nav-20260709/) |

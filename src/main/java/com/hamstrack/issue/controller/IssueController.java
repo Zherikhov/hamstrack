@@ -3,14 +3,21 @@ package com.hamstrack.issue.controller;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.issue.dto.*;
 import com.hamstrack.issue.entity.IssuePriority;
+import com.hamstrack.issue.service.AttachmentService;
 import com.hamstrack.issue.service.CommentService;
 import com.hamstrack.issue.service.IssueService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
@@ -21,6 +28,7 @@ public class IssueController {
 
     private final IssueService issueService;
     private final CommentService commentService;
+    private final AttachmentService attachmentService;
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -113,5 +121,51 @@ public class IssueController {
                               @PathVariable long number,
                               @PathVariable UUID commentId) {
         commentService.delete(actor, workspaceId, projectId, number, commentId);
+    }
+
+    // --- Attachments ---
+
+    @PostMapping("/{number}/attachments")
+    @ResponseStatus(HttpStatus.CREATED)
+    public AttachmentResponse uploadAttachment(@AuthenticationPrincipal User actor,
+                                               @PathVariable UUID workspaceId,
+                                               @PathVariable UUID projectId,
+                                               @PathVariable long number,
+                                               @RequestParam("file") MultipartFile file) {
+        return attachmentService.upload(actor, workspaceId, projectId, number, file);
+    }
+
+    @GetMapping("/{number}/attachments")
+    public List<AttachmentResponse> listAttachments(@AuthenticationPrincipal User actor,
+                                                    @PathVariable UUID workspaceId,
+                                                    @PathVariable UUID projectId,
+                                                    @PathVariable long number) {
+        return attachmentService.list(actor, workspaceId, projectId, number);
+    }
+
+    @GetMapping("/{number}/attachments/{attachmentId}")
+    public ResponseEntity<InputStreamResource> downloadAttachment(@AuthenticationPrincipal User actor,
+                                                                  @PathVariable UUID workspaceId,
+                                                                  @PathVariable UUID projectId,
+                                                                  @PathVariable long number,
+                                                                  @PathVariable UUID attachmentId) {
+        var download = attachmentService.download(actor, workspaceId, projectId, number, attachmentId);
+        return ResponseEntity.ok()
+                .contentType(MediaType.parseMediaType(download.contentType()))
+                .contentLength(download.sizeBytes())
+                .header("Content-Disposition", ContentDisposition.attachment()
+                        .filename(download.filename(), StandardCharsets.UTF_8)
+                        .build().toString())
+                .body(new InputStreamResource(download.stream()));
+    }
+
+    @DeleteMapping("/{number}/attachments/{attachmentId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void deleteAttachment(@AuthenticationPrincipal User actor,
+                                 @PathVariable UUID workspaceId,
+                                 @PathVariable UUID projectId,
+                                 @PathVariable long number,
+                                 @PathVariable UUID attachmentId) {
+        attachmentService.delete(actor, workspaceId, projectId, number, attachmentId);
     }
 }
