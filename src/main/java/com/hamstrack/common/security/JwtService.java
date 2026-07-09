@@ -6,6 +6,7 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.JwtException;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -21,6 +22,19 @@ import java.util.UUID;
 public class JwtService {
 
     private final JwtProperties jwtProperties;
+
+    // HMAC-SHA256 requires a >= 256-bit key (RFC 7518 §3.2). Checking at startup turns
+    // a misconfigured JWT_SECRET into a clear boot failure instead of a 500 on first login.
+    @PostConstruct
+    void validateSecret() {
+        var secret = jwtProperties.secret();
+        if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < 32) {
+            throw new IllegalStateException(
+                    "jwt.secret (JWT_SECRET) must be at least 32 bytes for HMAC-SHA256; current value is "
+                    + (secret == null ? "missing" : secret.getBytes(StandardCharsets.UTF_8).length + " bytes")
+                    + ". Generate one with e.g.: openssl rand -base64 48");
+        }
+    }
 
     public String generateAccessToken(User user) {
         var now = new Date();

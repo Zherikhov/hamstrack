@@ -29,8 +29,9 @@ public class ProjectController {
 
     @GetMapping
     public List<ProjectResponse> list(@AuthenticationPrincipal User actor,
-                                      @PathVariable UUID workspaceId) {
-        return projectService.list(actor, workspaceId);
+                                      @PathVariable UUID workspaceId,
+                                      @RequestParam(defaultValue = "false") boolean includeArchived) {
+        return projectService.list(actor, workspaceId, includeArchived);
     }
 
     @GetMapping("/{projectId}")
@@ -54,6 +55,14 @@ public class ProjectController {
                         @PathVariable UUID workspaceId,
                         @PathVariable UUID projectId) {
         projectService.archive(actor, workspaceId, projectId);
+    }
+
+    @PostMapping("/{projectId}/unarchive")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void unarchive(@AuthenticationPrincipal User actor,
+                          @PathVariable UUID workspaceId,
+                          @PathVariable UUID projectId) {
+        projectService.unarchive(actor, workspaceId, projectId);
     }
 
     @GetMapping("/{projectId}/members")

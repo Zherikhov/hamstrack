@@ -51,6 +51,7 @@ public class IssueService {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
+        requireNotArchived(project);
 
         var type = issueTypeRepository.findByIdAndWorkspace(req.typeId(), workspace)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
@@ -58,20 +59,19 @@ public class IssueService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
 
         // Atomic seq increment
-        projectRepository.incrementIssueSeq(project.getId());
-        var updated = projectRepository.findById(project.getId()).orElseThrow();
+        long seq = projectRepository.incrementAndGetIssueSeq(project.getId());
 
         var issue = new Issue();
         issue.setWorkspace(workspace);
-        issue.setProject(updated);
-        issue.setNumber(updated.getIssueSeq());
+        issue.setProject(project);
+        issue.setNumber(seq);
         issue.setTitle(req.title());
         issue.setDescription(req.description());
         issue.setType(type);
         issue.setStatus(status);
         issue.setPriority(req.priority() != null ? req.priority() : IssuePriority.NONE);
         issue.setReporter(actor);
-        issue.setPosition(updated.getIssueSeq());
+        issue.setPosition(seq);
 
         if (req.assigneeId() != null) {
             issue.setAssignee(resolveAssignee(workspace, req.assigneeId()));
@@ -90,12 +90,11 @@ public class IssueService {
 
     @Transactional(readOnly = true)
     public List<IssueResponse> list(User actor, UUID workspaceId, UUID projectId,
-                                    UUID statusId, UUID assigneeId, String priority) {
+                                    UUID statusId, UUID assigneeId, IssuePriority priority) {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
-        var priorityEnum = priority != null ? IssuePriority.valueOf(priority) : null;
-        return issueRepository.findByProjectFiltered(project, statusId, assigneeId, priorityEnum).stream()
+        return issueRepository.findByProjectFiltered(project, statusId, assigneeId, priority).stream()
                 .map(IssueResponse::of)
                 .toList();
     }
@@ -126,6 +125,7 @@ public class IssueService {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
+        requireNotArchived(project);
 
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
         var typeOpt = req.typeId() != null ? issueTypeRepository.findByIdAndWorkspace(req.typeId(), workspace) : null;
@@ -134,6 +134,11 @@ public class IssueService {
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
+
+        if (req.version() != null && req.version() != issue.getVersion()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Issue was modified by someone else — refresh and retry");
+        }
 
         var historyEntries = new ArrayList<IssueHistory>();
 
@@ -195,6 +200,7 @@ public class IssueService {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
+        requireNotArchived(project);
         requireProjectRole(actor, project, ProjectRole.MANAGER);
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
@@ -220,6 +226,12 @@ public class IssueService {
         h.setOldValue(oldVal);
         h.setNewValue(newVal);
         return h;
+    }
+
+    private void requireNotArchived(Project project) {
+        if (project.isArchived()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is archived");
+        }
     }
 
     // Assignee must be a member of the workspace — a bare findById would let callers

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
-import { apiLogin, apiMe } from '../api'
+import { apiLogin, apiMe, apiResendVerification, ApiResponseError } from '../api'
 import { useAuthStore } from '../auth'
 import { Button, Input } from '../components/ui'
 
@@ -11,10 +11,15 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  // 403 on login means "email not verified" — the only 403 this endpoint returns
+  const [needsVerification, setNeedsVerification] = useState(false)
+  const [resendState, setResendState] = useState<'idle' | 'sending' | 'sent'>('idle')
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
+    setNeedsVerification(false)
+    setResendState('idle')
     setLoading(true)
     try {
       const { accessToken } = await apiLogin(email, password)
@@ -24,8 +29,20 @@ export default function LoginPage() {
       navigate('/workspaces')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid credentials')
+      setNeedsVerification(err instanceof ApiResponseError && err.status === 403)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function resend() {
+    setResendState('sending')
+    try {
+      await apiResendVerification(email)
+      setResendState('sent')
+    } catch {
+      setResendState('idle')
+      setError('Failed to send verification email — try again')
     }
   }
 
@@ -78,6 +95,23 @@ export default function LoginPage() {
             />
             {error && (
               <p className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>
+            )}
+            {needsVerification && (
+              resendState === 'sent' ? (
+                <p className="text-xs px-1" style={{ color: 'var(--color-text-secondary)' }}>
+                  Verification email sent — check your inbox.
+                </p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={resend}
+                  disabled={resendState === 'sending'}
+                  className="text-xs px-1 text-left font-medium cursor-pointer hover:underline"
+                  style={{ color: 'var(--color-brand)', background: 'transparent' }}
+                >
+                  {resendState === 'sending' ? 'Sending…' : 'Resend verification email'}
+                </button>
+              )
             )}
             <Button
               type="submit"

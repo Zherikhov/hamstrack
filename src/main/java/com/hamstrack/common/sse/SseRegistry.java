@@ -3,9 +3,12 @@ package com.hamstrack.common.sse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -24,8 +27,13 @@ public class SseRegistry {
 
     public record UserEmitter(UUID userId, SseEmitter emitter) {}
 
+    // Finite timeout: the browser's EventSource reconnects automatically, and each
+    // reconnect re-runs the membership check in SseController — so a member removed
+    // from the workspace loses the stream within this window instead of never
+    private static final long EMITTER_TIMEOUT_MS = Duration.ofMinutes(30).toMillis();
+
     public SseEmitter subscribe(UUID workspaceId, UUID userId) {
-        var emitter = new SseEmitter(Long.MAX_VALUE);
+        var emitter = new SseEmitter(EMITTER_TIMEOUT_MS);
         var entry = new UserEmitter(userId, emitter);
 
         connections.computeIfAbsent(workspaceId, k -> new CopyOnWriteArrayList<>()).add(entry);
@@ -45,21 +53,41 @@ public class SseRegistry {
 
     /** Send an event to every user connected to the workspace. */
     public void broadcast(UUID workspaceId, String event, Object data) {
-        var list = connections.get(workspaceId);
-        if (list == null || list.isEmpty()) return;
-        for (var ue : list) {
-            send(ue.emitter(), event, data);
-        }
+        afterCommit(() -> {
+            var list = connections.get(workspaceId);
+            if (list == null || list.isEmpty()) return;
+            for (var ue : list) {
+                send(ue.emitter(), event, data);
+            }
+        });
     }
 
     /** Send an event only to a specific user's connections in the workspace. */
     public void sendToUser(UUID workspaceId, UUID userId, String event, Object data) {
-        var list = connections.get(workspaceId);
-        if (list == null || list.isEmpty()) return;
-        for (var ue : list) {
-            if (ue.userId().equals(userId)) {
-                send(ue.emitter(), event, data);
+        afterCommit(() -> {
+            var list = connections.get(workspaceId);
+            if (list == null || list.isEmpty()) return;
+            for (var ue : list) {
+                if (ue.userId().equals(userId)) {
+                    send(ue.emitter(), event, data);
+                }
             }
+        });
+    }
+
+    // Callers broadcast from inside @Transactional services. Sending immediately would
+    // race clients against the commit (they refetch before the data is visible) and
+    // would announce changes that a rollback then undoes — so defer until after commit.
+    private void afterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    action.run();
+                }
+            });
+        } else {
+            action.run();
         }
     }
 

@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 
 import java.util.List;
 import java.util.Optional;
@@ -13,4 +14,7 @@ public interface WorkspaceMemberRepository extends JpaRepository<WorkspaceMember
     Optional<WorkspaceMember> findByWorkspaceAndUser(Workspace workspace, User user);
     List<WorkspaceMember> findAllByWorkspace(Workspace workspace);
     boolean existsByWorkspaceAndUser(Workspace workspace, User user);
+
+    @Query("SELECT m FROM WorkspaceMember m JOIN FETCH m.workspace WHERE m.user.id = :userId")
+    List<WorkspaceMember> findAllByUserIdWithWorkspace(UUID userId);
 }

@@ -3,7 +3,7 @@ import { useAuthStore } from './auth'
 
 const BASE = '/api'
 
-class ApiResponseError extends Error {
+export class ApiResponseError extends Error {
   constructor(public status: number, public detail: string) {
     super(detail)
   }
@@ -87,6 +87,13 @@ export async function apiRegister(email: string, displayName: string, password: 
   })
 }
 
+export async function apiResendVerification(email: string) {
+  return request<{ message: string }>('/auth/resend-verification', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
 export async function apiLogout() {
   return request<void>('/auth/logout', { method: 'POST' })
 }
@@ -115,8 +122,8 @@ export async function apiGetWorkspace(wsId: string): Promise<Workspace> {
 
 // ── Projects ──────────────────────────────────────────────────────────────────
 
-export async function apiListProjects(wsId: string): Promise<Project[]> {
-  return request(`/workspaces/${wsId}/projects`)
+export async function apiListProjects(wsId: string, includeArchived = false): Promise<Project[]> {
+  return request(`/workspaces/${wsId}/projects${includeArchived ? '?includeArchived=true' : ''}`)
 }
 
 export async function apiCreateProject(wsId: string, name: string, key: string, description?: string): Promise<Project> {
@@ -128,6 +135,10 @@ export async function apiCreateProject(wsId: string, name: string, key: string, 
 
 export async function apiGetProject(wsId: string, projectId: string): Promise<Project> {
   return request(`/workspaces/${wsId}/projects/${projectId}`)
+}
+
+export async function apiUnarchiveProject(wsId: string, projectId: string): Promise<void> {
+  return request(`/workspaces/${wsId}/projects/${projectId}/unarchive`, { method: 'POST' })
 }
 
 // ── Issue Taxonomy ─────────────────────────────────────────────────────────────
@@ -174,7 +185,8 @@ export async function apiUpdateIssue(
   wsId: string,
   projectId: string,
   number: number,
-  payload: Partial<{ title: string; typeId: string; statusId: string; priority: string; description: string; assigneeId: string; dueDate: string }>
+  // version enables the backend's optimistic-lock check: 409 if someone else saved first
+  payload: Partial<{ title: string; typeId: string; statusId: string; priority: string; description: string; assigneeId: string; dueDate: string; version: number }>
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, {
     method: 'PATCH',

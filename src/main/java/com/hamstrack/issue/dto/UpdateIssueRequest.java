@@ -13,5 +13,7 @@ public record UpdateIssueRequest(
         UUID statusId,
         IssuePriority priority,
         UUID assigneeId,
-        LocalDate dueDate
+        LocalDate dueDate,
+        // Optimistic lock check — optional so clients that don't send it keep working
+        Integer version
 ) {}

@@ -48,10 +48,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (header != null && header.startsWith("Bearer ")) {
             return header.substring(7);
         }
-        // SSE connections use EventSource which cannot set headers — accept token as query param
-        var param = request.getParameter("token");
-        if (param != null && !param.isBlank()) {
-            return param;
+        // SSE connections use EventSource which cannot set headers — accept token as query
+        // param, but ONLY there: query strings end up in server/proxy logs
+        if (request.getRequestURI().endsWith("/sse")) {
+            var param = request.getParameter("token");
+            if (param != null && !param.isBlank()) {
+                return param;
+            }
         }
         return null;
     }

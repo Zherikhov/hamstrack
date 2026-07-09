@@ -18,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -53,15 +54,16 @@ public class ProjectService {
     }
 
     @Transactional(readOnly = true)
-    public List<ProjectResponse> list(User actor, UUID workspaceId) {
+    public List<ProjectResponse> list(User actor, UUID workspaceId, boolean includeArchived) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        return projectRepository.findAllByWorkspace(workspace).stream()
-                .map(p -> {
-                    var role = projectMemberRepository.findByProjectAndUser(p, actor)
-                            .map(ProjectMember::getRole)
-                            .orElse(ProjectRole.VIEWER);
-                    return ProjectResponse.of(p, role);
-                })
+        var projects = includeArchived
+                ? projectRepository.findAllByWorkspace(workspace)
+                : projectRepository.findAllByWorkspaceAndArchivedAtIsNull(workspace);
+        // One membership query for all projects instead of one per project
+        var roleByProjectId = projectMemberRepository.findAllByUserAndProjectIn(actor, projects).stream()
+                .collect(Collectors.toMap(m -> m.getProject().getId(), ProjectMember::getRole));
+        return projects.stream()
+                .map(p -> ProjectResponse.of(p, roleByProjectId.getOrDefault(p.getId(), ProjectRole.VIEWER)))
                 .toList();
     }
 
@@ -93,6 +95,15 @@ public class ProjectService {
         projectRepository.save(project);
     }
 
+    @Transactional
+    public void unarchive(User actor, UUID workspaceId, UUID projectId) {
+        var workspace = resolveWorkspace(actor, workspaceId);
+        var project = resolveProject(workspace, projectId);
+        requireRole(actor, project, ProjectRole.MANAGER);
+        project.setArchivedAt(null);
+        projectRepository.save(project);
+    }
+
     @Transactional(readOnly = true)
     public List<ProjectMemberResponse> listMembers(User actor, UUID workspaceId, UUID projectId) {
         var workspace = resolveWorkspace(actor, workspaceId);
@@ -114,7 +125,7 @@ public class ProjectService {
                 .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
                 .orElseThrow(UserNotFoundException::new);
         if (projectMemberRepository.existsByProjectAndUser(project, user)) {
-            throw new ProjectKeyConflictException();
+            throw new AlreadyProjectMemberException();
         }
         var member = new ProjectMember();
         member.setProject(project);

@@ -19,28 +19,38 @@ public class DataSeeder implements ApplicationRunner {
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
 
-    @Value("${seed.admin.email}")
+    @Value("${seed.admin.email:}")
     private String adminEmail;
 
-    @Value("${seed.admin.display-name}")
+    @Value("${seed.admin.display-name:Admin}")
     private String adminDisplayName;
 
-    @Value("${seed.admin.password}")
+    @Value("${seed.admin.password:}")
     private String adminPassword;
 
     @Override
     public void run(ApplicationArguments args) {
-        if (userRepository.existsByEmail(adminEmail)) {
+        if (adminEmail.isBlank()) {
+            log.info("Admin seeding skipped — seed.admin.email not configured");
+            return;
+        }
+        if (adminPassword.isBlank()) {
+            log.warn("Admin seeding skipped — seed.admin.email is set but seed.admin.password is empty");
+            return;
+        }
+        // Lowercase to match login, which looks the email up lowercased
+        var email = adminEmail.toLowerCase();
+        if (userRepository.existsByEmail(email)) {
             return;
         }
 
         var admin = new User();
-        admin.setEmail(adminEmail);
+        admin.setEmail(email);
         admin.setDisplayName(adminDisplayName);
         admin.setPasswordHash(passwordEncoder.encode(adminPassword));
         admin.setStatus(UserStatus.ACTIVE);
         userRepository.save(admin);
 
-        log.info("Admin account created: {}", adminEmail);
+        log.info("Admin account created: {}", email);
     }
 }

@@ -18,7 +18,7 @@ See `PLAN.md` for the full development roadmap and stack decisions.
 
 Phase 4A complete. Full-stack app is running — React frontend ships as a single JAR via Maven.
 
-- **Phase 2** — Auth (register, verify email, login, refresh, logout, forgot/reset password) and Workspace (create, list, get, members, invite, accept invite).
+- **Phase 2** — Auth (register, verify email, resend verification, login, refresh, logout, forgot/reset password) and Workspace (create, list, get, members, invite, accept invite — invite is bound to the invited email).
 - **Phase 3** — Projects (CRUD, archive, member roles), Issue Types and Statuses (workspace-scoped, seeded on workspace create), Issues (CRUD, filters, project-scoped sequence numbers, optimistic locking), Comments (CRUD, soft delete).
 - **Phase 4A** — React + TypeScript + Vite frontend. Pages: Login, Register, Workspaces, WorkspaceHome (project grid / auto-redirect), Board (issue table + side panel for create/view/edit/comments). Dark sidebar with user dropdown. Maven `frontend-maven-plugin` builds frontend into `src/main/resources/static/` during `generate-resources`. SPA fallback (`SpaController`) forwards all non-API, non-file paths to `index.html`.
 
@@ -36,16 +36,17 @@ The highest-severity bug class here is a query/service that forgets to scope by 
 
 Port `5432` is taken by a native PostgreSQL install on this machine — project Postgres runs in Docker on **port 15432**:
 
-The existing container is `easytask-postgres` (user `easytask`, DB `hamstrack`, port 15432). To start:
+The existing container is `hamstrack-postgres` (user `postgres`, password `1q2w#E`, DB `hamstrack`, port 15432). MailHog runs as `hamstrack-mailhog` (SMTP 1025, UI 8025). To start:
 ```
-docker start easytask-postgres
-# or create fresh:
-docker run -d --name easytask-postgres -e POSTGRES_DB=hamstrack -e POSTGRES_USER=easytask -e POSTGRES_PASSWORD=easytask -p 15432:5432 postgres:16-alpine
+docker start hamstrack-postgres hamstrack-mailhog
 ```
-Run the app:
+Run the app / tests:
 ```
-$env:DB_URL="jdbc:postgresql://localhost:15432/hamstrack"; $env:DB_USERNAME="easytask"; $env:DB_PASSWORD="easytask"; .\mvnw.cmd spring-boot:run
+$env:DB_URL="jdbc:postgresql://localhost:15432/hamstrack"; $env:DB_USERNAME="postgres"; $env:DB_PASSWORD="1q2w#E"; $env:JWT_SECRET="dev-only-jwt-secret-hamstrack-0123456789abcdef"; .\mvnw.cmd spring-boot:run
 ```
+`JWT_SECRET` must be at least 32 bytes — `JwtService` fails fast at startup otherwise (HMAC-SHA256 key size requirement).
+
+Note: the DB credentials in `application-local.properties` (user `hamstrack`) are stale — that role doesn't exist in the container; use env vars as above. Skip the frontend build with `-Dfrontend.skip=true` (in PowerShell prefix args with `--%` so `-D` flags aren't mangled).
 
 ## Commands
 
@@ -86,10 +87,11 @@ Always read `DESIGN.md` before making any visual or UI decisions. All font choic
 
 ```
 POST   /api/workspaces/{wsId}/projects                     # create; creator gets MANAGER
-GET    /api/workspaces/{wsId}/projects                     # list (workspace members only)
+GET    /api/workspaces/{wsId}/projects?includeArchived=    # list (workspace members only; archived hidden by default)
 GET    /api/workspaces/{wsId}/projects/{id}                # get
 PATCH  /api/workspaces/{wsId}/projects/{id}                # update name/description (MANAGER)
 POST   /api/workspaces/{wsId}/projects/{id}/archive        # archive (MANAGER)
+POST   /api/workspaces/{wsId}/projects/{id}/unarchive      # unarchive (MANAGER)
 GET    /api/workspaces/{wsId}/projects/{id}/members        # list members
 POST   /api/workspaces/{wsId}/projects/{id}/members        # add member (MANAGER)
 DELETE /api/workspaces/{wsId}/projects/{id}/members/{uid}  # remove member (MANAGER)
@@ -123,5 +125,6 @@ Workspace creation auto-seeds 4 issue types (Bug, Task, Story, Epic) and 3 statu
 - **`createdAt`/`updatedAt` null after `save()` with `@CreationTimestamp`**: In Hibernate 7, `@CreationTimestamp` sets values at flush time, not at `persist()`. Fix: use Spring Data JPA `@CreatedDate`/`@LastModifiedDate` + `@EntityListeners(AuditingEntityListener.class)` + `@EnableJpaAuditing` — these fire during `@PrePersist`/`@PreUpdate` and values are immediately available after `save()`.
 - **Custom `@Component` Filter silently not authenticating**: Spring Boot auto-registers any `Filter` bean as a generic servlet filter *in addition to* `addFilterBefore`. Fix: `FilterRegistrationBean<YourFilter>` with `setEnabled(false)`.
 - **404 on unmapped endpoint shows as 403**: container dispatches to `/error` which re-enters Spring Security unauthenticated. Fix: `.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()` in `SecurityConfig`.
+- **"Access Denied … response is already committed" ERROR when an SSE emitter times out**: emitter completion/timeout triggers a Tomcat ASYNC dispatch that re-enters the security filter chain without a security context; the committed event-stream can't take a 401, so Spring logs an ERROR. Fix: include `DispatcherType.ASYNC` in the `dispatcherTypeMatchers(...).permitAll()` line (safe — an async dispatch only follows an already-authorized request).
 - **`@Version` jumps by more than 1**: mutating entity fields before a repository query in the same method causes Hibernate AUTO flush to write the entity twice. Fix: run all reads first, then apply all mutations right before the final `save`/`saveAndFlush`.
-- **`@Modifying` JPQL update not visible to subsequent `findById` in same transaction**: Hibernate L1 cache returns the stale entity after a bulk UPDATE. Fix: `@Modifying(clearAutomatically = true)` — clears the first-level cache after the update so the next read hits the DB. Used on `ProjectRepository.incrementIssueSeq`.
+- **`@Modifying` JPQL update not visible to subsequent `findById` in same transaction**: Hibernate L1 cache returns the stale entity after a bulk UPDATE. Fix: `@Modifying(clearAutomatically = true)` — clears the first-level cache after the update so the next read hits the DB. Note: for increment-then-read (issue sequence numbers) even that is racy — two transactions can re-read the same final value. `ProjectRepository.incrementAndGetIssueSeq` uses a native `UPDATE ... RETURNING` instead, which gives each transaction its own value.

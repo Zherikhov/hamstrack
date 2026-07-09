@@ -2,6 +2,7 @@ package com.hamstrack.issue.controller;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.issue.dto.*;
+import com.hamstrack.issue.entity.IssuePriority;
 import com.hamstrack.issue.service.CommentService;
 import com.hamstrack.issue.service.IssueService;
 import jakarta.validation.Valid;
@@ -36,7 +37,7 @@ public class IssueController {
                                     @PathVariable UUID projectId,
                                     @RequestParam(required = false) UUID statusId,
                                     @RequestParam(required = false) UUID assigneeId,
-                                    @RequestParam(required = false) String priority) {
+                                    @RequestParam(required = false) IssuePriority priority) {
         return issueService.list(actor, workspaceId, projectId, statusId, assigneeId, priority);
     }
 

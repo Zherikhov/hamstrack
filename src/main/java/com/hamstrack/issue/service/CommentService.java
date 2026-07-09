@@ -28,13 +28,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
 public class CommentService {
-
-    private static final Pattern MENTION_PATTERN = Pattern.compile("@([\\w](?:[\\w\\s]*[\\w])?)");
 
     private final WorkspaceRepository workspaceRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
@@ -48,6 +45,7 @@ public class CommentService {
     @Transactional
     public CommentResponse create(User actor, UUID workspaceId, UUID projectId, long issueNumber, CreateCommentRequest req) {
         var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        requireNotArchived(issue);
         var comment = new IssueComment();
         comment.setIssue(issue);
         comment.setAuthor(actor);
@@ -91,6 +89,7 @@ public class CommentService {
     public CommentResponse update(User actor, UUID workspaceId, UUID projectId, long issueNumber,
                                   UUID commentId, CreateCommentRequest req) {
         var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        requireNotArchived(issue);
         var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
@@ -103,6 +102,7 @@ public class CommentService {
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID commentId) {
         var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        requireNotArchived(issue);
         var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN);
@@ -111,19 +111,39 @@ public class CommentService {
         commentRepository.save(comment);
     }
 
-    /** Extract mentioned users by matching @Name against workspace member display names. */
+    /**
+     * Extract mentioned users by prefix-matching member display names after each '@'.
+     * A regex over "word chars and spaces" can't work here: it grabs the longest run
+     * ("@John Doe thanks" → "John Doe thanks"), which then matches no member. Instead,
+     * at each '@' the longest matching display name wins, so "@John Doe" prefers the
+     * member "John Doe" over "John".
+     */
     private List<User> parseMentions(String body, List<WorkspaceMember> members) {
-        var matcher = MENTION_PATTERN.matcher(body);
-        var result = new java.util.ArrayList<User>();
-        while (matcher.find()) {
-            var name = matcher.group(1).trim();
-            members.stream()
-                    .filter(m -> m.getUser().getDisplayName().equalsIgnoreCase(name))
-                    .map(WorkspaceMember::getUser)
-                    .findFirst()
-                    .ifPresent(result::add);
+        var result = new java.util.LinkedHashSet<User>();
+        var lowerBody = body.toLowerCase();
+        for (int at = lowerBody.indexOf('@'); at >= 0; at = lowerBody.indexOf('@', at + 1)) {
+            User best = null;
+            int bestLen = 0;
+            for (var member : members) {
+                var name = member.getUser().getDisplayName();
+                if (name == null || name.isBlank() || name.length() <= bestLen) continue;
+                var lowerName = name.toLowerCase();
+                if (!lowerBody.startsWith(lowerName, at + 1)) continue;
+                // Require a non-alphanumeric boundary so "@JohnDoe2" doesn't mention "JohnDoe"
+                int end = at + 1 + lowerName.length();
+                if (end < lowerBody.length() && Character.isLetterOrDigit(lowerBody.charAt(end))) continue;
+                best = member.getUser();
+                bestLen = lowerName.length();
+            }
+            if (best != null) result.add(best);
         }
-        return result;
+        return new java.util.ArrayList<>(result);
+    }
+
+    private void requireNotArchived(com.hamstrack.issue.entity.Issue issue) {
+        if (issue.getProject().isArchived()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is archived");
+        }
     }
 
     // The comment must belong to the issue resolved from the URL — a global findById

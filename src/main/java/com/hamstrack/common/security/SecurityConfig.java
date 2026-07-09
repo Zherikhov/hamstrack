@@ -31,11 +31,14 @@ public class SecurityConfig {
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                // ASYNC: SSE emitter completion/timeout re-dispatches through the filter
+                // chain without a security context; the original request was already
+                // authorized, and the committed stream can't take a 401 anyway
+                .dispatcherTypeMatchers(DispatcherType.ERROR, DispatcherType.ASYNC).permitAll()
                 .requestMatchers(
                     "/api/auth/register", "/api/auth/login",
                     "/api/auth/refresh", "/api/auth/logout",
-                    "/api/auth/verify-email",
+                    "/api/auth/verify-email", "/api/auth/resend-verification",
                     "/api/auth/forgot-password", "/api/auth/reset-password"
                 ).permitAll()
                 .requestMatchers("/api/**").authenticated()

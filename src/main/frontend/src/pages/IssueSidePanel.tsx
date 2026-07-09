@@ -120,7 +120,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
         await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
         onClose()
       } else {
-        const updated = await apiUpdateIssue(wsId, projectId, issueNumber!, { title, description, typeId, statusId, priority })
+        const updated = await apiUpdateIssue(wsId, projectId, issueNumber!,
+          { title, description, typeId, statusId, priority, version: issue?.version })
         setIssue(updated)
         // Reload history after update
         apiGetIssueHistory(wsId, projectId, issueNumber!).then(setHistory).catch(() => {})

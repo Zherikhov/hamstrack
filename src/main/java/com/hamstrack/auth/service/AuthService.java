@@ -13,10 +13,13 @@ import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseCookie;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 
@@ -42,11 +45,12 @@ public class AuthService {
                 && userRepository.count() > 0) {
             throw new RegistrationDisabledException();
         }
-        if (userRepository.existsByEmail(req.email())) {
+        var email = req.email().toLowerCase();
+        if (userRepository.existsByEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
         var user = new User();
-        user.setEmail(req.email().toLowerCase());
+        user.setEmail(email);
         user.setDisplayName(req.displayName());
         user.setPasswordHash(passwordEncoder.encode(req.password()));
         user.setStatus(UserStatus.PENDING);
@@ -115,6 +119,14 @@ public class AuthService {
             // no cookie — already logged out
         }
         clearRefreshCookie(response);
+    }
+
+    @Transactional
+    public void resendVerification(String email) {
+        // Silently no-op for unknown or already-verified emails — no enumeration
+        userRepository.findByEmail(email.toLowerCase())
+                .filter(user -> user.getStatus() == UserStatus.PENDING)
+                .ifPresent(this::sendVerificationEmail);
     }
 
     @Transactional
@@ -188,22 +200,24 @@ public class AuthService {
     }
 
     private void setRefreshCookie(HttpServletResponse response, String rawToken) {
-        var cookie = new Cookie(REFRESH_COOKIE, rawToken);
-        cookie.setHttpOnly(true);
-        cookie.setSecure(true); // HTTPS only — set to false in local dev if needed
-        cookie.setPath("/api/auth");
-        cookie.setMaxAge((int) jwtProperties.refreshTokenExpiration().toSeconds());
-        // SameSite=Strict via header (Cookie API doesn't support it directly until Servlet 6.1)
-        response.addCookie(cookie);
-        response.addHeader("Set-Cookie",
-                String.format("%s=%s; Path=/api/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=%d",
-                        REFRESH_COOKIE, rawToken,
-                        jwtProperties.refreshTokenExpiration().toSeconds()));
+        response.addHeader(HttpHeaders.SET_COOKIE,
+                refreshCookie(rawToken, jwtProperties.refreshTokenExpiration()).toString());
     }
 
     private void clearRefreshCookie(HttpServletResponse response) {
-        response.addHeader("Set-Cookie",
-                REFRESH_COOKIE + "=; Path=/api/auth; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
+        response.addHeader(HttpHeaders.SET_COOKIE, refreshCookie("", Duration.ZERO).toString());
+    }
+
+    private ResponseCookie refreshCookie(String value, Duration maxAge) {
+        return ResponseCookie.from(REFRESH_COOKIE, value)
+                .httpOnly(true)
+                // Secure follows the deployment scheme: Cloud/HTTPS gets it, a self-hosted
+                // DC instance on plain HTTP still gets a working refresh flow
+                .secure(appProperties.baseUrl().startsWith("https"))
+                .path("/api/auth")
+                .maxAge(maxAge)
+                .sameSite("Strict")
+                .build();
     }
 
     private String generateRawToken() {

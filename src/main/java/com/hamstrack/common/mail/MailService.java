@@ -43,7 +43,7 @@ public class MailService {
         message.setTo(to);
         message.setSubject(subject);
         message.setText(text);
-        message.setFrom("noreply@hamstrack.com");
+        message.setFrom(appProperties.mailFrom());
         mailSender.send(message);
     }
 }

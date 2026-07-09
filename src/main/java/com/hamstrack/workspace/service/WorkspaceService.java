@@ -53,13 +53,8 @@ public class WorkspaceService {
 
     @Transactional(readOnly = true)
     public List<WorkspaceResponse> listForUser(User actor) {
-        return workspaceRepository.findAllByMemberId(actor.getId()).stream()
-                .map(w -> {
-                    var role = memberRepository.findByWorkspaceAndUser(w, actor)
-                            .map(WorkspaceMember::getRole)
-                            .orElse(WorkspaceRole.MEMBER);
-                    return WorkspaceResponse.of(w, role);
-                })
+        return memberRepository.findAllByUserIdWithWorkspace(actor.getId()).stream()
+                .map(m -> WorkspaceResponse.of(m.getWorkspace(), m.getRole()))
                 .toList();
     }
 
@@ -121,6 +116,11 @@ public class WorkspaceService {
         if (invite.isExpired() || invite.isAccepted()) {
             throw new WorkspaceNotFoundException();
         }
+        // The invite is bound to the invited address — a leaked/forwarded link must not
+        // let a different account join with the invite's role
+        if (!invite.getEmail().equalsIgnoreCase(actor.getEmail())) {
+            throw new WorkspaceNotFoundException();
+        }
         var workspace = invite.getWorkspace();
         if (memberRepository.existsByWorkspaceAndUser(workspace, actor)) {
             throw new AlreadyWorkspaceMemberException();
@@ -149,10 +149,21 @@ public class WorkspaceService {
                 .replaceAll("^-|-$", "");
         if (base.isBlank()) base = "workspace";
         var slug = base;
-        var suffix = 1;
+        // Random suffix instead of a counter: two concurrent creates of the same name
+        // would both compute "name-1" with a counter; random suffixes diverge
         while (workspaceRepository.existsBySlug(slug)) {
-            slug = base + "-" + suffix++;
+            slug = base + "-" + randomSuffix();
         }
         return slug;
+    }
+
+    private String randomSuffix() {
+        var chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+        var sb = new StringBuilder(6);
+        var rnd = java.util.concurrent.ThreadLocalRandom.current();
+        for (int i = 0; i < 6; i++) {
+            sb.append(chars.charAt(rnd.nextInt(chars.length())));
+        }
+        return sb.toString();
     }
 }

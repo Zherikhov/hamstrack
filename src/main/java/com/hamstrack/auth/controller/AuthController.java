@@ -51,6 +51,12 @@ public class AuthController {
         authService.logout(request, response);
     }
 
+    @PostMapping("/resend-verification")
+    public Map<String, String> resendVerification(@Valid @RequestBody ResendVerificationRequest req) {
+        authService.resendVerification(req.email());
+        return Map.of("message", "If this email is registered and unverified, a new verification link has been sent.");
+    }
+
     @PostMapping("/forgot-password")
     public Map<String, String> forgotPassword(@Valid @RequestBody ForgotPasswordRequest req) {
         authService.forgotPassword(req);

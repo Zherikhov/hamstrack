@@ -5,8 +5,11 @@ import com.hamstrack.issue.dto.CreateStatusRequest;
 import com.hamstrack.issue.dto.StatusResponse;
 import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.StatusCategory;
+import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.issue.repository.StatusRepository;
 import com.hamstrack.workspace.entity.Workspace;
+import com.hamstrack.workspace.entity.WorkspaceRole;
+import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
 import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
@@ -26,10 +29,12 @@ public class StatusService {
     private final WorkspaceRepository workspaceRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final StatusRepository statusRepository;
+    private final IssueRepository issueRepository;
 
     @Transactional
     public StatusResponse create(User actor, UUID workspaceId, CreateStatusRequest req) {
         var workspace = resolveWorkspace(actor, workspaceId);
+        requireAdmin(actor, workspace);
         if (statusRepository.existsByWorkspaceAndName(workspace, req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Status name already exists");
         }
@@ -52,6 +57,7 @@ public class StatusService {
     @Transactional
     public StatusResponse update(User actor, UUID workspaceId, UUID statusId, CreateStatusRequest req) {
         var workspace = resolveWorkspace(actor, workspaceId);
+        requireAdmin(actor, workspace);
         var status = statusRepository.findByIdAndWorkspace(statusId, workspace)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
         if (req.name() != null && !req.name().equals(status.getName())) {
@@ -69,8 +75,13 @@ public class StatusService {
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID statusId) {
         var workspace = resolveWorkspace(actor, workspaceId);
+        requireAdmin(actor, workspace);
         var status = statusRepository.findByIdAndWorkspace(statusId, workspace)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND));
+        // issues.status_id has no ON DELETE action — deleting an in-use status would be a 500
+        if (issueRepository.existsByStatus(status)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Status is used by existing issues");
+        }
         statusRepository.delete(status);
     }
 
@@ -104,5 +115,13 @@ public class StatusService {
         workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
                 .orElseThrow(WorkspaceNotFoundException::new);
         return workspace;
+    }
+
+    private void requireAdmin(User actor, Workspace workspace) {
+        var member = workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
+                .orElseThrow(WorkspaceNotFoundException::new);
+        if (!member.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
+            throw new InsufficientWorkspaceRoleException();
+        }
     }
 }
