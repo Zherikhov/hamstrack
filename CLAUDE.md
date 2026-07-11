@@ -50,6 +50,11 @@ $env:DB_URL="jdbc:postgresql://localhost:15432/hamstrack"; $env:DB_USERNAME="pos
 
 Note: the DB credentials in `application-local.properties` (user `hamstrack`) are stale — that role doesn't exist in the container; use env vars as above. Skip the frontend build with `-Dfrontend.skip=true` (in PowerShell prefix args with `--%` so `-D` flags aren't mangled).
 
+## CI/CD
+
+- `.github/workflows/ci.yml` — on every push / PR to main: builds and runs tests against a Postgres service container.
+- `.github/workflows/cd.yml` — on push to main: builds the Docker image (multi-stage `Dockerfile`), pushes to `ghcr.io/zherikhov/hamstrack` (`latest` + `sha-<commit>` tags), then SSHes to the server (`/opt/hamstrack`) and runs `docker compose -f docker-compose.prod.yml pull && up -d`. Required repo secrets: `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_PRIVATE_KEY`. The server keeps `docker-compose.prod.yml`, `Caddyfile`, and `.env` (`GITHUB_OWNER` — lowercase! — `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`, `SEED_ADMIN_PASSWORD`) in `/opt/hamstrack`; compose auto-loads `.env` from that directory. If the ghcr package is private, the server needs a one-time `docker login ghcr.io` with a PAT (`read:packages`).
+
 ## Commands
 
 Use the Maven wrapper (`mvnw.cmd` on Windows / `./mvnw` in bash).
