@@ -48,3 +48,5 @@ jobs:
           DB_URL: jdbc:postgresql://localhost:5432/hamstrack_test
           DB_USERNAME: hamstrack
           DB_PASSWORD: hamstrack
+          # Dummy value for tests only — JwtService requires >= 32 bytes (HMAC-SHA256)
+          JWT_SECRET: ci-only-jwt-secret-0123456789abcdef0123456789
