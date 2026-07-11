@@ -8,6 +8,11 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       JWT_SECRET: ${JWT_SECRET}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
+      STORAGE_TYPE: ${STORAGE_TYPE:-s3}
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
+      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-}
+    volumes:
+      - attachments_data:/app/data/attachments   # used only when STORAGE_TYPE=local
     depends_on:
       postgres:
         condition: service_healthy
@@ -46,3 +51,4 @@ volumes:
   postgres_data:
   caddy_data:
   caddy_config:
+  attachments_data:
