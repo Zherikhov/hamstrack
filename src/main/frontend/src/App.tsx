@@ -4,6 +4,7 @@ import { useAuthStore } from './auth'
 import { apiRefresh, apiMe } from './api'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
+import VerifyEmailPage from './pages/VerifyEmailPage'
 import WorkspacesPage from './pages/WorkspacesPage'
 import WorkspaceHomePage from './pages/WorkspaceHomePage'
 import BoardPage from './pages/BoardPage'
@@ -60,6 +61,7 @@ export default function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
+          <Route path="/verify-email" element={<VerifyEmailPage />} />
           <Route element={<RequireAuth />}>
             <Route path="/" element={<Navigate to="/workspaces" replace />} />
             <Route path="/workspaces" element={<WorkspacesPage />} />

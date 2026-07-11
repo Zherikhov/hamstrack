@@ -95,6 +95,14 @@ export async function apiRegister(email: string, displayName: string, password: 
   })
 }
 
+export async function apiVerifyEmail(token: string) {
+  // Returns the same shape as login — verifying also signs the user in
+  return request<{ accessToken: string }>('/auth/verify-email', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+}
+
 export async function apiResendVerification(email: string) {
   return request<{ message: string }>('/auth/resend-verification', {
     method: 'POST',

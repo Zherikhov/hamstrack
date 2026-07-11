@@ -60,7 +60,7 @@ public class AuthService {
     }
 
     @Transactional
-    public void verifyEmail(String rawToken) {
+    public AuthResponse verifyEmail(String rawToken, HttpServletResponse response) {
         var hash = sha256(rawToken);
         var verification = emailVerificationRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidTokenException::new);
@@ -73,6 +73,10 @@ public class AuthService {
         var user = verification.getUser();
         user.setStatus(UserStatus.ACTIVE);
         userRepository.save(user);
+
+        // The one-time token proves email ownership — same trust level as a
+        // password reset link — so the user is logged in directly
+        return issueTokens(user, response);
     }
 
     @Transactional

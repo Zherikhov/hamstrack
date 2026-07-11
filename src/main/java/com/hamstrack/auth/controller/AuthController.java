@@ -7,10 +7,14 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 
@@ -28,10 +32,21 @@ public class AuthController {
         return Map.of("message", "Registration successful. Please check your email to verify your account.");
     }
 
+    @PostMapping("/verify-email")
+    public AuthResponse verifyEmail(@Valid @RequestBody VerifyEmailRequest req,
+                                    HttpServletResponse response) {
+        return authService.verifyEmail(req.token(), response);
+    }
+
+    // Mail scanners follow GET links and would burn the one-time token, so the
+    // email links to the SPA page, which POSTs the token. This redirect keeps
+    // links from already-sent emails working.
     @GetMapping("/verify-email")
-    public Map<String, String> verifyEmail(@RequestParam String token) {
-        authService.verifyEmail(token);
-        return Map.of("message", "Email verified. You can now log in.");
+    public ResponseEntity<Void> verifyEmailLink(@RequestParam String token) {
+        var location = "/verify-email?token=" + URLEncoder.encode(token, StandardCharsets.UTF_8);
+        return ResponseEntity.status(HttpStatus.FOUND)
+                .header(HttpHeaders.LOCATION, location)
+                .build();
     }
 
     @PostMapping("/login")
