@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { queryClient } from './queryClient'
 import type { User } from './types'
 
 interface AuthState {
@@ -25,6 +26,8 @@ export const useAuthStore = create<AuthState>((set) => ({
 
   clear: () => {
     sessionStorage.removeItem('accessToken')
+    // Cached queries belong to the signed-out user — the next account must not see them
+    queryClient.clear()
     set({ user: null, accessToken: null })
   },
 

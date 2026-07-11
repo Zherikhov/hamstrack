@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { apiVerifyEmail, apiMe } from '../api'
 import { useAuthStore } from '../auth'
+import { queryClient } from '../queryClient'
 
 export default function VerifyEmailPage() {
   const navigate = useNavigate()
@@ -24,6 +25,8 @@ export default function VerifyEmailPage() {
     async function verify(token: string) {
       try {
         const { accessToken } = await apiVerifyEmail(token)
+        // A previous session on this tab may have left its cache behind
+        queryClient.clear()
         setToken(accessToken)
         setUser(await apiMe())
         navigate('/workspaces', { replace: true })

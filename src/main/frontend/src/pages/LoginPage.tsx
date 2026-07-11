@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
 import { apiLogin, apiMe, apiResendVerification, ApiResponseError } from '../api'
 import { useAuthStore } from '../auth'
+import { queryClient } from '../queryClient'
 import { Button, Input } from '../components/ui'
 
 export default function LoginPage() {
@@ -23,6 +24,8 @@ export default function LoginPage() {
     setLoading(true)
     try {
       const { accessToken } = await apiLogin(email, password)
+      // A previous session on this tab may have left its cache behind
+      queryClient.clear()
       setToken(accessToken)
       const user = await apiMe()
       setUser(user)
