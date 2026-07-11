@@ -103,6 +103,13 @@ The key differentiator for customizability — similar to Jira's ScriptRunner Fr
 - [ ] Monitoring & observability
 - [ ] Rate limiting & abuse protection
 
+### Prod hardening backlog (deployed 2026-07-11: https://hamstrack.com, EC2 + CD pipeline)
+
+- [ ] **SMTP on prod** — highest priority: registration/password-reset emails don't send (`MAIL_HOST` defaults to localhost:1025, nothing listens there). Pick a provider (SES / Resend / Brevo), pass `MAIL_HOST`/`MAIL_PORT`/`MAIL_USERNAME`/`MAIL_PASSWORD` (+ auth/starttls props) through `docker-compose.prod.yml` the same way storage vars are passed, set values in server `.env`.
+- [ ] **Switch attachments to S3** — prod runs `STORAGE_TYPE=local` (docker volume `attachments_data` on the instance). Create a bucket, give the EC2 instance an IAM role with access to it, set `STORAGE_TYPE=s3` + `STORAGE_S3_BUCKET`/`STORAGE_S3_REGION` in server `.env`, restart. Migrate existing local files if any.
+- [ ] **Cloudflare proxy (orange cloud)** — optional: DDoS protection + static caching. Flip both DNS records to Proxied **and** set SSL/TLS mode to Full (strict) first — the default Flexible mode causes a redirect loop with Caddy.
+- [ ] **Close SSH port 22** — currently open to 0.0.0.0/0 (key-only auth) so GitHub Actions can deploy. Harden later by moving deploy to AWS SSM (IAM role on instance, `aws ssm send-command` in cd.yml) and restricting 22 back to own IP.
+
 ## Phase 8 — DC Version *(later)*
 
 - [ ] Docker Compose / Helm packaging
