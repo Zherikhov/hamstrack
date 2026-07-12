@@ -45,6 +45,9 @@ public class AuthService {
                 && userRepository.count() > 0) {
             throw new RegistrationDisabledException();
         }
+        if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {
+            throw new TermsNotAcceptedException();
+        }
         var email = req.email().toLowerCase();
         if (userRepository.existsByEmail(email)) {
             throw new EmailAlreadyUsedException();
@@ -54,6 +57,10 @@ public class AuthService {
         user.setDisplayName(req.displayName());
         user.setPasswordHash(passwordEncoder.encode(req.password()));
         user.setStatus(UserStatus.PENDING);
+        if (req.hasAcceptedTerms()) {
+            // recorded whenever the box was ticked, even when not required
+            user.setTermsAcceptedAt(Instant.now());
+        }
         userRepository.save(user);
 
         sendVerificationEmail(user);

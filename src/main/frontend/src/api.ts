@@ -78,6 +78,18 @@ async function tryRefresh(): Promise<boolean> {
   }
 }
 
+// ── Instance metadata ─────────────────────────────────────────────────────────
+
+export interface PublicConfig {
+  publicLandingEnabled: boolean
+  termsAcceptanceRequired: boolean
+  publicSignupEnabled: boolean
+}
+
+export async function apiPublicConfig() {
+  return request<PublicConfig>('/meta')
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 export async function apiLogin(email: string, password: string) {
@@ -88,10 +100,10 @@ export async function apiLogin(email: string, password: string) {
   return data
 }
 
-export async function apiRegister(email: string, displayName: string, password: string) {
+export async function apiRegister(email: string, displayName: string, password: string, termsAccepted: boolean) {
   return request<{ message: string }>('/auth/register', {
     method: 'POST',
-    body: JSON.stringify({ email, displayName, password }),
+    body: JSON.stringify({ email, displayName, password, termsAccepted }),
   })
 }
 

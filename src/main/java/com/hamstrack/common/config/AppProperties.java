@@ -7,7 +7,13 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 public record AppProperties(
         String baseUrl,
         @DefaultValue("noreply@hamstrack.com") String mailFrom,
-        Registration registration
+        Registration registration,
+        Legal legal
 ) {
     public record Registration(boolean publicSignupEnabled) {}
+
+    public record Legal(
+            @DefaultValue("true") boolean publicLandingEnabled,
+            @DefaultValue("true") boolean termsAcceptanceRequired
+    ) {}
 }

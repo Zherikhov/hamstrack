@@ -1,6 +1,6 @@
 import { clsx } from 'clsx'
 import { forwardRef } from 'react'
-import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes } from 'react'
+import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
 
 // ── Button ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +86,27 @@ export function Input({ label, error, className, id, ...props }: InputProps) {
       />
       {error && <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>}
     </div>
+  )
+}
+
+// ── Checkbox ──────────────────────────────────────────────────────────────────
+
+interface CheckboxProps extends InputHTMLAttributes<HTMLInputElement> {
+  // ReactNode so the label can contain links (e.g. terms/privacy)
+  label?: ReactNode
+}
+
+export function Checkbox({ label, className, ...props }: CheckboxProps) {
+  return (
+    <label className={clsx('flex items-start gap-2 text-sm cursor-pointer select-none', className)}>
+      <input
+        type="checkbox"
+        className="mt-0.5 cursor-pointer"
+        style={{ accentColor: 'var(--color-brand)', width: 15, height: 15, flexShrink: 0 }}
+        {...props}
+      />
+      {label && <span style={{ color: 'var(--color-text-secondary)' }}>{label}</span>}
+    </label>
   )
 }
 

@@ -7,6 +7,7 @@ import lombok.Setter;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 
@@ -31,6 +32,11 @@ public class User extends BaseEntity implements UserDetails {
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private UserStatus status = UserStatus.PENDING;
+
+    // Null for users registered before terms acceptance existed and for
+    // installs where app.legal.terms-acceptance-required=false
+    @Column(name = "terms_accepted_at")
+    private Instant termsAcceptedAt;
 
     // --- UserDetails ---
 

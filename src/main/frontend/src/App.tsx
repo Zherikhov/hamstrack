@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
-import { apiRefresh, apiMe } from './api'
+import { useConfigStore } from './config'
+import { apiRefresh, apiMe, apiPublicConfig } from './api'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import VerifyEmailPage from './pages/VerifyEmailPage'
@@ -10,12 +11,18 @@ import WorkspaceHomePage from './pages/WorkspaceHomePage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
 import AppShell from './components/AppShell'
+import CookieBanner from './components/CookieBanner'
+import LandingPage from './pages/LandingPage'
+import TermsPage from './pages/legal/TermsPage'
+import PrivacyPage from './pages/legal/PrivacyPage'
+import CookiesPage from './pages/legal/CookiesPage'
 
 function AuthInit({ children }: { children: React.ReactNode }) {
   const { accessToken, setToken, setUser, clear, setInitialized, initialized } = useAuthStore()
+  const setConfig = useConfigStore((s) => s.setConfig)
 
   useEffect(() => {
-    async function init() {
+    async function initAuth() {
       if (accessToken) {
         try {
           const user = await apiMe()
@@ -32,9 +39,16 @@ function AuthInit({ children }: { children: React.ReactNode }) {
           }
         }
       }
-      setInitialized()
     }
-    init()
+    async function initConfig() {
+      try {
+        setConfig(await apiPublicConfig())
+      } catch {
+        // unreachable — keep fail-safe defaults from the store
+      }
+    }
+    // Both must settle before first render to avoid landing/checkbox flicker
+    Promise.all([initAuth(), initConfig()]).then(setInitialized)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!initialized) {
@@ -54,6 +68,16 @@ function RequireAuth() {
   return <Outlet />
 }
 
+// "/" is public: signed-in users go to their workspaces, anonymous visitors see
+// the landing page (unless a DC install disabled it via app.legal.*)
+function RootRoute() {
+  const { accessToken } = useAuthStore()
+  const publicLandingEnabled = useConfigStore((s) => s.config.publicLandingEnabled)
+  if (accessToken) return <Navigate to="/workspaces" replace />
+  if (!publicLandingEnabled) return <Navigate to="/login" replace />
+  return <LandingPage />
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -62,8 +86,11 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route path="/verify-email" element={<VerifyEmailPage />} />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
+          <Route path="/cookies" element={<CookiesPage />} />
+          <Route path="/" element={<RootRoute />} />
           <Route element={<RequireAuth />}>
-            <Route path="/" element={<Navigate to="/workspaces" replace />} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/w/:wsId" element={<AppShell />}>
               <Route index element={<WorkspaceHomePage />} />
@@ -72,6 +99,7 @@ export default function App() {
             </Route>
           </Route>
         </Routes>
+        <CookieBanner />
       </AuthInit>
     </BrowserRouter>
   )

@@ -1,13 +1,16 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
 import { apiRegister } from '../api'
-import { Button, Input } from '../components/ui'
+import { useConfigStore } from '../config'
+import { Button, Checkbox, Input } from '../components/ui'
 
 export default function RegisterPage() {
   const navigate = useNavigate()
+  const termsRequired = useConfigStore((s) => s.config.termsAcceptanceRequired)
   const [email, setEmail] = useState('')
   const [displayName, setDisplayName] = useState('')
   const [password, setPassword] = useState('')
+  const [termsAccepted, setTermsAccepted] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
@@ -17,7 +20,7 @@ export default function RegisterPage() {
     setError('')
     setLoading(true)
     try {
-      await apiRegister(email, displayName, password)
+      await apiRegister(email, displayName, password, termsAccepted)
       setDone(true)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Registration failed')
@@ -95,6 +98,24 @@ export default function RegisterPage() {
               minLength={8}
               required
             />
+            {termsRequired && (
+              <Checkbox
+                checked={termsAccepted}
+                onChange={e => setTermsAccepted(e.target.checked)}
+                label={
+                  <>
+                    I agree to the{' '}
+                    <Link to="/terms" target="_blank" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+                      Terms of Service
+                    </Link>{' '}
+                    and{' '}
+                    <Link to="/privacy" target="_blank" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+                      Privacy Policy
+                    </Link>
+                  </>
+                }
+              />
+            )}
             {error && (
               <p className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>
             )}
@@ -102,7 +123,7 @@ export default function RegisterPage() {
               type="submit"
               variant="primary"
               loading={loading}
-              disabled={!email || !displayName || !password}
+              disabled={!email || !displayName || !password || (termsRequired && !termsAccepted)}
               className="w-full justify-center mt-1"
             >
               Create account

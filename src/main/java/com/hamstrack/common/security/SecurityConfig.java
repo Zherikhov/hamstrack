@@ -39,7 +39,8 @@ public class SecurityConfig {
                     "/api/auth/register", "/api/auth/login",
                     "/api/auth/refresh", "/api/auth/logout",
                     "/api/auth/verify-email", "/api/auth/resend-verification",
-                    "/api/auth/forgot-password", "/api/auth/reset-password"
+                    "/api/auth/forgot-password", "/api/auth/reset-password",
+                    "/api/meta"
                 ).permitAll()
                 .requestMatchers("/api/**").authenticated()
                 // SPA routes and static assets — auth enforced client-side by React
