@@ -243,9 +243,10 @@ export default function BoardPage() {
         </div>
       </div>
 
-      {/* Side panel */}
+      {/* Side panel — keyed so switching issue↔create remounts it with fresh form state */}
       {panelOpen && wsId && projectId && (
         <IssueSidePanel
+          key={openIssueNumber ?? 'new'}
           wsId={wsId}
           projectId={projectId}
           issueNumber={openIssueNumber!}

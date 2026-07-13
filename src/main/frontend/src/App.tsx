@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router' // Navigate used for / → /workspaces
+import { Fragment, useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
 import { useConfigStore } from './config'
 import { apiRefresh, apiMe, apiPublicConfig } from './api'
@@ -62,6 +62,15 @@ function AuthInit({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// React reuses the same component instance when only route params change
+// (/w/A/p/X → /w/A/p/Y renders the same <BoardPage/> element), so page state
+// — open issue panel, filters — would leak across projects and workspaces.
+// Keying the subtree by the params forces a clean remount instead.
+function ParamKeyed({ children }: { children: React.ReactNode }) {
+  const { wsId, projectId } = useParams()
+  return <Fragment key={`${wsId}/${projectId ?? ''}`}>{children}</Fragment>
+}
+
 function RequireAuth() {
   const { accessToken } = useAuthStore()
   if (!accessToken) return <Navigate to="/login" replace />
@@ -93,9 +102,9 @@ export default function App() {
           <Route element={<RequireAuth />}>
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/w/:wsId" element={<AppShell />}>
-              <Route index element={<WorkspaceHomePage />} />
-              <Route path="p/:projectId" element={<BoardPage />} />
-              <Route path="p/:projectId/backlog" element={<BacklogPage />} />
+              <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
+              <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
+              <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
             </Route>
           </Route>
         </Routes>
