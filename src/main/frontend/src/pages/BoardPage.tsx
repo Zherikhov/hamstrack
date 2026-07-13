@@ -1,32 +1,20 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Filter } from 'lucide-react'
+import { Filter } from 'lucide-react'
 import { apiListIssues, apiListIssueTypes, apiListStatuses, apiListStatusTransitions, apiUpdateIssue } from '../api'
-import { Button, PriorityBadge, Avatar } from '../components/ui'
-import { useUiStore } from '../uiStore'
+import { PriorityBadge, Avatar } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
 import type { Issue, Status } from '../types'
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
   const qc = useQueryClient()
-  const [openIssueNumber, setOpenIssueNumber] = useState<number | null | undefined>(undefined)
-  // undefined = panel closed, null = create mode, number = view/edit
+  const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterPriority, setFilterPriority] = useState<string>('')
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<string>('')
-
-  // Global "+ Create" in the top bar signals issue creation for the open project
-  const createIssueSignal = useUiStore(s => s.createIssueSignal)
-  const lastSignal = useRef(createIssueSignal)
-  useEffect(() => {
-    if (createIssueSignal !== lastSignal.current) {
-      lastSignal.current = createIssueSignal
-      setOpenIssueNumber(null)
-    }
-  }, [createIssueSignal])
 
   const { data: issueTypes = [] } = useQuery({
     queryKey: ['issueTypes', wsId],
@@ -114,12 +102,6 @@ export default function BoardPage() {
         >
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-display font-bold text-sm truncate">Board</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={() => setOpenIssueNumber(null)}>
-              <Plus size={14} />
-              New issue
-            </Button>
           </div>
         </div>
 
@@ -243,10 +225,10 @@ export default function BoardPage() {
         </div>
       </div>
 
-      {/* Side panel — keyed so switching issue↔create remounts it with fresh form state */}
+      {/* Side panel — keyed so switching issues remounts it with fresh state */}
       {panelOpen && wsId && projectId && (
         <IssueSidePanel
-          key={openIssueNumber ?? 'new'}
+          key={openIssueNumber}
           wsId={wsId}
           projectId={projectId}
           issueNumber={openIssueNumber!}

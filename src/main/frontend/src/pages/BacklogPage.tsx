@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Filter } from 'lucide-react'
@@ -11,20 +11,10 @@ import type { Issue } from '../types'
 /** Backlog — every issue that is not in a DONE-category status, as a flat list. */
 export default function BacklogPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
-  const [openIssueNumber, setOpenIssueNumber] = useState<number | null | undefined>(undefined)
-  // undefined = panel closed, null = create mode, number = view/edit
+  const openCreateIssue = useUiStore(s => s.openCreateIssue)
+  const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterStatusId, setFilterStatusId] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
-
-  // Global "+ Create" in the top bar signals issue creation for the open project
-  const createIssueSignal = useUiStore(s => s.createIssueSignal)
-  const lastSignal = useRef(createIssueSignal)
-  useEffect(() => {
-    if (createIssueSignal !== lastSignal.current) {
-      lastSignal.current = createIssueSignal
-      setOpenIssueNumber(null)
-    }
-  }, [createIssueSignal])
 
   const { data: issueTypes = [] } = useQuery({
     queryKey: ['issueTypes', wsId],
@@ -65,12 +55,6 @@ export default function BacklogPage() {
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-display font-bold text-sm truncate">Backlog</span>
             <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>open issues only</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="primary" size="sm" onClick={() => setOpenIssueNumber(null)}>
-              <Plus size={14} />
-              New issue
-            </Button>
           </div>
         </div>
 
@@ -124,7 +108,7 @@ export default function BacklogPage() {
                 {filterStatusId || filterPriority ? 'No issues match the filter' : 'Backlog is empty'}
               </span>
               {!filterStatusId && !filterPriority && (
-                <Button variant="secondary" size="sm" onClick={() => setOpenIssueNumber(null)}>
+                <Button variant="secondary" size="sm" onClick={openCreateIssue}>
                   <Plus size={14} />
                   Create issue
                 </Button>
@@ -162,10 +146,10 @@ export default function BacklogPage() {
         </div>
       </div>
 
-      {/* Side panel — keyed so switching issue↔create remounts it with fresh form state */}
+      {/* Side panel — keyed so switching issues remounts it with fresh state */}
       {panelOpen && wsId && projectId && (
         <IssueSidePanel
-          key={openIssueNumber ?? 'new'}
+          key={openIssueNumber}
           wsId={wsId}
           projectId={projectId}
           issueNumber={openIssueNumber!}

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { X, Trash2, Paperclip } from 'lucide-react'
 import {
-  apiGetIssue, apiCreateIssue, apiUpdateIssue, apiDeleteIssue,
+  apiGetIssue, apiUpdateIssue, apiDeleteIssue,
   apiListComments, apiCreateComment, apiDeleteComment,
   apiListAttachments, apiUploadAttachment, apiDownloadAttachment, apiDeleteAttachment,
   apiGetIssueHistory, apiListWorkspaceMembers,
@@ -24,7 +24,7 @@ function formatBytes(bytes: number): string {
 interface Props {
   wsId: string
   projectId: string
-  issueNumber: number | null  // null = create mode
+  issueNumber: number
   issueTypes: IssueType[]
   statuses: Status[]
   onClose: () => void
@@ -33,23 +33,22 @@ interface Props {
 export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, onClose }: Props) {
   const qc = useQueryClient()
   const { user } = useAuthStore()
-  const isCreate = issueNumber === null
 
   const [issue, setIssue] = useState<Issue | null>(null)
   const [comments, setComments] = useState<Comment[]>([])
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [history, setHistory] = useState<IssueHistoryEntry[]>([])
-  const [loading, setLoading] = useState(!isCreate)
+  const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<Tab>('details')
 
   // Form state
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
-  const [typeId, setTypeId] = useState(issueTypes[0]?.id ?? '')
-  const [statusId, setStatusId] = useState(statuses[0]?.id ?? '')
+  const [typeId, setTypeId] = useState('')
+  const [statusId, setStatusId] = useState('')
   const [priority, setPriority] = useState('MEDIUM')
   const [saving, setSaving] = useState(false)
-  const [editing, setEditing] = useState(isCreate)
+  const [editing, setEditing] = useState(false)
   const [commentBody, setCommentBody] = useState('')
   const [postingComment, setPostingComment] = useState(false)
   const [uploading, setUploading] = useState(false)
@@ -99,14 +98,13 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   }
 
   const loadIssue = useCallback(async () => {
-    if (isCreate) return
     setLoading(true)
     try {
       const [iss, cmts, atts, hist] = await Promise.all([
-        apiGetIssue(wsId, projectId, issueNumber!),
-        apiListComments(wsId, projectId, issueNumber!),
-        apiListAttachments(wsId, projectId, issueNumber!),
-        apiGetIssueHistory(wsId, projectId, issueNumber!),
+        apiGetIssue(wsId, projectId, issueNumber),
+        apiListComments(wsId, projectId, issueNumber),
+        apiListAttachments(wsId, projectId, issueNumber),
+        apiGetIssueHistory(wsId, projectId, issueNumber),
       ])
       setIssue(iss)
       setTitle(iss.title)
@@ -120,7 +118,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     } finally {
       setLoading(false)
     }
-  }, [wsId, projectId, issueNumber, isCreate])
+  }, [wsId, projectId, issueNumber])
 
   useEffect(() => { loadIssue() }, [loadIssue])
 
@@ -128,19 +126,13 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     setError('')
     setSaving(true)
     try {
-      if (isCreate) {
-        await apiCreateIssue(wsId, projectId, { title: title.trim(), typeId, statusId, priority, description: description || undefined })
-        await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
-        onClose()
-      } else {
-        const updated = await apiUpdateIssue(wsId, projectId, issueNumber!,
-          { title, description, typeId, statusId, priority, version: issue?.version })
-        setIssue(updated)
-        // Reload history after update
-        apiGetIssueHistory(wsId, projectId, issueNumber!).then(setHistory).catch(() => {})
-        await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
-        setEditing(false)
-      }
+      const updated = await apiUpdateIssue(wsId, projectId, issueNumber,
+        { title, description, typeId, statusId, priority, version: issue?.version })
+      setIssue(updated)
+      // Reload history after update
+      apiGetIssueHistory(wsId, projectId, issueNumber).then(setHistory).catch(() => {})
+      await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+      setEditing(false)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to save')
     } finally {
@@ -151,7 +143,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   async function handleDelete() {
     if (!issue) return
     if (!window.confirm(`Delete ${issue.key}? This cannot be undone.`)) return
-    await apiDeleteIssue(wsId, projectId, issueNumber!)
+    await apiDeleteIssue(wsId, projectId, issueNumber)
     await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
     onClose()
   }
@@ -160,7 +152,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     if (!commentBody.trim()) return
     setPostingComment(true)
     try {
-      const c = await apiCreateComment(wsId, projectId, issueNumber!, commentBody.trim())
+      const c = await apiCreateComment(wsId, projectId, issueNumber, commentBody.trim())
       setComments(prev => [...prev, c])
       setCommentBody('')
     } finally {
@@ -169,7 +161,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   }
 
   async function handleDeleteComment(commentId: string) {
-    await apiDeleteComment(wsId, projectId, issueNumber!, commentId)
+    await apiDeleteComment(wsId, projectId, issueNumber, commentId)
     setComments(prev => prev.filter(c => c.id !== commentId))
   }
 
@@ -180,7 +172,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     setFileError('')
     setUploading(true)
     try {
-      const att = await apiUploadAttachment(wsId, projectId, issueNumber!, file)
+      const att = await apiUploadAttachment(wsId, projectId, issueNumber, file)
       setAttachments(prev => [...prev, att])
     } catch (err: unknown) {
       setFileError(err instanceof Error ? err.message : 'Upload failed')
@@ -191,14 +183,14 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
 
   async function handleDownloadAttachment(att: Attachment) {
     try {
-      await apiDownloadAttachment(wsId, projectId, issueNumber!, att)
+      await apiDownloadAttachment(wsId, projectId, issueNumber, att)
     } catch {
       setFileError('Download failed')
     }
   }
 
   async function handleDeleteAttachment(attachmentId: string) {
-    await apiDeleteAttachment(wsId, projectId, issueNumber!, attachmentId)
+    await apiDeleteAttachment(wsId, projectId, issueNumber, attachmentId)
     setAttachments(prev => prev.filter(a => a.id !== attachmentId))
   }
 
@@ -251,12 +243,9 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
               {issue.key}
             </span>
           )}
-          {isCreate && (
-            <span className="text-sm font-medium" style={{ color: 'var(--color-text-muted)' }}>New Issue</span>
-          )}
         </div>
         <div className="flex items-center gap-1">
-          {!isCreate && !editing && (
+          {!editing && (
             <>
               <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>Edit</Button>
               <Button variant="ghost" size="sm" onClick={handleDelete}>
@@ -271,7 +260,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       </div>
 
       {/* Tabs — only in view mode */}
-      {!isCreate && !editing && (
+      {!editing && (
         <div
           className="flex border-b flex-shrink-0"
           style={{ borderColor: 'var(--color-border)' }}
@@ -298,8 +287,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       {/* Body */}
       <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
 
-        {/* ── Details tab / create form ── */}
-        {(tab === 'details' || isCreate || editing) && (
+        {/* ── Details tab / edit form ── */}
+        {(tab === 'details' || editing) && (
           <>
             {/* Title */}
             {editing ? (
@@ -308,7 +297,6 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
                 value={title}
                 onChange={e => setTitle(e.target.value)}
                 placeholder="Issue title"
-                autoFocus={isCreate}
               />
             ) : (
               <h2 className="text-base font-semibold leading-snug" style={{ color: 'var(--color-text)' }}>
@@ -379,18 +367,16 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
             {editing && (
               <div className="flex gap-2">
                 <Button variant="primary" onClick={handleSave} loading={saving} disabled={!title.trim()}>
-                  {isCreate ? 'Create issue' : 'Save changes'}
+                  Save changes
                 </Button>
-                {!isCreate && (
-                  <Button variant="ghost" onClick={() => { setEditing(false); setError('') }}>Cancel</Button>
-                )}
+                <Button variant="ghost" onClick={() => { setEditing(false); setError('') }}>Cancel</Button>
               </div>
             )}
           </>
         )}
 
         {/* ── Comments tab ── */}
-        {tab === 'comments' && !isCreate && !editing && (
+        {tab === 'comments' && !editing && (
           <div className="flex flex-col gap-3">
             {comments.map(c => (
               <div key={c.id} className="flex gap-2.5 group">
@@ -464,7 +450,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
         )}
 
         {/* ── Files tab ── */}
-        {tab === 'files' && !isCreate && !editing && (
+        {tab === 'files' && !editing && (
           <div className="flex flex-col gap-3">
             {attachments.length === 0 && (
               <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No files attached yet.</p>
@@ -519,7 +505,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
         )}
 
         {/* ── History tab ── */}
-        {tab === 'history' && !isCreate && !editing && (
+        {tab === 'history' && !editing && (
           <div className="flex flex-col gap-2">
             {history.length === 0 ? (
               <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No changes recorded yet.</p>

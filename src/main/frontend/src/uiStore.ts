@@ -1,12 +1,14 @@
 import { create } from 'zustand'
 
 interface UiState {
-  /** Monotonic counter — BoardPage opens the create panel when it changes. */
-  createIssueSignal: number
-  requestCreateIssue: () => void
+  /** Create-issue dialog visibility — rendered by TopBar, triggerable from any page. */
+  createIssueOpen: boolean
+  openCreateIssue: () => void
+  closeCreateIssue: () => void
 }
 
 export const useUiStore = create<UiState>(set => ({
-  createIssueSignal: 0,
-  requestCreateIssue: () => set(s => ({ createIssueSignal: s.createIssueSignal + 1 })),
+  createIssueOpen: false,
+  openCreateIssue: () => set({ createIssueOpen: true }),
+  closeCreateIssue: () => set({ createIssueOpen: false }),
 }))

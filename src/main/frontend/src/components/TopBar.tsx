@@ -8,6 +8,7 @@ import { useUiStore } from '../uiStore'
 import { Avatar } from './ui'
 import ProjectSwitcher from './ProjectSwitcher'
 import CreateProjectModal from './CreateProjectModal'
+import CreateIssueModal from './CreateIssueModal'
 import NotificationBell from './NotificationBell'
 import { useSSE } from '../hooks/useSSE'
 import type { Notification } from '../types'
@@ -24,7 +25,9 @@ export default function TopBar({ wsId }: Props) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const { user, clear } = useAuthStore()
-  const requestCreateIssue = useUiStore(s => s.requestCreateIssue)
+  const createIssueOpen = useUiStore(s => s.createIssueOpen)
+  const openCreateIssue = useUiStore(s => s.openCreateIssue)
+  const closeCreateIssue = useUiStore(s => s.closeCreateIssue)
   const projectMatch = useMatch('/w/:wsId/p/:projectId/*')
   const projectId = projectMatch?.params.projectId
   const [showUserMenu, setShowUserMenu] = useState(false)
@@ -56,6 +59,10 @@ export default function TopBar({ wsId }: Props) {
     },
   })
 
+  // The flag lives in a global store — clear it when leaving the workspace shell
+  // so the dialog doesn't reappear on the next visit
+  useEffect(() => closeCreateIssue, [closeCreateIssue])
+
   useEffect(() => {
     function handle(e: MouseEvent) {
       if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
@@ -75,7 +82,7 @@ export default function TopBar({ wsId }: Props) {
 
   // Global Create: an issue when inside a project, a project otherwise
   function handleCreate() {
-    if (projectId) requestCreateIssue()
+    if (projectId) openCreateIssue()
     else setShowCreateProject(true)
   }
 
@@ -202,6 +209,10 @@ export default function TopBar({ wsId }: Props) {
 
       {showCreateProject && (
         <CreateProjectModal wsId={wsId} onClose={() => setShowCreateProject(false)} />
+      )}
+
+      {createIssueOpen && (
+        <CreateIssueModal wsId={wsId} defaultProjectId={projectId} onClose={closeCreateIssue} />
       )}
     </header>
   )
