@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useMatch } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, LogOut, Plus, Search } from 'lucide-react'
+import { ChevronDown, Info, LogOut, Plus, Search } from 'lucide-react'
 import { apiLogout } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Avatar } from './ui'
 import ProjectSwitcher from './ProjectSwitcher'
 import CreateIssueModal from './CreateIssueModal'
+import AboutModal from './AboutModal'
 import NotificationBell from './NotificationBell'
 import { useSSE } from '../hooks/useSSE'
 import type { Notification } from '../types'
@@ -31,6 +32,7 @@ export default function TopBar({ wsId }: Props) {
   const projectMatch = useMatch('/w/:wsId/p/:projectId/*')
   const projectId = projectMatch?.params.projectId
   const [showUserMenu, setShowUserMenu] = useState(false)
+  const [showAbout, setShowAbout] = useState(false)
   const [incomingNotification, setIncomingNotification] = useState<Notification | null>(null)
   const userMenuRef = useRef<HTMLDivElement>(null)
 
@@ -190,6 +192,16 @@ export default function TopBar({ wsId }: Props) {
                 </div>
               </div>
               <button
+                onClick={() => { setShowUserMenu(false); setShowAbout(true) }}
+                className="w-full flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors text-left"
+                style={{ color: 'rgba(255,255,255,0.7)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Info size={13} />
+                About Hamstrack
+              </button>
+              <button
                 onClick={handleLogout}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors text-left"
                 style={{ color: 'rgba(255,255,255,0.7)' }}
@@ -207,6 +219,8 @@ export default function TopBar({ wsId }: Props) {
       {createIssueOpen && (
         <CreateIssueModal wsId={wsId} defaultProjectId={projectId} onClose={closeCreateIssue} />
       )}
+
+      {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
     </header>
   )
 }

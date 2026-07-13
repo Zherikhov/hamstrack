@@ -13,6 +13,7 @@ export const useConfigStore = create<ConfigState>((set) => ({
     publicLandingEnabled: true,
     termsAcceptanceRequired: true,
     publicSignupEnabled: true,
+    version: '',
   },
   setConfig: (config) => set({ config }),
 }))

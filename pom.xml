@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.hamstrack</groupId>
     <artifactId>hamstrack</artifactId>
-    <version>0.0.1-SNAPSHOT</version>
+    <version>0.1.1</version>
     <name>hamstrack</name>
     <description>Hamstrack — open-source task tracker with AI agent support</description>
     <url/>
@@ -177,6 +177,15 @@
                         </exclude>
                     </excludes>
                 </configuration>
+                <executions>
+                    <!-- Generates META-INF/build-info.properties → Spring exposes it
+                         as a BuildProperties bean; /api/meta serves the version from it -->
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

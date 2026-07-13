@@ -84,6 +84,7 @@ export interface PublicConfig {
   publicLandingEnabled: boolean
   termsAcceptanceRequired: boolean
   publicSignupEnabled: boolean
+  version: string
 }
 
 export async function apiPublicConfig() {
