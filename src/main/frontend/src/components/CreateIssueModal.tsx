@@ -1,13 +1,14 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { apiCreateIssue, apiListIssueTypes, apiListProjects, apiListStatuses } from '../api'
+import { apiCreateIssue, apiListIssueTypes, apiListProjects, apiListStatuses, apiListWorkspaces } from '../api'
 import { Button, Input, Select, Textarea } from './ui'
 
 const PRIORITIES = ['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE']
 
 interface Props {
-  wsId: string
+  /** Absent when opened outside a workspace (/workspaces) — a Workspace select appears instead. */
+  wsId?: string
   /** Pre-selected project — the one currently open, if any. */
   defaultProjectId?: string
   onClose: () => void
@@ -16,24 +17,37 @@ interface Props {
 export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Props) {
   const qc = useQueryClient()
 
-  const { data: projects = [] } = useQuery({
-    queryKey: ['projects', wsId],
-    queryFn: () => apiListProjects(wsId),
+  const [wsSelection, setWsSelection] = useState('')
+
+  const { data: workspaces = [] } = useQuery({
+    queryKey: ['workspaces'],
+    queryFn: apiListWorkspaces,
+    enabled: !wsId,
+  })
+
+  // '' while the lists load; the effective value falls back to the first option
+  const effectiveWsId = wsId ?? (wsSelection || workspaces[0]?.id || '')
+
+  const { data: projects = [], isSuccess: projectsLoaded } = useQuery({
+    queryKey: ['projects', effectiveWsId],
+    queryFn: () => apiListProjects(effectiveWsId),
+    enabled: !!effectiveWsId,
   })
 
   const { data: issueTypes = [] } = useQuery({
-    queryKey: ['issueTypes', wsId],
-    queryFn: () => apiListIssueTypes(wsId),
+    queryKey: ['issueTypes', effectiveWsId],
+    queryFn: () => apiListIssueTypes(effectiveWsId),
+    enabled: !!effectiveWsId,
   })
 
   const { data: statuses = [] } = useQuery({
-    queryKey: ['statuses', wsId],
-    queryFn: () => apiListStatuses(wsId),
+    queryKey: ['statuses', effectiveWsId],
+    queryFn: () => apiListStatuses(effectiveWsId),
+    enabled: !!effectiveWsId,
   })
 
   const active = projects.filter(p => !p.archived)
 
-  // '' while the lists load; the effective value falls back to the first option
   const [projectId, setProjectId] = useState(defaultProjectId ?? '')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
@@ -47,19 +61,27 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
   const effectiveTypeId = typeId || issueTypes[0]?.id || ''
   const effectiveStatusId = statusId || statuses[0]?.id || ''
 
+  function handleWorkspaceChange(id: string) {
+    setWsSelection(id)
+    // Workspace-scoped selections don't carry over
+    setProjectId('')
+    setTypeId('')
+    setStatusId('')
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
     setSaving(true)
     try {
-      await apiCreateIssue(wsId, effectiveProjectId, {
+      await apiCreateIssue(effectiveWsId, effectiveProjectId, {
         title: title.trim(),
         typeId: effectiveTypeId,
         statusId: effectiveStatusId,
         priority,
         description: description.trim() || undefined,
       })
-      await qc.invalidateQueries({ queryKey: ['issues', wsId, effectiveProjectId] })
+      await qc.invalidateQueries({ queryKey: ['issues', effectiveWsId, effectiveProjectId] })
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create issue')
@@ -97,9 +119,22 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
         </div>
 
         <form onSubmit={submit} className="p-5 flex flex-col gap-4">
-          <Select label="Project" value={effectiveProjectId} onChange={e => setProjectId(e.target.value)}>
-            {active.map(p => <option key={p.id} value={p.id}>{p.key} — {p.name}</option>)}
-          </Select>
+          {!wsId && (
+            <Select label="Workspace" value={effectiveWsId} onChange={e => handleWorkspaceChange(e.target.value)}>
+              {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </Select>
+          )}
+
+          <div>
+            <Select label="Project" value={effectiveProjectId} onChange={e => setProjectId(e.target.value)}>
+              {active.map(p => <option key={p.id} value={p.id}>{p.key} — {p.name}</option>)}
+            </Select>
+            {projectsLoaded && active.length === 0 && (
+              <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                No projects in this workspace yet.
+              </p>
+            )}
+          </div>
 
           <Input
             label="Title"

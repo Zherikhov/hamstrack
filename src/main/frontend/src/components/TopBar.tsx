@@ -7,18 +7,18 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Avatar } from './ui'
 import ProjectSwitcher from './ProjectSwitcher'
-import CreateProjectModal from './CreateProjectModal'
 import CreateIssueModal from './CreateIssueModal'
 import NotificationBell from './NotificationBell'
 import { useSSE } from '../hooks/useSSE'
 import type { Notification } from '../types'
 
 interface Props {
-  wsId: string
+  /** Absent on workspace-agnostic pages (/workspaces) — hides the project switcher and search. */
+  wsId?: string
 }
 
 /**
- * Global top bar: workspace-level navigation and actions.
+ * Global top bar, shared by every authenticated page.
  * The contextual sidebar below it only covers the current project.
  */
 export default function TopBar({ wsId }: Props) {
@@ -31,7 +31,6 @@ export default function TopBar({ wsId }: Props) {
   const projectMatch = useMatch('/w/:wsId/p/:projectId/*')
   const projectId = projectMatch?.params.projectId
   const [showUserMenu, setShowUserMenu] = useState(false)
-  const [showCreateProject, setShowCreateProject] = useState(false)
   const [incomingNotification, setIncomingNotification] = useState<Notification | null>(null)
   const userMenuRef = useRef<HTMLDivElement>(null)
 
@@ -80,12 +79,6 @@ export default function TopBar({ wsId }: Props) {
     navigate('/login')
   }
 
-  // Global Create: an issue when inside a project, a project otherwise
-  function handleCreate() {
-    if (projectId) openCreateIssue()
-    else setShowCreateProject(true)
-  }
-
   return (
     <header
       className="flex items-center gap-4 px-4 flex-shrink-0"
@@ -106,43 +99,47 @@ export default function TopBar({ wsId }: Props) {
         <span className="font-display font-bold" style={{ fontSize: 16 }}>Hamstrack</span>
       </button>
 
-      <span style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.14)' }} />
+      {wsId && (
+        <>
+          <span style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.14)' }} />
 
-      <ProjectSwitcher wsId={wsId} projectId={projectId} />
+          <ProjectSwitcher wsId={wsId} projectId={projectId} />
 
-      {/* Global search — placeholder for the future query language */}
-      <div
-        className="flex items-center gap-2 px-2.5 py-1.5 rounded"
-        style={{
-          flex: 1,
-          maxWidth: 520,
-          background: 'rgba(255,255,255,0.06)',
-          border: '1px solid rgba(255,255,255,0.12)',
-        }}
-      >
-        <Search size={13} style={{ color: 'rgba(255,255,255,0.45)', flexShrink: 0 }} />
-        <input
-          placeholder="Search issues…"
-          className="flex-1 min-w-0 bg-transparent outline-none"
-          style={{ fontSize: 13.5, color: 'white', border: 'none' }}
-        />
-        <span
-          className="mono flex-shrink-0"
-          style={{
-            fontSize: 10.5,
-            border: '1px solid rgba(255,255,255,0.18)',
-            borderRadius: 3,
-            padding: '1px 5px',
-            color: 'rgba(255,255,255,0.45)',
-          }}
-        >
-          HQL
-        </span>
-      </div>
+          {/* Global search — placeholder for the future query language */}
+          <div
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded"
+            style={{
+              flex: 1,
+              maxWidth: 520,
+              background: 'rgba(255,255,255,0.06)',
+              border: '1px solid rgba(255,255,255,0.12)',
+            }}
+          >
+            <Search size={13} style={{ color: 'rgba(255,255,255,0.45)', flexShrink: 0 }} />
+            <input
+              placeholder="Search issues…"
+              className="flex-1 min-w-0 bg-transparent outline-none"
+              style={{ fontSize: 13.5, color: 'white', border: 'none' }}
+            />
+            <span
+              className="mono flex-shrink-0"
+              style={{
+                fontSize: 10.5,
+                border: '1px solid rgba(255,255,255,0.18)',
+                borderRadius: 3,
+                padding: '1px 5px',
+                color: 'rgba(255,255,255,0.45)',
+              }}
+            >
+              HQL
+            </span>
+          </div>
+        </>
+      )}
 
       <div className="flex items-center gap-3 ml-auto">
         <button
-          onClick={handleCreate}
+          onClick={openCreateIssue}
           className="flex items-center gap-1.5 font-medium cursor-pointer rounded transition-colors"
           style={{ background: 'var(--color-brand)', color: 'white', border: 'none', padding: '7px 14px', fontSize: 13.5 }}
           onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-brand-hover)')}
@@ -206,10 +203,6 @@ export default function TopBar({ wsId }: Props) {
           )}
         </div>
       </div>
-
-      {showCreateProject && (
-        <CreateProjectModal wsId={wsId} onClose={() => setShowCreateProject(false)} />
-      )}
 
       {createIssueOpen && (
         <CreateIssueModal wsId={wsId} defaultProjectId={projectId} onClose={closeCreateIssue} />

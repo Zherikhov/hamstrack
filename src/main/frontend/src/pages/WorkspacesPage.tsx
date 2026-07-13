@@ -1,15 +1,14 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, LogOut, LayoutGrid } from 'lucide-react'
-import { apiListWorkspaces, apiCreateWorkspace, apiLogout } from '../api'
-import { useAuthStore } from '../auth'
-import { Button, Input, Avatar } from '../components/ui'
+import { Plus, LayoutGrid } from 'lucide-react'
+import { apiListWorkspaces, apiCreateWorkspace } from '../api'
+import { Button, Input } from '../components/ui'
+import TopBar from '../components/TopBar'
 import type { Workspace } from '../types'
 
 export default function WorkspacesPage() {
   const navigate = useNavigate()
-  const { user, clear } = useAuthStore()
   const qc = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
   const [newName, setNewName] = useState('')
@@ -36,12 +35,6 @@ export default function WorkspacesPage() {
     }
   }
 
-  async function handleLogout() {
-    try { await apiLogout() } catch { /* ignore */ }
-    clear()
-    navigate('/login')
-  }
-
   const roleLabel = (role: Workspace['myRole']) => {
     if (role === 'OWNER') return 'Owner'
     if (role === 'ADMIN') return 'Admin'
@@ -50,27 +43,7 @@ export default function WorkspacesPage() {
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--color-surface)' }}>
-      {/* Topbar */}
-      <header
-        className="flex items-center justify-between px-6 py-3 border-b"
-        style={{ background: 'white', borderColor: 'var(--color-border)' }}
-      >
-        <span className="font-display font-bold text-lg" style={{ color: 'var(--color-text)' }}>
-          Hamstrack
-        </span>
-        <div className="flex items-center gap-3">
-          {user && (
-            <div className="flex items-center gap-2">
-              <Avatar name={user.displayName} avatarUrl={user.avatarUrl} size={28} />
-              <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>{user.displayName}</span>
-            </div>
-          )}
-          <Button variant="ghost" size="sm" onClick={handleLogout}>
-            <LogOut size={14} />
-            Sign out
-          </Button>
-        </div>
-      </header>
+      <TopBar />
 
       <div className="flex-1 overflow-y-auto p-8">
         <div style={{ maxWidth: 720, margin: '0 auto' }}>
