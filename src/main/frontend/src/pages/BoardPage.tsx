@@ -1,14 +1,18 @@
-import { useState } from 'react'
-import { useParams } from 'react-router'
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Filter } from 'lucide-react'
 import { apiListIssues, apiListIssueTypes, apiListStatuses, apiListStatusTransitions, apiUpdateIssue } from '../api'
-import { PriorityBadge, Avatar } from '../components/ui'
+import { useAuthStore } from '../auth'
+import { forgetProject } from '../recentProjects'
+import { Button, PriorityBadge, Avatar } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
 import type { Issue, Status } from '../types'
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
+  const navigate = useNavigate()
+  const { user } = useAuthStore()
   const qc = useQueryClient()
   const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterPriority, setFilterPriority] = useState<string>('')
@@ -35,11 +39,17 @@ export default function BoardPage() {
   })
 
   const issuesKey = ['issues', wsId, projectId, 'board', filterPriority]
-  const { data: issues = [], isLoading } = useQuery({
+  const { data: issues = [], isLoading, isError } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, { priority: filterPriority || undefined }),
     enabled: !!wsId && !!projectId,
   })
+
+  // Project gone or access revoked — drop it from the recency journal so the
+  // "/" redirect stops pointing here
+  useEffect(() => {
+    if (isError && user && projectId) forgetProject(user.id, projectId)
+  }, [isError, user, projectId])
 
   const moveMutation = useMutation({
     mutationFn: ({ issue, statusId }: { issue: Issue; statusId: string }) =>
@@ -90,6 +100,19 @@ export default function BoardPage() {
 
   const panelOpen = openIssueNumber !== undefined
   const ordered = [...statuses].sort((a, b) => a.position - b.position)
+
+  if (isError) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3">
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+          Project not found — it may have been deleted, or your access was removed.
+        </p>
+        <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}`, { state: { showAll: true } })}>
+          Go to projects
+        </Button>
+      </div>
+    )
+  }
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
@@ -168,9 +191,13 @@ export default function BoardPage() {
                     }
                   }}
                   onDrop={e => { e.preventDefault(); handleDrop(status.id) }}
-                  className="flex flex-col flex-shrink-0 rounded-xl border transition-colors"
+                  className="flex flex-col rounded-xl border transition-colors"
                   style={{
-                    width: 280,
+                    // Columns share the viewport width; below the min they overflow
+                    // into the container's horizontal scroll
+                    flex: '1 1 280px',
+                    minWidth: 240,
+                    maxWidth: 420,
                     background: isOver && allowed ? '#e2efec' : 'var(--color-surface-2)',
                     borderColor: isOver && allowed ? 'var(--color-brand)' : 'var(--color-border)',
                     opacity: dragging && !allowed && dragging.status.id !== status.id ? 0.45 : 1,

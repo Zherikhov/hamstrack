@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useParams, useNavigate } from 'react-router'
+import { useParams, useNavigate, useLocation } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArchiveRestore, FolderOpen, Plus } from 'lucide-react'
 import { apiListProjects, apiUnarchiveProject } from '../api'
@@ -10,7 +10,10 @@ import CreateProjectModal from '../components/CreateProjectModal'
 export default function WorkspaceHomePage() {
   const { wsId } = useParams<{ wsId: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const qc = useQueryClient()
+  // Set by the switcher's "View all projects" — an explicit request for the list
+  const showAll = Boolean((location.state as { showAll?: boolean } | null)?.showAll)
   const [showCreate, setShowCreate] = useState(false)
   const [unarchiving, setUnarchiving] = useState<string | null>(null)
 
@@ -34,13 +37,14 @@ export default function WorkspaceHomePage() {
     }
   }
 
-  // Auto-redirect if exactly one project — but not when archived projects exist,
-  // otherwise the Archived section (and its Unarchive button) would be unreachable
+  // Auto-redirect if exactly one project — but not when archived projects exist
+  // (the Archived section would be unreachable) and not on an explicit
+  // "View all projects" navigation
   useEffect(() => {
-    if (active.length === 1 && archived.length === 0) {
+    if (!showAll && active.length === 1 && archived.length === 0) {
       navigate(`/w/${wsId}/p/${active[0].id}`, { replace: true })
     }
-  }, [active.length, archived.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [active.length, archived.length, showAll]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (isLoading) {
     return (

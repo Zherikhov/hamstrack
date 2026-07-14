@@ -1,8 +1,10 @@
-import { useState } from 'react'
-import { useParams } from 'react-router'
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Filter } from 'lucide-react'
 import { apiListIssues, apiListIssueTypes, apiListStatuses } from '../api'
+import { useAuthStore } from '../auth'
+import { forgetProject } from '../recentProjects'
 import { Button, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
@@ -11,6 +13,8 @@ import type { Issue } from '../types'
 /** Backlog — every issue that is not in a DONE-category status, as a flat list. */
 export default function BacklogPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
+  const navigate = useNavigate()
+  const { user } = useAuthStore()
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
   const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterStatusId, setFilterStatusId] = useState<string>('')
@@ -30,7 +34,7 @@ export default function BacklogPage() {
 
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
-  const { data: allIssues = [], isLoading } = useQuery({
+  const { data: allIssues = [], isLoading, isError } = useQuery({
     queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority],
     queryFn: () => apiListIssues(wsId!, projectId!, {
       statusId: filterStatusId || undefined,
@@ -39,9 +43,28 @@ export default function BacklogPage() {
     enabled: !!wsId && !!projectId,
   })
 
+  // Project gone or access revoked — drop it from the recency journal so the
+  // "/" redirect stops pointing here
+  useEffect(() => {
+    if (isError && user && projectId) forgetProject(user.id, projectId)
+  }, [isError, user, projectId])
+
   const issues = allIssues.filter(i => i.status.category !== 'DONE')
 
   const panelOpen = openIssueNumber !== undefined
+
+  if (isError) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3">
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+          Project not found — it may have been deleted, or your access was removed.
+        </p>
+        <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}`, { state: { showAll: true } })}>
+          Go to projects
+        </Button>
+      </div>
+    )
+  }
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>

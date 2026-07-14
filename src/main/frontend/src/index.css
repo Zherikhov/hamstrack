@@ -17,6 +17,11 @@
   --color-text: #1C1B19;
   --color-ink: #1C1B19;
 
+  /* Top bar: near-black navy → navy diagonal gradient (30% near-black) */
+  --color-ink-blue-deep: #0B0D16;
+  --color-ink-blue: #263764;
+  --color-ink-menu: #272E48; /* dropdowns anchored to the top bar */
+
   /* Semantic */
   --color-success: #15803D;
   --color-warning: #B45309;

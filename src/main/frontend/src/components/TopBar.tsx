@@ -84,7 +84,11 @@ export default function TopBar({ wsId }: Props) {
   return (
     <header
       className="flex items-center gap-4 px-4 flex-shrink-0"
-      style={{ height: 52, background: 'var(--color-ink)', color: 'white' }}
+      style={{
+        height: 56,
+        background: 'linear-gradient(135deg, var(--color-ink-blue-deep) 0%, var(--color-ink-blue-deep) 30%, var(--color-ink-blue) 100%)',
+        color: 'white',
+      }}
     >
       {/* Logo → workspace list */}
       <button
@@ -177,7 +181,7 @@ export default function TopBar({ wsId }: Props) {
                 top: 'calc(100% + 8px)',
                 right: 0,
                 width: 220,
-                background: '#2a2927',
+                background: 'var(--color-ink-menu)',
                 border: '1px solid rgba(255,255,255,0.12)',
                 borderRadius: 'var(--radius-md)',
                 overflow: 'hidden',

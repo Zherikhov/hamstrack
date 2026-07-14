@@ -105,7 +105,7 @@ export default function NotificationBell({ incoming }: Props) {
             width: 320,
             maxHeight: 400,
             overflowY: 'auto',
-            background: '#2a2927',
+            background: 'var(--color-ink-menu)',
             border: '1px solid rgba(255,255,255,0.12)',
             borderRadius: 'var(--radius-md)',
             boxShadow: '0 8px 24px rgba(0,0,0,0.4)',

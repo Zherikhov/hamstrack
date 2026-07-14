@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
 import { apiLogin, apiMe, apiResendVerification, ApiResponseError } from '../api'
 import { useAuthStore } from '../auth'
+import { getLastProject } from '../recentProjects'
 import { queryClient } from '../queryClient'
 import { Button, Input } from '../components/ui'
 
@@ -29,7 +30,10 @@ export default function LoginPage() {
       setToken(accessToken)
       const user = await apiMe()
       setUser(user)
-      navigate('/workspaces')
+      // Returning users land on their last active project (first sign-in on
+      // this device — no journal yet — falls back to the workspace list)
+      const last = getLastProject(user.id)
+      navigate(last ? `/w/${last.wsId}/p/${last.projectId}` : '/workspaces')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid credentials')
       setNeedsVerification(err instanceof ApiResponseError && err.status === 403)

@@ -2,6 +2,7 @@ import { Fragment, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
 import { useConfigStore } from './config'
+import { getLastProject } from './recentProjects'
 import { apiRefresh, apiMe, apiPublicConfig } from './api'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
@@ -77,12 +78,17 @@ function RequireAuth() {
   return <Outlet />
 }
 
-// "/" is public: signed-in users go to their workspaces, anonymous visitors see
-// the landing page (unless a DC install disabled it via app.legal.*)
+// "/" is public: signed-in users go to their last active project (fallback:
+// workspace list), anonymous visitors see the landing page (unless a DC
+// install disabled it via app.legal.*)
 function RootRoute() {
-  const { accessToken } = useAuthStore()
+  const { accessToken, user } = useAuthStore()
   const publicLandingEnabled = useConfigStore((s) => s.config.publicLandingEnabled)
-  if (accessToken) return <Navigate to="/workspaces" replace />
+  if (accessToken) {
+    const last = user ? getLastProject(user.id) : null
+    if (last) return <Navigate to={`/w/${last.wsId}/p/${last.projectId}`} replace />
+    return <Navigate to="/workspaces" replace />
+  }
   if (!publicLandingEnabled) return <Navigate to="/login" replace />
   return <LandingPage />
 }
