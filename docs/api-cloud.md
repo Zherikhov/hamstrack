@@ -113,6 +113,11 @@ Validation failures (`400`) additionally carry a per-field `errors` map:
 | `409` | Conflict: stale `version`, duplicate name/key, resource in use |
 | `413` | Attachment exceeds the upload size limit (25 MB) |
 | `422` | Semantically invalid reference (unknown status/type/assignee, workflow-forbidden transition) |
+| `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
+
+### Rate limits
+
+The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget of 15 requests per minute**. Additionally, repeated failed logins for one account trigger an **exponential backoff** (starting at 30 s after 5 consecutive failures, doubling per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds). The rest of the API is currently not rate-limited.
 
 ## Roles
 

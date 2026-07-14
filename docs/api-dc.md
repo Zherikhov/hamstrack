@@ -63,6 +63,8 @@ A self-hosted instance is configured through environment variables; a few of the
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | When `false`, no demo workspace is created on first login |
 | `PUBLIC_LANDING_ENABLED` | `true` | When `false`, `robots.txt` disallows all crawling and `sitemap.xml` returns `404` |
 | `ATTACHMENT_MAX_FILE_SIZE` | `25MB` | Upload size limit for attachments (`413` when exceeded) |
+| `RATE_LIMIT_ENABLED` | `true` | Auth rate limiting (see [Rate limits](#rate-limits)) |
+| `RATE_LIMIT_AUTH_IP_PER_MINUTE` / `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` / `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` / `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS` | `15` / `5` / `30` / `900` | Rate-limit tuning |
 | `APP_BASE_URL` | — | The `refresh_token` cookie is marked `Secure` only when this is an `https` URL |
 
 ## Authentication
@@ -127,6 +129,11 @@ Validation failures (`400`) additionally carry a per-field `errors` map:
 | `409` | Conflict: stale `version`, duplicate name/key, resource in use |
 | `413` | Attachment exceeds the upload size limit (default 25 MB) |
 | `422` | Semantically invalid reference (unknown status/type/assignee, workflow-forbidden transition) |
+| `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
+
+### Rate limits
+
+The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget** (default 15 requests per minute). Additionally, repeated failed logins for one account trigger an **exponential backoff** (defaults: starts at 30 s after 5 consecutive failures, doubles per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds). Operators tune or disable this via the `RATE_LIMIT_*` variables below. Counters are in-memory (per app node).
 
 ## Roles
 

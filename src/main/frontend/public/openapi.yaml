@@ -20,6 +20,11 @@ info:
     does not exist or you are not a member of its workspace. Lists are
     currently unpaginated (beta). The API is unversioned while in beta;
     breaking changes are announced in release notes.
+
+    **Rate limits** — sensitive auth endpoints share a per-IP budget
+    (15 requests/min by default), and repeated failed logins for one account
+    trigger an exponential backoff. Both return `429` with a `Retry-After`
+    header (seconds).
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/easyTask
@@ -105,6 +110,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/verify-email:
     post:
@@ -125,6 +131,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/resend-verification:
     post:
@@ -148,6 +155,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/login:
     post:
@@ -176,6 +184,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/refresh:
     post:
@@ -228,6 +237,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/reset-password:
     post:
@@ -257,6 +267,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/me:
     get:
@@ -1245,6 +1256,15 @@ components:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
     UnprocessableReference:
       description: Unknown status/type/assignee/parent, or a workflow-forbidden transition
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    TooManyRequests:
+      description: Rate limited — retry after the number of seconds in the `Retry-After` header
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }

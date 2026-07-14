@@ -1,5 +1,7 @@
 package com.hamstrack.common.exception;
 
+import com.hamstrack.common.ratelimit.RateLimitedException;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -19,6 +21,15 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ProblemDetail> handleAppException(AppException ex) {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    // More specific than the AppException handler — adds the Retry-After hint
+    @ExceptionHandler(RateLimitedException.class)
+    public ResponseEntity<ProblemDetail> handleRateLimited(RateLimitedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        return ResponseEntity.status(ex.getStatus())
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
+                .body(problem);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

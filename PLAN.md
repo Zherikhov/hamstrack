@@ -101,14 +101,14 @@ The key differentiator for customizability — similar to Jira's ScriptRunner Fr
 - [ ] S3-compatible file storage
 - [ ] Email service (SES / Postmark)
 - [ ] Monitoring & observability
-- [ ] Rate limiting & abuse protection
+- [x] Rate limiting & abuse protection — **auth endpoints done 2026-07-14** (per-IP window + per-account login backoff, `common.ratelimit`, env `RATE_LIMIT_*`); rest of the API still unlimited — revisit with usage metering
 
 ### Prod hardening backlog (deployed 2026-07-11: https://hamstrack.com, EC2 + CD pipeline)
 
 - [x] **SMTP on prod** — done 2026-07-11 via Resend (domain verified with MX/SPF/DKIM records on Cloudflare, sender `noreply@hamstrack.com`). `MAIL_*` vars flow through `docker-compose.prod.yml` → server `.env`; SMTP creds: host `smtp.resend.com:587`, username `resend`, password = API key. Free tier: 3000 emails/mo — revisit (SES?) if volume grows.
-- [ ] **Switch attachments to S3** — prod runs `STORAGE_TYPE=local` (docker volume `attachments_data` on the instance). Create a bucket, give the EC2 instance an IAM role with access to it, set `STORAGE_TYPE=s3` + `STORAGE_S3_BUCKET`/`STORAGE_S3_REGION` in server `.env`, restart. Migrate existing local files if any.
-- [ ] **Cloudflare proxy (orange cloud)** — optional: DDoS protection + static caching. Flip both DNS records to Proxied **and** set SSL/TLS mode to Full (strict) first — the default Flexible mode causes a redirect loop with Caddy.
-- [ ] **Close SSH port 22** — currently open to 0.0.0.0/0 (key-only auth) so GitHub Actions can deploy. Harden later by moving deploy to AWS SSM (IAM role on instance, `aws ssm send-command` in cd.yml) and restricting 22 back to own IP.
+- [x] **Switch attachments to S3** — done 2026-07-14: bucket `hamstrack-attachments-prod` (private, eu-north-1), instance role `hamstrack-ec2` (S3 policy + `AmazonSSMManagedInstanceCore`) on `i-019fe684b25ad831f`, IMDS hop limit was already 2, `.env` → `STORAGE_TYPE=s3`; verified e2e (upload/download через прод-API, объект в бакете). Local volume was empty — no migration needed.
+- [ ] **Cloudflare proxy (orange cloud)** — `docs/ops-prod-hardening.md` §2. Order: SSL mode Full (strict) → flip DNS to Proxied → add Cloudflare to Caddy `trusted_proxies` (otherwise the auth rate limiter buckets everyone under CF edge IPs → false 429s).
+- [ ] **Close SSH port 22** — AWS side done 2026-07-14: instance is SSM-managed (Online), scoped deploy user `hamstrack-deploy` created, pipeline deploy job switched to `aws ssm send-command`, dry-run Success (compose plugin installed system-wide — SSM runs as root). Remaining: add GitHub secrets (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_INSTANCE_ID`), push, verify one green deploy, then `aws ec2 revoke-security-group-ingress --group-id sg-060970351b3f5c950 --protocol tcp --port 22 --cidr 0.0.0.0/0` (this also cuts the dev machine's SSH — use Session Manager afterwards).
 
 ## Phase 8 — DC Version *(later)*
 

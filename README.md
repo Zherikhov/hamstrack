@@ -24,7 +24,7 @@ One codebase ships in two deployment models:
 - **Kanban board** — drag-and-drop between status columns, workflow-transition rules enforced on drop
 - **Backlog** — flat table of all unfinished work
 - **Comments & attachments** — with @mentions, soft delete and per-issue file uploads
-- **Notifications** — in-app bell plus live updates over Server-Sent Events, email for mentions and invites
+- **Notifications** — in-app bell plus live updates over Server-Sent Events; email for verification, invites and password recovery
 - **Auth** — email registration with verification, JWT access tokens, rotating refresh-token cookie, password recovery
 
 ## Quick start (self-hosted / DC)
@@ -100,6 +100,7 @@ Open `http://localhost:8080` (or your `APP_BASE_URL` behind a TLS-terminating re
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
+| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create an admin account on startup |
 
 ## Documentation & REST API

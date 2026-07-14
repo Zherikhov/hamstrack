@@ -93,21 +93,36 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
-  # SSH into AWS EC2 and pull the new image.
+  # Deploy via AWS SSM — no open SSH port needed on the instance.
   # Inherits the main-only gate: skipped when build-and-push is skipped.
+  # The hamstrack-deploy IAM user may only run AWS-RunShellScript on this
+  # one instance (see docs/ops-prod-hardening.md §3).
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to AWS EC2
-        uses: appleboy/ssh-action@v1
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SERVER_SSH_PRIVATE_KEY }}
-          script: |
-            cd /opt/hamstrack
-            docker compose -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker image prune -f
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      - name: Deploy via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ secrets.AWS_INSTANCE_ID }}" \
+            --document-name AWS-RunShellScript \
+            --comment "hamstrack deploy ${{ github.sha }}" \
+            --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --remove-orphans && docker image prune -f"]' \
+            --query 'Command.CommandId' --output text)
+          echo "Command: $CMD_ID"
+          # `wait` polls until the command finishes; it exits non-zero on failure
+          aws ssm wait command-executed \
+            --command-id "$CMD_ID" --instance-id "${{ secrets.AWS_INSTANCE_ID }}" || FAILED=1
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" --instance-id "${{ secrets.AWS_INSTANCE_ID }}" \
+            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+            --output json
+          [ -z "$FAILED" ]

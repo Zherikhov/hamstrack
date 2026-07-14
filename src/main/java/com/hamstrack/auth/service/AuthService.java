@@ -7,6 +7,7 @@ import com.hamstrack.auth.repository.*;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.config.JwtProperties;
 import com.hamstrack.common.mail.MailService;
+import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.security.JwtService;
 import com.hamstrack.common.util.TokenUtils;
 import jakarta.servlet.http.Cookie;
@@ -38,6 +39,7 @@ public class AuthService {
     private final JwtProperties jwtProperties;
     private final AppProperties appProperties;
     private final MailService mailService;
+    private final RateLimitService rateLimitService;
 
     @Transactional
     public void register(RegisterRequest req) {
@@ -88,9 +90,15 @@ public class AuthService {
 
     @Transactional
     public AuthResponse login(LoginRequest req, HttpServletResponse response) {
-        var user = userRepository.findByEmail(req.email().toLowerCase())
-                .orElseThrow(InvalidCredentialsException::new);
-        if (!passwordEncoder.matches(req.password(), user.getPasswordHash())) {
+        var email = req.email().toLowerCase();
+        // Exponential backoff after consecutive failures — throws 429 while
+        // blocked. Applied to unknown emails too, so the limiter itself can't
+        // be used to probe which addresses are registered.
+        rateLimitService.checkLoginAllowed(email);
+
+        var user = userRepository.findByEmail(email).orElse(null);
+        if (user == null || !passwordEncoder.matches(req.password(), user.getPasswordHash())) {
+            rateLimitService.recordLoginFailure(email);
             throw new InvalidCredentialsException();
         }
         if (user.getStatus() == UserStatus.PENDING) {
@@ -99,6 +107,7 @@ public class AuthService {
         if (user.getStatus() == UserStatus.DISABLED) {
             throw new InvalidCredentialsException();
         }
+        rateLimitService.resetLoginFailures(email);
         return issueTokens(user, response);
     }
 
