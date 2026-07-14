@@ -38,6 +38,11 @@ public class User extends BaseEntity implements UserDetails {
     @Column(name = "terms_accepted_at")
     private Instant termsAcceptedAt;
 
+    // Null = demo workspace not yet seeded; stamped atomically on first
+    // authentication (see UserRepository.claimDemoSeed / DemoDataService)
+    @Column(name = "demo_seeded_at")
+    private Instant demoSeededAt;
+
     // --- UserDetails ---
 
     @Override

@@ -8,9 +8,12 @@ public record AppProperties(
         String baseUrl,
         @DefaultValue("noreply@hamstrack.com") String mailFrom,
         Registration registration,
-        Legal legal
+        Legal legal,
+        Demo demo
 ) {
     public record Registration(boolean publicSignupEnabled) {}
+
+    public record Demo(@DefaultValue("true") boolean seedOnFirstLogin) {}
 
     public record Legal(
             @DefaultValue("true") boolean publicLandingEnabled,
