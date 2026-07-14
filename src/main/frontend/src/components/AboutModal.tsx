@@ -68,8 +68,8 @@ export default function AboutModal({ onClose }: Props) {
 
           {/* Links */}
           <div className="flex flex-col border-t pt-3" style={{ borderColor: 'var(--color-border)' }}>
-            {/* Temporary: points to the repository README until real docs exist */}
-            <a href={`${REPO_URL}#readme`} target="_blank" rel="noreferrer" className={linkRowClass} style={linkRowStyle}>
+            {/* In-app docs hub (/docs) — new tab so the user keeps their board context */}
+            <a href="/docs" target="_blank" rel="noreferrer" className={linkRowClass} style={linkRowStyle}>
               <BookOpen size={15} style={{ color: 'var(--color-brand)' }} />
               <span className="flex-1">Documentation</span>
               <ExternalLink size={12} style={{ color: 'var(--color-text-muted)' }} />

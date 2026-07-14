@@ -13,6 +13,12 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Workflow rules: which status-to-status transitions are allowed for issues
+ * in the workspace. When no transitions are configured for a source status,
+ * any move from it is permitted; once at least one exists, only the listed
+ * targets are accepted (enforced on issue updates and board drag-and-drop).
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/status-transitions")
 @RequiredArgsConstructor

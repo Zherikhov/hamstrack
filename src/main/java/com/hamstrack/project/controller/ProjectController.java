@@ -12,6 +12,12 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Project management within a workspace: CRUD, archive/unarchive and project
+ * membership. Visible to all workspace members; mutations require the
+ * project MANAGER role (the creator gets MANAGER automatically). Archived
+ * projects are hidden from listings by default and reject issue mutations.
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects")
 @RequiredArgsConstructor

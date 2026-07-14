@@ -3,6 +3,11 @@ package com.hamstrack.common.web;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 
+/**
+ * SPA fallback: forwards all non-API, non-static-file paths to index.html so
+ * client-side routes (React Router) survive a full page load / deep link.
+ * API routes win by mapping specificity; asset paths are excluded by pattern.
+ */
 @Controller
 public class SpaController {
 

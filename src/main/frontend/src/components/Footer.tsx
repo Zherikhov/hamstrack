@@ -24,6 +24,9 @@ export default function Footer() {
           <Link to="/cookies" className="hover:underline" style={{ color: 'var(--color-text-secondary)' }}>
             Cookies
           </Link>
+          <Link to="/docs" className="hover:underline" style={{ color: 'var(--color-text-secondary)' }}>
+            Docs
+          </Link>
           <a
             href="https://github.com/Zherikhov/easyTask"
             target="_blank"

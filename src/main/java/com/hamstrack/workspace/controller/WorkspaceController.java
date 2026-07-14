@@ -13,6 +13,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * Workspace management: create/list/get workspaces, list members, invite by
+ * email and accept invites. The workspace is the tenant boundary — every
+ * nested resource is resolved through the caller's membership, and a
+ * non-member gets 404 (never 403) so workspace existence is not revealed.
+ * Creating a workspace makes the caller OWNER and seeds default issue types
+ * and statuses.
+ */
 @RestController
 @RequestMapping("/api/workspaces")
 @RequiredArgsConstructor

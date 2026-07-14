@@ -11,6 +11,13 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.UUID;
 
+/**
+ * Server-Sent Events stream with live workspace events (ISSUE_CREATED,
+ * ISSUE_UPDATED, ISSUE_DELETED, NOTIFICATION), used by the SPA to refresh
+ * boards and the notification bell without polling. Membership is checked on
+ * subscribe; emitter lifecycle (timeouts, disconnects) is handled by
+ * {@link SseRegistry}.
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/sse")
 @RequiredArgsConstructor

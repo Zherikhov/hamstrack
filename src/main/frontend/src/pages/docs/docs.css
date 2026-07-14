@@ -1,0 +1,40 @@
+/* Blend Swagger UI into the design system (warm neutrals, app fonts) —
+   method colors (GET/POST/…) stay stock: it's a universally recognized idiom. */
+.swagger-ui,
+.swagger-ui .info .title,
+.swagger-ui .opblock-tag,
+.swagger-ui .opblock .opblock-summary-description,
+.swagger-ui table,
+.swagger-ui label,
+.swagger-ui .btn {
+  font-family: var(--font-body);
+}
+
+.swagger-ui .info .title {
+  font-family: var(--font-display);
+  letter-spacing: -0.3px;
+}
+
+.swagger-ui code,
+.swagger-ui .opblock .opblock-summary-path,
+.swagger-ui .parameter__name,
+.swagger-ui .prop-type,
+.swagger-ui .model {
+  font-family: var(--font-mono);
+}
+
+/* The page renders its own header — trim Swagger's outer chrome */
+.swagger-ui .info {
+  margin: 24px 0;
+}
+
+.swagger-ui .scheme-container {
+  background: transparent;
+  box-shadow: none;
+  padding: 8px 0;
+  margin: 0;
+}
+
+.swagger-ui .wrapper {
+  padding: 0;
+}

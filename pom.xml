@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.hamstrack</groupId>
     <artifactId>hamstrack</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
     <name>hamstrack</name>
     <description>Hamstrack — open-source task tracker with AI agent support</description>
     <url/>

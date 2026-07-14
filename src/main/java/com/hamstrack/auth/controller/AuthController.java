@@ -20,6 +20,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * Authentication endpoints: registration, email verification, login, token
+ * refresh, logout and password recovery. All endpoints are public except
+ * {@code GET /me}. Successful authentication returns a short-lived JWT access
+ * token in the body and sets the {@code refresh_token} HttpOnly cookie
+ * (scoped to {@code /api/auth}); every authentication response also triggers
+ * one-time demo data seeding for the user.
+ */
 @Slf4j
 @RestController
 @RequestMapping("/api/auth")

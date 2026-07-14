@@ -27,6 +27,10 @@ Stack: Spring Boot 4.1.0 / Java 21, Spring Web MVC, Spring Data JPA, Spring Secu
 
 Frontend (`src/main/frontend/`): React 19, TypeScript, Vite 6, Tailwind v4 (`@tailwindcss/vite`), React Router v7, TanStack Query v5, Zustand v5, lucide-react.
 
+## Docs (2026-07-14)
+
+`README.md` (public GitHub face — quick start, config env table, links) and `docs/api-cloud.md` / `docs/api-dc.md` (user-facing REST API reference, one file per deployment model; identical structure, DC adds an "Operator settings that affect the API" section). In-app docs hub at SPA route `/docs` (`pages/docs/DocsPage.tsx`, lazy-loaded — Swagger UI is a 1.4MB chunk): tabbed layout (single "REST API" tab so far, admin/user guides planned), renders `swagger-ui-dist` (import `swagger-ui-dist/swagger-ui-bundle` directly — the package main entry requires Node `path` and breaks browser builds) against the hand-written OpenAPI 3.0 spec at `src/main/frontend/public/openapi.yaml`, served statically at `/openapi.yaml` (root-level dotted filename bypasses the SPA fallback; deeper paths like `/docs/x.yaml` would NOT — SpaController's multi-segment pattern only checks the first segment for dots). About modal "Documentation" and the public Footer "Docs" link here. springdoc doesn't support Boot 4 yet — revisit generating the spec when it does. **When the API surface or behavior changes, update `openapi.yaml` AND both api-*.md files** (validate: `npx @apidevtools/swagger-cli validate src/main/frontend/public/openapi.yaml`; beware YAML flow-map `{}` values containing commas/colons — quote them). All controllers carry class-level javadoc; keep it when adding endpoints.
+
 ## DC vs Cloud (single codebase)
 
 Hamstrack ships as one codebase in two modes, controlled by Spring profile `dc` or `cloud` (`SPRING_PROFILES_ACTIVE=cloud`). Differences between modes must be config/profile-gated behavior, never forked code.

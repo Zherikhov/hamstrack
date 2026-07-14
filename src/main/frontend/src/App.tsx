@@ -1,4 +1,4 @@
-import { Fragment, useEffect } from 'react'
+import { Fragment, Suspense, lazy, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
 import { useConfigStore } from './config'
@@ -17,6 +17,9 @@ import LandingPage from './pages/LandingPage'
 import TermsPage from './pages/legal/TermsPage'
 import PrivacyPage from './pages/legal/PrivacyPage'
 import CookiesPage from './pages/legal/CookiesPage'
+
+// Lazy: Swagger UI is heavy and must not weigh down the main app bundle
+const DocsPage = lazy(() => import('./pages/docs/DocsPage'))
 
 function AuthInit({ children }: { children: React.ReactNode }) {
   const { accessToken, setToken, setUser, clear, setInitialized, initialized } = useAuthStore()
@@ -104,6 +107,20 @@ export default function App() {
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiesPage />} />
+          <Route
+            path="/docs"
+            element={
+              <Suspense
+                fallback={
+                  <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
+                    <span className="mono" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
+                  </div>
+                }
+              >
+                <DocsPage />
+              </Suspense>
+            }
+          />
           <Route path="/" element={<RootRoute />} />
           <Route element={<RequireAuth />}>
             <Route path="/workspaces" element={<WorkspacesPage />} />

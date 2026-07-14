@@ -13,6 +13,13 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Workspace-scoped status catalog (To Do / In Progress / Done seeded on
+ * workspace creation). Each status carries a category (TO_DO / IN_PROGRESS /
+ * DONE) that drives board grouping and backlog filtering. Listing is open to
+ * all workspace members; mutations require workspace ADMIN. A status
+ * referenced by existing issues cannot be deleted (409).
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/statuses")
 @RequiredArgsConstructor

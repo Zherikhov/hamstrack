@@ -13,6 +13,12 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Workspace-scoped issue type catalog (Bug, Task, Story, Epic by default —
+ * seeded on workspace creation). Listing is open to all workspace members;
+ * mutations require workspace ADMIN. A type referenced by existing issues
+ * cannot be deleted (409).
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/issue-types")
 @RequiredArgsConstructor

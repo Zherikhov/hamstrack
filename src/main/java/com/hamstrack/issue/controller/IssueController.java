@@ -21,6 +21,16 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 
+/**
+ * Issues and their sub-resources (comments, attachments, change history).
+ * Issues are addressed by their project-scoped {@code number} (the numeric
+ * part of "DEMO-42"), not by UUID. Updates use optimistic locking via the
+ * {@code version} field (409 on a stale version) and status changes are
+ * validated against configured workflow transitions. Comment edits/deletes
+ * are author-only; attachment deletion is allowed to the uploader or a
+ * project MANAGER. Deleting an issue requires MANAGER and removes stored
+ * attachment blobs.
+ */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/issues")
 @RequiredArgsConstructor

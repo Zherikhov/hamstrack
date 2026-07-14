@@ -12,6 +12,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * The current user's in-app notifications (assignments, mentions, …):
+ * listing, unread counter and read receipts. Not workspace-scoped — the feed
+ * spans all workspaces the user belongs to. Real-time delivery happens over
+ * the workspace SSE stream; these endpoints back the notification bell.
+ */
 @RestController
 @RequestMapping("/api/notifications")
 @RequiredArgsConstructor
