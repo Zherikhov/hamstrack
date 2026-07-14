@@ -1,0 +1,1575 @@
+# Hamstrack REST API — OpenAPI 3.0 specification.
+#
+# Hand-maintained (springdoc does not support Spring Boot 4 yet): when the API
+# surface changes, update this file together with docs/api-cloud.md and
+# docs/api-dc.md. Served at /openapi.yaml and rendered by the in-app /docs page.
+openapi: 3.0.3
+info:
+  title: Hamstrack REST API
+  version: 0.2.0
+  description: |
+    The HTTP API behind the Hamstrack web app — everything the UI does goes
+    through it, and it is available to users for scripting and integrations.
+
+    **Authentication** — call `POST /api/auth/login` and send the returned
+    access token as `Authorization: Bearer <token>` (use the **Authorize**
+    button here). Tokens expire after 24 h; refresh via the rotating
+    `refresh_token` cookie with `POST /api/auth/refresh`.
+
+    **Access model** — a resource you cannot see returns `404`, whether it
+    does not exist or you are not a member of its workspace. Lists are
+    currently unpaginated (beta). The API is unversioned while in beta;
+    breaking changes are announced in release notes.
+  contact:
+    name: Hamstrack
+    url: https://github.com/Zherikhov/easyTask
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: https://hamstrack.com/api
+    description: Cloud
+  - url: /api
+    description: This instance (Cloud or self-hosted DC)
+
+tags:
+  - name: Meta
+    description: Public instance metadata
+  - name: Auth
+    description: Registration, login, tokens, password recovery
+  - name: Workspaces
+    description: Tenancy boundary — members, invites
+  - name: Projects
+    description: Projects and project membership
+  - name: Issue types
+    description: Workspace-wide issue type catalog
+  - name: Statuses
+    description: Workspace-wide status catalog (board columns)
+  - name: Workflow
+    description: Allowed status-to-status transitions
+  - name: Issues
+    description: Issues, addressed by project-scoped number
+  - name: Comments
+    description: Issue comments
+  - name: Attachments
+    description: Issue file attachments
+  - name: Notifications
+    description: The current user's notification feed
+  - name: Events
+    description: Real-time Server-Sent Events
+
+security:
+  - bearerAuth: []
+
+paths:
+  /meta:
+    get:
+      tags: [Meta]
+      summary: Instance flags and version
+      description: Which optional surfaces are enabled on this installation, and the app version.
+      operationId: getMeta
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MetaResponse' }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register an account
+      description: |
+        Sends a verification email. `termsAccepted: true` is required when the
+        instance has terms acceptance enabled (see `GET /meta`). Returns `403`
+        when the operator disabled public signup.
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+      responses:
+        '201':
+          description: Registered — verification email sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Email is already registered
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /auth/verify-email:
+    post:
+      tags: [Auth]
+      summary: Verify email with the one-time token
+      description: Exchanges the emailed token for a session (acts as a login).
+      operationId: verifyEmail
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VerifyEmailRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/AuthOk' }
+        '400':
+          description: Token is invalid, expired or already used
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /auth/resend-verification:
+    post:
+      tags: [Auth]
+      summary: Re-send the verification email
+      description: Always returns `200` — no account enumeration.
+      operationId: resendVerification
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: |
+        Returns an access token and sets the `refresh_token` cookie
+        (`HttpOnly`, `SameSite=Strict`, path `/api/auth`). Unverified accounts
+        get `403`.
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200': { $ref: '#/components/responses/AuthOk' }
+        '401':
+          description: Invalid email or password
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403':
+          description: Email address is not verified
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token
+      description: |
+        Authenticated by the `refresh_token` cookie. Returns a fresh access
+        token and a new cookie; the previous refresh token is invalidated.
+      operationId: refresh
+      security:
+        - cookieAuth: []
+      responses:
+        '200': { $ref: '#/components/responses/AuthOk' }
+        '400':
+          description: Missing, invalid or expired refresh token
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: Revokes the refresh token and clears the cookie.
+      operationId: logout
+      security:
+        - cookieAuth: []
+      responses:
+        '204': { description: Logged out }
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password reset link
+      description: Always returns `200` — no account enumeration.
+      operationId: forgotPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Set a new password with the emailed token
+      description: Revokes all active sessions on success.
+      operationId: resetPassword
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, newPassword]
+              properties:
+                token: { type: string }
+                newPassword: { type: string, minLength: 8, maxLength: 100 }
+      responses:
+        '200':
+          description: Password reset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400':
+          description: Token is invalid, expired or already used
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user
+      operationId: me
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /workspaces:
+    post:
+      tags: [Workspaces]
+      summary: Create a workspace
+      description: Caller becomes `OWNER`; default issue types and statuses are seeded.
+      operationId: createWorkspace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateWorkspaceRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    get:
+      tags: [Workspaces]
+      summary: List my workspaces
+      operationId: listWorkspaces
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /workspaces/{workspaceId}:
+    get:
+      tags: [Workspaces]
+      summary: Get a workspace
+      operationId: getWorkspace
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/members:
+    get:
+      tags: [Workspaces]
+      summary: List workspace members
+      operationId: listWorkspaceMembers
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceMemberResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/invites:
+    post:
+      tags: [Workspaces]
+      summary: Invite a member by email
+      description: |
+        Requires workspace `ADMIN`. The granted role must not exceed your own
+        and can never be `OWNER`. The invite is bound to the invited email.
+      operationId: inviteMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InviteMemberRequest' }
+      responses:
+        '201':
+          description: Invite sent
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: User is already a member
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/accept-invite:
+    post:
+      tags: [Workspaces]
+      summary: Accept an invite
+      description: Must be signed in with the invited email address.
+      operationId: acceptInvite
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Joined the workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already a member
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects:
+    post:
+      tags: [Projects]
+      summary: Create a project
+      description: Caller becomes project `MANAGER`. Key is unique per workspace.
+      operationId: createProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProjectRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Project key already exists in the workspace
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+    get:
+      tags: [Projects]
+      summary: List projects
+      operationId: listProjects
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: includeArchived
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}:
+    get:
+      tags: [Projects]
+      summary: Get a project
+      operationId: getProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Projects]
+      summary: Update name / description
+      description: Requires project `MANAGER`.
+      operationId: updateProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/archive:
+    post:
+      tags: [Projects]
+      summary: Archive a project
+      description: Requires project `MANAGER`. Archived projects reject issue mutations.
+      operationId: archiveProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '204': { description: Archived }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/unarchive:
+    post:
+      tags: [Projects]
+      summary: Restore an archived project
+      description: Requires project `MANAGER`.
+      operationId: unarchiveProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '204': { description: Restored }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/members:
+    get:
+      tags: [Projects]
+      summary: List project members
+      operationId: listProjectMembers
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectMemberResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Projects]
+      summary: Add a project member
+      description: Requires project `MANAGER`. The user must already be a workspace member.
+      operationId: addProjectMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddProjectMemberRequest' }
+      responses:
+        '201':
+          description: Added
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectMemberResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already a project member
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/members/{userId}:
+    delete:
+      tags: [Projects]
+      summary: Remove a project member
+      description: Requires project `MANAGER`.
+      operationId: removeProjectMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: userId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Removed }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/issue-types:
+    get:
+      tags: [Issue types]
+      summary: List issue types
+      description: Ordered by `position`. New workspaces start with Bug, Task, Story, Epic.
+      operationId: listIssueTypes
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IssueTypeResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Issue types]
+      summary: Create an issue type
+      description: Requires workspace `ADMIN`.
+      operationId: createIssueType
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIssueTypeRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueTypeResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/issue-types/{typeId}:
+    patch:
+      tags: [Issue types]
+      summary: Update an issue type
+      description: Requires workspace `ADMIN`.
+      operationId: updateIssueType
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: typeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIssueTypeRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueTypeResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Issue types]
+      summary: Delete an issue type
+      description: Requires workspace `ADMIN`. Fails with `409` while issues use the type.
+      operationId: deleteIssueType
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: typeId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Type is used by existing issues
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/statuses:
+    get:
+      tags: [Statuses]
+      summary: List statuses
+      description: Ordered by `position`. New workspaces start with To Do, In Progress, Done.
+      operationId: listStatuses
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StatusResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Statuses]
+      summary: Create a status
+      description: Requires workspace `ADMIN`.
+      operationId: createStatus
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStatusRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/statuses/{statusId}:
+    patch:
+      tags: [Statuses]
+      summary: Update a status
+      description: Requires workspace `ADMIN`.
+      operationId: updateStatus
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: statusId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStatusRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Statuses]
+      summary: Delete a status
+      description: Requires workspace `ADMIN`. Fails with `409` while issues use the status.
+      operationId: deleteStatus
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: statusId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Status is used by existing issues
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/status-transitions:
+    get:
+      tags: [Workflow]
+      summary: List transition rules
+      description: |
+        With no rules configured for a source status, any move from it is
+        allowed; once at least one exists, only the listed targets are
+        accepted (a forbidden move returns `422` on issue update).
+      operationId: listTransitions
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/StatusTransitionResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Workflow]
+      summary: Create a transition rule
+      description: Requires workspace `OWNER`.
+      operationId: createTransition
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateStatusTransitionRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatusTransitionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/status-transitions/{transitionId}:
+    delete:
+      tags: [Workflow]
+      summary: Delete a transition rule
+      description: Requires workspace `OWNER`.
+      operationId: deleteTransition
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: transitionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues:
+    post:
+      tags: [Issues]
+      summary: Create an issue
+      description: |
+        `assigneeId` must be a workspace member; `parentId` links a sub-task
+        to a parent issue in the same project. The issue gets the next
+        sequential project-scoped `number`.
+      operationId: createIssue
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateIssueRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Project is archived
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422': { $ref: '#/components/responses/UnprocessableReference' }
+    get:
+      tags: [Issues]
+      summary: List issues
+      operationId: listIssues
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: statusId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: assigneeId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: priority
+          in: query
+          schema: { $ref: '#/components/schemas/IssuePriority' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IssueResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}:
+    get:
+      tags: [Issues]
+      summary: Get an issue
+      operationId: getIssue
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Issues]
+      summary: Update an issue
+      description: |
+        Partial update — send any subset of fields plus the `version` you last
+        read; a stale version returns `409` (omit `version` to skip the check).
+        Status changes are validated against workflow transition rules (`422`
+        when forbidden).
+      operationId: updateIssue
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateIssueRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Stale `version` — the issue was modified by someone else, or the project is archived
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422': { $ref: '#/components/responses/UnprocessableReference' }
+    delete:
+      tags: [Issues]
+      summary: Delete an issue
+      description: Requires project `MANAGER`. Removes comments and attachment files too.
+      operationId: deleteIssue
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/history:
+    get:
+      tags: [Issues]
+      summary: Field-level change history
+      operationId: getIssueHistory
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '200':
+          description: OK, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IssueHistoryResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments:
+    post:
+      tags: [Comments]
+      summary: Add a comment
+      description: '`@DisplayName` mentions notify the mentioned workspace members.'
+      operationId: createComment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCommentRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    get:
+      tags: [Comments]
+      summary: List comments
+      description: Soft-deleted comments are excluded.
+      operationId: listComments
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CommentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments/{commentId}:
+    patch:
+      tags: [Comments]
+      summary: Edit a comment
+      description: Author only.
+      operationId: updateComment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/commentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateCommentRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CommentResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Comments]
+      summary: Delete a comment (soft)
+      description: Author only.
+      operationId: deleteComment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/commentId'
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/attachments:
+    post:
+      tags: [Attachments]
+      summary: Upload an attachment
+      description: '`multipart/form-data` with a `file` field. Default size limit 25 MB (`413` when exceeded).'
+      operationId: uploadAttachment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Uploaded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttachmentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '413':
+          description: File exceeds the upload size limit
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+    get:
+      tags: [Attachments]
+      summary: List attachments
+      operationId: listAttachments
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AttachmentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/attachments/{attachmentId}:
+    get:
+      tags: [Attachments]
+      summary: Download an attachment
+      operationId: downloadAttachment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/attachmentId'
+      responses:
+        '200':
+          description: 'Binary content, `Content-Disposition: attachment`'
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Attachments]
+      summary: Delete an attachment
+      description: Uploader or project `MANAGER`.
+      operationId: deleteAttachment
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/attachmentId'
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: List my notifications
+      description: Across all workspaces, newest first.
+      operationId: listNotifications
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/NotificationResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Unread counter
+      operationId: unreadCount
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count: { type: integer, format: int64, example: 3 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      summary: Mark one as read
+      operationId: markNotificationRead
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotificationResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark all as read
+      operationId: markAllNotificationsRead
+      responses:
+        '204': { description: Done }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /workspaces/{workspaceId}/sse:
+    get:
+      tags: [Events]
+      summary: Subscribe to workspace events (SSE)
+      description: |
+        Server-Sent Events stream (`text/event-stream`), workspace members
+        only. Event names: `ISSUE_CREATED`, `ISSUE_UPDATED`, `ISSUE_DELETED`
+        (data: `{"projectId", "issueNumber"}`) and `NOTIFICATION`. Reconnect
+        with standard `EventSource` retry semantics.
+      operationId: subscribeSse
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: Event stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from `POST /api/auth/login` (24 h lifetime).
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: Rotating refresh token cookie set on login (30-day lifetime, path `/api/auth`).
+
+  parameters:
+    workspaceId:
+      name: workspaceId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    projectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    issueNumber:
+      name: number
+      in: path
+      required: true
+      description: Project-scoped issue number (the `42` in `DEMO-42`)
+      schema: { type: integer, format: int64 }
+    commentId:
+      name: commentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    attachmentId:
+      name: attachmentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    AuthOk:
+      description: Authenticated — access token in body, refresh cookie set
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/AuthResponse' }
+    Unauthorized:
+      description: Missing, expired or invalid access token
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    Forbidden:
+      description: Authenticated but not allowed (insufficient role)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    NotFound:
+      description: Not found — or not a member of the containing workspace
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ValidationError:
+      description: Failed validation — see the `errors` map
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+    UnprocessableReference:
+      description: Unknown status/type/assignee/parent, or a workflow-forbidden transition
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  schemas:
+    ProblemDetail:
+      type: object
+      description: RFC 9457 problem details
+      properties:
+        type: { type: string, example: 'about:blank' }
+        title: { type: string, example: Conflict }
+        status: { type: integer, example: 409 }
+        detail: { type: string, example: Issue was modified by someone else — refresh and retry }
+
+    ValidationProblemDetail:
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errors:
+              type: object
+              additionalProperties: { type: string }
+              example: { email: must be a well-formed email address }
+
+    MessageResponse:
+      type: object
+      properties:
+        message: { type: string }
+
+    MetaResponse:
+      type: object
+      properties:
+        publicLandingEnabled: { type: boolean }
+        termsAcceptanceRequired: { type: boolean }
+        publicSignupEnabled: { type: boolean }
+        version: { type: string, example: 0.2.0 }
+
+    RegisterRequest:
+      type: object
+      required: [email, password, displayName]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 100 }
+        displayName: { type: string, minLength: 2, maxLength: 100 }
+        termsAccepted:
+          type: boolean
+          description: Required to be `true` when the instance enforces terms acceptance
+
+    VerifyEmailRequest:
+      type: object
+      required: [token]
+      properties:
+        token: { type: string, description: One-time token from the verification email }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+
+    AuthResponse:
+      type: object
+      properties:
+        accessToken: { type: string, description: JWT for the Authorization header }
+        expiresIn: { type: integer, format: int64, example: 86400, description: 'Access token lifetime, seconds' }
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+
+    MeResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        avatarUrl: { type: string, nullable: true }
+
+    WorkspaceRole:
+      type: string
+      enum: [OWNER, ADMIN, MEMBER]
+
+    ProjectRole:
+      type: string
+      enum: [MANAGER, MEMBER, VIEWER]
+
+    IssuePriority:
+      type: string
+      enum: [URGENT, HIGH, MEDIUM, LOW, NONE]
+
+    StatusCategory:
+      type: string
+      enum: [TODO, IN_PROGRESS, DONE]
+      description: Drives board grouping and backlog filtering
+
+    CreateWorkspaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 255 }
+
+    WorkspaceResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        slug: { type: string, example: acme-inc }
+        name: { type: string, example: Acme Inc }
+        myRole: { $ref: '#/components/schemas/WorkspaceRole' }
+        createdAt: { type: string, format: date-time }
+
+    WorkspaceMemberResponse:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        role: { $ref: '#/components/schemas/WorkspaceRole' }
+        joinedAt: { type: string, format: date-time }
+
+    InviteMemberRequest:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/WorkspaceRole' }
+
+    CreateProjectRequest:
+      type: object
+      required: [name, key]
+      properties:
+        name: { type: string, minLength: 2, maxLength: 255 }
+        key:
+          type: string
+          pattern: '^[A-Z0-9]+$'
+          minLength: 1
+          maxLength: 10
+          example: DEMO
+        description: { type: string, nullable: true }
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 2, maxLength: 255 }
+        description: { type: string }
+
+    ProjectResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        workspaceId: { type: string, format: uuid }
+        name: { type: string, example: Demo Project }
+        key: { type: string, example: DEMO }
+        description: { type: string, nullable: true }
+        archived: { type: boolean }
+        myRole: { $ref: '#/components/schemas/ProjectRole' }
+        createdAt: { type: string, format: date-time }
+
+    ProjectMemberResponse:
+      type: object
+      properties:
+        userId: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        avatarUrl: { type: string, nullable: true }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+        joinedAt: { type: string, format: date-time }
+
+    AddProjectMemberRequest:
+      type: object
+      required: [userId, role]
+      properties:
+        userId: { type: string, format: uuid }
+        role: { $ref: '#/components/schemas/ProjectRole' }
+
+    CreateIssueTypeRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#EF4444' }
+        icon: { type: string, maxLength: 50, example: bug }
+
+    IssueTypeResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Bug }
+        color: { type: string, example: '#EF4444' }
+        icon: { type: string, nullable: true, example: bug }
+        position: { type: integer }
+
+    CreateStatusRequest:
+      type: object
+      required: [name, category]
+      properties:
+        name: { type: string, maxLength: 100 }
+        category: { $ref: '#/components/schemas/StatusCategory' }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#3B82F6' }
+
+    StatusResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: In Progress }
+        color: { type: string, example: '#3B82F6' }
+        category: { $ref: '#/components/schemas/StatusCategory' }
+        position: { type: integer }
+
+    CreateStatusTransitionRequest:
+      type: object
+      required: [fromStatusId, toStatusId]
+      properties:
+        fromStatusId: { type: string, format: uuid }
+        toStatusId: { type: string, format: uuid }
+
+    StatusTransitionResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fromStatusId: { type: string, format: uuid }
+        fromStatusName: { type: string, example: To Do }
+        toStatusId: { type: string, format: uuid }
+        toStatusName: { type: string, example: In Progress }
+
+    UserRef:
+      type: object
+      nullable: true
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+        avatarUrl: { type: string, nullable: true }
+
+    CreateIssueRequest:
+      type: object
+      required: [title, typeId, statusId]
+      properties:
+        title: { type: string, maxLength: 500 }
+        description: { type: string, nullable: true }
+        typeId: { type: string, format: uuid }
+        statusId: { type: string, format: uuid }
+        priority: { $ref: '#/components/schemas/IssuePriority' }
+        assigneeId: { type: string, format: uuid, nullable: true, description: Must be a workspace member }
+        parentId: { type: string, format: uuid, nullable: true, description: Parent issue in the same project }
+        dueDate: { type: string, format: date, nullable: true }
+
+    UpdateIssueRequest:
+      type: object
+      description: Partial update — omitted fields are left unchanged
+      properties:
+        title: { type: string, minLength: 1, maxLength: 500 }
+        description: { type: string }
+        typeId: { type: string, format: uuid }
+        statusId: { type: string, format: uuid, description: Validated against workflow transition rules }
+        priority: { $ref: '#/components/schemas/IssuePriority' }
+        assigneeId: { type: string, format: uuid }
+        dueDate: { type: string, format: date }
+        version:
+          type: integer
+          description: Optimistic lock — the `version` you last read; `409` when stale. Omit to skip the check.
+
+    IssueResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: integer, format: int64, example: 18 }
+        key: { type: string, example: DEMO-18 }
+        title: { type: string }
+        description: { type: string, nullable: true }
+        type: { $ref: '#/components/schemas/IssueTypeResponse' }
+        status: { $ref: '#/components/schemas/StatusResponse' }
+        priority: { $ref: '#/components/schemas/IssuePriority' }
+        assignee: { $ref: '#/components/schemas/UserRef' }
+        reporter: { $ref: '#/components/schemas/UserRef' }
+        parentId: { type: string, format: uuid, nullable: true }
+        dueDate: { type: string, format: date, nullable: true }
+        version: { type: integer, description: Send back in PATCH for optimistic locking }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    IssueHistoryResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        field: { type: string, example: status }
+        oldValue: { type: string, nullable: true, example: To Do }
+        newValue: { type: string, nullable: true, example: In Progress }
+        changedById: { type: string, format: uuid }
+        changedByName: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    CreateCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, description: '`@DisplayName` mentions notify workspace members' }
+
+    CommentResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        authorId: { type: string, format: uuid }
+        authorName: { type: string }
+        body: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    AttachmentResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string, example: screenshot.png }
+        sizeBytes: { type: integer, format: int64 }
+        contentType: { type: string, example: image/png }
+        uploadedById: { type: string, format: uuid }
+        uploadedByName: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    NotificationResponse:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, example: ISSUE_ASSIGNED }
+        title: { type: string, example: You were assigned DEMO-18 }
+        body: { type: string, nullable: true }
+        link: { type: string, nullable: true, example: /w/…/p/…?issue=18 }
+        read: { type: boolean }
+        createdAt: { type: string, format: date-time }
