@@ -101,6 +101,11 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
 
+    # The instance id is not sensitive — inlined instead of a secret so a
+    # malformed secret value can't silently break deploys
+    env:
+      INSTANCE_ID: i-019fe684b25ad831f
+
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -112,7 +117,7 @@ jobs:
       - name: Deploy via SSM
         run: |
           CMD_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.AWS_INSTANCE_ID }}" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "hamstrack deploy ${{ github.sha }}" \
             --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --remove-orphans && docker image prune -f"]' \
@@ -120,9 +125,9 @@ jobs:
           echo "Command: $CMD_ID"
           # `wait` polls until the command finishes; it exits non-zero on failure
           aws ssm wait command-executed \
-            --command-id "$CMD_ID" --instance-id "${{ secrets.AWS_INSTANCE_ID }}" || FAILED=1
+            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" || FAILED=1
           aws ssm get-command-invocation \
-            --command-id "$CMD_ID" --instance-id "${{ secrets.AWS_INSTANCE_ID }}" \
+            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
             --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
             --output json
           [ -z "$FAILED" ]
