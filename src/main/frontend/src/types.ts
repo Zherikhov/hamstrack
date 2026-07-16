@@ -3,6 +3,8 @@ export interface User {
   email: string;
   displayName: string;
   avatarUrl?: string;
+  // Instance-wide role; ADMIN unlocks /admin (server enforces regardless)
+  systemRole?: 'ADMIN' | 'USER';
 }
 
 export interface Workspace {
@@ -40,7 +42,67 @@ export interface Status {
   position: number;
 }
 
-export type Priority = 'URGENT' | 'HIGH' | 'MEDIUM' | 'LOW' | 'NONE';
+// Catalog entity since M1 (was a closed enum before)
+export interface Priority {
+  id: string;
+  name: string;
+  color: string;
+  icon?: string;
+  position?: number;
+}
+
+// The effective taxonomy of a project — the board, filters and issue forms
+// render exclusively from this
+export interface ProjectConfig {
+  statuses: Status[];                 // board-column order
+  transitions: TransitionRule[];      // empty = all moves allowed
+  priorities: PriorityOption[];       // display order
+  issueTypes: IssueType[];
+  fields: ProjectField[];             // custom fields, display order
+}
+
+// ── Custom fields (M2) ──────────────────────────────────────────────────────
+
+export type FieldType =
+  | 'TEXT' | 'TEXTAREA' | 'NUMBER' | 'DATE'
+  | 'SELECT' | 'MULTI_SELECT' | 'USER' | 'CHECKBOX' | 'URL';
+
+// Value JSON shape per type: TEXT/TEXTAREA/URL string · NUMBER number ·
+// DATE "YYYY-MM-DD" · SELECT option id · MULTI_SELECT option id[] ·
+// USER user UUID · CHECKBOX boolean
+export type FieldValue = string | number | boolean | string[];
+
+export interface FieldConfig {
+  options?: { id: string; label: string; color?: string }[];  // selects
+  min?: number;                                               // numbers
+  max?: number;
+}
+
+// One custom field as a project offers it (definition + set flags)
+export interface ProjectField {
+  id: string;
+  key: string;
+  name: string;
+  type: FieldType;
+  config?: FieldConfig | null;
+  description?: string;
+  required: boolean;
+  showOnCreate: boolean;
+}
+
+export interface FieldValueEntry {
+  fieldId: string;
+  value: FieldValue;
+}
+
+export interface TransitionRule {
+  fromStatusId: string | null;        // null = "from any status"
+  toStatusId: string;
+}
+
+export interface PriorityOption extends Priority {
+  isDefault: boolean;
+}
 
 export interface AssigneeInfo {
   id: string;
@@ -61,6 +123,7 @@ export interface Issue {
   reporter: AssigneeInfo;
   parentId?: string;
   dueDate?: string;
+  fields: FieldValueEntry[];          // filled custom fields only
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -95,12 +158,96 @@ export interface IssueHistoryEntry {
   createdAt: string;
 }
 
-export interface StatusTransition {
+// ── Admin console (system ADMIN only) ──────────────────────────────────────
+
+export interface UsageInfo {
+  workflows: number;
+  sets: number;
+  projects: number;
+  issues: number;
+}
+
+export interface AdminStatus extends Status {
+  archived: boolean;
+  usage: UsageInfo;
+}
+
+export interface AdminPriority extends Priority {
+  position: number;
+  archived: boolean;
+  usage: UsageInfo;
+}
+
+export interface AdminIssueType extends IssueType {
+  archived: boolean;
+  usage: UsageInfo;
+}
+
+export interface AdminWorkflow {
   id: string;
-  fromStatusId: string;
-  fromStatusName: string;
-  toStatusId: string;
-  toStatusName: string;
+  name: string;
+  description?: string;
+  systemDefault: boolean;
+  statuses: Status[];
+  transitions: TransitionRule[];
+  projectsUsing: number;
+}
+
+export interface AdminPrioritySet {
+  id: string;
+  name: string;
+  systemDefault: boolean;
+  items: { priority: Priority; isDefault: boolean }[];
+  projectsUsing: number;
+}
+
+export interface AdminField {
+  id: string;
+  key: string;
+  name: string;
+  type: FieldType;
+  config?: FieldConfig | null;
+  description?: string;
+  archived: boolean;
+  // Absent on fields nested inside a set response
+  usage: UsageInfo | null;
+}
+
+export interface AdminFieldSet {
+  id: string;
+  name: string;
+  systemDefault: boolean;
+  items: { field: AdminField; required: boolean; showOnCreate: boolean }[];
+  projectsUsing: number;
+}
+
+export interface AdminIssueTypeSet {
+  id: string;
+  name: string;
+  systemDefault: boolean;
+  types: IssueType[];                 // display order
+  projectsUsing: number;
+}
+
+// "Where exactly is this used?" — the expansion behind a usage chip
+export interface UsageDetail {
+  workflows: string[];
+  sets: string[];
+  projects: { id: string; key: string; name: string }[];
+  issues: number;
+}
+
+export interface ProjectBinding {
+  projectId: string;
+  key: string;
+  name: string;
+  archived: boolean;
+  workspaceId: string;
+  workspaceName: string;
+  workflowId: string | null;
+  prioritySetId: string | null;
+  fieldSetId: string | null;
+  issueTypeSetId: string | null;
 }
 
 export interface Notification {

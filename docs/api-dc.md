@@ -24,9 +24,8 @@ https://tracker.example.com/api
 - [Auth endpoints](#auth-endpoints)
 - [Workspaces](#workspaces)
 - [Projects](#projects)
-- [Issue types](#issue-types)
-- [Statuses](#statuses)
-- [Workflow transitions](#workflow-transitions)
+- [Project configuration](#project-configuration)
+- [System administration](#system-administration)
 - [Issues](#issues)
 - [Comments](#comments)
 - [Attachments](#attachments)
@@ -49,7 +48,7 @@ curl -s $BASE/workspaces -H "Authorization: Bearer $TOKEN"
 # 3. Create an issue
 curl -s -X POST $BASE/workspaces/{workspaceId}/projects/{projectId}/issues \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"title":"Fix the flux capacitor","typeId":"…","statusId":"…","priority":"HIGH"}'
+  -d '{"title":"Fix the flux capacitor","typeId":"…","statusId":"…","priorityId":"…"}'
 ```
 
 ## Operator settings that affect the API
@@ -137,14 +136,13 @@ The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verif
 
 ## Roles
 
-**Workspace roles** (`OWNER` > `ADMIN` > `MEMBER`) and **project roles** (`MANAGER` > `MEMBER` > `VIEWER`):
+**System role** (`ADMIN` — instance-wide, typically the instance operator; maintains the global taxonomy via [`/admin/**`](#system-administration)), **workspace roles** (`OWNER` > `ADMIN` > `MEMBER`) and **project roles** (`MANAGER` > `MEMBER` > `VIEWER`). The `seed.admin` account (env `SEED_ADMIN_*`) gets the system `ADMIN` role automatically; `GET /auth/me` returns your `systemRole`.
 
 | Action | Required role |
 |---|---|
 | See a workspace and its projects, issues, members | workspace member |
 | Invite workspace members | workspace `ADMIN` |
-| Manage issue types / statuses | workspace `ADMIN` |
-| Manage workflow transitions | workspace `OWNER` |
+| Manage statuses / priorities / issue types / workflows / project bindings | system `ADMIN` |
 | Create a project | workspace member (creator becomes project `MANAGER`) |
 | Edit / archive a project, manage its members | project `MANAGER` |
 | Create / edit issues, comment, attach files | workspace member |
@@ -243,45 +241,57 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 }
 ```
 
-## Issue types
+## Project configuration
 
-Workspace-wide catalog; new workspaces start with **Bug, Task, Story, Epic**.
+The taxonomy (statuses, priorities, issue types, custom fields) lives in a **global catalog maintained by the system administrator** and reaches projects through reusable bindings: a *workflow* (statuses + allowed transitions), a *priority set* (offered priorities + the default for new issues), a *field set* (which custom fields the project's issues carry, their order and create-form behavior) and an *issue type set* (which types the project offers — restricting only issue creation and type changes; existing issues keep their type). Regular users read a project's **effective configuration** from one endpoint and never touch the catalog:
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/workspaces/{wsId}/issue-types` | member | List, ordered by `position` |
-| `POST` | `/workspaces/{wsId}/issue-types` | `ADMIN` | Create (`{"name", "color?", "icon?"}`). `201` |
-| `PATCH` | `/workspaces/{wsId}/issue-types/{typeId}` | `ADMIN` | Update |
-| `DELETE` | `/workspaces/{wsId}/issue-types/{typeId}` | `ADMIN` | Delete; `409` if used by issues. `204` |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/config` | member | Effective statuses (board order), transition rules, priorities (+default), issue types, custom fields |
 
 ```json
-{ "id": "…", "name": "Bug", "color": "#EF4444", "icon": "bug", "position": 0 }
+{
+  "statuses":    [ { "id": "…", "name": "To Do", "color": "#6B7280", "category": "TODO", "position": 0 }, … ],
+  "transitions": [ { "fromStatusId": null, "toStatusId": "…" } ],
+  "priorities":  [ { "id": "…", "name": "High", "color": "#EA580C", "icon": "chevron-up", "isDefault": false }, … ],
+  "issueTypes":  [ { "id": "…", "name": "Bug", "color": "#EF4444", "icon": "bug", "position": 0 } ],
+  "fields":      [ { "id": "…", "key": "severity", "name": "Severity", "type": "SELECT",
+                     "config": { "options": [ { "id": "critical", "label": "Critical", "color": "#B91C1C" }, … ] },
+                     "description": "Impact of the defect on users",
+                     "required": false, "showOnCreate": true }, … ]
+}
 ```
 
-## Statuses
+Transition semantics: a status with no source-specific rules is open (any move allowed); once it has rules, only its listed targets plus wildcard (`fromStatusId: null` = "from any") targets are accepted — a forbidden move returns `422` on issue updates and board drag-and-drop.
 
-Workspace-wide board columns; new workspaces start with **To Do, In Progress, Done**. Every status has a `category` — `TODO`, `IN_PROGRESS` or `DONE` — that drives board grouping and backlog filtering.
+Custom field types and their JSON value shapes: `TEXT`/`TEXTAREA`/`URL` — string; `NUMBER` — number (`config.min`/`max` enforced); `DATE` — `"YYYY-MM-DD"` string; `SELECT` — option id string; `MULTI_SELECT` — array of option ids; `USER` — user UUID (must be a workspace member); `CHECKBOX` — boolean. A `required` field must be filled on create and can never be cleared; `showOnCreate: false` fields are only offered when editing.
 
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `GET` | `/workspaces/{wsId}/statuses` | member | List, ordered by `position` |
-| `POST` | `/workspaces/{wsId}/statuses` | `ADMIN` | Create (`{"name", "category", "color?"}`). `201` |
-| `PATCH` | `/workspaces/{wsId}/statuses/{statusId}` | `ADMIN` | Update |
-| `DELETE` | `/workspaces/{wsId}/statuses/{statusId}` | `ADMIN` | Delete; `409` if used by issues. `204` |
+## System administration
 
-```json
-{ "id": "…", "name": "In Progress", "color": "#3B82F6", "category": "IN_PROGRESS", "position": 1 }
-```
+Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, independent of workspace/project roles; regular users get `403`). They manage the global catalog and the project bindings:
 
-## Workflow transitions
+| Method | Path | Description |
+|---|---|---|
+| `GET/POST` | `/admin/statuses` · `/admin/priorities` · `/admin/issue-types` | List catalog (with usage counts) / create. `201` |
+| `PATCH` | `/admin/{catalog}/{id}` | Update |
+| `POST` | `/admin/{catalog}/{id}/archive` · `/unarchive` | Hide from new use / restore |
+| `DELETE` | `/admin/{catalog}/{id}?replaceWithId=` | Delete; `409` while issues reference it and no replacement is given — with `replaceWithId`, affected issues are remapped |
+| `GET` | `/admin/{catalog}/{id}/usage` | Usage detail (all four catalogs incl. `fields`): names of containing workflows/sets and the projects reached through them, plus the referencing-issue count |
+| `GET/POST` | `/admin/workflows` | List / create (`{"name", "description?", "statusIds": […], "transitions": […]}`) |
+| `PATCH/DELETE` | `/admin/workflows/{id}` | Full replacement / delete (`409` while projects use it; the system default is not deletable) |
+| `GET/POST` | `/admin/priority-sets` | List / create (`{"name", "items": [{"priorityId", "isDefault"}]}`) |
+| `PATCH/DELETE` | `/admin/priority-sets/{id}` | Full replacement / delete (`409` while in use) |
+| `GET/POST` | `/admin/fields` | List custom fields (with usage counts) / create (`{"name", "key?", "type", "config?", "description?"}`; blank `key` is derived from the name — key and type are immutable afterwards) |
+| `PATCH` | `/admin/fields/{id}` | Update name/config/description (also `POST /{id}/archive` · `/unarchive`) |
+| `DELETE` | `/admin/fields/{id}?dropValues=` | Delete; `409` while issues hold values unless `dropValues=true` (drops them — there is no remap across value shapes; archive instead to keep them) |
+| `GET/POST` | `/admin/field-sets` | List / create (`{"name", "items": [{"fieldId", "required", "showOnCreate"}]}` — a required field is always shown on create) |
+| `PATCH/DELETE` | `/admin/field-sets/{id}` | Full replacement / delete (`409` while in use; the system default "No fields" set is not deletable) |
+| `GET/POST` | `/admin/issue-type-sets` | List / create (`{"name", "typeIds": […]}` in display order; a set can never be empty) |
+| `PATCH/DELETE` | `/admin/issue-type-sets/{id}` | Full replacement / delete (`409` while in use; the system default "All types" set is not deletable) |
+| `GET` | `/admin/projects` | Assignment matrix: every project × its bindings |
+| `PATCH` | `/admin/projects/{id}/bindings` | `{"workflowId", "prioritySetId", "fieldSetId", "issueTypeSetId"}` (null = system default); `409` when issues sit in statuses the new workflow lacks |
 
-Optional rules restricting how issues move between statuses. With no rules configured for a source status, any move from it is allowed; once one exists, only listed targets are accepted (both via `PATCH` and board drag-and-drop) — a forbidden move returns `422`.
-
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| `GET` | `/workspaces/{wsId}/status-transitions` | member | List rules |
-| `POST` | `/workspaces/{wsId}/status-transitions` | `OWNER` | Create (`{"fromStatusId", "toStatusId"}`). `201` |
-| `DELETE` | `/workspaces/{wsId}/status-transitions/{transitionId}` | `OWNER` | Delete. `204` |
+Integrity rules: deletions never leave dangling references (remap or `409`), no workflow can end up empty, every priority set keeps a default, and a workflow change is refused while it would strand issues in statuses invisible to the board.
 
 ## Issues
 
@@ -290,13 +300,13 @@ Issues live under a project and are addressed by **number** — the numeric part
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | member | Create. `201` |
-| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priority=` | member | List with optional filters |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=` | member | List with optional filters |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Get one |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history` | member | Field-level change history |
 | `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Partial update with optimistic locking |
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `MANAGER` | Delete issue + comments + attachments. `204` |
 
-**Create** — `title`, `typeId` and `statusId` are required; `priority` is one of `URGENT`, `HIGH`, `MEDIUM`, `LOW`, `NONE` (default); `parentId` links a sub-task to a parent issue in the same project; `assigneeId` must be a workspace member:
+**Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links a sub-task to a parent issue in the same project; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`:
 
 ```bash
 curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
@@ -304,9 +314,10 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
   "title": "Rate-limit authentication endpoints",
   "description": "Login accepts unlimited attempts…",
   "typeId": "…", "statusId": "…",
-  "priority": "HIGH",
+  "priorityId": "…",
   "assigneeId": "…",
-  "dueDate": "2026-07-24"
+  "dueDate": "2026-07-24",
+  "fields": { "e1b2…": 5, "f3c4…": "critical" }
 }'
 ```
 
@@ -317,17 +328,18 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
   "description": "Login accepts unlimited attempts…",
   "type":   { "id": "…", "name": "Task", "color": "#3B82F6", "icon": "task", "position": 1 },
   "status": { "id": "…", "name": "To Do", "color": "#6B7280", "category": "TODO", "position": 0 },
-  "priority": "HIGH",
+  "priority": { "id": "…", "name": "High", "color": "#EA580C", "icon": "chevron-up", "position": 1 },
   "assignee": { "id": "…", "displayName": "Ada Lovelace", "avatarUrl": null },
   "reporter": { "id": "…", "displayName": "Ada Lovelace", "avatarUrl": null },
   "parentId": null,
   "dueDate": "2026-07-24",
+  "fields": [ { "fieldId": "e1b2…", "value": 5 }, { "fieldId": "f3c4…", "value": "critical" } ],
   "version": 0,
   "createdAt": "…", "updatedAt": "…"
 }
 ```
 
-**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priority`, `assigneeId`, `dueDate`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins):
+**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
 
 ```bash
 curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
@@ -341,6 +353,8 @@ curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
 { "id": "…", "field": "status", "oldValue": "To Do", "newValue": "In Progress",
   "changedById": "…", "changedByName": "Ada Lovelace", "createdAt": "…" }
 ```
+
+Custom field changes appear with the field's display name in `field` and human-readable values (option labels rather than ids, user display names, `yes`/`no` for checkboxes).
 
 ## Comments
 

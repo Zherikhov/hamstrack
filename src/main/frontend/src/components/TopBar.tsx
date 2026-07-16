@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useMatch } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, Info, LogOut, Plus, Search } from 'lucide-react'
+import { ChevronDown, Info, LogOut, Plus, Search, Settings } from 'lucide-react'
 import { apiLogout } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
@@ -195,6 +195,18 @@ export default function TopBar({ wsId }: Props) {
                   {user?.email}
                 </div>
               </div>
+              {user?.systemRole === 'ADMIN' && (
+                <button
+                  onClick={() => { setShowUserMenu(false); navigate('/admin') }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors text-left"
+                  style={{ color: 'rgba(255,255,255,0.7)' }}
+                  onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                  onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                >
+                  <Settings size={13} />
+                  System administration
+                </button>
+              )}
               <button
                 onClick={() => { setShowUserMenu(false); setShowAbout(true) }}
                 className="w-full flex items-center gap-2 px-3 py-2 text-sm cursor-pointer transition-colors text-left"

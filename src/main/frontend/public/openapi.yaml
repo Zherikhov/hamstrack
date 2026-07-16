@@ -47,12 +47,8 @@ tags:
     description: Tenancy boundary — members, invites
   - name: Projects
     description: Projects and project membership
-  - name: Issue types
-    description: Workspace-wide issue type catalog
-  - name: Statuses
-    description: Workspace-wide status catalog (board columns)
-  - name: Workflow
-    description: Allowed status-to-status transitions
+  - name: Project config
+    description: The effective taxonomy of a project (statuses, transitions, priorities, types)
   - name: Issues
     description: Issues, addressed by project-scoped number
   - name: Comments
@@ -63,6 +59,8 @@ tags:
     description: The current user's notification feed
   - name: Events
     description: Real-time Server-Sent Events
+  - name: Admin
+    description: Global taxonomy management — requires the system ADMIN role (403 otherwise)
 
 security:
   - bearerAuth: []
@@ -572,193 +570,205 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /workspaces/{workspaceId}/issue-types:
+  /workspaces/{workspaceId}/projects/{projectId}/config:
     get:
-      tags: [Issue types]
-      summary: List issue types
-      description: Ordered by `position`. New workspaces start with Bug, Task, Story, Epic.
-      operationId: listIssueTypes
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/IssueTypeResponse' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    post:
-      tags: [Issue types]
-      summary: Create an issue type
-      description: Requires workspace `ADMIN`.
-      operationId: createIssueType
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CreateIssueTypeRequest' }
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/IssueTypeResponse' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409':
-          description: Name already exists
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
-
-  /workspaces/{workspaceId}/issue-types/{typeId}:
-    patch:
-      tags: [Issue types]
-      summary: Update an issue type
-      description: Requires workspace `ADMIN`.
-      operationId: updateIssueType
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-        - name: typeId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CreateIssueTypeRequest' }
-      responses:
-        '200':
-          description: Updated
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/IssueTypeResponse' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      tags: [Issue types]
-      summary: Delete an issue type
-      description: Requires workspace `ADMIN`. Fails with `409` while issues use the type.
-      operationId: deleteIssueType
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-        - name: typeId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '204': { description: Deleted }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Type is used by existing issues
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
-
-  /workspaces/{workspaceId}/statuses:
-    get:
-      tags: [Statuses]
-      summary: List statuses
-      description: Ordered by `position`. New workspaces start with To Do, In Progress, Done.
-      operationId: listStatuses
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/StatusResponse' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    post:
-      tags: [Statuses]
-      summary: Create a status
-      description: Requires workspace `ADMIN`.
-      operationId: createStatus
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CreateStatusRequest' }
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StatusResponse' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '409':
-          description: Name already exists
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
-
-  /workspaces/{workspaceId}/statuses/{statusId}:
-    patch:
-      tags: [Statuses]
-      summary: Update a status
-      description: Requires workspace `ADMIN`.
-      operationId: updateStatus
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-        - name: statusId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/CreateStatusRequest' }
-      responses:
-        '200':
-          description: Updated
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StatusResponse' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-    delete:
-      tags: [Statuses]
-      summary: Delete a status
-      description: Requires workspace `ADMIN`. Fails with `409` while issues use the status.
-      operationId: deleteStatus
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-        - name: statusId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '204': { description: Deleted }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: Status is used by existing issues
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
-
-  /workspaces/{workspaceId}/status-transitions:
-    get:
-      tags: [Workflow]
-      summary: List transition rules
+      tags: [Project config]
+      summary: Effective taxonomy of a project
       description: |
-        With no rules configured for a source status, any move from it is
-        allowed; once at least one exists, only the listed targets are
-        accepted (a forbidden move returns `422` on issue update).
-      operationId: listTransitions
+        Everything needed to render the board and issue forms: statuses of the
+        project's workflow (board-column order), transition rules (empty =
+        all moves allowed), offered priorities with the default for new
+        issues, the issue types of the project's type set, and the custom
+        fields of the project's field set (display order, with create-form
+        flags). Workspace members only.
+        Replaced the workspace-scoped `/statuses`, `/issue-types` and
+        `/status-transitions` endpoints.
+      operationId: getProjectConfig
       parameters:
         - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectConfig' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ---- System administration (system ADMIN role only) ----
+
+  /admin/statuses:
+    get:
+      tags: [Admin]
+      summary: List catalog statuses (admin)
+      operationId: adminListStatuses
+      responses:
+        '200':
+          description: Catalog with usage counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminStatus' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Admin]
+      summary: Create a status (admin)
+      operationId: adminCreateStatus
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertStatus' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStatus' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/statuses/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update a status (admin)
+      operationId: adminUpdateStatus
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertStatus' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminStatus' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Admin]
+      summary: Delete a status, optionally remapping issues (admin)
+      description: |
+        409 while issues reference the status and `replaceWithId` is absent,
+        or when the deletion would leave a workflow empty / the replacement
+        is not part of every affected workflow. `POST /{id}/archive` and
+        `/{id}/unarchive` (not listed individually) hide an entry from new
+        use instead. The same delete/archive semantics apply to priorities
+        and issue types.
+      operationId: adminDeleteStatus
+      parameters:
+        - $ref: '#/components/parameters/adminId'
+        - name: replaceWithId
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: In use — remap required or blocked by integrity rules
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/priorities:
+    get:
+      tags: [Admin]
+      summary: List catalog priorities (admin)
+      description: Full CRUD mirrors `/admin/statuses` — POST, PATCH `/{id}`, DELETE `/{id}?replaceWithId=`, POST `/{id}/archive|unarchive`.
+      operationId: adminListPriorities
+      responses:
+        '200':
+          description: Catalog with usage counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminPriority' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/issue-types:
+    get:
+      tags: [Admin]
+      summary: List catalog issue types (admin)
+      description: Full CRUD mirrors `/admin/statuses`.
+      operationId: adminListIssueTypes
+      responses:
+        '200':
+          description: Catalog with usage counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminIssueType' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/fields:
+    get:
+      tags: [Admin]
+      summary: List catalog custom fields (admin)
+      description: |
+        POST creates a field (`key` blank = derived from the name; key and
+        type are immutable afterwards — stored values depend on them), PATCH
+        `/{id}` updates name/config/description, POST `/{id}/archive` and
+        `/{id}/unarchive` hide a field from forms without touching values.
+        DELETE `/{id}` refuses (409) while issues hold values for the field
+        unless `?dropValues=true` is passed — the values are then dropped;
+        there is no remap across arbitrary value shapes.
+      operationId: adminListFields
+      responses:
+        '200':
+          description: Catalog with usage counts
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminField' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Admin]
+      summary: Create a custom field (admin)
+      operationId: adminCreateField
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertField' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminField' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name or key already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: Select field without options / option missing id or label
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/field-sets:
+    get:
+      tags: [Admin]
+      summary: List field sets (admin)
+      description: |
+        POST / PATCH `/{id}` take `{name, items:[{fieldId, required,
+        showOnCreate}]}` (full replacement, display order; a required field
+        is always shown on create); DELETE refuses while projects use the
+        set. The system default set ("No fields") is empty and not deletable.
+      operationId: adminListFieldSets
       responses:
         '200':
           description: OK
@@ -766,45 +776,160 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/StatusTransitionResponse' }
-        '404': { $ref: '#/components/responses/NotFound' }
+                items: { $ref: '#/components/schemas/AdminFieldSet' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/workflows:
+    get:
+      tags: [Admin]
+      summary: List workflows (admin)
+      operationId: adminListWorkflows
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminWorkflow' }
+        '403': { $ref: '#/components/responses/Forbidden' }
     post:
-      tags: [Workflow]
-      summary: Create a transition rule
-      description: Requires workspace `OWNER`.
-      operationId: createTransition
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
+      tags: [Admin]
+      summary: Create a workflow (admin)
+      description: |
+        `PATCH /admin/workflows/{id}` takes the same body (full replacement
+        of statuses and transitions; 409 when a removed status still holds
+        issues in bound projects). `DELETE /admin/workflows/{id}` refuses
+        (409) while projects use the workflow; the system default is not
+        deletable.
+      operationId: adminCreateWorkflow
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/CreateStatusTransitionRequest' }
+            schema: { $ref: '#/components/schemas/UpsertWorkflow' }
       responses:
         '201':
           description: Created
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/StatusTransitionResponse' }
+              schema: { $ref: '#/components/schemas/AdminWorkflow' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Name already exists
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/statuses/{id}/usage:
+    get:
+      tags: [Admin]
+      summary: Usage detail of a catalog entry (admin)
+      description: |
+        The expansion behind a usage chip — names instead of counts: the
+        workflows/sets containing the entry and the projects that effectively
+        use it through them (deduplicated; projects on a system default are
+        included). The same endpoint exists for the other catalogs:
+        `GET /admin/priorities/{id}/usage`, `GET /admin/issue-types/{id}/usage`,
+        `GET /admin/fields/{id}/usage` (not listed individually).
+      operationId: adminStatusUsage
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UsageDetail' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
-  /workspaces/{workspaceId}/status-transitions/{transitionId}:
-    delete:
-      tags: [Workflow]
-      summary: Delete a transition rule
-      description: Requires workspace `OWNER`.
-      operationId: deleteTransition
-      parameters:
-        - $ref: '#/components/parameters/workspaceId'
-        - name: transitionId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+  /admin/priority-sets:
+    get:
+      tags: [Admin]
+      summary: List priority sets (admin)
+      description: POST / PATCH `/{id}` take `{name, items:[{priorityId, isDefault}]}` (full replacement, display order); DELETE refuses while projects use the set.
+      operationId: adminListPrioritySets
       responses:
-        '204': { description: Deleted }
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminPrioritySet' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/issue-type-sets:
+    get:
+      tags: [Admin]
+      summary: List issue type sets (admin)
+      description: |
+        POST / PATCH `/{id}` take `{name, typeIds: […]}` (full replacement,
+        display order; a set can never be empty); DELETE refuses while
+        projects use the set, and the system default ("All types") is not
+        deletable. A type set restricts only issue creation and type changes —
+        existing issues keep a type that has left the set.
+      operationId: adminListIssueTypeSets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminIssueTypeSet' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/projects:
+    get:
+      tags: [Admin]
+      summary: Assignment matrix — all projects × bindings (admin)
+      operationId: adminListProjects
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ProjectBinding' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/projects/{id}/bindings:
+    patch:
+      tags: [Admin]
+      summary: Change a project's workflow / priority / field / type set (admin)
+      description: |
+        Full replacement of all bindings; `null` = the system default. 409
+        when the project has issues in statuses the new workflow lacks.
+        Field/type set changes are always allowed — values stay stored,
+        issues keep their type.
+      operationId: adminUpdateProjectBindings
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workflowId: { type: string, format: uuid, nullable: true }
+                prioritySetId: { type: string, format: uuid, nullable: true }
+                fieldSetId: { type: string, format: uuid, nullable: true }
+                issueTypeSetId: { type: string, format: uuid, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBinding' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Issues would be stranded in statuses the new workflow lacks
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues:
     post:
@@ -850,9 +975,9 @@ paths:
         - name: assigneeId
           in: query
           schema: { type: string, format: uuid }
-        - name: priority
+        - name: priorityId
           in: query
-          schema: { $ref: '#/components/schemas/IssuePriority' }
+          schema: { type: string, format: uuid }
       responses:
         '200':
           description: OK
@@ -1227,6 +1352,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    adminId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
 
   responses:
     AuthOk:
@@ -1351,14 +1481,231 @@ components:
       type: string
       enum: [MANAGER, MEMBER, VIEWER]
 
-    IssuePriority:
-      type: string
-      enum: [URGENT, HIGH, MEDIUM, LOW, NONE]
+    Priority:
+      type: object
+      description: Catalog entity (was a closed enum before M1)
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: High }
+        color: { type: string, example: '#EA580C' }
+        icon: { type: string, nullable: true, example: chevron-up, description: lucide icon name }
+        position: { type: integer }
 
     StatusCategory:
       type: string
       enum: [TODO, IN_PROGRESS, DONE]
       description: Drives board grouping and backlog filtering
+
+    # ---- Admin console schemas ----
+
+    UsageInfo:
+      type: object
+      description: Where a catalog entry is used; counts irrelevant to the type are 0
+      properties:
+        workflows: { type: integer, format: int64 }
+        sets: { type: integer, format: int64 }
+        projects: { type: integer, format: int64 }
+        issues: { type: integer, format: int64 }
+
+    UpsertStatus:
+      type: object
+      required: [name, category]
+      properties:
+        name: { type: string, maxLength: 100 }
+        category: { $ref: '#/components/schemas/StatusCategory' }
+        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#3B82F6' }
+        position: { type: integer, nullable: true, description: Omitted = appended last }
+
+    AdminStatus:
+      allOf:
+        - $ref: '#/components/schemas/StatusResponse'
+        - type: object
+          properties:
+            archived: { type: boolean }
+            usage: { $ref: '#/components/schemas/UsageInfo' }
+
+    AdminPriority:
+      allOf:
+        - $ref: '#/components/schemas/Priority'
+        - type: object
+          properties:
+            archived: { type: boolean }
+            usage: { $ref: '#/components/schemas/UsageInfo' }
+
+    AdminIssueType:
+      allOf:
+        - $ref: '#/components/schemas/IssueTypeResponse'
+        - type: object
+          properties:
+            archived: { type: boolean }
+            usage: { $ref: '#/components/schemas/UsageInfo' }
+
+    UpsertWorkflow:
+      type: object
+      required: [name, statusIds]
+      properties:
+        name: { type: string, maxLength: 100 }
+        description: { type: string, nullable: true }
+        statusIds:
+          type: array
+          description: Board-column order
+          items: { type: string, format: uuid }
+        transitions:
+          type: array
+          items: { $ref: '#/components/schemas/TransitionRule' }
+
+    AdminWorkflow:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Dev workflow }
+        description: { type: string, nullable: true }
+        systemDefault: { type: boolean, description: Used by projects without a binding; not deletable }
+        statuses:
+          type: array
+          items: { $ref: '#/components/schemas/StatusResponse' }
+        transitions:
+          type: array
+          items: { $ref: '#/components/schemas/TransitionRule' }
+        projectsUsing: { type: integer, format: int64 }
+
+    AdminPrioritySet:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Default priorities }
+        systemDefault: { type: boolean }
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              priority: { $ref: '#/components/schemas/Priority' }
+              isDefault: { type: boolean, description: Default for new issues }
+        projectsUsing: { type: integer, format: int64 }
+
+    ProjectBinding:
+      type: object
+      description: One row of the admin assignment matrix; null binding = system default
+      properties:
+        projectId: { type: string, format: uuid }
+        key: { type: string, example: DEMO }
+        name: { type: string }
+        archived: { type: boolean }
+        workspaceId: { type: string, format: uuid }
+        workspaceName: { type: string }
+        workflowId: { type: string, format: uuid, nullable: true }
+        prioritySetId: { type: string, format: uuid, nullable: true }
+        fieldSetId: { type: string, format: uuid, nullable: true }
+        issueTypeSetId: { type: string, format: uuid, nullable: true }
+
+    AdminIssueTypeSet:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: All types }
+        systemDefault: { type: boolean }
+        types:
+          type: array
+          description: Display order
+          items: { $ref: '#/components/schemas/IssueTypeResponse' }
+        projectsUsing: { type: integer, format: int64 }
+
+    UsageDetail:
+      type: object
+      description: '"Where exactly is this used?" — names instead of counts'
+      properties:
+        workflows:
+          type: array
+          items: { type: string }
+        sets:
+          type: array
+          items: { type: string }
+        projects:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              key: { type: string, example: DEMO }
+              name: { type: string }
+        issues: { type: integer, format: int64 }
+
+    FieldType:
+      type: string
+      enum: [TEXT, TEXTAREA, NUMBER, DATE, SELECT, MULTI_SELECT, USER, CHECKBOX, URL]
+      description: >-
+        Determines the JSON value shape: TEXT/TEXTAREA/URL string ·
+        NUMBER number · DATE "YYYY-MM-DD" string · SELECT option id ·
+        MULTI_SELECT array of option ids · USER user UUID (workspace
+        member) · CHECKBOX boolean
+
+    FieldConfig:
+      type: object
+      nullable: true
+      description: '`options` for selects; `min`/`max` for numbers'
+      properties:
+        options:
+          type: array
+          items:
+            type: object
+            required: [id, label]
+            properties:
+              id: { type: string, example: critical, description: Referenced by stored values — stable once used }
+              label: { type: string, example: Critical }
+              color: { type: string, nullable: true, example: '#B91C1C' }
+        min: { type: number, nullable: true }
+        max: { type: number, nullable: true }
+
+    UpsertField:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, maxLength: 100 }
+        key:
+          type: string
+          pattern: '[a-z0-9_]*'
+          maxLength: 50
+          description: Blank on create = derived from the name; immutable afterwards
+        type: { $ref: '#/components/schemas/FieldType' }
+        config: { $ref: '#/components/schemas/FieldConfig' }
+        description: { type: string, maxLength: 500, nullable: true, description: Shown as a hint in issue forms }
+
+    AdminField:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, example: story_points }
+        name: { type: string, example: Story points }
+        type: { $ref: '#/components/schemas/FieldType' }
+        config: { $ref: '#/components/schemas/FieldConfig' }
+        description: { type: string, nullable: true }
+        archived: { type: boolean }
+        usage: { $ref: '#/components/schemas/UsageInfo' }
+
+    AdminFieldSet:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Engineering fields }
+        systemDefault: { type: boolean }
+        items:
+          type: array
+          description: Display order
+          items:
+            type: object
+            properties:
+              field: { $ref: '#/components/schemas/AdminField' }
+              required: { type: boolean, description: Must be filled on create; cannot be cleared }
+              showOnCreate: { type: boolean, description: Rendered in the create form }
+        projectsUsing: { type: integer, format: int64 }
+
+    FieldValueEntry:
+      type: object
+      description: A filled custom field on an issue
+      properties:
+        fieldId: { type: string, format: uuid }
+        value: { description: Shape depends on the field type — see FieldType }
 
     CreateWorkspaceRequest:
       type: object
@@ -1440,14 +1787,6 @@ components:
         userId: { type: string, format: uuid }
         role: { $ref: '#/components/schemas/ProjectRole' }
 
-    CreateIssueTypeRequest:
-      type: object
-      required: [name]
-      properties:
-        name: { type: string, maxLength: 100 }
-        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#EF4444' }
-        icon: { type: string, maxLength: 50, example: bug }
-
     IssueTypeResponse:
       type: object
       properties:
@@ -1456,14 +1795,6 @@ components:
         color: { type: string, example: '#EF4444' }
         icon: { type: string, nullable: true, example: bug }
         position: { type: integer }
-
-    CreateStatusRequest:
-      type: object
-      required: [name, category]
-      properties:
-        name: { type: string, maxLength: 100 }
-        category: { $ref: '#/components/schemas/StatusCategory' }
-        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#3B82F6' }
 
     StatusResponse:
       type: object
@@ -1474,21 +1805,51 @@ components:
         category: { $ref: '#/components/schemas/StatusCategory' }
         position: { type: integer }
 
-    CreateStatusTransitionRequest:
+    TransitionRule:
       type: object
-      required: [fromStatusId, toStatusId]
+      description: fromStatusId null = "from any status"
       properties:
-        fromStatusId: { type: string, format: uuid }
+        fromStatusId: { type: string, format: uuid, nullable: true }
         toStatusId: { type: string, format: uuid }
 
-    StatusTransitionResponse:
+    ProjectConfig:
       type: object
+      description: The effective taxonomy of a project (see GET …/config)
       properties:
-        id: { type: string, format: uuid }
-        fromStatusId: { type: string, format: uuid }
-        fromStatusName: { type: string, example: To Do }
-        toStatusId: { type: string, format: uuid }
-        toStatusName: { type: string, example: In Progress }
+        statuses:
+          type: array
+          description: Board-column order
+          items: { $ref: '#/components/schemas/StatusResponse' }
+        transitions:
+          type: array
+          description: Empty = all moves allowed
+          items: { $ref: '#/components/schemas/TransitionRule' }
+        priorities:
+          type: array
+          description: Display order; isDefault marks the default for new issues
+          items:
+            allOf:
+              - $ref: '#/components/schemas/Priority'
+              - type: object
+                properties:
+                  isDefault: { type: boolean }
+        issueTypes:
+          type: array
+          items: { $ref: '#/components/schemas/IssueTypeResponse' }
+        fields:
+          type: array
+          description: Custom fields of the project's field set, display order
+          items:
+            type: object
+            properties:
+              id: { type: string, format: uuid }
+              key: { type: string, example: story_points }
+              name: { type: string, example: Story points }
+              type: { $ref: '#/components/schemas/FieldType' }
+              config: { $ref: '#/components/schemas/FieldConfig' }
+              description: { type: string, nullable: true }
+              required: { type: boolean, description: Must be filled on create; cannot be cleared }
+              showOnCreate: { type: boolean, description: Rendered in the create form }
 
     UserRef:
       type: object
@@ -1504,12 +1865,21 @@ components:
       properties:
         title: { type: string, maxLength: 500 }
         description: { type: string, nullable: true }
-        typeId: { type: string, format: uuid }
-        statusId: { type: string, format: uuid }
-        priority: { $ref: '#/components/schemas/IssuePriority' }
+        typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
+        statusId: { type: string, format: uuid, description: Must belong to the project's workflow }
+        priorityId: { type: string, format: uuid, nullable: true, description: Omitted = the project's default priority }
         assigneeId: { type: string, format: uuid, nullable: true, description: Must be a workspace member }
         parentId: { type: string, format: uuid, nullable: true, description: Parent issue in the same project }
         dueDate: { type: string, format: date, nullable: true }
+        fields:
+          type: object
+          nullable: true
+          additionalProperties: true
+          description: >-
+            Custom field values keyed by field id (value shapes per
+            FieldType). Required fields of the project's set must be
+            present; fields outside the set or archived are rejected (422).
+          example: { 'e1b2…': 5, 'f3c4…': critical }
 
     UpdateIssueRequest:
       type: object
@@ -1517,11 +1887,18 @@ components:
       properties:
         title: { type: string, minLength: 1, maxLength: 500 }
         description: { type: string }
-        typeId: { type: string, format: uuid }
+        typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
         statusId: { type: string, format: uuid, description: Validated against workflow transition rules }
-        priority: { $ref: '#/components/schemas/IssuePriority' }
+        priorityId: { type: string, format: uuid, description: Must be offered by the project's priority set }
         assigneeId: { type: string, format: uuid }
         dueDate: { type: string, format: date }
+        fields:
+          type: object
+          additionalProperties: true
+          description: >-
+            Partial like the rest of the body — only listed field ids
+            change; JSON null clears a value (required fields cannot be
+            cleared).
         version:
           type: integer
           description: Optimistic lock — the `version` you last read; `409` when stale. Omit to skip the check.
@@ -1536,11 +1913,15 @@ components:
         description: { type: string, nullable: true }
         type: { $ref: '#/components/schemas/IssueTypeResponse' }
         status: { $ref: '#/components/schemas/StatusResponse' }
-        priority: { $ref: '#/components/schemas/IssuePriority' }
+        priority: { $ref: '#/components/schemas/Priority' }
         assignee: { $ref: '#/components/schemas/UserRef' }
         reporter: { $ref: '#/components/schemas/UserRef' }
         parentId: { type: string, format: uuid, nullable: true }
         dueDate: { type: string, format: date, nullable: true }
+        fields:
+          type: array
+          description: Filled custom fields only
+          items: { $ref: '#/components/schemas/FieldValueEntry' }
         version: { type: integer, description: Send back in PATCH for optimistic locking }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
@@ -1549,7 +1930,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        field: { type: string, example: status }
+        field: { type: string, example: status, description: 'Built-in attribute name, or the display name of a custom field' }
         oldValue: { type: string, nullable: true, example: To Do }
         newValue: { type: string, nullable: true, example: In Progress }
         changedById: { type: string, format: uuid }

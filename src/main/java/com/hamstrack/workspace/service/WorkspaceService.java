@@ -4,8 +4,6 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.util.TokenUtils;
-import com.hamstrack.issue.service.IssueTypeService;
-import com.hamstrack.issue.service.StatusService;
 import com.hamstrack.workspace.dto.*;
 import com.hamstrack.workspace.entity.*;
 import com.hamstrack.workspace.exception.*;
@@ -27,8 +25,6 @@ public class WorkspaceService {
     private final WorkspaceInviteRepository inviteRepository;
     private final UserRepository userRepository;
     private final MailService mailService;
-    private final IssueTypeService issueTypeService;
-    private final StatusService statusService;
 
     @Transactional
     public WorkspaceResponse create(User actor, CreateWorkspaceRequest req) {
@@ -45,8 +41,8 @@ public class WorkspaceService {
         member.setRole(WorkspaceRole.OWNER);
         memberRepository.save(member);
 
-        issueTypeService.seedDefaults(workspace);
-        statusService.seedDefaults(workspace);
+        // No per-workspace taxonomy seeding since M1: statuses/types/priorities
+        // live in the global catalog and reach projects through bindings
 
         return WorkspaceResponse.of(workspace, WorkspaceRole.OWNER);
     }

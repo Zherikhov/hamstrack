@@ -1,6 +1,8 @@
 import { clsx } from 'clsx'
 import { forwardRef } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
+import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, type LucideIcon } from 'lucide-react'
+import type { Priority } from '../types'
 
 // ── Button ────────────────────────────────────────────────────────────────────
 
@@ -213,22 +215,28 @@ export function Avatar({ name, avatarUrl, size = 24 }: { name: string; avatarUrl
   )
 }
 
-// ── PriorityDot ───────────────────────────────────────────────────────────────
+// ── PriorityBadge ─────────────────────────────────────────────────────────────
+// Priorities are catalog entries since M1: color comes from the entry, the
+// icon field holds a lucide icon name (admin-editable)
 
-const priorityColors: Record<string, string> = {
-  URGENT: 'var(--color-error)',
-  HIGH:   'var(--color-warning)',
-  MEDIUM: 'var(--color-brand)',
-  LOW:    'var(--color-sandbox)',
-  NONE:   'var(--color-text-muted)',
+const priorityIcons: Record<string, LucideIcon> = {
+  'chevrons-up':  ChevronsUp,
+  'chevron-up':   ChevronUp,
+  'equal':        Equal,
+  'chevron-down': ChevronDown,
+  'minus':        Minus,
 }
 
-export function PriorityBadge({ priority }: { priority: string }) {
-  const color = priorityColors[priority] ?? priorityColors.NONE
+export function PriorityIcon({ priority, size = 14 }: { priority: Priority; size?: number }) {
+  const Icon = (priority.icon && priorityIcons[priority.icon]) || Minus
+  return <Icon size={size} strokeWidth={2.5} style={{ color: priority.color, flexShrink: 0 }} />
+}
+
+export function PriorityBadge({ priority }: { priority: Priority }) {
   return (
-    <span className="inline-flex items-center gap-1 text-xs" style={{ color }}>
-      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: color }} />
-      {priority}
+    <span className="inline-flex items-center gap-1 text-xs" style={{ color: priority.color }}>
+      <PriorityIcon priority={priority} size={13} />
+      {priority.name}
     </span>
   )
 }

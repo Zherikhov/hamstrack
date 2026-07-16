@@ -42,6 +42,8 @@ public class SecurityConfig {
                     "/api/auth/forgot-password", "/api/auth/reset-password",
                     "/api/meta"
                 ).permitAll()
+                // System administration (global taxonomy) — system ADMIN only
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers("/api/**").authenticated()
                 // SPA routes and static assets — auth enforced client-side by React
                 .anyRequest().permitAll()

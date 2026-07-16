@@ -2,13 +2,14 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Filter } from 'lucide-react'
-import { apiListIssues, apiListIssueTypes, apiListStatuses } from '../api'
+import { apiGetProjectConfig, apiListIssues, apiListWorkspaceMembers } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
 import { Button, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
+import { FieldValueDisplay } from '../components/fields'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue } from '../types'
+import type { Issue, ProjectField, WorkspaceMember } from '../types'
 
 /** Backlog — every issue that is not in a DONE-category status, as a flat list. */
 export default function BacklogPage() {
@@ -20,16 +21,21 @@ export default function BacklogPage() {
   const [filterStatusId, setFilterStatusId] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
 
-  const { data: issueTypes = [] } = useQuery({
-    queryKey: ['issueTypes', wsId],
-    queryFn: () => apiListIssueTypes(wsId!),
-    enabled: !!wsId,
+  const { data: config } = useQuery({
+    queryKey: ['projectConfig', wsId, projectId],
+    queryFn: () => apiGetProjectConfig(wsId!, projectId!),
+    enabled: !!wsId && !!projectId,
   })
+  const statuses = config?.statuses ?? []
+  const issueTypes = config?.issueTypes ?? []
+  const priorities = config?.priorities ?? []
+  const fields = config?.fields ?? []
 
-  const { data: statuses = [] } = useQuery({
-    queryKey: ['statuses', wsId],
-    queryFn: () => apiListStatuses(wsId!),
-    enabled: !!wsId,
+  // Only needed to display USER-type field values by name
+  const { data: members = [] } = useQuery({
+    queryKey: ['wsMembers', wsId],
+    queryFn: () => apiListWorkspaceMembers(wsId!),
+    enabled: !!wsId && fields.some(f => f.type === 'USER'),
   })
 
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
@@ -38,7 +44,7 @@ export default function BacklogPage() {
     queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority],
     queryFn: () => apiListIssues(wsId!, projectId!, {
       statusId: filterStatusId || undefined,
-      priority: filterPriority || undefined,
+      priorityId: filterPriority || undefined,
     }),
     enabled: !!wsId && !!projectId,
   })
@@ -103,7 +109,7 @@ export default function BacklogPage() {
             style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
           >
             <option value="">All priorities</option>
-            {['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE'].map(p => <option key={p} value={p}>{p}</option>)}
+            {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
           {(filterStatusId || filterPriority) && (
             <button
@@ -141,7 +147,7 @@ export default function BacklogPage() {
             <table className="w-full border-collapse">
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Assignee'].map(h => (
+                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Assignee', ...fields.map(f => f.name)].map(h => (
                     <th
                       key={h}
                       className="text-left px-4 py-2 text-xs font-medium"
@@ -157,6 +163,8 @@ export default function BacklogPage() {
                   <IssueRow
                     key={issue.id}
                     issue={issue}
+                    fields={fields}
+                    members={members}
                     active={openIssueNumber === issue.number}
                     onClick={() => setOpenIssueNumber(
                       openIssueNumber === issue.number ? undefined : issue.number
@@ -178,6 +186,8 @@ export default function BacklogPage() {
           issueNumber={openIssueNumber!}
           issueTypes={issueTypes}
           statuses={statuses}
+          priorities={priorities}
+          fields={fields}
           onClose={() => setOpenIssueNumber(undefined)}
         />
       )}
@@ -185,7 +195,10 @@ export default function BacklogPage() {
   )
 }
 
-function IssueRow({ issue, active, onClick }: { issue: Issue; active: boolean; onClick: () => void }) {
+function IssueRow({ issue, fields, members, active, onClick }: {
+  issue: Issue; fields: ProjectField[]; members: WorkspaceMember[]; active: boolean; onClick: () => void
+}) {
+  const values = Object.fromEntries(issue.fields.map(f => [f.fieldId, f.value]))
   return (
     <tr
       onClick={onClick}
@@ -200,7 +213,8 @@ function IssueRow({ issue, active, onClick }: { issue: Issue; active: boolean; o
       <td className="px-4 py-2.5">
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{issue.key}</span>
       </td>
-      <td className="px-4 py-2.5 max-w-xs">
+      {/* Inline maxWidth: max-w-xs resolves to 4px under our @theme spacing scale */}
+      <td className="px-4 py-2.5" style={{ maxWidth: 320 }}>
         <span className="text-sm truncate block" style={{ color: 'var(--color-text)' }}>{issue.title}</span>
       </td>
       <td className="px-4 py-2.5">
@@ -224,6 +238,15 @@ function IssueRow({ issue, active, onClick }: { issue: Issue; active: boolean; o
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
         )}
       </td>
+      {fields.map(f => (
+        <td key={f.id} className="px-4 py-2.5" style={{ maxWidth: 180 }}>
+          {values[f.id] !== undefined ? (
+            <FieldValueDisplay field={f} value={values[f.id]} members={members} />
+          ) : (
+            <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
+          )}
+        </td>
+      ))}
     </tr>
   )
 }

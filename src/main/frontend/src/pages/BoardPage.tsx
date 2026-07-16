@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Filter } from 'lucide-react'
-import { apiListIssues, apiListIssueTypes, apiListStatuses, apiListStatusTransitions, apiUpdateIssue } from '../api'
+import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
 import { Button, PriorityBadge, Avatar } from '../components/ui'
@@ -20,28 +20,23 @@ export default function BoardPage() {
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<string>('')
 
-  const { data: issueTypes = [] } = useQuery({
-    queryKey: ['issueTypes', wsId],
-    queryFn: () => apiListIssueTypes(wsId!),
-    enabled: !!wsId,
+  // One endpoint since M1: the project's effective workflow statuses (board
+  // order), transition rules, offered priorities and issue types
+  const { data: config } = useQuery({
+    queryKey: ['projectConfig', wsId, projectId],
+    queryFn: () => apiGetProjectConfig(wsId!, projectId!),
+    enabled: !!wsId && !!projectId,
   })
-
-  const { data: statuses = [] } = useQuery({
-    queryKey: ['statuses', wsId],
-    queryFn: () => apiListStatuses(wsId!),
-    enabled: !!wsId,
-  })
-
-  const { data: transitions = [] } = useQuery({
-    queryKey: ['statusTransitions', wsId],
-    queryFn: () => apiListStatusTransitions(wsId!),
-    enabled: !!wsId,
-  })
+  const statuses = config?.statuses ?? []
+  const transitions = config?.transitions ?? []
+  const issueTypes = config?.issueTypes ?? []
+  const priorities = config?.priorities ?? []
+  const fields = config?.fields ?? []
 
   const issuesKey = ['issues', wsId, projectId, 'board', filterPriority]
   const { data: issues = [], isLoading, isError } = useQuery({
     queryKey: issuesKey,
-    queryFn: () => apiListIssues(wsId!, projectId!, { priority: filterPriority || undefined }),
+    queryFn: () => apiListIssues(wsId!, projectId!, { priorityId: filterPriority || undefined }),
     enabled: !!wsId && !!projectId,
   })
 
@@ -80,13 +75,15 @@ export default function BoardPage() {
     },
   })
 
-  // Workflow rules: if a status has outgoing transitions defined, only those
-  // targets are allowed; a status with none defined can move anywhere.
+  // Workflow rules (mirrors backend semantics): a status with no
+  // source-specific rules is open; once it has rules, only its listed targets
+  // plus wildcard ("any → X", fromStatusId null) targets are allowed.
   function isMoveAllowed(from: Status, toStatusId: string): boolean {
     if (from.id === toStatusId) return false
-    const outgoing = transitions.filter(t => t.fromStatusId === from.id)
-    if (outgoing.length === 0) return true
-    return outgoing.some(t => t.toStatusId === toStatusId)
+    const restricted = transitions.some(t => t.fromStatusId === from.id)
+    if (!restricted) return true
+    return transitions.some(t =>
+      (t.fromStatusId === from.id || t.fromStatusId === null) && t.toStatusId === toStatusId)
   }
 
   function handleDrop(statusId: string) {
@@ -99,7 +96,8 @@ export default function BoardPage() {
   }
 
   const panelOpen = openIssueNumber !== undefined
-  const ordered = [...statuses].sort((a, b) => a.position - b.position)
+  // config.statuses arrive in workflow (board-column) order — don't re-sort
+  const ordered = statuses
 
   if (isError) {
     return (
@@ -141,7 +139,7 @@ export default function BoardPage() {
             style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
           >
             <option value="">All priorities</option>
-            {['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE'].map(p => <option key={p} value={p}>{p}</option>)}
+            {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
           {filterPriority && (
             <button
@@ -261,6 +259,8 @@ export default function BoardPage() {
           issueNumber={openIssueNumber!}
           issueTypes={issueTypes}
           statuses={statuses}
+          priorities={priorities}
+          fields={fields}
           onClose={() => setOpenIssueNumber(undefined)}
         />
       )}

@@ -1,11 +1,12 @@
 package com.hamstrack.issue.dto;
 
-import com.hamstrack.issue.entity.IssuePriority;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.UUID;
 
 public record CreateIssueRequest(
@@ -13,8 +14,11 @@ public record CreateIssueRequest(
         String description,
         @NotNull UUID typeId,
         @NotNull UUID statusId,
-        IssuePriority priority,
+        // Null = the default priority of the project's priority set
+        UUID priorityId,
         UUID assigneeId,
         UUID parentId,
-        LocalDate dueDate
+        LocalDate dueDate,
+        // Custom field values keyed by field id; shapes per field type
+        Map<UUID, JsonNode> fields
 ) {}

@@ -1,5 +1,6 @@
 package com.hamstrack.common.seed;
 
+import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
@@ -40,7 +41,14 @@ public class DataSeeder implements ApplicationRunner {
         }
         // Lowercase to match login, which looks the email up lowercased
         var email = adminEmail.toLowerCase();
-        if (userRepository.existsByEmail(email)) {
+        var existing = userRepository.findByEmail(email).orElse(null);
+        if (existing != null) {
+            // Accounts seeded before system roles existed must still get ADMIN
+            if (existing.getSystemRole() != SystemRole.ADMIN) {
+                existing.setSystemRole(SystemRole.ADMIN);
+                userRepository.save(existing);
+                log.info("Existing seed account promoted to system ADMIN: {}", email);
+            }
             return;
         }
 
@@ -49,6 +57,7 @@ public class DataSeeder implements ApplicationRunner {
         admin.setDisplayName(adminDisplayName);
         admin.setPasswordHash(passwordEncoder.encode(adminPassword));
         admin.setStatus(UserStatus.ACTIVE);
+        admin.setSystemRole(SystemRole.ADMIN);
         userRepository.save(admin);
 
         log.info("Admin account created: {}", email);

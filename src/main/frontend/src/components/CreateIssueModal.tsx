@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { apiCreateIssue, apiListIssueTypes, apiListProjects, apiListStatuses, apiListWorkspaces } from '../api'
+import { apiCreateIssue, apiGetProjectConfig, apiListProjects, apiListWorkspaceMembers, apiListWorkspaces } from '../api'
+import type { FieldValue } from '../types'
+import { FieldInput } from './fields'
 import { Button, Input, Select, Textarea } from './ui'
-
-const PRIORITIES = ['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE']
 
 interface Props {
   /** Absent when opened outside a workspace (/workspaces) — a Workspace select appears instead. */
@@ -34,18 +34,6 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
     enabled: !!effectiveWsId,
   })
 
-  const { data: issueTypes = [] } = useQuery({
-    queryKey: ['issueTypes', effectiveWsId],
-    queryFn: () => apiListIssueTypes(effectiveWsId),
-    enabled: !!effectiveWsId,
-  })
-
-  const { data: statuses = [] } = useQuery({
-    queryKey: ['statuses', effectiveWsId],
-    queryFn: () => apiListStatuses(effectiveWsId),
-    enabled: !!effectiveWsId,
-  })
-
   const active = projects.filter(p => !p.archived)
 
   const [projectId, setProjectId] = useState(defaultProjectId ?? '')
@@ -53,21 +41,66 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
   const [description, setDescription] = useState('')
   const [typeId, setTypeId] = useState('')
   const [statusId, setStatusId] = useState('')
-  const [priority, setPriority] = useState('MEDIUM')
+  const [priorityId, setPriorityId] = useState('')
+  const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
   const effectiveProjectId = projectId || active[0]?.id || ''
+
+  // Types, statuses and priorities depend on the selected project since M1
+  // (its workflow / priority set) — not on the workspace
+  const { data: config } = useQuery({
+    queryKey: ['projectConfig', effectiveWsId, effectiveProjectId],
+    queryFn: () => apiGetProjectConfig(effectiveWsId, effectiveProjectId),
+    enabled: !!effectiveWsId && !!effectiveProjectId,
+  })
+  const issueTypes = config?.issueTypes ?? []
+  const statuses = config?.statuses ?? []
+  const priorities = config?.priorities ?? []
+  const createFields = (config?.fields ?? []).filter(f => f.showOnCreate)
+
+  // Only needed as the option list of USER-type fields
+  const { data: members = [] } = useQuery({
+    queryKey: ['wsMembers', effectiveWsId],
+    queryFn: () => apiListWorkspaceMembers(effectiveWsId),
+    enabled: !!effectiveWsId && createFields.some(f => f.type === 'USER'),
+  })
+
   const effectiveTypeId = typeId || issueTypes[0]?.id || ''
   const effectiveStatusId = statusId || statuses[0]?.id || ''
+  const effectivePriorityId = priorityId
+    || priorities.find(p => p.isDefault)?.id || priorities[0]?.id || ''
 
   function handleWorkspaceChange(id: string) {
     setWsSelection(id)
-    // Workspace-scoped selections don't carry over
     setProjectId('')
+    resetTaxonomySelections()
+  }
+
+  function handleProjectChange(id: string) {
+    setProjectId(id)
+    // Taxonomy is per-project — selections don't carry over
+    resetTaxonomySelections()
+  }
+
+  function resetTaxonomySelections() {
     setTypeId('')
     setStatusId('')
+    setPriorityId('')
+    setFieldValues({})
   }
+
+  function setFieldValue(fieldId: string, value: FieldValue | undefined) {
+    setFieldValues(prev => {
+      const next = { ...prev }
+      if (value === undefined) delete next[fieldId]
+      else next[fieldId] = value
+      return next
+    })
+  }
+
+  const missingRequired = createFields.some(f => f.required && fieldValues[f.id] === undefined)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -78,8 +111,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
         title: title.trim(),
         typeId: effectiveTypeId,
         statusId: effectiveStatusId,
-        priority,
+        priorityId: effectivePriorityId || undefined,
         description: description.trim() || undefined,
+        fields: Object.keys(fieldValues).length > 0 ? fieldValues : undefined,
       })
       await qc.invalidateQueries({ queryKey: ['issues', effectiveWsId, effectiveProjectId] })
       onClose()
@@ -126,7 +160,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
           )}
 
           <div>
-            <Select label="Project" value={effectiveProjectId} onChange={e => setProjectId(e.target.value)}>
+            <Select label="Project" value={effectiveProjectId} onChange={e => handleProjectChange(e.target.value)}>
               {active.map(p => <option key={p.id} value={p.id}>{p.key} — {p.name}</option>)}
             </Select>
             {projectsLoaded && active.length === 0 && (
@@ -152,8 +186,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
             <Select label="Status" value={effectiveStatusId} onChange={e => setStatusId(e.target.value)}>
               {statuses.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </Select>
-            <Select label="Priority" value={priority} onChange={e => setPriority(e.target.value)}>
-              {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+            <Select label="Priority" value={effectivePriorityId} onChange={e => setPriorityId(e.target.value)}>
+              {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
           </div>
 
@@ -165,6 +199,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
             rows={4}
           />
 
+          {createFields.map(f => (
+            <FieldInput key={f.id} field={f} value={fieldValues[f.id]}
+                        onChange={v => setFieldValue(f.id, v)} members={members} />
+          ))}
+
           {error && (
             <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>
           )}
@@ -175,7 +214,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
               variant="primary"
               type="submit"
               loading={saving}
-              disabled={!title.trim() || !effectiveProjectId || !effectiveTypeId || !effectiveStatusId}
+              disabled={!title.trim() || !effectiveProjectId || !effectiveTypeId || !effectiveStatusId || missingRequired}
             >
               Create issue
             </Button>

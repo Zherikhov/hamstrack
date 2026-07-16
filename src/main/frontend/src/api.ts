@@ -1,4 +1,10 @@
-import type { User, Workspace, Project, IssueType, Status, Issue, Comment, Attachment, IssueHistoryEntry, StatusTransition, Notification, WorkspaceMember } from './types'
+import type {
+  User, Workspace, Project, Issue, Comment, Attachment, IssueHistoryEntry,
+  Notification, WorkspaceMember, ProjectConfig,
+  AdminStatus, AdminPriority, AdminIssueType, AdminWorkflow, AdminPrioritySet,
+  AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
+  ProjectBinding, TransitionRule, UsageDetail,
+} from './types'
 import { useAuthStore } from './auth'
 
 const BASE = '/api'
@@ -170,14 +176,12 @@ export async function apiUnarchiveProject(wsId: string, projectId: string): Prom
   return request(`/workspaces/${wsId}/projects/${projectId}/unarchive`, { method: 'POST' })
 }
 
-// ── Issue Taxonomy ─────────────────────────────────────────────────────────────
+// ── Project taxonomy config ──────────────────────────────────────────────────
+// Statuses, transitions, priorities and types all come from one endpoint since
+// M1 — the project's effective workflow/priority-set resolution happens server-side
 
-export async function apiListIssueTypes(wsId: string): Promise<IssueType[]> {
-  return request(`/workspaces/${wsId}/issue-types`)
-}
-
-export async function apiListStatuses(wsId: string): Promise<Status[]> {
-  return request(`/workspaces/${wsId}/statuses`)
+export async function apiGetProjectConfig(wsId: string, projectId: string): Promise<ProjectConfig> {
+  return request(`/workspaces/${wsId}/projects/${projectId}/config`)
 }
 
 // ── Issues ─────────────────────────────────────────────────────────────────────
@@ -185,12 +189,12 @@ export async function apiListStatuses(wsId: string): Promise<Status[]> {
 export async function apiListIssues(
   wsId: string,
   projectId: string,
-  filters?: { statusId?: string; assigneeId?: string; priority?: string }
+  filters?: { statusId?: string; assigneeId?: string; priorityId?: string }
 ): Promise<Issue[]> {
   const params = new URLSearchParams()
   if (filters?.statusId) params.set('statusId', filters.statusId)
   if (filters?.assigneeId) params.set('assigneeId', filters.assigneeId)
-  if (filters?.priority) params.set('priority', filters.priority)
+  if (filters?.priorityId) params.set('priorityId', filters.priorityId)
   const qs = params.toString()
   return request(`/workspaces/${wsId}/projects/${projectId}/issues${qs ? `?${qs}` : ''}`)
 }
@@ -202,7 +206,9 @@ export async function apiGetIssue(wsId: string, projectId: string, number: numbe
 export async function apiCreateIssue(
   wsId: string,
   projectId: string,
-  payload: { title: string; typeId: string; statusId: string; priority?: string; description?: string; assigneeId?: string; dueDate?: string }
+  // priorityId omitted = the project's default priority;
+  // fields keyed by field id — value shapes per field type (see FieldValue)
+  payload: { title: string; typeId: string; statusId: string; priorityId?: string; description?: string; assigneeId?: string; dueDate?: string; fields?: Record<string, FieldValue> }
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues`, {
     method: 'POST',
@@ -214,8 +220,9 @@ export async function apiUpdateIssue(
   wsId: string,
   projectId: string,
   number: number,
-  // version enables the backend's optimistic-lock check: 409 if someone else saved first
-  payload: Partial<{ title: string; typeId: string; statusId: string; priority: string; description: string; assigneeId: string; dueDate: string; version: number }>
+  // version enables the backend's optimistic-lock check: 409 if someone else saved first;
+  // fields is partial — only listed ids change, null clears a value
+  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; fields: Record<string, FieldValue | null>; version: number }>
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, {
     method: 'PATCH',
@@ -283,21 +290,132 @@ export async function apiGetIssueHistory(wsId: string, projectId: string, number
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/history`)
 }
 
-// ── Workflow / Status Transitions ──────────────────────────────────────────────
+// ── Admin console (system ADMIN only; server-guarded) ────────────────────────
 
-export async function apiListStatusTransitions(wsId: string): Promise<StatusTransition[]> {
-  return request(`/workspaces/${wsId}/status-transitions`)
+export interface UpsertCatalogPayload {
+  name: string
+  color?: string
+  icon?: string
+  category?: 'TODO' | 'IN_PROGRESS' | 'DONE'  // statuses only
+  position?: number
 }
 
-export async function apiCreateStatusTransition(wsId: string, fromStatusId: string, toStatusId: string): Promise<StatusTransition> {
-  return request(`/workspaces/${wsId}/status-transitions`, {
-    method: 'POST',
-    body: JSON.stringify({ fromStatusId, toStatusId }),
-  })
+function adminCrud<TResp>(resource: string) {
+  return {
+    list: () => request<TResp[]>(`/admin/${resource}`),
+    create: (payload: UpsertCatalogPayload) =>
+      request<TResp>(`/admin/${resource}`, { method: 'POST', body: JSON.stringify(payload) }),
+    update: (id: string, payload: UpsertCatalogPayload) =>
+      request<TResp>(`/admin/${resource}/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+    archive: (id: string) => request<void>(`/admin/${resource}/${id}/archive`, { method: 'POST' }),
+    unarchive: (id: string) => request<void>(`/admin/${resource}/${id}/unarchive`, { method: 'POST' }),
+    remove: (id: string, replaceWithId?: string) =>
+      request<void>(`/admin/${resource}/${id}${replaceWithId ? `?replaceWithId=${replaceWithId}` : ''}`,
+        { method: 'DELETE' }),
+    usage: (id: string) => request<UsageDetail>(`/admin/${resource}/${id}/usage`),
+  }
 }
 
-export async function apiDeleteStatusTransition(wsId: string, transitionId: string): Promise<void> {
-  return request(`/workspaces/${wsId}/status-transitions/${transitionId}`, { method: 'DELETE' })
+export const adminStatuses = adminCrud<AdminStatus>('statuses')
+export const adminPriorities = adminCrud<AdminPriority>('priorities')
+export const adminIssueTypes = adminCrud<AdminIssueType>('issue-types')
+
+export interface UpsertWorkflowPayload {
+  name: string
+  description?: string
+  statusIds: string[]                 // board-column order
+  transitions: TransitionRule[]
+}
+
+export const adminWorkflows = {
+  list: () => request<AdminWorkflow[]>('/admin/workflows'),
+  create: (p: UpsertWorkflowPayload) =>
+    request<AdminWorkflow>('/admin/workflows', { method: 'POST', body: JSON.stringify(p) }),
+  update: (id: string, p: UpsertWorkflowPayload) =>
+    request<AdminWorkflow>(`/admin/workflows/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  remove: (id: string) => request<void>(`/admin/workflows/${id}`, { method: 'DELETE' }),
+}
+
+export interface UpsertPrioritySetPayload {
+  name: string
+  items: { priorityId: string; isDefault: boolean }[]  // display order
+}
+
+export const adminPrioritySets = {
+  list: () => request<AdminPrioritySet[]>('/admin/priority-sets'),
+  create: (p: UpsertPrioritySetPayload) =>
+    request<AdminPrioritySet>('/admin/priority-sets', { method: 'POST', body: JSON.stringify(p) }),
+  update: (id: string, p: UpsertPrioritySetPayload) =>
+    request<AdminPrioritySet>(`/admin/priority-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  remove: (id: string) => request<void>(`/admin/priority-sets/${id}`, { method: 'DELETE' }),
+}
+
+export interface UpsertFieldPayload {
+  name: string
+  key?: string                        // blank on create = derived from name; immutable afterwards
+  type: FieldType                     // immutable after creation
+  config?: FieldConfig | null
+  description?: string
+}
+
+export const adminFields = {
+  list: () => request<AdminField[]>('/admin/fields'),
+  create: (p: UpsertFieldPayload) =>
+    request<AdminField>('/admin/fields', { method: 'POST', body: JSON.stringify(p) }),
+  update: (id: string, p: UpsertFieldPayload) =>
+    request<AdminField>(`/admin/fields/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  archive: (id: string) => request<void>(`/admin/fields/${id}/archive`, { method: 'POST' }),
+  unarchive: (id: string) => request<void>(`/admin/fields/${id}/unarchive`, { method: 'POST' }),
+  // No remap for arbitrary value shapes — deleting a field with values needs
+  // the explicit dropValues confirmation (409 otherwise)
+  remove: (id: string, dropValues = false) =>
+    request<void>(`/admin/fields/${id}${dropValues ? '?dropValues=true' : ''}`, { method: 'DELETE' }),
+  usage: (id: string) => request<UsageDetail>(`/admin/fields/${id}/usage`),
+}
+
+export interface UpsertFieldSetPayload {
+  name: string
+  items: { fieldId: string; required: boolean; showOnCreate: boolean }[]  // display order
+}
+
+export const adminFieldSets = {
+  list: () => request<AdminFieldSet[]>('/admin/field-sets'),
+  create: (p: UpsertFieldSetPayload) =>
+    request<AdminFieldSet>('/admin/field-sets', { method: 'POST', body: JSON.stringify(p) }),
+  update: (id: string, p: UpsertFieldSetPayload) =>
+    request<AdminFieldSet>(`/admin/field-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  remove: (id: string) => request<void>(`/admin/field-sets/${id}`, { method: 'DELETE' }),
+}
+
+export interface UpsertIssueTypeSetPayload {
+  name: string
+  typeIds: string[]                   // display order
+}
+
+export const adminIssueTypeSets = {
+  list: () => request<AdminIssueTypeSet[]>('/admin/issue-type-sets'),
+  create: (p: UpsertIssueTypeSetPayload) =>
+    request<AdminIssueTypeSet>('/admin/issue-type-sets', { method: 'POST', body: JSON.stringify(p) }),
+  update: (id: string, p: UpsertIssueTypeSetPayload) =>
+    request<AdminIssueTypeSet>(`/admin/issue-type-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  remove: (id: string) => request<void>(`/admin/issue-type-sets/${id}`, { method: 'DELETE' }),
+}
+
+export interface ProjectBindings {
+  workflowId: string | null
+  prioritySetId: string | null
+  fieldSetId: string | null
+  issueTypeSetId: string | null
+}
+
+export const adminProjects = {
+  list: () => request<ProjectBinding[]>('/admin/projects'),
+  // Full replacement of all bindings; null = system default
+  updateBindings: (projectId: string, bindings: ProjectBindings) =>
+    request<ProjectBinding>(`/admin/projects/${projectId}/bindings`, {
+      method: 'PATCH',
+      body: JSON.stringify(bindings),
+    }),
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────────

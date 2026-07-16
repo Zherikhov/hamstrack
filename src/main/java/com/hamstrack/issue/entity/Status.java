@@ -1,21 +1,26 @@
 package com.hamstrack.issue.entity;
 
 import com.hamstrack.common.entity.CreatedOnlyEntity;
-import com.hamstrack.workspace.entity.Workspace;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
 
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Global catalog entry. A status reaches a board only through a
+ * {@link Workflow} assigned to the project. {@code scopeWorkspaceId} NULL =
+ * global row managed by the system admin (workspace scoping reserved).
+ */
 @Entity
-@Table(name = "statuses",
-        uniqueConstraints = @UniqueConstraint(columnNames = {"workspace_id", "name"}))
+@Table(name = "statuses")
 @Getter
 @Setter
 public class Status extends CreatedOnlyEntity {
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "workspace_id", nullable = false)
-    private Workspace workspace;
+    @Column(name = "scope_workspace_id")
+    private UUID scopeWorkspaceId;
 
     @Column(nullable = false, length = 100)
     private String name;
@@ -29,4 +34,7 @@ public class Status extends CreatedOnlyEntity {
 
     @Column(nullable = false)
     private short position = 0;
+
+    @Column(name = "archived_at")
+    private Instant archivedAt;
 }

@@ -110,10 +110,11 @@ public class AuthController {
         return auth;
     }
 
-    public record MeResponse(UUID id, String email, String displayName, String avatarUrl) {}
+    public record MeResponse(UUID id, String email, String displayName, String avatarUrl, String systemRole) {}
 
     @GetMapping("/me")
     public MeResponse me(@AuthenticationPrincipal User user) {
-        return new MeResponse(user.getId(), user.getEmail(), user.getDisplayName(), user.getAvatarUrl());
+        return new MeResponse(user.getId(), user.getEmail(), user.getDisplayName(), user.getAvatarUrl(),
+                user.getSystemRole().name());
     }
 }

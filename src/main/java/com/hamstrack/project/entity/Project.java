@@ -2,6 +2,10 @@ package com.hamstrack.project.entity;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.entity.BaseEntity;
+import com.hamstrack.issue.entity.FieldSet;
+import com.hamstrack.issue.entity.IssueTypeSet;
+import com.hamstrack.issue.entity.PrioritySet;
+import com.hamstrack.issue.entity.Workflow;
 import com.hamstrack.workspace.entity.Workspace;
 import jakarta.persistence.*;
 import lombok.Getter;
@@ -38,6 +42,23 @@ public class Project extends BaseEntity {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "created_by", nullable = false)
     private User createdBy;
+
+    // Taxonomy bindings; NULL = the system-default workflow / priority set
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "workflow_id")
+    private Workflow workflow;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "priority_set_id")
+    private PrioritySet prioritySet;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "field_set_id")
+    private FieldSet fieldSet;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "issue_type_set_id")
+    private IssueTypeSet issueTypeSet;
 
     public boolean isArchived() {
         return archivedAt != null;

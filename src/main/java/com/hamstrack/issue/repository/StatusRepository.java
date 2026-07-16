@@ -1,7 +1,6 @@
 package com.hamstrack.issue.repository;
 
 import com.hamstrack.issue.entity.Status;
-import com.hamstrack.workspace.entity.Workspace;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 import java.util.List;
@@ -10,9 +9,12 @@ import java.util.UUID;
 
 public interface StatusRepository extends JpaRepository<Status, UUID> {
 
-    List<Status> findAllByWorkspaceOrderByPosition(Workspace workspace);
+    // Global catalog (scope IS NULL); workspace-scoped rows are a future feature
+    List<Status> findAllByScopeWorkspaceIdIsNullOrderByPosition();
 
-    Optional<Status> findByIdAndWorkspace(UUID id, Workspace workspace);
+    Optional<Status> findByIdAndScopeWorkspaceIdIsNull(UUID id);
 
-    boolean existsByWorkspaceAndName(Workspace workspace, String name);
+    Optional<Status> findByScopeWorkspaceIdIsNullAndName(String name);
+
+    boolean existsByScopeWorkspaceIdIsNullAndName(String name);
 }

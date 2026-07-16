@@ -41,9 +41,11 @@ public class IssueService {
     private final IssueRepository issueRepository;
     private final IssueTypeRepository issueTypeRepository;
     private final StatusRepository statusRepository;
+    private final PriorityRepository priorityRepository;
     private final UserRepository userRepository;
     private final IssueHistoryRepository historyRepository;
-    private final StatusTransitionRepository transitionRepository;
+    private final ProjectConfigService projectConfigService;
+    private final FieldValueService fieldValueService;
     private final AttachmentService attachmentService;
     private final SseRegistry sseRegistry;
 
@@ -54,10 +56,11 @@ public class IssueService {
                 .orElseThrow(ProjectNotFoundException::new);
         requireNotArchived(project);
 
-        var type = issueTypeRepository.findByIdAndWorkspace(req.typeId(), workspace)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
-        var status = statusRepository.findByIdAndWorkspace(req.statusId(), workspace)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
+        var type = projectConfigService.requireTypeInSet(project, resolveType(req.typeId()));
+        var status = projectConfigService.requireStatusInWorkflow(project, resolveStatus(req.statusId()));
+        var priority = req.priorityId() != null
+                ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
+                : projectConfigService.defaultPriority(project);
 
         // Atomic seq increment
         long seq = projectRepository.incrementAndGetIssueSeq(project.getId());
@@ -70,7 +73,7 @@ public class IssueService {
         issue.setDescription(req.description());
         issue.setType(type);
         issue.setStatus(status);
-        issue.setPriority(req.priority() != null ? req.priority() : IssuePriority.NONE);
+        issue.setPriority(priority);
         issue.setReporter(actor);
         issue.setPosition(seq);
 
@@ -84,19 +87,25 @@ public class IssueService {
         issue.setDueDate(req.dueDate());
         issueRepository.save(issue);
 
+        // Custom fields: validates against the project's field set (incl.
+        // required-on-create); no history entries for initial values
+        fieldValueService.applyValues(issue, req.fields(), true, (f, o, n) -> {});
+
         sseRegistry.broadcast(workspaceId, "ISSUE_CREATED",
                 Map.of("projectId", projectId.toString(), "issueNumber", issue.getNumber()));
-        return IssueResponse.of(issue);
+        return IssueResponse.of(issue, fieldValueService.values(issue));
     }
 
     @Transactional(readOnly = true)
     public List<IssueResponse> list(User actor, UUID workspaceId, UUID projectId,
-                                    UUID statusId, UUID assigneeId, IssuePriority priority) {
+                                    UUID statusId, UUID assigneeId, UUID priorityId) {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
-        return issueRepository.findByProjectFiltered(project, statusId, assigneeId, priority).stream()
-                .map(IssueResponse::of)
+        var issues = issueRepository.findByProjectFiltered(project, statusId, assigneeId, priorityId);
+        var valuesByIssue = fieldValueService.valuesByIssue(issues);
+        return issues.stream()
+                .map(i -> IssueResponse.of(i, valuesByIssue.get(i.getId())))
                 .toList();
     }
 
@@ -107,7 +116,7 @@ public class IssueService {
                 .orElseThrow(ProjectNotFoundException::new);
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
-        return IssueResponse.of(issue);
+        return IssueResponse.of(issue, fieldValueService.values(issue));
     }
 
     @Transactional(readOnly = true)
@@ -129,8 +138,15 @@ public class IssueService {
         requireNotArchived(project);
 
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
-        var typeOpt = req.typeId() != null ? issueTypeRepository.findByIdAndWorkspace(req.typeId(), workspace) : null;
-        var statusOpt = req.statusId() != null ? statusRepository.findByIdAndWorkspace(req.statusId(), workspace) : null;
+        var newType = req.typeId() != null
+                ? projectConfigService.requireTypeInSet(project, resolveType(req.typeId()))
+                : null;
+        var newStatus = req.statusId() != null
+                ? projectConfigService.requireStatusInWorkflow(project, resolveStatus(req.statusId()))
+                : null;
+        var newPriority = req.priorityId() != null
+                ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
+                : null;
         var newAssignee = req.assigneeId() != null ? resolveAssignee(workspace, req.assigneeId()) : null;
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
@@ -152,27 +168,19 @@ public class IssueService {
                     issue.getDescription() != null ? "..." : null, "..."));
             issue.setDescription(req.description());
         }
-        if (typeOpt != null) {
-            var newType = typeOpt.orElseThrow(
-                    () -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
-            if (!newType.getId().equals(issue.getType().getId())) {
-                historyEntries.add(makeHistory(issue, actor, "type", issue.getType().getName(), newType.getName()));
-                issue.setType(newType);
-            }
+        if (newType != null && !newType.getId().equals(issue.getType().getId())) {
+            historyEntries.add(makeHistory(issue, actor, "type", issue.getType().getName(), newType.getName()));
+            issue.setType(newType);
         }
-        if (statusOpt != null) {
-            var newStatus = statusOpt.orElseThrow(
-                    () -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
-            if (!newStatus.getId().equals(issue.getStatus().getId())) {
-                validateTransition(workspace, issue.getStatus(), newStatus);
-                historyEntries.add(makeHistory(issue, actor, "status", issue.getStatus().getName(), newStatus.getName()));
-                issue.setStatus(newStatus);
-            }
+        if (newStatus != null && !newStatus.getId().equals(issue.getStatus().getId())) {
+            projectConfigService.validateTransition(project, issue.getStatus(), newStatus);
+            historyEntries.add(makeHistory(issue, actor, "status", issue.getStatus().getName(), newStatus.getName()));
+            issue.setStatus(newStatus);
         }
-        if (req.priority() != null && !req.priority().equals(issue.getPriority())) {
+        if (newPriority != null && !newPriority.getId().equals(issue.getPriority().getId())) {
             historyEntries.add(makeHistory(issue, actor, "priority",
-                    issue.getPriority().name(), req.priority().name()));
-            issue.setPriority(req.priority());
+                    issue.getPriority().getName(), newPriority.getName()));
+            issue.setPriority(newPriority);
         }
         if (newAssignee != null) {
             String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
@@ -188,12 +196,17 @@ public class IssueService {
             issue.setDueDate(req.dueDate());
         }
 
+        // Custom fields: partial map, JSON null clears; changes land in history
+        fieldValueService.applyValues(issue, req.fields(), false,
+                (fieldName, oldVal, newVal) ->
+                        historyEntries.add(makeHistory(issue, actor, fieldName, oldVal, newVal)));
+
         issueRepository.save(issue);
         historyRepository.saveAll(historyEntries);
 
         sseRegistry.broadcast(workspaceId, "ISSUE_UPDATED",
                 Map.of("projectId", projectId.toString(), "issueNumber", number));
-        return IssueResponse.of(issue);
+        return IssueResponse.of(issue, fieldValueService.values(issue));
     }
 
     @Transactional
@@ -212,12 +225,24 @@ public class IssueService {
                 Map.of("projectId", projectId.toString(), "issueNumber", number));
     }
 
-    private void validateTransition(Workspace workspace, Status from, Status to) {
-        var allowed = transitionRepository.findAllByWorkspaceAndFromStatus(workspace, from);
-        if (allowed.isEmpty()) return; // no restrictions on this status
-        boolean ok = allowed.stream().anyMatch(t -> t.getToStatus().getId().equals(to.getId()));
-        if (!ok) throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
-                "Transition from '" + from.getName() + "' to '" + to.getName() + "' is not allowed by workflow");
+    // ---- catalog resolution (global rows; workspace scoping reserved) ----
+
+    private IssueType resolveType(UUID id) {
+        return issueTypeRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+                .filter(t -> t.getArchivedAt() == null)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
+    }
+
+    private Status resolveStatus(UUID id) {
+        return statusRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+                .filter(s -> s.getArchivedAt() == null)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
+    }
+
+    private Priority resolvePriority(UUID id) {
+        return priorityRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+                .filter(p -> p.getArchivedAt() == null)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority"));
     }
 
     private IssueHistory makeHistory(Issue issue, User actor, String field, String oldVal, String newVal) {

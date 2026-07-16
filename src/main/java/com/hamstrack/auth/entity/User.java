@@ -5,6 +5,7 @@ import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
 import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.userdetails.UserDetails;
 
 import java.time.Instant;
@@ -43,11 +44,16 @@ public class User extends BaseEntity implements UserDetails {
     @Column(name = "demo_seeded_at")
     private Instant demoSeededAt;
 
+    // Instance-wide role; ADMIN unlocks /api/admin/** (see SecurityConfig)
+    @Enumerated(EnumType.STRING)
+    @Column(name = "system_role", nullable = false, length = 20)
+    private SystemRole systemRole = SystemRole.USER;
+
     // --- UserDetails ---
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
-        return List.of();
+        return List.of(new SimpleGrantedAuthority("ROLE_" + systemRole.name()));
     }
 
     @Override

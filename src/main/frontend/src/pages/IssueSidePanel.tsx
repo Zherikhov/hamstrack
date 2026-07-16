@@ -9,11 +9,14 @@ import {
 } from '../api'
 import { useAuthStore } from '../auth'
 import { Button, Input, Textarea, Select, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
-import type { Issue, IssueType, Status, Comment, Attachment, IssueHistoryEntry, WorkspaceMember } from '../types'
-
-const PRIORITIES = ['URGENT', 'HIGH', 'MEDIUM', 'LOW', 'NONE']
+import { FieldInput, FieldValueDisplay } from '../components/fields'
+import type { Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, Comment, Attachment, IssueHistoryEntry, WorkspaceMember } from '../types'
 
 type Tab = 'details' | 'comments' | 'files' | 'history'
+
+function fieldValuesOf(issue: Issue): Record<string, FieldValue> {
+  return Object.fromEntries(issue.fields.map(f => [f.fieldId, f.value]))
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
@@ -27,10 +30,12 @@ interface Props {
   issueNumber: number
   issueTypes: IssueType[]
   statuses: Status[]
+  priorities: PriorityOption[]   // the project's offered priorities (from config)
+  fields: ProjectField[]         // the project's custom fields (from config)
   onClose: () => void
 }
 
-export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, onClose }: Props) {
+export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, priorities, fields, onClose }: Props) {
   const qc = useQueryClient()
   const { user } = useAuthStore()
 
@@ -46,7 +51,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   const [description, setDescription] = useState('')
   const [typeId, setTypeId] = useState('')
   const [statusId, setStatusId] = useState('')
-  const [priority, setPriority] = useState('MEDIUM')
+  const [priorityId, setPriorityId] = useState('')
+  const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
   const [commentBody, setCommentBody] = useState('')
@@ -111,7 +117,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setDescription(iss.description ?? '')
       setTypeId(iss.type.id)
       setStatusId(iss.status.id)
-      setPriority(iss.priority)
+      setPriorityId(iss.priority.id)
+      setFieldValues(fieldValuesOf(iss))
       setComments(cmts)
       setAttachments(atts)
       setHistory(hist)
@@ -122,13 +129,41 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
 
   useEffect(() => { loadIssue() }, [loadIssue])
 
+  function setFieldValue(fieldId: string, value: FieldValue | undefined) {
+    setFieldValues(prev => {
+      const next = { ...prev }
+      if (value === undefined) delete next[fieldId]
+      else next[fieldId] = value
+      return next
+    })
+  }
+
+  // The update is partial: only changed field ids go on the wire, JSON null clears
+  function changedFields(): Record<string, FieldValue | null> | undefined {
+    if (!issue) return undefined
+    const original = fieldValuesOf(issue)
+    const diff: Record<string, FieldValue | null> = {}
+    for (const f of fields) {
+      const oldV = original[f.id]
+      const newV = fieldValues[f.id]
+      if (JSON.stringify(oldV) === JSON.stringify(newV)) continue
+      diff[f.id] = newV === undefined ? null : newV
+    }
+    return Object.keys(diff).length > 0 ? diff : undefined
+  }
+
+  // Required fields can never be cleared (backend enforces the same)
+  const missingRequired = editing && issue !== null && fields.some(f => f.required
+    && fieldValuesOf(issue)[f.id] !== undefined && fieldValues[f.id] === undefined)
+
   async function handleSave() {
     setError('')
     setSaving(true)
     try {
       const updated = await apiUpdateIssue(wsId, projectId, issueNumber,
-        { title, description, typeId, statusId, priority, version: issue?.version })
+        { title, description, typeId, statusId, priorityId, fields: changedFields(), version: issue?.version })
       setIssue(updated)
+      setFieldValues(fieldValuesOf(updated))
       // Reload history after update
       apiGetIssueHistory(wsId, projectId, issueNumber).then(setHistory).catch(() => {})
       await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
@@ -314,8 +349,12 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
                   <Select label="Status" value={statusId} onChange={e => setStatusId(e.target.value)}>
                     {statuses.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                   </Select>
-                  <Select label="Priority" value={priority} onChange={e => setPriority(e.target.value)}>
-                    {PRIORITIES.map(p => <option key={p} value={p}>{p}</option>)}
+                  <Select label="Priority" value={priorityId} onChange={e => setPriorityId(e.target.value)}>
+                    {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    {/* Issue may carry a priority no longer offered by the project */}
+                    {issue && !priorities.some(p => p.id === issue.priority.id) && (
+                      <option value={issue.priority.id}>{issue.priority.name}</option>
+                    )}
                   </Select>
                 </>
               ) : issue ? (
@@ -361,15 +400,35 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
               </div>
             ) : null}
 
+            {/* Custom fields */}
+            {editing ? (
+              fields.map(f => (
+                <FieldInput key={f.id} field={f} value={fieldValues[f.id]}
+                            onChange={v => setFieldValue(f.id, v)} members={members} />
+              ))
+            ) : issue && fields.some(f => fieldValues[f.id] !== undefined) ? (
+              <div className="grid grid-cols-2 gap-3">
+                {fields.filter(f => fieldValues[f.id] !== undefined).map(f => (
+                  <div key={f.id} className={f.type === 'TEXTAREA' || f.type === 'MULTI_SELECT' ? 'col-span-2' : ''}>
+                    <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
+                    <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
 
             {/* Save / Cancel */}
             {editing && (
               <div className="flex gap-2">
-                <Button variant="primary" onClick={handleSave} loading={saving} disabled={!title.trim()}>
+                <Button variant="primary" onClick={handleSave} loading={saving} disabled={!title.trim() || missingRequired}>
                   Save changes
                 </Button>
-                <Button variant="ghost" onClick={() => { setEditing(false); setError('') }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => {
+                  setEditing(false); setError('')
+                  if (issue) setFieldValues(fieldValuesOf(issue))
+                }}>Cancel</Button>
               </div>
             )}
           </>

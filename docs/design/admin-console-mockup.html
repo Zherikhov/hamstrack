@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hamstrack — Admin Console Mockup</title>
+<link href="https://api.fontshare.com/v2/css?f[]=cabinet-grotesk@700,800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --brand:#0F6E63; --brand-hover:#0C5950;
+    --surface:#F7F6F3; --surface2:#EFEDE7; --border:#E4E1DA; --border2:#CBC7BC;
+    --text:#1C1B19; --text2:#5C5950; --muted:#8B8680;
+    --ink-deep:#0B0D16; --ink-blue:#263764; --ink-menu:#272E48;
+    --success:#15803D; --warning:#B45309; --error:#B91C1C; --info:#64748B;
+    --r-sm:4px; --r-md:8px; --r-lg:12px;
+    --font-display:"Cabinet Grotesk",sans-serif; --font-body:"Instrument Sans",sans-serif; --font-mono:"IBM Plex Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0}
+  body{font-family:var(--font-body);font-size:15px;color:var(--text);background:var(--surface)}
+  .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums}
+
+  /* ===== global top bar (unchanged from the app) ===== */
+  .topbar{height:56px;display:flex;align-items:center;gap:16px;padding:0 16px;
+    background:linear-gradient(135deg,var(--ink-deep) 0%,var(--ink-deep) 30%,var(--ink-blue) 100%);color:#fff}
+  .topbar .logo{font-family:var(--font-display);font-weight:800;font-size:18px;letter-spacing:-.3px}
+  .topbar .pill{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);border-radius:var(--r-sm);
+    padding:5px 10px;font-size:13px;color:#cfd4e4}
+  .topbar .spacer{flex:1}
+  .topbar .adminBadge{background:var(--warning);color:#fff;font-size:11px;font-weight:600;letter-spacing:.4px;
+    border-radius:9999px;padding:3px 10px;text-transform:uppercase}
+  .avatar{width:28px;height:28px;border-radius:9999px;background:var(--brand);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+
+  .shell{display:flex;min-height:calc(100vh - 56px)}
+
+  /* ===== admin sidebar ===== */
+  .side{width:220px;background:#fff;border-right:1px solid var(--border);padding:16px 8px;flex-shrink:0}
+  .side h3{font-size:11px;font-weight:600;letter-spacing:.8px;color:var(--muted);text-transform:uppercase;padding:4px 12px 8px}
+  .side a{display:flex;justify-content:space-between;align-items:center;padding:7px 12px;border-radius:var(--r-sm);
+    color:var(--text2);text-decoration:none;font-size:14px;cursor:pointer}
+  .side a:hover{background:var(--surface2)}
+  .side a.active{background:#E7F0EE;color:var(--brand);font-weight:600}
+  .side .soon{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:9999px;padding:1px 7px}
+  .side hr{border:none;border-top:1px solid var(--border);margin:12px 8px}
+
+  /* ===== content ===== */
+  .main{flex:1;padding:28px 32px;max-width:1080px}
+  .crumb{font-size:12px;color:var(--muted);margin-bottom:6px}
+  h1{font-family:var(--font-display);font-weight:700;font-size:26px;letter-spacing:-.4px}
+  .sub{color:var(--text2);font-size:14px;margin-top:4px;max-width:640px}
+  .pagehead{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px}
+  .btn{background:var(--brand);color:#fff;border:none;border-radius:var(--r-sm);padding:8px 14px;font-size:14px;font-weight:600;font-family:var(--font-body);cursor:pointer}
+  .btn:hover{background:var(--brand-hover)}
+  .btn.ghost{background:transparent;color:var(--text2);border:1px solid var(--border2)}
+  .btn.danger{background:var(--error)}
+
+  table{width:100%;border-collapse:collapse;background:#fff;border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+  thead th{font-size:11px;font-weight:600;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);text-align:left;
+    padding:9px 12px;background:var(--surface2);border-bottom:1px solid var(--border)}
+  tbody td{padding:10px 12px;border-bottom:1px solid var(--border);font-size:14px;vertical-align:middle}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:#FCFBF9}
+  .drag{color:var(--border2);cursor:grab;font-size:14px;width:20px}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:9999px;margin-right:8px;vertical-align:-1px}
+  .cat{font-family:var(--font-mono);font-size:11.5px;border-radius:var(--r-sm);padding:2px 7px;border:1px solid var(--border)}
+  .cat.todo{color:var(--info);background:#eef1f4}
+  .cat.prog{color:#1d4ed8;background:#e8eefc;border-color:#d3ddf5}
+  .cat.done{color:var(--success);background:#e9f4ec;border-color:#d5e8da}
+  .usage{font-size:12.5px;color:var(--brand);background:#E7F0EE;border-radius:9999px;padding:3px 10px;cursor:pointer;white-space:nowrap}
+  .usage.zero{color:var(--muted);background:var(--surface2)}
+  .kebab{color:var(--muted);cursor:pointer;padding:0 6px;font-weight:600}
+  .typechip{font-family:var(--font-mono);font-size:11.5px;color:var(--text2);background:var(--surface2);border-radius:var(--r-sm);padding:2px 8px}
+  .req{color:var(--warning);font-size:12px;font-weight:600}
+  .key{font-family:var(--font-mono);font-size:12.5px;color:var(--text2)}
+  .inline-edit{border:1.5px solid var(--brand);border-radius:var(--r-sm);padding:4px 8px;font-size:14px;font-family:var(--font-body);width:150px;background:#fff}
+  select{font-family:var(--font-body);font-size:13.5px;color:var(--text);border:1px solid var(--border2);border-radius:var(--r-sm);padding:5px 8px;background:#fff;cursor:pointer}
+  .note{margin-top:14px;font-size:13px;color:var(--muted)}
+  .star{color:var(--warning)}
+
+  /* workflow chips */
+  .flow{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .flow .chip{border:1px solid var(--border2);background:#fff;border-radius:9999px;padding:3px 11px;font-size:12.5px}
+  .flow .arr{color:var(--border2)}
+  .panelbox{background:#fff;border:1px solid var(--border);border-radius:var(--r-md);padding:16px;margin-top:16px}
+  .panelbox h4{font-size:13px;font-weight:600;margin-bottom:10px}
+  .trans{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--border);font-size:13.5px}
+  .trans:last-child{border-bottom:none}
+  .trans .x{margin-left:auto;color:var(--muted);cursor:pointer}
+  .addrow{color:var(--brand);font-size:13.5px;font-weight:600;cursor:pointer;padding-top:8px;display:inline-block}
+
+  /* side editor panel (fields) */
+  .split{display:flex;gap:20px;align-items:flex-start}
+  .split .left{flex:1;min-width:0}
+  .editor{width:320px;flex-shrink:0;background:#fff;border:1px solid var(--border);border-radius:var(--r-lg);padding:18px;box-shadow:0 8px 28px rgba(28,27,25,.07)}
+  .editor h4{font-family:var(--font-display);font-size:16px;font-weight:700;margin-bottom:14px}
+  .editor label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin:12px 0 4px}
+  .editor input,.editor select,.editor textarea{width:100%;border:1px solid var(--border2);border-radius:var(--r-sm);padding:7px 9px;font-size:13.5px;font-family:var(--font-body)}
+  .editor .opt{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13.5px}
+  .editor .footer{display:flex;gap:8px;margin-top:18px}
+
+  /* impact dialog */
+  .overlay{position:fixed;inset:0;background:rgba(28,27,25,.55);display:none;align-items:center;justify-content:center;backdrop-filter:blur(2px);z-index:40}
+  .overlay.open{display:flex}
+  .dialog{width:460px;background:#fff;border-radius:var(--r-lg);border:1px solid var(--border);box-shadow:0 20px 60px rgba(0,0,0,.18);padding:20px}
+  .dialog h4{font-family:var(--font-display);font-size:17px;font-weight:700}
+  .impact{background:#FBF3E8;border:1px solid #EFD9BC;border-radius:var(--r-md);padding:10px 12px;font-size:13.5px;color:#7C4A0B;margin:14px 0}
+  .impact .mono{font-size:12.5px}
+  .dialog label{display:block;font-size:12px;font-weight:600;color:var(--text2);margin:10px 0 4px}
+  .dialog select{width:100%}
+  .dialog .footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+
+  .screen{display:none}
+  .screen.active{display:block}
+  .pri{display:inline-flex;align-items:center;gap:7px}
+  .pri svg{width:16px;height:16px;flex-shrink:0}
+  .banner{font-size:12.5px;color:#fff;background:var(--ink-menu);padding:6px 16px;text-align:center}
+</style>
+</head>
+<body>
+<div class="banner">Макет админ-консоли Hamstrack — кликайте разделы в левом сайдбаре. Не работающий прототип, только вид.</div>
+
+<div class="topbar">
+  <span class="logo">Hamstrack</span>
+  <span class="pill">Projects ▾</span>
+  <span class="pill" style="min-width:220px;color:#8b93ad">Search…</span>
+  <span class="spacer"></span>
+  <span class="adminBadge">System administration</span>
+  <span class="pill">+ Create</span>
+  <span>🔔</span>
+  <span class="avatar">VZ</span>
+</div>
+
+<div class="shell">
+  <nav class="side">
+    <h3>Administration</h3>
+    <a data-s="statuses" class="active">Statuses</a>
+    <a data-s="priorities">Priorities</a>
+    <a data-s="types">Issue types</a>
+    <a data-s="fields">Fields</a>
+    <a data-s="workflows">Workflows</a>
+    <a data-s="projects">Projects</a>
+    <hr>
+    <a>Users <span class="soon">soon</span></a>
+    <a>Workspaces <span class="soon">soon</span></a>
+    <a>Settings <span class="soon">soon</span></a>
+    <hr>
+    <a style="color:var(--muted)">← Back to app</a>
+  </nav>
+
+  <!-- ================= STATUSES ================= -->
+  <main class="main screen active" id="s-statuses">
+    <div class="crumb">Administration / Statuses</div>
+    <div class="pagehead">
+      <div>
+        <h1>Statuses</h1>
+        <p class="sub">Global catalog. Statuses are grouped into workflows, and workflows are assigned to projects — a status appears on a board only through a workflow.</p>
+      </div>
+      <button class="btn">+ New status</button>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Name</th><th>Category</th><th>Used in</th><th></th></tr></thead>
+      <tbody>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#6B7280"></span>To Do</td><td><span class="cat todo">TODO</span></td><td><span class="usage">3 workflows · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#3B82F6"></span><input class="inline-edit" value="In Progress"> <span style="font-size:12px;color:var(--muted)">↵ save · esc cancel</span></td><td><span class="cat prog">IN_PROGRESS</span></td><td><span class="usage">3 workflows · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#8B5CF6"></span>In Review</td><td><span class="cat prog">IN_PROGRESS</span></td><td><span class="usage">1 workflow · 6 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#F59E0B"></span>Blocked</td><td><span class="cat prog">IN_PROGRESS</span></td><td><span class="usage zero">not used</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#10B981"></span>Done</td><td><span class="cat done">DONE</span></td><td><span class="usage">3 workflows · 14 projects</span></td><td class="kebab">⋯</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Категория обязательна (борд/бэклог группируются по ней). Клик по «Used in» — поповер со списком воркфлоу и проектов. Строка 2 показана в состоянии inline-редактирования.
+      <a style="color:var(--brand);cursor:pointer" onclick="document.getElementById('impact').classList.add('open')">Показать диалог удаления →</a></p>
+  </main>
+
+  <!-- ================= PRIORITIES ================= -->
+  <main class="main screen" id="s-priorities">
+    <div class="crumb">Administration / Priorities</div>
+    <div class="pagehead">
+      <div>
+        <h1>Priorities</h1>
+        <p class="sub">Global catalog. Priority <em>sets</em> choose which of these a project offers and which one is the default for new issues.</p>
+      </div>
+      <button class="btn">+ New priority</button>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Name</th><th>Color</th><th>Used in</th><th></th></tr></thead>
+      <tbody>
+        <tr><td class="drag">⠿</td><td><span class="pri"><svg viewBox="0 0 24 24" fill="none" stroke="#B91C1C" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m17 11-5-5-5 5"/><path d="m17 18-5-5-5 5"/></svg>Urgent</span></td><td><span class="dot" style="background:#B91C1C"></span><span class="key">#B91C1C</span></td><td><span class="usage">2 sets · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="pri"><svg viewBox="0 0 24 24" fill="none" stroke="#EA580C" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>High</span></td><td><span class="dot" style="background:#EA580C"></span><span class="key">#EA580C</span></td><td><span class="usage">2 sets · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="pri"><svg viewBox="0 0 24 24" fill="none" stroke="#B45309" stroke-width="2.5" stroke-linecap="round"><line x1="5" x2="19" y1="9" y2="9"/><line x1="5" x2="19" y1="15" y2="15"/></svg>Medium</span></td><td><span class="dot" style="background:#B45309"></span><span class="key">#B45309</span></td><td><span class="usage">2 sets · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="pri"><svg viewBox="0 0 24 24" fill="none" stroke="#64748B" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>Low</span></td><td><span class="dot" style="background:#64748B"></span><span class="key">#64748B</span></td><td><span class="usage">2 sets · 14 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="pri"><svg viewBox="0 0 24 24" fill="none" stroke="#8B8680" stroke-width="2.5" stroke-linecap="round"><line x1="5" x2="19" y1="12" y2="12"/></svg>None</span></td><td><span class="dot" style="background:#8B8680"></span><span class="key">#8B8680</span></td><td><span class="usage">1 set · 8 projects</span></td><td class="kebab">⋯</td></tr>
+      </tbody>
+    </table>
+    <div class="panelbox">
+      <h4>Priority sets</h4>
+      <div class="trans"><b style="min-width:170px">Default priorities</b><span class="flow"><span class="chip">Urgent</span><span class="chip">High</span><span class="chip" style="border-color:var(--warning)">Medium <span class="star">★ default</span></span><span class="chip">Low</span><span class="chip">None</span></span><span class="usage" style="margin-left:auto">8 projects</span></div>
+      <div class="trans"><b style="min-width:170px">Support (SLA)</b><span class="flow"><span class="chip" style="border-color:var(--warning)">Urgent <span class="star">★ default</span></span><span class="chip">High</span><span class="chip">Medium</span></span><span class="usage" style="margin-left:auto">6 projects</span></div>
+      <span class="addrow">+ New priority set</span>
+    </div>
+  </main>
+
+  <!-- ================= ISSUE TYPES ================= -->
+  <main class="main screen" id="s-types">
+    <div class="crumb">Administration / Issue types</div>
+    <div class="pagehead">
+      <div>
+        <h1>Issue types</h1>
+        <p class="sub">Global catalog, currently offered to all projects. Per-project type sets are planned (M3).</p>
+      </div>
+      <button class="btn">+ New type</button>
+    </div>
+    <table>
+      <thead><tr><th></th><th>Name</th><th>Icon</th><th>Used by issues</th><th></th></tr></thead>
+      <tbody>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#EF4444"></span>Bug</td><td class="key">bug</td><td><span class="usage">1 204 issues</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#3B82F6"></span>Task</td><td class="key">task</td><td><span class="usage">3 118 issues</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#8B5CF6"></span>Story</td><td class="key">story</td><td><span class="usage">944 issues</span></td><td class="kebab">⋯</td></tr>
+        <tr><td class="drag">⠿</td><td><span class="dot" style="background:#F59E0B"></span>Epic</td><td class="key">epic</td><td><span class="usage">102 issues</span></td><td class="kebab">⋯</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <!-- ================= FIELDS ================= -->
+  <main class="main screen" id="s-fields">
+    <div class="crumb">Administration / Fields</div>
+    <div class="pagehead">
+      <div>
+        <h1>Fields</h1>
+        <p class="sub">Library of custom fields. Field <em>sets</em> pick which fields a project shows, their order, and whether they're required.</p>
+      </div>
+      <button class="btn">+ New field</button>
+    </div>
+    <div class="split">
+      <div class="left">
+        <table>
+          <thead><tr><th>Name</th><th>Key</th><th>Type</th><th>Used in</th><th></th></tr></thead>
+          <tbody>
+            <tr style="outline:1.5px solid var(--brand);outline-offset:-1.5px"><td>Story points</td><td class="key">story_points</td><td><span class="typechip">NUMBER</span></td><td><span class="usage">2 sets · 8 projects</span></td><td class="kebab">⋯</td></tr>
+            <tr><td>Severity</td><td class="key">severity</td><td><span class="typechip">SELECT</span></td><td><span class="usage">1 set · 6 projects</span></td><td class="kebab">⋯</td></tr>
+            <tr><td>Environment</td><td class="key">environment</td><td><span class="typechip">MULTI_SELECT</span></td><td><span class="usage">1 set · 6 projects</span></td><td class="kebab">⋯</td></tr>
+            <tr><td>Customer link</td><td class="key">customer_link</td><td><span class="typechip">URL</span></td><td><span class="usage zero">not used</span></td><td class="kebab">⋯</td></tr>
+            <tr><td>QA owner</td><td class="key">qa_owner</td><td><span class="typechip">USER</span></td><td><span class="usage">1 set · 6 projects</span></td><td class="kebab">⋯</td></tr>
+          </tbody>
+        </table>
+        <p class="note">Типы: TEXT · TEXTAREA · NUMBER · DATE · SELECT · MULTI_SELECT · USER · CHECKBOX · URL. Выбранное поле редактируется в панели справа.</p>
+      </div>
+      <aside class="editor">
+        <h4>Edit field</h4>
+        <label>Name</label><input value="Story points">
+        <label>Key <span style="color:var(--muted);font-weight:400">(mono, immutable after create)</span></label><input value="story_points" disabled style="background:var(--surface2)">
+        <label>Type</label><select><option>NUMBER</option><option>TEXT</option><option>SELECT</option></select>
+        <label>Constraints</label>
+        <div class="opt"><span class="key">min</span><input value="0" style="width:70px"><span class="key">max</span><input value="100" style="width:70px"></div>
+        <label>Description (shown as a hint in the issue form)</label>
+        <textarea rows="2">Fibonacci estimate agreed at planning.</textarea>
+        <div class="footer"><button class="btn">Save</button><button class="btn ghost">Cancel</button></div>
+      </aside>
+    </div>
+  </main>
+
+  <!-- ================= WORKFLOWS ================= -->
+  <main class="main screen" id="s-workflows">
+    <div class="crumb">Administration / Workflows</div>
+    <div class="pagehead">
+      <div>
+        <h1>Workflows</h1>
+        <p class="sub">A workflow = which statuses a project uses (board column order) + allowed transitions between them.</p>
+      </div>
+      <button class="btn">+ New workflow</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Statuses</th><th>Used in</th><th></th></tr></thead>
+      <tbody>
+        <tr><td><b>Default workflow</b> <span class="key">system</span></td>
+            <td><span class="flow"><span class="chip">To Do</span><span class="arr">→</span><span class="chip">In Progress</span><span class="arr">→</span><span class="chip">Done</span></span></td>
+            <td><span class="usage">8 projects</span></td><td class="kebab">⋯</td></tr>
+        <tr style="outline:1.5px solid var(--brand);outline-offset:-1.5px"><td><b>Dev workflow</b></td>
+            <td><span class="flow"><span class="chip">To Do</span><span class="arr">→</span><span class="chip">In Progress</span><span class="arr">→</span><span class="chip">In Review</span><span class="arr">→</span><span class="chip">Done</span></span></td>
+            <td><span class="usage">6 projects</span></td><td class="kebab">⋯</td></tr>
+      </tbody>
+    </table>
+
+    <div class="panelbox">
+      <h4>Dev workflow — statuses <span style="color:var(--muted);font-weight:400">(drag = board column order)</span></h4>
+      <div class="flow" style="margin-bottom:6px">
+        <span class="chip">⠿ To Do</span><span class="chip">⠿ In Progress</span><span class="chip">⠿ In Review</span><span class="chip">⠿ Done</span>
+        <span class="addrow" style="padding-top:0">+ Add status from catalog</span>
+      </div>
+    </div>
+    <div class="panelbox">
+      <h4>Dev workflow — transition rules <span style="color:var(--muted);font-weight:400">(empty source = any move allowed from it)</span></h4>
+      <div class="trans"><span class="chip">Any status</span><span class="arr">→</span><span class="chip">In Progress</span><span class="x">✕</span></div>
+      <div class="trans"><span class="chip">In Progress</span><span class="arr">→</span><span class="chip">In Review</span><span class="x">✕</span></div>
+      <div class="trans"><span class="chip">In Review</span><span class="arr">→</span><span class="chip">Done</span><span class="x">✕</span></div>
+      <div class="trans"><span class="chip">In Review</span><span class="arr">→</span><span class="chip">In Progress</span><span class="x">✕</span></div>
+      <span class="addrow">+ Add transition</span>
+      <p class="note" style="margin-top:10px">⚠ Изменения затронут <b>6 проектов</b> — предупреждение показывается до сохранения (в Jira этого нет).</p>
+    </div>
+  </main>
+
+  <!-- ================= PROJECTS (matrix) ================= -->
+  <main class="main screen" id="s-projects">
+    <div class="crumb">Administration / Projects</div>
+    <div class="pagehead">
+      <div>
+        <h1>Project configuration</h1>
+        <p class="sub">Every project × its workflow, priority set and field set — assign everything from one screen (instead of four scheme pages in Jira).</p>
+      </div>
+      <span><select><option>All workspaces</option><option>Acme Inc</option><option>Demo Workspace</option></select></span>
+    </div>
+    <table>
+      <thead><tr><th>Project</th><th>Workspace</th><th>Workflow</th><th>Priorities</th><th>Issue types</th><th>Fields</th></tr></thead>
+      <tbody>
+        <tr><td><span class="key">CORE</span> Platform Core</td><td style="color:var(--text2)">Acme Inc</td>
+            <td><select><option>Dev workflow</option><option>Default workflow</option></select></td>
+            <td><select><option>Default priorities</option><option>Support (SLA)</option></select></td>
+            <td><select><option>All types</option><option>Dev types</option></select></td>
+            <td><select><option>Engineering fields</option><option>— none —</option></select></td></tr>
+        <tr><td><span class="key">SUP</span> Customer Support</td><td style="color:var(--text2)">Acme Inc</td>
+            <td><select><option>Default workflow</option><option>Dev workflow</option></select></td>
+            <td><select><option>Support (SLA)</option><option>Default priorities</option></select></td>
+            <td><select><option>Support types</option><option>All types</option></select></td>
+            <td><select><option>Support fields</option><option>— none —</option></select></td></tr>
+        <tr><td><span class="key">DEMO</span> Demo Project</td><td style="color:var(--text2)">Demo Workspace</td>
+            <td><select><option>Default workflow</option><option>Dev workflow</option></select></td>
+            <td><select><option>Default priorities</option><option>Support (SLA)</option></select></td>
+            <td><select><option>All types</option><option>Dev types</option></select></td>
+            <td><select><option>— none —</option><option>Engineering fields</option></select></td></tr>
+      </tbody>
+    </table>
+    <p class="note">Изменение применяется сразу к строке (PATCH bindings), с тостом-подтверждением и Undo. «— none —» / «All types» = системный набор по умолчанию. Колонки Issue types и Fields становятся рабочими в M3 и M2 соответственно; до этого показывают дефолт.</p>
+  </main>
+</div>
+
+<!-- impact dialog -->
+<div class="overlay" id="impact" onclick="this.classList.remove('open')">
+  <div class="dialog" onclick="event.stopPropagation()">
+    <h4>Delete status “In Review”?</h4>
+    <div class="impact">
+      Used in <b>1 workflow</b> (Dev workflow) assigned to <b>6 projects</b>.<br>
+      <span class="mono">216 issues</span> currently have this status and must be remapped.
+    </div>
+    <label>Move affected issues to</label>
+    <select><option>In Progress</option><option>To Do</option><option>Done</option></select>
+    <label style="margin-top:12px"><input type="checkbox" checked style="width:auto;margin-right:6px">Also remove its transitions from Dev workflow</label>
+    <div class="footer">
+      <button class="btn ghost" onclick="document.getElementById('impact').classList.remove('open')">Cancel</button>
+      <button class="btn ghost">Archive instead</button>
+      <button class="btn danger">Delete &amp; remap 216 issues</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.side a[data-s]').forEach(a => a.addEventListener('click', () => {
+    document.querySelectorAll('.side a[data-s]').forEach(x => x.classList.remove('active'));
+    document.querySelectorAll('.screen').forEach(x => x.classList.remove('active'));
+    a.classList.add('active');
+    document.getElementById('s-' + a.dataset.s).classList.add('active');
+  }));
+</script>
+</body>
+</html>

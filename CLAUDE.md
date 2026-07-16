@@ -27,6 +27,38 @@ Stack: Spring Boot 4.1.0 / Java 21, Spring Web MVC, Spring Data JPA, Spring Secu
 
 Frontend (`src/main/frontend/`): React 19, TypeScript, Vite 6, Tailwind v4 (`@tailwindcss/vite`), React Router v7, TanStack Query v5, Zustand v5, lucide-react.
 
+## Admin console & global taxonomy (M1, 2026-07-15)
+
+**System role**: `users.system_role` (`ADMIN`/`USER`, enum `SystemRole`, extensible). `User.getAuthorities()` → `ROLE_<role>`; all of `/api/admin/**` is guarded by one `hasRole("ADMIN")` line in SecurityConfig. The `seed.admin` account is promoted to ADMIN by `DataSeeder` (idempotent). `/auth/me` returns `systemRole`; the SPA shows "System administration" in the user menu and guards `/admin/**` client-side.
+
+**Taxonomy model** (V6, replaces per-workspace copies): global catalog — `statuses`, `priorities` (NEW entity, was the `IssuePriority` Java enum; `issues.priority_id` FK), `issue_types` — each with `scope_workspace_id NULL` (=global; column reserved for future workspace-admin delegation) and `archived_at`. Reusable bindings: `workflows` (+`workflow_statuses` position = board column order, +`workflow_transitions`, `from_status_id NULL` = "from any") and `priority_sets` (+items with `is_default`). `projects.workflow_id`/`priority_set_id` NULL = the `is_system_default` row. `ProjectConfigService` is the ONLY place that resolves effective config (statuses/transitions/priorities/default/validation) — issue paths and the public endpoint go through it. Transition semantics: a source status with no source-specific rules is open; with rules, allowed = its targets + wildcard targets (wildcards grant, never restrict).
+
+**API**: public `GET /api/workspaces/{ws}/projects/{p}/config` (effective taxonomy — the SPA renders board/forms exclusively from it); admin CRUD under `/api/admin/{statuses,priorities,issue-types}` (+`/archive`,`/unarchive`, `DELETE ?replaceWithId=` remaps issues), `/api/admin/{workflows,priority-sets}` (upserts replace children wholesale), `/api/admin/projects` matrix + `PATCH /{id}/bindings`. Integrity guards (409): delete-in-use without replacement, empty workflow/set, workflow change/status removal that would strand issues in statuses invisible to the board. Removed: workspace-scoped `/statuses`, `/issue-types`, `/status-transitions`; `priority` filter/fields became `priorityId`, `IssueResponse.priority` is now an object (id/name/color/icon/position). Workspace creation no longer seeds taxonomy.
+
+**Frontend**: `/admin/**` (lazy `pages/admin/AdminArea.tsx` — own light sidebar under the global top bar; pages: Statuses, Priorities+sets, Issue types, Workflows, Projects matrix; shared bits in `pages/admin/common.tsx` incl. usage chips and the delete-with-remap dialog). Priority icons = lucide names in the catalog `icon` column, rendered by `PriorityIcon`/`PriorityBadge` (`components/ui.tsx`).
+
+**Gotchas**: don't use `CHAR(n)` in migrations — Hibernate validate fails on bpchar (bit us again in V6; V2 had fixed the same thing). Boot 4: no auto-configured `ObjectMapper` bean; `AutoConfigureMockMvc` lives in `org.springframework.boot.webmvc.test.autoconfigure`. Frontend: **never use Tailwind `max-w-2xs…max-w-3xl`** — our `@theme --spacing-{2xs..3xl}` scale shadows them in Tailwind v4, so `max-w-xl` resolves to `var(--spacing-xl)` = **32px** (word-per-line paragraphs); use inline `maxWidth`. React Router: inside a splat route (`/admin/*`) relative `<Link>`/`<NavLink>` paths resolve AFTER the splat — use absolute paths.
+
+## Custom fields (M2, 2026-07-16)
+
+**Model** (V7, additive — no data reset): `field_defs` (global catalog; `key` snake_case + `type` immutable after creation — stored values depend on them; `config` JSONB: `options[{id,label,color}]` for selects, `min`/`max` for numbers; `archived_at`), `field_sets` + `field_set_items` (position = display order, `required`, `show_on_create`; required forces show_on_create — enforced in service AND UI), `projects.field_set_id` (NULL = the `is_system_default` "No fields" empty set), `issue_field_values` (issue×field UNIQUE, `value` JSONB). V7 seeds sample fields (story_points/severity/environment) + an "Engineering fields" set, bound to nothing.
+
+**Semantics**: value shapes per `FieldType` javadoc (TEXT/TEXTAREA/URL string, NUMBER number, DATE "YYYY-MM-DD", SELECT option id, MULTI_SELECT id[], USER member UUID, CHECKBOX bool). `issue.FieldValueService` is the ONLY writer of `issue_field_values` (`applyValues` — partial map, JSON null clears, 422 on unknown/archived field, required can't be cleared and must be present on create when shown there; changes go to issue history with the field's display *name* and human-readable values). No remap on delete: a field with values 409s unless `?dropValues=true`; archive is the safe path. Select option ids referenced by stored values — removing an option leaves old values rendering the raw id (UI warns).
+
+**API**: admin `/api/admin/fields` (+`/archive|unarchive`, `DELETE ?dropValues=`) and `/api/admin/field-sets` (upsert replaces items wholesale); `PATCH /admin/projects/{id}/bindings` now takes `fieldSetId` too. Issue payloads: `fields` map (create/update) keyed by field id; `IssueResponse.fields` = `[{fieldId, value}]` (filled only); project `config` response carries `fields` (display order + required/showOnCreate).
+
+**Frontend**: `pages/admin/AdminFieldsPage.tsx` (catalog + sets, custom drop-values delete dialog instead of the remap one); Projects matrix got a third select. Shared renderers in `components/fields.tsx` — `FieldInput` (editor per type; USER options = workspace members) + `FieldValueDisplay` (compact read-only) + `FIELD_TYPE_LABELS`. CreateIssueModal renders `showOnCreate` fields and blocks submit on missing required; IssueSidePanel shows filled fields in details and all set fields in edit (diff-only partial `fields` on save, null to clear); Backlog appends one column per set field.
+
+## Admin polish & issue type sets (M3, 2026-07-16)
+
+**Issue type sets** (V8, additive): same one-layer set model as priorities/fields — `issue_type_sets` + `issue_type_set_items` (position = display order), `projects.issue_type_set_id` (NULL = the seeded "All types" `is_system_default` set, which preserves pre-M3 behavior; new catalog types are NOT auto-added to it). Semantics differ from workflows deliberately: a type set restricts only issue **creation and type changes** (`ProjectConfigService.requireTypeInSet` in `IssueService` create/update) — existing issues keep a type that left the set, so binding/set changes need no stranded-issues guard. Config endpoint types now come from `ProjectConfigService.types(project)` (set order, archived filtered). Catalog delete guards: type in use needs remap, no set may be left empty, ≥1 catalog type must remain. API: `/api/admin/issue-type-sets` (upsert `{name, typeIds}` replaces items wholesale), `issueTypeSetId` in bindings.
+
+**Usage detail**: `GET /api/admin/{statuses|priorities|issue-types|fields}/{id}/usage` → `UsageDetailResponse` (names of containing workflows/sets + deduped projects reached through them — incl. unbound projects when a system default is involved — + issue count). Frontend: `UsageChip` accepts `fetchDetail` and expands into a lazy-loading popover.
+
+**Matrix bulk ops** (frontend-only): row checkboxes + bulk bar in `AdminProjectsPage` with a per-dimension "keep / system default / named set" choice; applies via parallel per-project `PATCH /bindings` (`Promise.allSettled`, partial-failure message). `adminProjects.updateBindings` now takes a full `ProjectBindings` object.
+
+**Polish**: `ImpactBanner` ("used by N projects — changes apply immediately") in workflow/priority-set/field-set/type-set editors; `ArchivedToggle` on all four catalog pages (archived rows hidden by default, toggle appears only when something is archived).
+
 ## Auth rate limiting (2026-07-14)
 
 `common.ratelimit` — two in-memory mechanisms (single-node; move to Redis if Cloud scales out), both configurable via `app.rate-limit.*` (env `RATE_LIMIT_*`, `enabled` default `true`): **per-IP fixed window** (default 15 req/min) across login/register/verify-email/resend-verification/forgot-password/reset-password, enforced by `AuthRateLimitFilter` — registered via `FilterRegistrationBean` with explicit URL patterns (NOT `@Component`, see filter gotcha) at highest precedence, POST only (`/refresh`+`/logout` excluded: cookie-driven, called on every page load); and **per-account exponential login backoff** (5 fails → 30s, doubling, cap 15 min; success resets) in `AuthService.login`, keyed by submitted email even for unknown accounts (no enumeration via the limiter). Both raise `RateLimitedException` (429 + `Retry-After`, dedicated `GlobalExceptionHandler` handler). Client IP = rightmost `X-Forwarded-For` entry (Caddy ≥2.5 discards client-supplied XFF; only Caddy is exposed on prod) else `remoteAddr`. Counter eviction via `@Scheduled` (`@EnableScheduling` on the app class). Tests: `AuthRateLimitTest` (Boot 4 note: `AutoConfigureMockMvc` lives in `org.springframework.boot.webmvc.test.autoconfigure`).
@@ -117,18 +149,10 @@ GET    /api/workspaces/{wsId}/projects/{id}/members        # list members
 POST   /api/workspaces/{wsId}/projects/{id}/members        # add member (MANAGER)
 DELETE /api/workspaces/{wsId}/projects/{id}/members/{uid}  # remove member (MANAGER)
 
-GET    /api/workspaces/{wsId}/issue-types                  # list (ordered by position)
-POST   /api/workspaces/{wsId}/issue-types                  # create
-PATCH  /api/workspaces/{wsId}/issue-types/{id}             # update
-DELETE /api/workspaces/{wsId}/issue-types/{id}             # delete
-
-GET    /api/workspaces/{wsId}/statuses                     # list (ordered by position)
-POST   /api/workspaces/{wsId}/statuses                     # create
-PATCH  /api/workspaces/{wsId}/statuses/{id}                # update
-DELETE /api/workspaces/{wsId}/statuses/{id}                # delete
+GET    /api/workspaces/{wsId}/projects/{pId}/config        # effective taxonomy (statuses/transitions/priorities/types) — see Admin console section
 
 POST   /api/workspaces/{wsId}/projects/{pId}/issues                        # create
-GET    /api/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priority=  # list + filter
+GET    /api/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=  # list + filter
 GET    /api/workspaces/{wsId}/projects/{pId}/issues/{number}               # get by project-scoped number
 PATCH  /api/workspaces/{wsId}/projects/{pId}/issues/{number}               # update
 DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{number}               # delete (MANAGER)
@@ -144,7 +168,7 @@ GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # dow
 DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # delete (uploader or project MANAGER)
 ```
 
-Workspace creation auto-seeds 4 issue types (Bug, Task, Story, Epic) and 3 statuses (To Do/TODO, In Progress/IN_PROGRESS, Done/DONE).
+Since M1 the taxonomy is NOT seeded per workspace — it lives in the global catalog (V6 seeds Bug/Task/Story/Epic, To Do/In Progress/Done, Urgent…None, "Default workflow", "Default priorities") and reaches projects through bindings; see the Admin console section.
 
 ## Gotchas — don't re-debug these
 

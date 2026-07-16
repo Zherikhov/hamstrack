@@ -1,9 +1,10 @@
 package com.hamstrack.issue.dto;
 
-import com.hamstrack.issue.entity.IssuePriority;
+import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.Size;
 
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.UUID;
 
 public record UpdateIssueRequest(
@@ -11,9 +12,11 @@ public record UpdateIssueRequest(
         String description,
         UUID typeId,
         UUID statusId,
-        IssuePriority priority,
+        UUID priorityId,
         UUID assigneeId,
         LocalDate dueDate,
+        // Partial: only listed field ids change; JSON null clears a value
+        Map<UUID, JsonNode> fields,
         // Optimistic lock check — optional so clients that don't send it keep working
         Integer version
 ) {}

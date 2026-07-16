@@ -41,9 +41,9 @@ public class Issue extends BaseEntity {
     @JoinColumn(name = "status_id", nullable = false)
     private Status status;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 20)
-    private IssuePriority priority = IssuePriority.NONE;
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "priority_id", nullable = false)
+    private Priority priority;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "assignee_id")

@@ -20,6 +20,16 @@ import CookiesPage from './pages/legal/CookiesPage'
 
 // Lazy: Swagger UI is heavy and must not weigh down the main app bundle
 const DocsPage = lazy(() => import('./pages/docs/DocsPage'))
+// Lazy: the admin console is only ever loaded by system admins
+const AdminArea = lazy(() => import('./pages/admin/AdminArea'))
+
+function LazyFallback() {
+  return (
+    <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
+      <span className="mono" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
+    </div>
+  )
+}
 
 function AuthInit({ children }: { children: React.ReactNode }) {
   const { accessToken, setToken, setUser, clear, setInitialized, initialized } = useAuthStore()
@@ -107,22 +117,10 @@ export default function App() {
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiesPage />} />
-          <Route
-            path="/docs"
-            element={
-              <Suspense
-                fallback={
-                  <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
-                    <span className="mono" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
-                  </div>
-                }
-              >
-                <DocsPage />
-              </Suspense>
-            }
-          />
+          <Route path="/docs" element={<Suspense fallback={<LazyFallback />}><DocsPage /></Suspense>} />
           <Route path="/" element={<RootRoute />} />
           <Route element={<RequireAuth />}>
+            <Route path="/admin/*" element={<Suspense fallback={<LazyFallback />}><AdminArea /></Suspense>} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/w/:wsId" element={<AppShell />}>
               <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
