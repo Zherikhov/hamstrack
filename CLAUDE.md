@@ -130,7 +130,7 @@ Schema managed entirely by Flyway; `spring.jpa.hibernate.ddl-auto=validate` only
 
 **PostgreSQL ENUMs:** Do NOT use `CREATE TYPE ... AS ENUM`. Hibernate 7 + PostgreSQL ENUM types cause JDBC type cast errors on INSERT (`column is of type X but expression is of type character varying`). Use `VARCHAR(N)` columns instead — enum values are validated at the application layer by Java enums.
 
-**Jackson:** Spring Boot 4 does not include Jackson in `spring-boot-starter-web` by default. Add `jackson-databind` explicitly to `pom.xml`.
+**Jackson:** Spring Boot 4 does not include Jackson in `spring-boot-starter-web` by default. Add `jackson-databind` explicitly to `pom.xml`. **Jackson 2 vs 3 split:** Spring MVC now (de)serializes with Jackson 3 (`tools.jackson.*`), but Hibernate's JSON mapper and all our JSONB-backed fields use Jackson 2's `com.fasterxml.jackson.databind.JsonNode`. Jackson 3 has no built-in support for a Jackson 2 tree node, so any request/response carrying one (custom field values, field-def `config`) fails: read → `InvalidDefinitionException: Cannot construct instance of JsonNode (no Creators)` (HTTP 500/400), write → getter-noise dump `{"array":false,...}`. Bridged by `common.json.Jackson2NodeModule` — a Jackson 3 `JacksonModule` bean (auto-registered by Boot 4's `JacksonAutoConfiguration`, which collects all `tools.jackson.databind.JacksonModule` beans into the MVC `JsonMapper`) that round-trips Jackson 2 nodes via raw JSON. Keep entity/DTO JSONB fields on Jackson 2 `JsonNode` (Hibernate reads/writes those); the module handles the web boundary. Don't mix in `tools.jackson` node types on entities without also switching Hibernate's format mapper.
 
 ## Design System
 
