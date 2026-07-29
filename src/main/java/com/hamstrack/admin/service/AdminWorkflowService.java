@@ -78,6 +78,10 @@ public class AdminWorkflowService {
         workflowRepository.save(wf);
         workflowTransitionRepository.deleteAllByWorkflow(wf);
         workflowStatusRepository.deleteAllByWorkflow(wf);
+        // Force the DELETEs to hit the DB before we re-insert. Hibernate otherwise
+        // orders INSERTs ahead of DELETEs in a single flush, so re-adding a status
+        // that was already present collides with UNIQUE(workflow_id, status_id).
+        workflowStatusRepository.flush();
         applyStatusesAndTransitions(wf, req);
         return toResponse(wf);
     }

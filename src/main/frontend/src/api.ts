@@ -66,6 +66,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       const body = await res.json()
       detail = body.detail ?? body.message ?? body.title ?? detail
     } catch { /* ignore */ }
+    // Never surface an empty message — statusText is blank over HTTP/2, which
+    // would render as a silent, invisible error in the UI.
+    if (!detail) detail = `Request failed (${res.status})`
     throw new ApiResponseError(res.status, detail)
   }
 

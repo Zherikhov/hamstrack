@@ -20,10 +20,11 @@ One codebase ships in two deployment models:
 
 - **Workspaces** — the tenancy boundary; invite members by email with role-based access (OWNER / ADMIN / MEMBER)
 - **Projects** — per-workspace, with keys (`DEMO-42`), archiving and project-level roles (MANAGER / MEMBER / VIEWER)
-- **Issues** — types (Bug, Task, Story, Epic), statuses, priorities, assignees, due dates, sub-task links, change history and optimistic locking
+- **Issues** — issue types, statuses, priorities and custom fields, plus assignees, due dates, sub-task links, change history and optimistic locking
 - **Kanban board** — drag-and-drop between status columns, workflow-transition rules enforced on drop
 - **Backlog** — flat table of all unfinished work
 - **Comments & attachments** — with @mentions, soft delete and per-issue file uploads
+- **Admin console** — a system administrator manages a global catalog of statuses, priorities, issue types and custom fields, bundles them into reusable workflows and sets, and assigns those to projects from a bulk-editable matrix (`/admin`)
 - **Notifications** — in-app bell plus live updates over Server-Sent Events; email for verification, invites and password recovery
 - **Auth** — email registration with verification, JWT access tokens, rotating refresh-token cookie, password recovery
 
@@ -101,7 +102,7 @@ Open `http://localhost:8080` (or your `APP_BASE_URL` behind a TLS-terminating re
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
 | `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
-| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create an admin account on startup |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) |
 
 ## Documentation & REST API
 

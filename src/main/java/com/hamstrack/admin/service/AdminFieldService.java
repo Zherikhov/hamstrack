@@ -136,6 +136,9 @@ public class AdminFieldService {
         set.setName(req.name());
         fieldSetRepository.save(set);
         fieldSetItemRepository.deleteAllBySet(set);
+        // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
+        // DELETEs in one flush, colliding with UNIQUE(set_id, field_id).
+        fieldSetItemRepository.flush();
         applyItems(set, req);
         return toSetResponse(set);
     }

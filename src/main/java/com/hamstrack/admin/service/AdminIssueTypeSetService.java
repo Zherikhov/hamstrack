@@ -64,6 +64,9 @@ public class AdminIssueTypeSetService {
         set.setName(req.name());
         setRepository.save(set);
         itemRepository.deleteAllBySet(set);
+        // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
+        // DELETEs in one flush, colliding with UNIQUE(set_id, type_id).
+        itemRepository.flush();
         applyItems(set, req);
         return toResponse(set);
     }

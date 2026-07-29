@@ -62,6 +62,9 @@ public class AdminPrioritySetService {
         set.setName(req.name());
         prioritySetRepository.save(set);
         prioritySetItemRepository.deleteAllBySet(set);
+        // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
+        // DELETEs in one flush, colliding with UNIQUE(set_id, priority_id).
+        prioritySetItemRepository.flush();
         applyItems(set, req);
         return toResponse(set);
     }
