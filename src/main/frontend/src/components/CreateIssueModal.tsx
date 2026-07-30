@@ -127,7 +127,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
   const overlayStyle: React.CSSProperties = {
     position: 'fixed', inset: 0, zIndex: 50,
     background: 'rgba(28,27,25,0.55)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    // Padding keeps the panel off the screen edges; the panel's max-height:100%
+    // then resolves against this padded area, so it never overflows off-screen
+    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12,
     backdropFilter: 'blur(2px)',
   }
 
@@ -136,6 +138,12 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
     borderRadius: 'var(--radius-lg)',
     border: '1px solid var(--color-border)',
     width: 480,
+    // Cap to the (padded) viewport so short screens scroll the body instead of
+    // pushing the form off-screen; header and footer stay pinned
+    maxWidth: '100%',
+    maxHeight: '100%',
+    display: 'flex',
+    flexDirection: 'column',
     boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
   }
 
@@ -143,7 +151,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
     <div style={overlayStyle} onClick={onClose}>
       <div style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
-          className="flex items-center justify-between px-5 py-4 border-b"
+          className="flex items-center justify-between px-5 py-4 border-b flex-shrink-0"
           style={{ borderColor: 'var(--color-border)' }}
         >
           <span className="font-semibold text-sm">New Issue</span>
@@ -152,7 +160,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
           </button>
         </div>
 
-        <form onSubmit={submit} className="p-5 flex flex-col gap-4">
+        <form onSubmit={submit} className="flex flex-col min-h-0 flex-1">
+          <div className="flex-1 min-h-0 overflow-y-auto p-5 flex flex-col gap-4">
           {!wsId && (
             <Select label="Workspace" value={effectiveWsId} onChange={e => handleWorkspaceChange(e.target.value)}>
               {workspaces.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
@@ -207,8 +216,10 @@ export default function CreateIssueModal({ wsId, defaultProjectId, onClose }: Pr
           {error && (
             <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>
           )}
+          </div>
 
-          <div className="flex justify-end gap-2 pt-1">
+          <div className="flex justify-end gap-2 px-5 py-4 border-t flex-shrink-0"
+               style={{ borderColor: 'var(--color-border)' }}>
             <Button variant="ghost" type="button" onClick={onClose}>Cancel</Button>
             <Button
               variant="primary"
