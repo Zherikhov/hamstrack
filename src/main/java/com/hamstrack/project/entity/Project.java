@@ -36,7 +36,12 @@ public class Project extends BaseEntity {
     @Column(name = "archived_at")
     private Instant archivedAt;
 
-    @Column(name = "issue_seq", nullable = false)
+    // Project-scoped issue counter. Maintained ONLY by the atomic native
+    // UPDATE ... RETURNING in ProjectRepository.incrementAndGetIssueSeq —
+    // updatable=false keeps JPA from ever writing it, so a stale managed
+    // Project (whose in-memory value lags the native increments) can't clobber
+    // the DB counter on flush and desync issue numbers (bit demo seeding).
+    @Column(name = "issue_seq", nullable = false, updatable = false)
     private long issueSeq = 0;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
