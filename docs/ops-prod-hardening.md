@@ -1,5 +1,12 @@
 # Prod hardening runbook
 
+> **Audience: the Hamstrack owner only.** This documents how the *official*
+> hosted deployment at **hamstrack.com** (AWS EC2 + SSM, Cloudflare, S3) is set
+> up and hardened — it is a reference specific to that infrastructure, **not a
+> requirement for self-hosting**. If you're running your own instance (DC), see
+> the [Self-hosting guide](self-hosting.md); you do not need any of the
+> AWS/Cloudflare steps below.
+
 Remaining PLAN.md Phase 7 backlog items that require AWS console / Cloudflare
 dashboard access (no AWS credentials exist on the dev machine or the EC2
 instance — these steps must be run by an account admin, e.g. in

@@ -78,7 +78,8 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)" >> "$GITHUB_OUTPUT"
+            V=$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)
+            echo "version=${V#v}" >> "$GITHUB_OUTPUT"   # strip leading v for a clean dev version
           fi
 
       - name: Log in to GitHub Container Registry
