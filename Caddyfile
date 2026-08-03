@@ -1,3 +1,5 @@
-hamstrack.com, www.hamstrack.com {
+# SITE_ADDRESS is injected from .env (see .env.prod.example). Its host(s) must
+# match the host in APP_BASE_URL. Example: "example.com, www.example.com".
+{$SITE_ADDRESS} {
     reverse_proxy app:8080
 }

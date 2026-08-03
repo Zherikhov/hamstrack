@@ -1,28 +1,24 @@
 services:
   app:
     image: ghcr.io/${GITHUB_OWNER}/hamstrack:latest
+    # All operator-facing config comes from .env — see .env.prod.example for the
+    # full list. Defaults live in the app's application-{cloud,dc}.properties.
+    env_file: .env
     environment:
-      SPRING_PROFILES_ACTIVE: cloud
+      # Internal / switch values — set explicitly so they always win over .env.
+      # Deployment model: cloud (S3 storage default) or dc (local disk default).
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-cloud}
+      # DB host is the compose service name; never overridable from .env.
       DB_URL: jdbc:postgresql://postgres:5432/hamstrack
-      DB_USERNAME: ${DB_USERNAME}
-      DB_PASSWORD: ${DB_PASSWORD}
-      JWT_SECRET: ${JWT_SECRET}
-      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
-      SEED_ADMIN_DISPLAY_NAME: ${SEED_ADMIN_DISPLAY_NAME:-Admin}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD}
-      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
-      MAIL_HOST: ${MAIL_HOST:-localhost}
-      MAIL_PORT: ${MAIL_PORT:-1025}
-      MAIL_USERNAME: ${MAIL_USERNAME:-}
-      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
-      MAIL_SMTP_AUTH: ${MAIL_SMTP_AUTH:-false}
-      MAIL_STARTTLS: ${MAIL_STARTTLS:-false}
-      MAIL_FROM: ${MAIL_FROM:-noreply@hamstrack.com}
-      STORAGE_TYPE: ${STORAGE_TYPE:-s3}
-      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-}
-      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-}
     volumes:
-      - attachments_data:/app/data/attachments   # used only when STORAGE_TYPE=local
+      - attachments_data:/app/data/attachments   # used only when storage type = local
+    healthcheck:
+      # Public, unauthenticated endpoint; wget ships with the alpine JRE image.
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/meta"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s   # give Spring Boot time to start before counting failures
     depends_on:
       postgres:
         condition: service_healthy
@@ -32,8 +28,8 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: hamstrack
-      POSTGRES_USER: ${DB_USERNAME}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USERNAME:?set DB_USERNAME in .env}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -45,6 +41,8 @@ services:
 
   caddy:
     image: caddy:2-alpine
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
     ports:
       - "80:80"
       - "443:443"
@@ -54,7 +52,8 @@ services:
       - caddy_data:/data        # stores certificates (persisted across restarts)
       - caddy_config:/config
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

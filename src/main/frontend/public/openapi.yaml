@@ -33,10 +33,10 @@ info:
     url: https://www.apache.org/licenses/LICENSE-2.0
 
 servers:
-  - url: https://hamstrack.com/api
-    description: Cloud
   - url: /api
     description: This instance (Cloud or self-hosted DC)
+  - url: https://hamstrack.com/api
+    description: Hamstrack Cloud
 
 tags:
   - name: Meta

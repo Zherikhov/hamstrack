@@ -20,7 +20,7 @@ services:
     image: mailhog/mailhog:latest
     container_name: hamstrack-mailhog
     ports:
-      - "1025:1025"   # SMTP — настроить в Spring как spring.mail.host=localhost spring.mail.port=1025
+      - "1025:1025"   # SMTP — configure in Spring as spring.mail.host=localhost and spring.mail.port=1025
       - "8025:8025"   # Web UI — http://localhost:8025
 
 volumes:

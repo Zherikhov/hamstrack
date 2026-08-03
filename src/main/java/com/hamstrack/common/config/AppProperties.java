@@ -6,7 +6,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
 @ConfigurationProperties(prefix = "app")
 public record AppProperties(
         String baseUrl,
-        @DefaultValue("noreply@hamstrack.com") String mailFrom,
+        @DefaultValue("noreply@example.com") String mailFrom,
         Registration registration,
         Legal legal,
         Demo demo

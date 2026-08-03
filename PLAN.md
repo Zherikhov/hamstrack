@@ -45,6 +45,7 @@ Differences between modes are config/profile-gated, never forked code.
 - [x] Project members — add, remove, list; MANAGER-only mutations
 - [x] Issue types — workspace-scoped CRUD, ordered by position; seeded on workspace create (Bug, Task, Story, Epic)
 - [x] Statuses — workspace-scoped CRUD with `StatusCategory` (TODO / IN_PROGRESS / DONE), ordered by position; seeded on workspace create
+  - > **Superseded by M1 (global taxonomy catalog):** issue types and statuses are no longer workspace-scoped or seeded on workspace create — they live in a global catalog reached through project bindings. `priority` below became `priorityId`. See CLAUDE.md → "Admin console & global taxonomy".
 - [x] Issues — CRUD, project-scoped sequence numbers, priorities, assignee, due date, optimistic locking (`@Version`)
 - [x] Issue filters — by `statusId`, `assigneeId`, `priority`
 - [x] Comments — create, list (soft-deleted excluded), update (author only), soft delete (author only)
@@ -105,10 +106,10 @@ The key differentiator for customizability — similar to Jira's ScriptRunner Fr
 
 ### Prod hardening backlog (deployed 2026-07-11: https://hamstrack.com, EC2 + CD pipeline)
 
-- [x] **SMTP on prod** — done 2026-07-11 via Resend (domain verified with MX/SPF/DKIM records on Cloudflare, sender `noreply@hamstrack.com`). `MAIL_*` vars flow through `docker-compose.prod.yml` → server `.env`; SMTP creds: host `smtp.resend.com:587`, username `resend`, password = API key. Free tier: 3000 emails/mo — revisit (SES?) if volume grows.
-- [x] **Switch attachments to S3** — done 2026-07-14: bucket `hamstrack-attachments-prod` (private, eu-north-1), instance role `hamstrack-ec2` (S3 policy + `AmazonSSMManagedInstanceCore`) on `i-019fe684b25ad831f`, IMDS hop limit was already 2, `.env` → `STORAGE_TYPE=s3`; verified e2e (upload/download через прод-API, объект в бакете). Local volume was empty — no migration needed.
+- [x] **SMTP on prod** — done 2026-07-11 via Resend (domain verified with MX/SPF/DKIM records on Cloudflare, sender `noreply@<domain>`). `MAIL_*` vars flow through `docker-compose.prod.yml` → server `.env`; SMTP creds: host `smtp.resend.com:587`, username `resend`, password = API key. Free tier: 3000 emails/mo — revisit (SES?) if volume grows.
+- [x] **Switch attachments to S3** — done 2026-07-14: bucket `<BUCKET>` (private, eu-north-1), instance role `hamstrack-ec2` (S3 policy + `AmazonSSMManagedInstanceCore`) on `<INSTANCE_ID>`, IMDS hop limit was already 2, `.env` → `STORAGE_TYPE=s3`; verified e2e (upload/download через прод-API, объект в бакете). Local volume was empty — no migration needed.
 - [x] **Cloudflare proxy (orange cloud)** — done 2026-07-14: SSL mode Full (strict), both DNS records Proxied, Caddyfile got a global `servers { trusted_proxies static <CF ranges> }` block and `reverse_proxy` now sends `header_up X-Forwarded-For {client_ip}` (single resolved real client IP — the auth rate limiter keys on the rightmost XFF entry). Verified: site serves via CF (CF-RAY), Caddy logs show `client_ip` = real visitor while `remote_ip` = CF edge, and a burst through CF trips 429 exactly at the 16th request. CF ranges are pinned statically — re-check https://www.cloudflare.com/ips/ if client IPs ever look wrong.
-- [x] **Close SSH port 22** — done 2026-07-14. Deploys go through SSM (`hamstrack-deploy` IAM user, GitHub secrets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`; instance id is inlined in pipeline.yml), first green SSM deploy verified, then the 0.0.0.0/0:22 rule was revoked (SG `sg-060970351b3f5c950` now allows only 80/443). Server access henceforth: SSM only — `aws ssm start-session --target i-019fe684b25ad831f` or send-command (compose plugin installed system-wide since SSM runs as root). Old `SERVER_*` GitHub secrets are obsolete.
+- [x] **Close SSH port 22** — done 2026-07-14. Deploys go through SSM (`hamstrack-deploy` IAM user, GitHub secrets `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_INSTANCE_ID`), first green SSM deploy verified, then the 0.0.0.0/0:22 rule was revoked (SG `<SECURITY_GROUP_ID>` now allows only 80/443). Server access henceforth: SSM only — `aws ssm start-session --target <INSTANCE_ID>` or send-command (compose plugin installed system-wide since SSM runs as root). Old `SERVER_*` GitHub secrets are obsolete.
 
 ## Phase 8 — DC Version *(later)*
 

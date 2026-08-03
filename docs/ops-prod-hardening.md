@@ -6,8 +6,8 @@ instance — these steps must be run by an account admin, e.g. in
 [CloudShell](https://console.aws.amazon.com/cloudshell)). Server-side steps can
 be done over SSH afterwards.
 
-Facts used below: region `eu-north-1`, instance IP `51.20.104.29`
-(`ip-172-31-26-22`), app dir `/opt/hamstrack`, compose project `hamstrack`,
+Facts used below: region `eu-north-1`, instance IP `<INSTANCE_IP>`
+(`<INSTANCE_PRIVATE_DNS>`), app dir `/opt/hamstrack`, compose project `hamstrack`,
 only Caddy (80/443) is exposed publicly.
 
 ---
@@ -18,9 +18,9 @@ only Caddy (80/443) is exposed publicly.
 
 ```bash
 REGION=eu-north-1
-BUCKET=hamstrack-attachments-prod
+BUCKET=<BUCKET>
 INSTANCE_ID=$(aws ec2 describe-instances --region $REGION \
-  --filters "Name=ip-address,Values=51.20.104.29" \
+  --filters "Name=ip-address,Values=<INSTANCE_IP>" \
   --query 'Reservations[0].Instances[0].InstanceId' --output text)
 
 # Private bucket
@@ -54,17 +54,17 @@ aws ec2 modify-instance-metadata-options --region $REGION --instance-id $INSTANC
 
 ```bash
 # migrate existing local files (volume path may differ — check `docker volume inspect hamstrack_attachments_data`)
-sudo aws s3 sync /var/lib/docker/volumes/hamstrack_attachments_data/_data s3://hamstrack-attachments-prod/
+sudo aws s3 sync /var/lib/docker/volumes/hamstrack_attachments_data/_data s3://<BUCKET>/
 
 # switch the app over
 cd /opt/hamstrack
 sudo sed -i 's/^STORAGE_TYPE=local/STORAGE_TYPE=s3/' .env
-echo 'STORAGE_S3_BUCKET=hamstrack-attachments-prod' | sudo tee -a .env
+echo 'STORAGE_S3_BUCKET=<BUCKET>' | sudo tee -a .env
 echo 'STORAGE_S3_REGION=eu-north-1' | sudo tee -a .env
 docker compose -f docker-compose.prod.yml up -d app
 
 # verify: upload + download an attachment in the UI, then
-aws s3 ls s3://hamstrack-attachments-prod/ --recursive | head
+aws s3 ls s3://<BUCKET>/ --recursive | head
 ```
 
 No compose change needed — `docker-compose.prod.yml` already passes
@@ -93,10 +93,16 @@ Dashboard only, ~2 minutes. Order matters:
        }
    }
 
-   hamstrack.com, www.hamstrack.com {
+   # Site address comes from SITE_ADDRESS in .env — do NOT hardcode the domain.
+   {$SITE_ADDRESS} {
        reverse_proxy app:8080
    }
    ```
+
+   The global `trusted_proxies` block is the only site-specific addition here —
+   keep the site line as `{$SITE_ADDRESS}` (add `SITE_ADDRESS=…` to `/opt/hamstrack/.env`
+   first, since the caddy service uses `${SITE_ADDRESS:?…}` fail-fast). Merge this
+   block into the existing Caddyfile; don't overwrite it with the repo template.
 
    Then `docker compose -f docker-compose.prod.yml restart caddy` and verify
    login still works and `docker compose logs app` shows distinct client IPs.

@@ -101,10 +101,11 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
 
-    # The instance id is not sensitive — inlined instead of a secret so a
-    # malformed secret value can't silently break deploys
+    # Instance id comes from a repo secret so it isn't committed. Add it under
+    # Settings → Secrets → Actions as AWS_INSTANCE_ID; a missing/empty value
+    # fails the deploy loudly (aws ssm rejects an empty --instance-ids).
     env:
-      INSTANCE_ID: i-019fe684b25ad831f
+      INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
 
     steps:
       - name: Configure AWS credentials
