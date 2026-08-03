@@ -101,11 +101,12 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
 
-    # Instance id comes from a repo secret so it isn't committed. Add it under
-    # Settings → Secrets → Actions as AWS_INSTANCE_ID; a missing/empty value
-    # fails the deploy loudly (aws ssm rejects an empty --instance-ids).
+    # AWS instance ids are not secret (useless without credentials), so it's
+    # pinned literally. This also avoids a subtle failure mode: a mistyped
+    # AWS_INSTANCE_ID secret is masked as *** in logs, so a wrong value looks
+    # correct yet 403s the SSM call against the exact-match IAM policy.
     env:
-      INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
+      INSTANCE_ID: i-019fe684b25ad831f
 
     steps:
       - name: Configure AWS credentials
@@ -117,10 +118,6 @@ jobs:
 
       - name: Deploy via SSM
         run: |
-          # Strip any stray whitespace/newline the secret value may carry — a
-          # trailing \n makes the resource ARN miss the exact-match IAM policy,
-          # which surfaces as an SSM AccessDeniedException on the instance.
-          INSTANCE_ID=$(printf '%s' "$INSTANCE_ID" | tr -d '[:space:]')
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
