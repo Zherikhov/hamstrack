@@ -1,6 +1,6 @@
 # Hamstrack
 
-[![CI/CD](https://github.com/Zherikhov/easyTask/actions/workflows/pipeline.yml/badge.svg)](https://github.com/Zherikhov/easyTask/actions/workflows/pipeline.yml)
+[![Build](https://github.com/Zherikhov/easyTask/actions/workflows/build.yml/badge.svg)](https://github.com/Zherikhov/easyTask/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **Hamstrack** is an open-source task tracker for software teams: workspaces, projects, kanban boards, backlog, workflows, comments, attachments and real-time updates — in a single deployable JAR.
@@ -36,7 +36,7 @@ Requirements: Docker with Compose.
 # docker-compose.yml
 services:
   app:
-    image: ghcr.io/zherikhov/hamstrack:latest
+    image: ghcr.io/zherikhov/hamstrack:0.4   # pin a release line — see Upgrading (`latest` = dev builds)
     environment:
       SPRING_PROFILES_ACTIVE: dc
       DB_URL: jdbc:postgresql://postgres:5432/hamstrack
@@ -103,6 +103,24 @@ Open `http://localhost:8080` (or your `APP_BASE_URL` behind a TLS-terminating re
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
 | `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) |
+
+## Upgrading
+
+Images are published to `ghcr.io/zherikhov/hamstrack` with these tags:
+
+| Tag | Meaning |
+|---|---|
+| `0.4.3` | exact release — fully reproducible |
+| `0.4` | latest patch of the 0.4 line — **recommended for production** |
+| `latest` | newest development build from `main` — not for production |
+
+Pin a version in your compose (e.g. `:0.4`), then upgrade with:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Database migrations run automatically on startup (Flyway) — no manual step. See the [Releases](https://github.com/Zherikhov/easyTask/releases) page for notes before upgrading across a minor version.
 
 ## Documentation & REST API
 

@@ -142,7 +142,7 @@ aws iam create-access-key --user-name hamstrack-deploy   # → GitHub secrets
 GitHub repo secrets: add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 `AWS_INSTANCE_ID`; the old `SERVER_*` secrets become obsolete.
 
-### Pipeline change (`.github/workflows/pipeline.yml`, deploy job)
+### Pipeline change (`.github/workflows/deploy.yml`)
 
 ```yaml
   deploy:
