@@ -117,6 +117,10 @@ jobs:
 
       - name: Deploy via SSM
         run: |
+          # Strip any stray whitespace/newline the secret value may carry — a
+          # trailing \n makes the resource ARN miss the exact-match IAM policy,
+          # which surfaces as an SSM AccessDeniedException on the instance.
+          INSTANCE_ID=$(printf '%s' "$INSTANCE_ID" | tr -d '[:space:]')
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
