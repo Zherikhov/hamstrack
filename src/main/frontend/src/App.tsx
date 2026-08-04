@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams } from 'react-router' // Navigate used for / → /workspaces
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams, useLocation } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
 import { useConfigStore } from './config'
 import { getLastProject } from './recentProjects'
@@ -7,8 +7,11 @@ import { apiRefresh, apiMe, apiPublicConfig } from './api'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import VerifyEmailPage from './pages/VerifyEmailPage'
+import ResetPasswordPage from './pages/ResetPasswordPage'
 import WorkspacesPage from './pages/WorkspacesPage'
 import WorkspaceHomePage from './pages/WorkspaceHomePage'
+import WelcomePage from './pages/welcome/WelcomePage'
+import JoinTeamPage from './pages/welcome/JoinTeamPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
 import AppShell from './components/AppShell'
@@ -86,9 +89,23 @@ function ParamKeyed({ children }: { children: React.ReactNode }) {
 }
 
 function RequireAuth() {
-  const { accessToken } = useAuthStore()
+  const { accessToken, user } = useAuthStore()
+  const { pathname } = useLocation()
   if (!accessToken) return <Navigate to="/login" replace />
+  // First-login onboarding gate (Cloud): until the user creates or joins a team
+  // (or skips), every authenticated route funnels into the welcome flow.
+  if (user?.needsOnboarding && !pathname.startsWith('/welcome')) {
+    return <Navigate to="/welcome" replace />
+  }
   return <Outlet />
+}
+
+// Self-registration is closed on DC (and wherever an operator disables it):
+// the /register route redirects to /login when public signup is off.
+function RequirePublicSignup({ children }: { children: React.ReactNode }) {
+  const publicSignupEnabled = useConfigStore((s) => s.config.publicSignupEnabled)
+  if (!publicSignupEnabled) return <Navigate to="/login" replace />
+  return <>{children}</>
 }
 
 // "/" is public: signed-in users go to their last active project (fallback:
@@ -98,6 +115,7 @@ function RootRoute() {
   const { accessToken, user } = useAuthStore()
   const publicLandingEnabled = useConfigStore((s) => s.config.publicLandingEnabled)
   if (accessToken) {
+    if (user?.needsOnboarding) return <Navigate to="/welcome" replace />
     const last = user ? getLastProject(user.id) : null
     if (last) return <Navigate to={`/w/${last.wsId}/p/${last.projectId}`} replace />
     return <Navigate to="/workspaces" replace />
@@ -112,14 +130,17 @@ export default function App() {
       <AuthInit>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
-          <Route path="/register" element={<RegisterPage />} />
+          <Route path="/register" element={<RequirePublicSignup><RegisterPage /></RequirePublicSignup>} />
           <Route path="/verify-email" element={<VerifyEmailPage />} />
+          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/cookies" element={<CookiesPage />} />
           <Route path="/docs" element={<Suspense fallback={<LazyFallback />}><DocsPage /></Suspense>} />
           <Route path="/" element={<RootRoute />} />
           <Route element={<RequireAuth />}>
+            <Route path="/welcome" element={<WelcomePage />} />
+            <Route path="/welcome/invites" element={<JoinTeamPage />} />
             <Route path="/admin/*" element={<Suspense fallback={<LazyFallback />}><AdminArea /></Suspense>} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/w/:wsId" element={<AppShell />}>

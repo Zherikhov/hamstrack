@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
 import { apiLogin, apiMe, apiResendVerification, ApiResponseError } from '../api'
 import { useAuthStore } from '../auth'
+import { useConfigStore } from '../config'
 import { getLastProject } from '../recentProjects'
 import { queryClient } from '../queryClient'
 import { Button, Input } from '../components/ui'
@@ -9,6 +10,7 @@ import { Button, Input } from '../components/ui'
 export default function LoginPage() {
   const navigate = useNavigate()
   const { setToken, setUser } = useAuthStore()
+  const publicSignupEnabled = useConfigStore((s) => s.config.publicSignupEnabled)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
@@ -30,10 +32,15 @@ export default function LoginPage() {
       setToken(accessToken)
       const user = await apiMe()
       setUser(user)
-      // Returning users land on their last active project (first sign-in on
-      // this device — no journal yet — falls back to the workspace list)
-      const last = getLastProject(user.id)
-      navigate(last ? `/w/${last.wsId}/p/${last.projectId}` : '/workspaces')
+      // First-login onboarding (Cloud) takes precedence over any destination
+      if (user.needsOnboarding) {
+        navigate('/welcome')
+      } else {
+        // Returning users land on their last active project (first sign-in on
+        // this device — no journal yet — falls back to the workspace list)
+        const last = getLastProject(user.id)
+        navigate(last ? `/w/${last.wsId}/p/${last.projectId}` : '/workspaces')
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Invalid credentials')
       setNeedsVerification(err instanceof ApiResponseError && err.status === 403)
@@ -132,12 +139,14 @@ export default function LoginPage() {
           </form>
         </div>
 
-        <p className="text-center text-sm mt-4" style={{ color: 'var(--color-text-muted)' }}>
-          No account?{' '}
-          <Link to="/register" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
-            Create one
-          </Link>
-        </p>
+        {publicSignupEnabled && (
+          <p className="text-center text-sm mt-4" style={{ color: 'var(--color-text-muted)' }}>
+            No account?{' '}
+            <Link to="/register" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+              Create one
+            </Link>
+          </p>
+        )}
       </div>
     </div>
   )

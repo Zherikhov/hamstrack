@@ -43,8 +43,10 @@ public class AuthService {
 
     @Transactional
     public void register(RegisterRequest req) {
-        if (!appProperties.registration().publicSignupEnabled()
-                && userRepository.count() > 0) {
+        // When public signup is off (DC default), self-registration is fully
+        // closed — no first-user bootstrap. Accounts are created by the system
+        // admin (Admin console → Users); the initial admin comes from SEED_ADMIN_*.
+        if (!appProperties.registration().publicSignupEnabled()) {
             throw new RegistrationDisabledException();
         }
         if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {

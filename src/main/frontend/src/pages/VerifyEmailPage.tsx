@@ -28,8 +28,10 @@ export default function VerifyEmailPage() {
         // A previous session on this tab may have left its cache behind
         queryClient.clear()
         setToken(accessToken)
-        setUser(await apiMe())
-        navigate('/workspaces', { replace: true })
+        const user = await apiMe()
+        setUser(user)
+        // A freshly verified Cloud account starts in onboarding
+        navigate(user.needsOnboarding ? '/welcome' : '/workspaces', { replace: true })
       } catch {
         setError('This verification link is invalid or has expired.')
       }

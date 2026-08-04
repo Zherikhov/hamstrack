@@ -70,7 +70,9 @@ public class DemoDataService {
         if (userRepository.claimDemoSeed(userId, Instant.now()) == 0) return;
 
         var user = userRepository.findById(userId).orElseThrow();
-        var wsId = workspaceService.create(user, new CreateWorkspaceRequest("Demo Workspace")).id();
+        // completesOnboarding=false: the demo workspace is auto-provisioned, not
+        // a user choice — a Cloud user must still see the create-or-join welcome
+        var wsId = workspaceService.create(user, new CreateWorkspaceRequest("Demo Workspace"), false).id();
         var projectId = projectService.create(user, wsId, new CreateProjectRequest(
                 "Demo Project", "DEMO",
                 "A sample software project showing how Hamstrack works — a board with "

@@ -22,6 +22,7 @@ https://hamstrack.com/api
 - [Instance metadata](#instance-metadata)
 - [Auth endpoints](#auth-endpoints)
 - [Workspaces](#workspaces)
+- [Onboarding](#onboarding)
 - [Projects](#projects)
 - [Project configuration](#project-configuration)
 - [System administration](#system-administration)
@@ -156,7 +157,9 @@ The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verif
 | `POST` | `/auth/logout` | cookie | Revoke the refresh token. `204` |
 | `POST` | `/auth/forgot-password` | — | Send a reset link (always `200` — no account enumeration) |
 | `POST` | `/auth/reset-password` | — | Set a new password with the emailed token; revokes all sessions |
-| `GET` | `/auth/me` | ✔ | The current user |
+| `GET` | `/auth/me` | ✔ | The current user (`id`, `email`, `displayName`, `avatarUrl`, `systemRole`, `needsOnboarding`) |
+
+`GET /auth/me` includes **`needsOnboarding`** — `true` until the user creates or joins their first team (or skips the welcome screen). Route new sign-ins to the [onboarding](#onboarding) flow while it's true.
 
 **Register** — `termsAccepted: true` is required on this instance:
 
@@ -181,7 +184,7 @@ curl -X POST $BASE/auth/register -H "Content-Type: application/json" -d '{
 }
 ```
 
-Unverified accounts cannot log in (`403` until the email is verified). On first successful authentication the account is seeded with a demo workspace and project.
+Unverified accounts cannot log in (`403` until the email is verified). A demo workspace and project are provisioned only when the user chooses "Create a team" during [onboarding](#onboarding) — not automatically on first authentication (users who join an existing team get none).
 
 ## Workspaces
 
@@ -200,6 +203,19 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 // POST /workspaces  {"name": "Acme Inc"}
 { "id": "…", "slug": "acme-inc", "name": "Acme Inc", "myRole": "OWNER", "createdAt": "…" }
 ```
+
+## Onboarding
+
+On first login (`needsOnboarding: true` from [`/auth/me`](#auth-endpoints)) a user either creates their own team or joins one they were invited to. These endpoints back the "join a team" screen — accepting an invite here needs no emailed token.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/invites` | ✔ | Pending, non-expired invites addressed to your email |
+| `POST` | `/invites/{id}/accept` | ✔ | Join the workspace; still email-bound (`404` if the invite isn't yours). Returns the workspace |
+| `POST` | `/invites/{id}/decline` | ✔ | Remove the invite. `204` |
+| `POST` | `/onboarding/create-team` | ✔ | The "Create a team" choice: provisions the demo starter workspace and completes onboarding. `204` |
+
+Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `false` and the welcome screen won't reappear). It happens by either **creating a team** (`POST /onboarding/create-team`, or the first `POST /workspaces`) or **accepting an invite**. The **demo workspace is provisioned only via `create-team`** — users who join an existing team get a clean account with just the team they joined.
 
 ## Projects
 
@@ -272,6 +288,9 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH/DELETE` | `/admin/issue-type-sets/{id}` | Full replacement / delete (`409` while in use; the system default "All types" set is not deletable) |
 | `GET` | `/admin/projects` | Assignment matrix: every project × its bindings |
 | `PATCH` | `/admin/projects/{id}/bindings` | `{"workflowId", "prioritySetId", "fieldSetId", "issueTypeSetId"}` (null = system default); `409` when issues sit in statuses the new workflow lacks |
+| `GET/POST` | `/admin/users` | List accounts / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person |
+| `POST` | `/admin/users/{id}/setup-link` | Regenerate the one-time setup link → `{"setupLink"}` |
+| `PATCH` | `/admin/users/{id}` | Change `systemRole` (`ADMIN`/`USER`) and/or `status` (`ACTIVE`/`DISABLED`); `409` when it would disable/demote the last active admin or your own account (disabling revokes the user's refresh tokens) |
 
 Integrity rules: deletions never leave dangling references (remap or `409`), no workflow can end up empty, every priority set keeps a default, and a workflow change is refused while it would strand issues in statuses invisible to the board.
 

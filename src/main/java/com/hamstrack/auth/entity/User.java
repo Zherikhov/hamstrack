@@ -44,6 +44,12 @@ public class User extends BaseEntity implements UserDetails {
     @Column(name = "demo_seeded_at")
     private Instant demoSeededAt;
 
+    // Null = the user hasn't completed first-login onboarding (Cloud only):
+    // stamped when they create or join their first team, or skip. Gated by
+    // app.onboarding.enabled — see UserRepository.markOnboarded
+    @Column(name = "onboarded_at")
+    private Instant onboardedAt;
+
     // Instance-wide role; ADMIN unlocks /api/admin/** (see SecurityConfig)
     @Enumerated(EnumType.STRING)
     @Column(name = "system_role", nullable = false, length = 20)

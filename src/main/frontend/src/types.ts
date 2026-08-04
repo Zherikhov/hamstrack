@@ -5,6 +5,19 @@ export interface User {
   avatarUrl?: string;
   // Instance-wide role; ADMIN unlocks /admin (server enforces regardless)
   systemRole?: 'ADMIN' | 'USER';
+  // Cloud only: true until the user creates/joins their first team (or skips)
+  needsOnboarding?: boolean;
+}
+
+// A pending workspace invite addressed to the current user (onboarding "join")
+export interface PendingInvite {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  role: 'OWNER' | 'ADMIN' | 'MEMBER';
+  invitedByName: string;
+  createdAt: string;
+  expiresAt: string;
 }
 
 export interface Workspace {
@@ -248,6 +261,18 @@ export interface ProjectBinding {
   prioritySetId: string | null;
   fieldSetId: string | null;
   issueTypeSetId: string | null;
+}
+
+// Admin console user directory (system ADMIN only)
+export interface AdminUser {
+  id: string;
+  email: string;
+  displayName: string;
+  systemRole: 'ADMIN' | 'USER';
+  status: 'ACTIVE' | 'PENDING' | 'DISABLED';
+  // False while the account still awaits its setup link being used
+  hasPassword: boolean;
+  createdAt: string;
 }
 
 export interface Notification {

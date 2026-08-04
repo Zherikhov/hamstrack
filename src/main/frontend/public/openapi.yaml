@@ -45,6 +45,8 @@ tags:
     description: Registration, login, tokens, password recovery
   - name: Workspaces
     description: Tenancy boundary — members, invites
+  - name: Onboarding
+    description: First-login flow — pending invites and create-or-join-a-team (Cloud)
   - name: Projects
     description: Projects and project membership
   - name: Project config
@@ -397,6 +399,68 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /invites:
+    get:
+      tags: [Onboarding]
+      summary: List pending invites addressed to me
+      description: >-
+        Pending, non-expired workspace invites sent to the signed-in user's
+        email — the onboarding "join a team" surface. Accept/decline by id
+        without needing the emailed token link.
+      operationId: listMyInvites
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PendingInvite' }
+
+  /invites/{id}/accept:
+    post:
+      tags: [Onboarding]
+      summary: Accept an invite by id
+      description: Still bound to the invited email — a foreign invite id returns 404.
+      operationId: acceptInviteById
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      responses:
+        '200':
+          description: Joined the workspace
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Already a member
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /invites/{id}/decline:
+    post:
+      tags: [Onboarding]
+      summary: Decline (remove) an invite by id
+      operationId: declineInvite
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      responses:
+        '204': { description: Declined }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /onboarding/create-team:
+    post:
+      tags: [Onboarding]
+      summary: Choose to create your own team (onboarding)
+      description: >-
+        The "Create a team" first-login choice: provisions the demo starter
+        workspace (if enabled) and completes onboarding, so the welcome screen
+        isn't shown again. The user then creates their real team on the
+        workspaces page. Users who join an existing team never call this and get
+        no demo workspace.
+      operationId: onboardingCreateTeam
+      responses:
+        '204': { description: Onboarding completed }
 
   /workspaces/{workspaceId}/projects:
     post:
@@ -927,6 +991,110 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Issues would be stranded in statuses the new workflow lacks
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List all user accounts (admin)
+      operationId: adminListUsers
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AdminUser' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Admin]
+      summary: Create a user account (admin)
+      description: |
+        Creates an ACTIVE account with no password and sends no email. The
+        response carries a one-time `setupLink` (`/reset-password?token=`,
+        valid 7 days) the admin hands over so the person can set a password.
+        On DC this is the primary way to onboard users — public
+        self-registration is disabled there.
+      operationId: adminCreateUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, displayName]
+              properties:
+                email: { type: string, format: email }
+                displayName: { type: string, maxLength: 100 }
+                systemRole: { type: string, enum: [ADMIN, USER], default: USER }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/AdminUser' }
+                  setupLink: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409':
+          description: Email already registered
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/users/{id}/setup-link:
+    post:
+      tags: [Admin]
+      summary: Regenerate a user's one-time setup link (admin)
+      operationId: adminRegenerateSetupLink
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  setupLink: { type: string }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/users/{id}:
+    patch:
+      tags: [Admin]
+      summary: Change a user's role or status (admin)
+      description: |
+        Partial update; any omitted field is unchanged. `status` accepts only
+        ACTIVE / DISABLED. Guards return 409 when the change would disable or
+        demote the last active administrator, or the admin's own account.
+        Disabling revokes the user's refresh tokens.
+      operationId: adminUpdateUser
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                systemRole: { type: string, enum: [ADMIN, USER] }
+                status: { type: string, enum: [ACTIVE, DISABLED] }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminUser' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Would lock out the last administrator, or self-disable/self-demote
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1472,6 +1640,25 @@ components:
         email: { type: string, format: email }
         displayName: { type: string }
         avatarUrl: { type: string, nullable: true }
+        systemRole: { type: string, enum: [ADMIN, USER] }
+        needsOnboarding:
+          type: boolean
+          description: >-
+            Cloud only — true until the user creates or joins their first team
+            (or skips the welcome screen). Always false when onboarding is
+            disabled (e.g. DC).
+
+    PendingInvite:
+      type: object
+      description: A workspace invite addressed to the current user (onboarding "join a team")
+      properties:
+        id: { type: string, format: uuid }
+        workspaceId: { type: string, format: uuid }
+        workspaceName: { type: string }
+        role: { $ref: '#/components/schemas/WorkspaceRole' }
+        invitedByName: { type: string }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
 
     WorkspaceRole:
       type: string
@@ -1598,6 +1785,20 @@ components:
         prioritySetId: { type: string, format: uuid, nullable: true }
         fieldSetId: { type: string, format: uuid, nullable: true }
         issueTypeSetId: { type: string, format: uuid, nullable: true }
+
+    AdminUser:
+      type: object
+      description: A user account in the admin directory
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        systemRole: { type: string, enum: [ADMIN, USER] }
+        status: { type: string, enum: [ACTIVE, PENDING, DISABLED] }
+        hasPassword:
+          type: boolean
+          description: False while the account still awaits its setup link being used
+        createdAt: { type: string, format: date-time }
 
     AdminIssueTypeSet:
       type: object

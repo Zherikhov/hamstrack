@@ -8,6 +8,9 @@ interface AuthState {
   initialized: boolean
   setToken: (token: string) => void
   setUser: (user: User) => void
+  // Optimistically clear the onboarding flag once the user creates/joins/skips,
+  // so the global onboarding redirect (RequireAuth) lets them through
+  markOnboarded: () => void
   clear: () => void
   setInitialized: () => void
 }
@@ -23,6 +26,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   setUser: (user) => set({ user }),
+
+  markOnboarded: () => set((s) => (s.user ? { user: { ...s.user, needsOnboarding: false } } : s)),
 
   clear: () => {
     sessionStorage.removeItem('accessToken')

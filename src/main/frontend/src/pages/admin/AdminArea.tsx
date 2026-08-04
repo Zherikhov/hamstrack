@@ -7,6 +7,7 @@ import AdminIssueTypesPage from './AdminIssueTypesPage'
 import AdminFieldsPage from './AdminFieldsPage'
 import AdminWorkflowsPage from './AdminWorkflowsPage'
 import AdminProjectsPage from './AdminProjectsPage'
+import AdminUsersPage from './AdminUsersPage'
 
 const SECTIONS = [
   { path: 'statuses', label: 'Statuses' },
@@ -15,6 +16,7 @@ const SECTIONS = [
   { path: 'fields', label: 'Fields' },
   { path: 'workflows', label: 'Workflows' },
   { path: 'projects', label: 'Projects' },
+  { path: 'users', label: 'Users' },
 ] as const
 
 /**
@@ -52,7 +54,7 @@ export default function AdminArea() {
           ))}
           <div className="border-t mt-3 pt-3 px-3" style={{ borderColor: 'var(--color-border)' }}>
             <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              Users, Workspaces — planned
+              Workspaces — planned
             </span>
           </div>
         </nav>
@@ -66,6 +68,7 @@ export default function AdminArea() {
               <Route path="fields" element={<AdminFieldsPage />} />
               <Route path="workflows" element={<AdminWorkflowsPage />} />
               <Route path="projects" element={<AdminProjectsPage />} />
+              <Route path="users" element={<AdminUsersPage />} />
             </Routes>
           </div>
         </main>

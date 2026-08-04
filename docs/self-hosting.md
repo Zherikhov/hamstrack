@@ -102,9 +102,11 @@ docker compose up -d
 ```
 
 Browse your instance at its `APP_BASE_URL`, reached through the TLS proxy you put
-in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Register the first
-account and verify it via the email link. The schema is created and migrated
-automatically on startup (Flyway).
+in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Public self-registration
+is **closed by default** on self-hosted installs, so set `SEED_ADMIN_EMAIL` +
+`SEED_ADMIN_PASSWORD` to create your first administrator on startup (see
+[First user](#first-user)). The schema is created and migrated automatically on
+startup (Flyway).
 
 > **Trying it out locally without a proxy?** Set `APP_BASE_URL=http://localhost:8080`
 > and open that. With an `https` base the session cookie is `Secure` and won't
@@ -144,6 +146,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `STORAGE_LOCAL_DIR` | `./data/attachments` | Local storage path (mount a volume) |
 | `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION` / `STORAGE_S3_ENDPOINT` / `STORAGE_S3_PATH_STYLE` / `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY` | — | S3 or S3-compatible storage (MinIO etc.); empty keys fall back to the AWS default credentials chain |
 | `ATTACHMENT_MAX_FILE_SIZE` | `25MB` | Upload size limit |
+| `PUBLIC_SIGNUP_ENABLED` | `false` | Self-registration is **closed by default** on self-hosted installs — create accounts in the Admin console (Users → New user → share the setup link, no email needed). Set `true` to let anyone register |
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
@@ -238,18 +241,11 @@ built-in defaults, so with no `MAIL_*` set the app expects MailHog on localhost.
 
 ## First run & the admin account
 
-### First user
+### First user (the administrator)
 
-Open your instance, click **Register**, enter email + password (accept the terms
-unless you disabled that), then click the link in the verification email — that
-verifies the address **and** logs you in. This first account is a **regular
-user**: it can create workspaces and projects but has no system-admin powers.
-
-### Bootstrapping a system administrator
-
-The `/admin` console (the global catalog of statuses, priorities, issue types,
-custom fields, workflows and their project bindings) needs a **system
-administrator**. Promote one at startup:
+Public self-registration is **closed by default** on self-hosted installs
+(`PUBLIC_SIGNUP_ENABLED=false`), so there is no "click Register" first step —
+you seed the first **system administrator** at startup instead:
 
 ```
 SEED_ADMIN_EMAIL=admin@example.com
@@ -259,8 +255,23 @@ SEED_ADMIN_DISPLAY_NAME=Admin          # optional, defaults to "Admin"
 
 **Both** email and password are required — a blank email skips seeding entirely.
 On boot the account is created (or an existing user with that email is promoted)
-to system admin; it's idempotent, so the variables are safe to leave set.
-"System administration" then appears in the top-bar user menu → `/admin`.
+to system admin; it's idempotent, so the variables are safe to leave set. Log in
+with those credentials — "System administration" appears in the top-bar user
+menu → `/admin`. The `/admin` console holds the global catalog (statuses,
+priorities, issue types, custom fields, workflows and their project bindings)
+**and** the user directory.
+
+### Adding more users
+
+In the `/admin` console open **Users → New user**, enter a name, email and role.
+No email is sent: you get a one-time **setup link** (`/reset-password?token=`,
+valid 7 days) — copy it and hand it to the person over your own channel. They
+open it, choose a password, and sign in. Regenerate the link anytime, and
+disable or promote accounts from the same screen.
+
+> Prefer open registration? Set `PUBLIC_SIGNUP_ENABLED=true` and anyone can
+> register + verify their email themselves (SMTP required for the verification
+> mail). New accounts are regular users until an admin promotes them.
 
 ## Attachment storage
 
@@ -306,6 +317,7 @@ DC operators can disable Cloud-oriented behavior:
 
 | Variable | Effect |
 |---|---|
+| `PUBLIC_SIGNUP_ENABLED=true` | re-opens public self-registration (closed by default on DC — admins create accounts via the Users console) |
 | `PUBLIC_LANDING_ENABLED=false` | hides the public landing page (`/` → login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED=false` | removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN=false` | disables the demo workspace seeded on first login |

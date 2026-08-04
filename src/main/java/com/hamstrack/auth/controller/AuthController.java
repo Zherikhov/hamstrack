@@ -3,6 +3,7 @@ package com.hamstrack.auth.controller;
 import com.hamstrack.auth.dto.*;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.service.AuthService;
+import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.seed.DemoDataService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -36,6 +37,7 @@ public class AuthController {
 
     private final AuthService authService;
     private final DemoDataService demoDataService;
+    private final AppProperties appProperties;
 
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
@@ -102,6 +104,13 @@ public class AuthController {
     // never fail (or roll back) a successful authentication — it is logged and
     // retried on the next auth because the claim rolls back with it.
     private AuthResponse withDemoSeed(AuthResponse auth) {
+        // With onboarding enabled (Cloud) the demo workspace is provisioned only
+        // when the user picks "Create a team" on the welcome screen (see
+        // OnboardingController) — users who join an existing team get no demo.
+        // Without onboarding (DC) it still seeds on first authentication.
+        if (appProperties.onboarding().enabled()) {
+            return auth;
+        }
         try {
             demoDataService.seedOnFirstLogin(auth.userId());
         } catch (Exception e) {
@@ -110,11 +119,15 @@ public class AuthController {
         return auth;
     }
 
-    public record MeResponse(UUID id, String email, String displayName, String avatarUrl, String systemRole) {}
+    public record MeResponse(UUID id, String email, String displayName, String avatarUrl, String systemRole,
+                             boolean needsOnboarding) {}
 
     @GetMapping("/me")
     public MeResponse me(@AuthenticationPrincipal User user) {
+        // Cloud only (app.onboarding.enabled): true until the user creates or
+        // joins their first team, or skips the welcome screen.
+        boolean needsOnboarding = appProperties.onboarding().enabled() && user.getOnboardedAt() == null;
         return new MeResponse(user.getId(), user.getEmail(), user.getDisplayName(), user.getAvatarUrl(),
-                user.getSystemRole().name());
+                user.getSystemRole().name(), needsOnboarding);
     }
 }

@@ -3,7 +3,7 @@ import type {
   Notification, WorkspaceMember, ProjectConfig,
   AdminStatus, AdminPriority, AdminIssueType, AdminWorkflow, AdminPrioritySet,
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
-  ProjectBinding, TransitionRule, UsageDetail,
+  ProjectBinding, TransitionRule, UsageDetail, AdminUser, PendingInvite,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -132,6 +132,15 @@ export async function apiResendVerification(email: string) {
   })
 }
 
+// Backs both the password-reset email link and admin-generated setup links —
+// both point at /reset-password?token=
+export async function apiResetPassword(token: string, newPassword: string) {
+  return request<{ message: string }>('/auth/reset-password', {
+    method: 'POST',
+    body: JSON.stringify({ token, newPassword }),
+  })
+}
+
 export async function apiLogout() {
   return request<void>('/auth/logout', { method: 'POST' })
 }
@@ -156,6 +165,27 @@ export async function apiCreateWorkspace(name: string): Promise<Workspace> {
 
 export async function apiGetWorkspace(wsId: string): Promise<Workspace> {
   return request(`/workspaces/${wsId}`)
+}
+
+// ── Onboarding (first-login: create or join a team) ──────────────────────────
+
+export async function apiListInvites(): Promise<PendingInvite[]> {
+  return request('/invites')
+}
+
+export async function apiAcceptInvite(inviteId: string): Promise<Workspace> {
+  return request(`/invites/${inviteId}/accept`, { method: 'POST' })
+}
+
+export async function apiDeclineInvite(inviteId: string): Promise<void> {
+  return request(`/invites/${inviteId}/decline`, { method: 'POST' })
+}
+
+// "Create a team" onboarding choice: provisions the demo starter workspace (if
+// enabled) and completes onboarding. Joining a team completes it via the invite
+// accept endpoint instead — and gets no demo.
+export async function apiOnboardingCreateTeam(): Promise<void> {
+  return request('/onboarding/create-team', { method: 'POST' })
 }
 
 // ── Projects ──────────────────────────────────────────────────────────────────
@@ -419,6 +449,22 @@ export const adminProjects = {
       method: 'PATCH',
       body: JSON.stringify(bindings),
     }),
+}
+
+// ── Admin users (system ADMIN only; server-guarded) ──────────────────────────
+// Accounts are created without a password/email; the response carries a
+// one-time setup link (/reset-password?token=) the admin hands over.
+
+export const adminUsers = {
+  list: () => request<AdminUser[]>('/admin/users'),
+  create: (payload: { email: string; displayName: string; systemRole: 'ADMIN' | 'USER' }) =>
+    request<{ user: AdminUser; setupLink: string }>('/admin/users', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  regenerateSetupLink: (id: string) =>
+    request<{ setupLink: string }>(`/admin/users/${id}/setup-link`, { method: 'POST' }),
+  update: (id: string, payload: { systemRole?: 'ADMIN' | 'USER'; status?: 'ACTIVE' | 'DISABLED' }) =>
+    request<AdminUser>(`/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────────

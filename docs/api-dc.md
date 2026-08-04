@@ -37,7 +37,8 @@ https://tracker.example.com/api
 ```bash
 BASE=https://tracker.example.com/api   # your instance
 
-# 1. Log in (register + verify your email first — see Auth endpoints)
+# 1. Log in (accounts are created by an admin — see System administration —
+#    or, if the operator enabled public signup, register + verify your email)
 TOKEN=$(curl -s -X POST $BASE/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email":"you@example.com","password":"your-password"}' | jq -r .accessToken)
@@ -58,7 +59,7 @@ A self-hosted instance is configured through environment variables; a few of the
 | Setting (env) | Default | API effect |
 |---|---|---|
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | When `false`, `termsAccepted` is optional at registration |
-| Public signup (`app.registration.public-signup-enabled`) | `true` | When disabled, `POST /auth/register` returns `403` once the first account exists |
+| `PUBLIC_SIGNUP_ENABLED` (`app.registration.public-signup-enabled`) | `false` (DC) | Self-registration is **closed by default on DC**: `POST /auth/register` returns `403` and accounts are created by the admin (see [System administration](#system-administration)). Set `true` to re-open public registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | When `false`, no demo workspace is created on first login |
 | `PUBLIC_LANDING_ENABLED` | `true` | When `false`, `robots.txt` disallows all crawling and `sitemap.xml` returns `404` |
 | `ATTACHMENT_MAX_FILE_SIZE` | `25MB` | Upload size limit for attachments (`413` when exceeded) |
@@ -166,17 +167,19 @@ Values reflect the [operator's configuration](#operator-settings-that-affect-the
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/register` | — | Create an account; sends a verification email. `201` |
+| `POST` | `/auth/register` | — | Create an account; sends a verification email. `201`. **`403` when public signup is disabled** (the DC default — accounts are created by an admin instead, see [System administration](#system-administration)) |
 | `POST` | `/auth/verify-email` | — | Exchange the emailed one-time token for a session |
 | `POST` | `/auth/resend-verification` | — | Re-send the verification email (always `200`) |
 | `POST` | `/auth/login` | — | Email + password → access token + refresh cookie |
 | `POST` | `/auth/refresh` | cookie | Rotate the refresh token, get a fresh access token |
 | `POST` | `/auth/logout` | cookie | Revoke the refresh token. `204` |
 | `POST` | `/auth/forgot-password` | — | Send a reset link (always `200` — no account enumeration) |
-| `POST` | `/auth/reset-password` | — | Set a new password with the emailed token; revokes all sessions |
-| `GET` | `/auth/me` | ✔ | The current user |
+| `POST` | `/auth/reset-password` | — | Set a password with a one-time token; revokes all sessions. Backs both the forgot-password email and admin-generated account setup links |
+| `GET` | `/auth/me` | ✔ | The current user (`id`, `email`, `displayName`, `avatarUrl`, `systemRole`, `needsOnboarding`) |
 
-**Register** — `termsAccepted: true` is required unless the operator disabled `TERMS_ACCEPTANCE_REQUIRED` (check `GET /meta`):
+> `needsOnboarding` is **always `false`** on DC — the first-login create-or-join-a-team flow is a Cloud feature (`app.onboarding.enabled`, off here). The invite-acceptance endpoints below still work if a workspace admin sends invites. `GET /invites` lists pending invites addressed to your email; `POST /invites/{id}/accept` · `/decline` accept/remove them by id (accept stays email-bound → `404` otherwise).
+
+**Register** — available only when `publicSignupEnabled` is true (`GET /meta`); disabled by default on DC, where an admin creates accounts and shares a setup link. `termsAccepted: true` is required unless the operator disabled `TERMS_ACCEPTANCE_REQUIRED`:
 
 ```bash
 curl -X POST $BASE/auth/register -H "Content-Type: application/json" -d '{
@@ -290,8 +293,13 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH/DELETE` | `/admin/issue-type-sets/{id}` | Full replacement / delete (`409` while in use; the system default "All types" set is not deletable) |
 | `GET` | `/admin/projects` | Assignment matrix: every project × its bindings |
 | `PATCH` | `/admin/projects/{id}/bindings` | `{"workflowId", "prioritySetId", "fieldSetId", "issueTypeSetId"}` (null = system default); `409` when issues sit in statuses the new workflow lacks |
+| `GET/POST` | `/admin/users` | List accounts / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person. On DC this is the primary way to onboard users |
+| `POST` | `/admin/users/{id}/setup-link` | Regenerate the one-time setup link → `{"setupLink"}` |
+| `PATCH` | `/admin/users/{id}` | Change `systemRole` (`ADMIN`/`USER`) and/or `status` (`ACTIVE`/`DISABLED`); `409` when it would disable/demote the last active admin or your own account (disabling revokes the user's refresh tokens) |
 
 Integrity rules: deletions never leave dangling references (remap or `409`), no workflow can end up empty, every priority set keeps a default, and a workflow change is refused while it would strand issues in statuses invisible to the board.
+
+**Onboarding users (DC).** Since self-registration is closed by default, create each account via `POST /admin/users` and share the returned `setupLink`. The recipient opens it, chooses a password (`POST /auth/reset-password` under the hood), then signs in normally. No SMTP is required for this flow.
 
 ## Issues
 

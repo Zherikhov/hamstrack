@@ -26,8 +26,20 @@ public class WorkspaceService {
     private final UserRepository userRepository;
     private final MailService mailService;
 
+    // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
     public WorkspaceResponse create(User actor, CreateWorkspaceRequest req) {
+        return create(actor, req, true);
+    }
+
+    /**
+     * @param completesOnboarding whether this creation counts as the user
+     *   choosing to make their own team. False for auto-provisioned workspaces
+     *   (demo seeding) — those must NOT complete onboarding, or the welcome
+     *   screen would never appear for a Cloud user who also got a demo workspace.
+     */
+    @Transactional
+    public WorkspaceResponse create(User actor, CreateWorkspaceRequest req, boolean completesOnboarding) {
         var slug = generateSlug(req.name());
         var workspace = new Workspace();
         workspace.setName(req.name());
@@ -43,6 +55,11 @@ public class WorkspaceService {
 
         // No per-workspace taxonomy seeding since M1: statuses/types/priorities
         // live in the global catalog and reach projects through bindings
+
+        if (completesOnboarding) {
+            // Creating a team completes first-login onboarding (Cloud; no-op otherwise)
+            userRepository.markOnboarded(actor.getId(), Instant.now());
+        }
 
         return WorkspaceResponse.of(workspace, WorkspaceRole.OWNER);
     }
@@ -104,11 +121,50 @@ public class WorkspaceService {
         mailService.sendWorkspaceInviteEmail(req.email(), workspace.getName(), rawToken);
     }
 
+    // Accept via the emailed token link.
     @Transactional
     public WorkspaceResponse acceptInvite(User actor, String rawToken) {
         var hash = TokenUtils.sha256(rawToken);
         var invite = inviteRepository.findByTokenHash(hash)
                 .orElseThrow(WorkspaceNotFoundException::new);
+        return acceptInvite(actor, invite);
+    }
+
+    // Pending invites addressed to the caller's email — the onboarding
+    // "join a team" screen accepts these without needing the token link.
+    @Transactional(readOnly = true)
+    public List<PendingInviteResponse> listPendingInvites(User actor) {
+        return inviteRepository
+                .findByEmailIgnoreCaseAndAcceptedAtIsNullOrderByCreatedAtDesc(actor.getEmail())
+                .stream()
+                .filter(i -> !i.isExpired())
+                // Already a member (e.g. accepted a different invite to the same ws) — hide it
+                .filter(i -> !memberRepository.existsByWorkspaceAndUser(i.getWorkspace(), actor))
+                .map(PendingInviteResponse::of)
+                .toList();
+    }
+
+    // Accept a specific invite by id (from the onboarding screen).
+    @Transactional
+    public WorkspaceResponse acceptInvite(User actor, UUID inviteId) {
+        var invite = inviteRepository.findById(inviteId)
+                .orElseThrow(WorkspaceNotFoundException::new);
+        return acceptInvite(actor, invite);
+    }
+
+    // Decline an invite addressed to the caller. Removes it (single-use,
+    // email-bound); an admin can always re-invite.
+    @Transactional
+    public void declineInvite(User actor, UUID inviteId) {
+        var invite = inviteRepository.findById(inviteId)
+                .orElseThrow(WorkspaceNotFoundException::new);
+        if (!invite.getEmail().equalsIgnoreCase(actor.getEmail())) {
+            throw new WorkspaceNotFoundException();
+        }
+        inviteRepository.delete(invite);
+    }
+
+    private WorkspaceResponse acceptInvite(User actor, WorkspaceInvite invite) {
         if (invite.isExpired() || invite.isAccepted()) {
             throw new WorkspaceNotFoundException();
         }
@@ -130,7 +186,17 @@ public class WorkspaceService {
         invite.setAcceptedAt(Instant.now());
         inviteRepository.save(invite);
 
+        // Joining a team completes first-login onboarding (Cloud; no-op otherwise)
+        userRepository.markOnboarded(actor.getId(), Instant.now());
+
         return WorkspaceResponse.of(workspace, invite.getRole());
+    }
+
+    // Marks first-login onboarding complete (the "Create a team" choice; joining
+    // completes it via acceptInvite). Idempotent.
+    @Transactional
+    public void completeOnboarding(User actor) {
+        userRepository.markOnboarded(actor.getId(), Instant.now());
     }
 
     // Returns membership or throws 404 — never reveals workspace existence to non-members
