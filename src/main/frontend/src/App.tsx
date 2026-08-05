@@ -14,6 +14,8 @@ import WelcomePage from './pages/welcome/WelcomePage'
 import JoinTeamPage from './pages/welcome/JoinTeamPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
+import ProjectSettingsArea from './pages/settings/ProjectSettingsArea'
+import WorkspaceSettingsArea from './pages/settings/WorkspaceSettingsArea'
 import AppShell from './components/AppShell'
 import CookieBanner from './components/CookieBanner'
 import LandingPage from './pages/LandingPage'
@@ -145,8 +147,10 @@ export default function App() {
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/w/:wsId" element={<AppShell />}>
               <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
+              <Route path="settings/*" element={<ParamKeyed><WorkspaceSettingsArea /></ParamKeyed>} />
               <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
               <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
+              <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
             </Route>
           </Route>
         </Routes>

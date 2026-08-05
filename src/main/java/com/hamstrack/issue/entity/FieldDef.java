@@ -21,10 +21,13 @@ import java.util.UUID;
 @Table(name = "field_defs")
 @Getter
 @Setter
-public class FieldDef extends CreatedOnlyEntity {
+public class FieldDef extends CreatedOnlyEntity implements Scoped {
 
     @Column(name = "scope_workspace_id")
     private UUID scopeWorkspaceId;
+
+    @Column(name = "scope_project_id")
+    private UUID scopeProjectId;
 
     @Column(nullable = false, length = 50, updatable = false)
     private String key;

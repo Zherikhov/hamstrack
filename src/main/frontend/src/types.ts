@@ -180,20 +180,28 @@ export interface UsageInfo {
   issues: number;
 }
 
+// Delegated consoles: a catalog/set row's scope. Rows not matching the current
+// console's scope are inherited and shown read-only (GLOBAL/WORKSPACE seen from a
+// project console). See pages/admin/AdminApiContext.
+export type AdminScopeTag = 'GLOBAL' | 'WORKSPACE' | 'PROJECT';
+
 export interface AdminStatus extends Status {
   archived: boolean;
   usage: UsageInfo;
+  scope: AdminScopeTag;
 }
 
 export interface AdminPriority extends Priority {
   position: number;
   archived: boolean;
   usage: UsageInfo;
+  scope: AdminScopeTag;
 }
 
 export interface AdminIssueType extends IssueType {
   archived: boolean;
   usage: UsageInfo;
+  scope: AdminScopeTag;
 }
 
 export interface AdminWorkflow {
@@ -204,6 +212,7 @@ export interface AdminWorkflow {
   statuses: Status[];
   transitions: TransitionRule[];
   projectsUsing: number;
+  scope: AdminScopeTag;
 }
 
 export interface AdminPrioritySet {
@@ -212,6 +221,7 @@ export interface AdminPrioritySet {
   systemDefault: boolean;
   items: { priority: Priority; isDefault: boolean }[];
   projectsUsing: number;
+  scope: AdminScopeTag;
 }
 
 export interface AdminField {
@@ -222,6 +232,7 @@ export interface AdminField {
   config?: FieldConfig | null;
   description?: string;
   archived: boolean;
+  scope: AdminScopeTag;
   // Absent on fields nested inside a set response
   usage: UsageInfo | null;
 }
@@ -232,6 +243,7 @@ export interface AdminFieldSet {
   systemDefault: boolean;
   items: { field: AdminField; required: boolean; showOnCreate: boolean }[];
   projectsUsing: number;
+  scope: AdminScopeTag;
 }
 
 export interface AdminIssueTypeSet {
@@ -240,6 +252,7 @@ export interface AdminIssueTypeSet {
   systemDefault: boolean;
   types: IssueType[];                 // display order
   projectsUsing: number;
+  scope: AdminScopeTag;
 }
 
 // "Where exactly is this used?" — the expansion behind a usage chip
@@ -261,6 +274,22 @@ export interface ProjectBinding {
   prioritySetId: string | null;
   fieldSetId: string | null;
   issueTypeSetId: string | null;
+}
+
+// Delegated admin: the sets a project/workspace may bind, per dimension. Each
+// option's scope marks whether it's inherited (GLOBAL/WORKSPACE) or the caller's
+// own (PROJECT) — see the delegated-admin backend.
+export interface SetOption {
+  id: string;
+  name: string;
+  scope: 'GLOBAL' | 'WORKSPACE' | 'PROJECT';
+}
+
+export interface BindingOptions {
+  workflows: SetOption[];
+  prioritySets: SetOption[];
+  fieldSets: SetOption[];
+  issueTypeSets: SetOption[];
 }
 
 // Admin console user directory (system ADMIN only)

@@ -79,13 +79,14 @@ public class DemoDataService {
                         + "statuses, issue types, priorities and due dates. Feel free to edit, "
                         + "move or delete anything here.")).id();
 
-        // Since M1 the taxonomy is a global catalog; new projects use the
-        // system-default workflow (To Do / In Progress / Done) and priority set
-        var typeIds = issueTypeRepository.findAllByScopeWorkspaceIdIsNullOrderByPosition().stream()
+        // The demo uses the GLOBAL catalog (both scope columns null); findAtScope
+        // (null, null) excludes workspace-/project-scoped rows, which may reuse a
+        // global name — a plain scope_workspace_id-null filter would collide here.
+        var typeIds = issueTypeRepository.findAllAtScope(null, null).stream()
                 .collect(Collectors.toMap(IssueType::getName, IssueType::getId));
-        var statusIds = statusRepository.findAllByScopeWorkspaceIdIsNullOrderByPosition().stream()
+        var statusIds = statusRepository.findAllAtScope(null, null).stream()
                 .collect(Collectors.toMap(Status::getName, Status::getId));
-        var prioIds = priorityRepository.findAllByScopeWorkspaceIdIsNullOrderByPosition().stream()
+        var prioIds = priorityRepository.findAllAtScope(null, null).stream()
                 .collect(Collectors.toMap(Priority::getName, Priority::getId));
         Function<CreateIssueRequest, UUID> create =
                 req -> issueService.create(user, wsId, projectId, req).id();
@@ -220,16 +221,16 @@ public class DemoDataService {
      * if an admin deleted the sample set/fields.
      */
     private void seedDemoFieldValues(UUID projectId) {
-        var set = fieldSetRepository.findByScopeWorkspaceIdIsNullAndName("Engineering fields").orElse(null);
+        var set = fieldSetRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndName("Engineering fields").orElse(null);
         if (set == null) return;
         var project = projectRepository.findById(projectId).orElseThrow();
         project.setFieldSet(set);
         projectRepository.save(project);
 
         var json = JsonNodeFactory.instance;
-        var storyPoints = fieldDefRepository.findByScopeWorkspaceIdIsNullAndKey("story_points").orElse(null);
-        var severity = fieldDefRepository.findByScopeWorkspaceIdIsNullAndKey("severity").orElse(null);
-        var environment = fieldDefRepository.findByScopeWorkspaceIdIsNullAndKey("environment").orElse(null);
+        var storyPoints = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("story_points").orElse(null);
+        var severity = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("severity").orElse(null);
+        var environment = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("environment").orElse(null);
 
         // issue numbers follow the creation order above
         if (storyPoints != null) {

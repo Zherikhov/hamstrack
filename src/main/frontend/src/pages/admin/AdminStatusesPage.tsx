@@ -1,15 +1,17 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminStatuses } from '../../api'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import type { AdminStatus } from '../../types'
 import { Button, Input, Select, StatusBadge } from '../../components/ui'
-import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, Modal, PageHeader, UsageChip } from './common'
+import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
+import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 
 const CATEGORIES = ['TODO', 'IN_PROGRESS', 'DONE'] as const
 
 export default function AdminStatusesPage() {
-  const qc = useQueryClient()
-  const { data: statuses = [] } = useQuery({ queryKey: ['admin', 'statuses'], queryFn: adminStatuses.list })
+  const { api, keyPrefix, scope } = useAdminApi()
+  const ownTag = ownScopeTag(scope)
+  const invalidate = useAdminInvalidate()
+  const { data: statuses = [] } = useQuery({ queryKey: [...keyPrefix, 'statuses'], queryFn: api.statuses.list })
   const [editing, setEditing] = useState<AdminStatus | 'new' | null>(null)
   const [deleting, setDeleting] = useState<AdminStatus | null>(null)
   const [showArchived, setShowArchived] = useState(false)
@@ -17,18 +19,16 @@ export default function AdminStatusesPage() {
 
   const visible = showArchived ? statuses : statuses.filter(s => !s.archived)
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['admin'] })
-
   const del = useMutation({
     mutationFn: ({ id, replaceWithId }: { id: string; replaceWithId?: string }) =>
-      adminStatuses.remove(id, replaceWithId),
+      api.statuses.remove(id, replaceWithId),
     onSuccess: () => { setDeleting(null); setError(''); invalidate() },
     onError: e => setError(e instanceof Error ? e.message : 'Delete failed'),
   })
 
   const archive = useMutation({
     mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
-      archived ? adminStatuses.unarchive(id) : adminStatuses.archive(id),
+      archived ? api.statuses.unarchive(id) : api.statuses.archive(id),
     onSuccess: () => { setDeleting(null); invalidate() },
   })
 
@@ -36,7 +36,9 @@ export default function AdminStatusesPage() {
     <>
       <PageHeader
         title="Statuses"
-        subtitle="Global catalog. A status appears on a board only through a workflow assigned to the project."
+        subtitle={scope === 'project'
+          ? 'Statuses private to this project. They appear on the board only through a workflow you assign to the project.'
+          : 'Catalog of statuses. A status appears on a board only through a workflow assigned to the project.'}
         action={<Button variant="primary" onClick={() => setEditing('new')}>+ New status</Button>}
       />
       <ArchivedToggle archivedCount={statuses.filter(s => s.archived).length}
@@ -52,17 +54,21 @@ export default function AdminStatusesPage() {
               </span>
             </td>
             <td className="px-3 py-2.5"><StatusBadge name={s.category} category={s.category} /></td>
-            <td className="px-3 py-2.5"><UsageChip usage={s.usage} fetchDetail={() => adminStatuses.usage(s.id)} /></td>
+            <td className="px-3 py-2.5"><UsageChip usage={s.usage} fetchDetail={() => api.statuses.usage(s.id)} /></td>
             <td className="px-3 py-2.5 text-right whitespace-nowrap">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
-              <Button variant="ghost" size="sm"
-                      onClick={() => archive.mutate({ id: s.id, archived: s.archived })}>
-                {s.archived ? 'Unarchive' : 'Archive'}
-              </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { setError(''); setDeleting(s) }}>
-                Delete
-              </Button>
+              {s.scope === ownTag ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(s)}>Edit</Button>
+                  <Button variant="ghost" size="sm"
+                          onClick={() => archive.mutate({ id: s.id, archived: s.archived })}>
+                    {s.archived ? 'Unarchive' : 'Archive'}
+                  </Button>
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { setError(''); setDeleting(s) }}>
+                    Delete
+                  </Button>
+                </>
+              ) : <InheritedBadge scope={s.scope} />}
             </td>
           </tr>
         ))}
@@ -96,6 +102,7 @@ export default function AdminStatusesPage() {
 function StatusForm({ status, onClose, onSaved }: {
   status: AdminStatus | null; onClose: () => void; onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(status?.name ?? '')
   const [category, setCategory] = useState<string>(status?.category ?? 'TODO')
   const [color, setColor] = useState(status?.color ?? '#6B7280')
@@ -104,7 +111,7 @@ function StatusForm({ status, onClose, onSaved }: {
   const save = useMutation({
     mutationFn: () => {
       const payload = { name: name.trim(), category: category as AdminStatus['category'], color }
-      return status ? adminStatuses.update(status.id, payload) : adminStatuses.create(payload)
+      return status ? api.statuses.update(status.id, payload) : api.statuses.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),

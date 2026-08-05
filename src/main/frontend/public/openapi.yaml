@@ -63,6 +63,12 @@ tags:
     description: Real-time Server-Sent Events
   - name: Admin
     description: Global taxonomy management — requires the system ADMIN role (403 otherwise)
+  - name: Delegated admin
+    description: >-
+      The same catalog/set/binding operations at a workspace scope
+      (/workspaces/{wsId}/admin, workspace OWNER/ADMIN) or a project scope
+      (/workspaces/{wsId}/projects/{pId}/admin, project MANAGER). Membership-based:
+      non-member 404, member without the role 403.
 
 security:
   - bearerAuth: []
@@ -1099,6 +1105,165 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
 
+  # ---- Delegated administration (workspace OWNER/ADMIN, project MANAGER) ----
+
+  /workspaces/{workspaceId}/admin/statuses:
+    get:
+      tags: [Delegated admin]
+      summary: List workspace-scoped catalog (visible = global ∪ workspace)
+      description: >-
+        Workspace console. The full catalog/set surface of `/admin/**` is mirrored
+        under `/workspaces/{workspaceId}/admin/**` for workspace OWNER/ADMIN:
+        `statuses`, `priorities`, `issue-types`, `fields` (GET/POST, PATCH `/{id}`,
+        POST `/{id}/archive|unarchive`, DELETE `/{id}` [`?replaceWithId=`; fields
+        `?dropValues=`], GET `/{id}/usage`) and the sets `workflows`,
+        `priority-sets`, `field-sets`, `issue-type-sets` (GET/POST, PATCH/DELETE
+        `/{id}`). List responses carry `scope`; writes to inherited (global) rows
+        return 404.
+      operationId: wsAdminListStatuses
+      parameters: [ { $ref: '#/components/parameters/workspaceId' } ]
+      responses:
+        '200':
+          description: Visible statuses (scope-tagged)
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/AdminStatus' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/admin/projects:
+    get:
+      tags: [Delegated admin]
+      summary: Workspace binding matrix — every project in the workspace
+      operationId: wsAdminMatrix
+      parameters: [ { $ref: '#/components/parameters/workspaceId' } ]
+      responses:
+        '200':
+          description: Project bindings for the workspace
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/ProjectBinding' } }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/admin/binding-options:
+    get:
+      tags: [Delegated admin]
+      summary: Sets bindable within the workspace (global ∪ workspace)
+      operationId: wsAdminBindingOptions
+      parameters: [ { $ref: '#/components/parameters/workspaceId' } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BindingOptions' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/admin/projects/{projectId}/bindings:
+    patch:
+      tags: [Delegated admin]
+      summary: Set a project's bindings (workspace admin)
+      operationId: wsAdminUpdateBindings
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workflowId: { type: string, format: uuid, nullable: true }
+                prioritySetId: { type: string, format: uuid, nullable: true }
+                fieldSetId: { type: string, format: uuid, nullable: true }
+                issueTypeSetId: { type: string, format: uuid, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBinding' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Set not visible to the project
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/admin/bindings:
+    get:
+      tags: [Delegated admin]
+      summary: This project's bindings (project MANAGER)
+      description: >-
+        Project console. The catalog/set surface mirrors `/admin/**` under
+        `/workspaces/{workspaceId}/projects/{projectId}/admin/**` for the project
+        MANAGER — rows scoped PROJECT are editable; global/workspace rows are
+        inherited (read-only). This endpoint plus PATCH set the four bindings.
+      operationId: projectAdminGetBindings
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBinding' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Delegated admin]
+      summary: Set this project's bindings (project MANAGER)
+      operationId: projectAdminUpdateBindings
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                workflowId: { type: string, format: uuid, nullable: true }
+                prioritySetId: { type: string, format: uuid, nullable: true }
+                fieldSetId: { type: string, format: uuid, nullable: true }
+                issueTypeSetId: { type: string, format: uuid, nullable: true }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBinding' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: Set not visible to the project
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/admin/binding-options:
+    get:
+      tags: [Delegated admin]
+      summary: Sets bindable to this project (global ∪ workspace ∪ project)
+      operationId: projectAdminBindingOptions
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BindingOptions' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /workspaces/{workspaceId}/projects/{projectId}/issues:
     post:
       tags: [Issues]
@@ -1703,6 +1868,13 @@ components:
         color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#3B82F6' }
         position: { type: integer, nullable: true, description: Omitted = appended last }
 
+    AdminScope:
+      type: string
+      enum: [GLOBAL, WORKSPACE, PROJECT]
+      description: >-
+        A catalog/set row's scope. Delegated consoles list rows visible to them
+        (global ∪ workspace ∪ project) but edit only rows at their own scope.
+
     AdminStatus:
       allOf:
         - $ref: '#/components/schemas/StatusResponse'
@@ -1710,6 +1882,7 @@ components:
           properties:
             archived: { type: boolean }
             usage: { $ref: '#/components/schemas/UsageInfo' }
+            scope: { $ref: '#/components/schemas/AdminScope' }
 
     AdminPriority:
       allOf:
@@ -1718,6 +1891,7 @@ components:
           properties:
             archived: { type: boolean }
             usage: { $ref: '#/components/schemas/UsageInfo' }
+            scope: { $ref: '#/components/schemas/AdminScope' }
 
     AdminIssueType:
       allOf:
@@ -1726,6 +1900,7 @@ components:
           properties:
             archived: { type: boolean }
             usage: { $ref: '#/components/schemas/UsageInfo' }
+            scope: { $ref: '#/components/schemas/AdminScope' }
 
     UpsertWorkflow:
       type: object
@@ -1755,6 +1930,7 @@ components:
           type: array
           items: { $ref: '#/components/schemas/TransitionRule' }
         projectsUsing: { type: integer, format: int64 }
+        scope: { $ref: '#/components/schemas/AdminScope' }
 
     AdminPrioritySet:
       type: object
@@ -1770,6 +1946,7 @@ components:
               priority: { $ref: '#/components/schemas/Priority' }
               isDefault: { type: boolean, description: Default for new issues }
         projectsUsing: { type: integer, format: int64 }
+        scope: { $ref: '#/components/schemas/AdminScope' }
 
     ProjectBinding:
       type: object
@@ -1785,6 +1962,23 @@ components:
         prioritySetId: { type: string, format: uuid, nullable: true }
         fieldSetId: { type: string, format: uuid, nullable: true }
         issueTypeSetId: { type: string, format: uuid, nullable: true }
+
+    SetOption:
+      type: object
+      description: A bindable set, tagged with its scope (delegated consoles)
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        scope: { $ref: '#/components/schemas/AdminScope' }
+
+    BindingOptions:
+      type: object
+      description: Sets bindable to a project/workspace, per dimension
+      properties:
+        workflows: { type: array, items: { $ref: '#/components/schemas/SetOption' } }
+        prioritySets: { type: array, items: { $ref: '#/components/schemas/SetOption' } }
+        fieldSets: { type: array, items: { $ref: '#/components/schemas/SetOption' } }
+        issueTypeSets: { type: array, items: { $ref: '#/components/schemas/SetOption' } }
 
     AdminUser:
       type: object
@@ -1811,6 +2005,7 @@ components:
           description: Display order
           items: { $ref: '#/components/schemas/IssueTypeResponse' }
         projectsUsing: { type: integer, format: int64 }
+        scope: { $ref: '#/components/schemas/AdminScope' }
 
     UsageDetail:
       type: object
@@ -1883,6 +2078,7 @@ components:
         description: { type: string, nullable: true }
         archived: { type: boolean }
         usage: { $ref: '#/components/schemas/UsageInfo' }
+        scope: { $ref: '#/components/schemas/AdminScope' }
 
     AdminFieldSet:
       type: object
@@ -1900,6 +2096,7 @@ components:
               required: { type: boolean, description: Must be filled on create; cannot be cleared }
               showOnCreate: { type: boolean, description: Rendered in the create form }
         projectsUsing: { type: integer, format: int64 }
+        scope: { $ref: '#/components/schemas/AdminScope' }
 
     FieldValueEntry:
       type: object

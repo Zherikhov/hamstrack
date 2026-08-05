@@ -2,6 +2,7 @@ package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.AdminWorkflowResponse;
 import com.hamstrack.admin.dto.UpsertWorkflowRequest;
+import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.dto.StatusResponse;
 import com.hamstrack.issue.entity.*;
 import com.hamstrack.issue.repository.*;
@@ -33,30 +34,34 @@ public class AdminWorkflowService {
     private final ProjectCountService projectCountService;
 
     @Transactional(readOnly = true)
-    public List<AdminWorkflowResponse> list() {
-        return workflowRepository.findAllByScopeWorkspaceIdIsNullOrderByName().stream()
-                .map(this::toResponse)
-                .toList();
+    public List<AdminWorkflowResponse> list(ScopeContext scope) {
+        // Delegated consoles also SEE inherited (global/workspace) workflows — read-only,
+        // so a project admin can tell what they're using; only own-scope rows are editable.
+        var workflows = scope.isGlobal()
+                ? workflowRepository.findAllAtScope(null, null)
+                : workflowRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
+        return workflows.stream().map(this::toResponse).toList();
     }
 
     @Transactional
-    public AdminWorkflowResponse create(UpsertWorkflowRequest req) {
-        if (workflowRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+    public AdminWorkflowResponse create(ScopeContext scope, UpsertWorkflowRequest req) {
+        if (workflowRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Workflow name already exists");
         }
         var wf = new Workflow();
+        scope.stamp(wf);
         wf.setName(req.name());
         wf.setDescription(req.description());
         workflowRepository.save(wf);
-        applyStatusesAndTransitions(wf, req);
+        applyStatusesAndTransitions(scope, wf, req);
         return toResponse(wf);
     }
 
     @Transactional
-    public AdminWorkflowResponse update(UUID id, UpsertWorkflowRequest req) {
-        var wf = require(id);
+    public AdminWorkflowResponse update(ScopeContext scope, UUID id, UpsertWorkflowRequest req) {
+        var wf = require(scope, id);
         if (!wf.getName().equals(req.name())
-                && workflowRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+                && workflowRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Workflow name already exists");
         }
         // Integrity guard: statuses being removed must hold no issues in
@@ -82,13 +87,13 @@ public class AdminWorkflowService {
         // orders INSERTs ahead of DELETEs in a single flush, so re-adding a status
         // that was already present collides with UNIQUE(workflow_id, status_id).
         workflowStatusRepository.flush();
-        applyStatusesAndTransitions(wf, req);
+        applyStatusesAndTransitions(scope, wf, req);
         return toResponse(wf);
     }
 
     @Transactional
-    public void delete(UUID id) {
-        var wf = require(id);
+    public void delete(ScopeContext scope, UUID id) {
+        var wf = require(scope, id);
         if (wf.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default workflow cannot be deleted");
         }
@@ -100,12 +105,12 @@ public class AdminWorkflowService {
         workflowRepository.delete(wf);
     }
 
-    private void applyStatusesAndTransitions(Workflow wf, UpsertWorkflowRequest req) {
+    private void applyStatusesAndTransitions(ScopeContext scope, Workflow wf, UpsertWorkflowRequest req) {
         var seen = new HashSet<UUID>();
         short pos = 0;
         for (var statusId : req.statusIds()) {
             if (!seen.add(statusId)) continue;
-            var status = requireStatus(statusId);
+            var status = requireStatus(scope, statusId);
             var ws = new WorkflowStatus();
             ws.setWorkflow(wf);
             ws.setStatus(status);
@@ -124,8 +129,8 @@ public class AdminWorkflowService {
                 }
                 var t = new WorkflowTransition();
                 t.setWorkflow(wf);
-                t.setFromStatus(rule.fromStatusId() != null ? requireStatus(rule.fromStatusId()) : null);
-                t.setToStatus(requireStatus(rule.toStatusId()));
+                t.setFromStatus(rule.fromStatusId() != null ? requireStatus(scope, rule.fromStatusId()) : null);
+                t.setToStatus(requireStatus(scope, rule.toStatusId()));
                 workflowTransitionRepository.save(t);
             }
         }
@@ -142,16 +147,17 @@ public class AdminWorkflowService {
                 .toList();
         return new AdminWorkflowResponse(wf.getId(), wf.getName(), wf.getDescription(),
                 wf.isSystemDefault(), statuses, transitions,
-                projectCountService.projectsUsingWorkflow(wf));
+                projectCountService.projectsUsingWorkflow(wf), wf.scopeLabel());
     }
 
-    private Workflow require(UUID id) {
-        return workflowRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    private Workflow require(ScopeContext scope, UUID id) {
+        return workflowRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workflow not found"));
     }
 
-    private Status requireStatus(UUID id) {
-        return statusRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    /** A status the workflow may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
+    private Status requireStatus(ScopeContext scope, UUID id) {
+        return statusRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
     }
 }

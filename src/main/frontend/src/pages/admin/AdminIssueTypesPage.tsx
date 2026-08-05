@@ -1,15 +1,17 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminIssueTypes, adminIssueTypeSets } from '../../api'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import type { AdminIssueType, AdminIssueTypeSet } from '../../types'
 import { Button, Checkbox, Input } from '../../components/ui'
-import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, Modal, PageHeader, UsageChip } from './common'
+import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
+import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 import { ColorField } from './AdminStatusesPage'
 
 export default function AdminIssueTypesPage() {
-  const qc = useQueryClient()
-  const { data: types = [] } = useQuery({ queryKey: ['admin', 'issue-types'], queryFn: adminIssueTypes.list })
-  const { data: sets = [] } = useQuery({ queryKey: ['admin', 'issue-type-sets'], queryFn: adminIssueTypeSets.list })
+  const { api, keyPrefix, scope } = useAdminApi()
+  const ownTag = ownScopeTag(scope)
+  const invalidate = useAdminInvalidate()
+  const { data: types = [] } = useQuery({ queryKey: [...keyPrefix, 'issue-types'], queryFn: api.issueTypes.list })
+  const { data: sets = [] } = useQuery({ queryKey: [...keyPrefix, 'issue-type-sets'], queryFn: api.issueTypeSets.list })
   const [editing, setEditing] = useState<AdminIssueType | 'new' | null>(null)
   const [editingSet, setEditingSet] = useState<AdminIssueTypeSet | 'new' | null>(null)
   const [deleting, setDeleting] = useState<AdminIssueType | null>(null)
@@ -18,23 +20,21 @@ export default function AdminIssueTypesPage() {
 
   const visible = showArchived ? types : types.filter(t => !t.archived)
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['admin'] })
-
   const del = useMutation({
     mutationFn: ({ id, replaceWithId }: { id: string; replaceWithId?: string }) =>
-      adminIssueTypes.remove(id, replaceWithId),
+      api.issueTypes.remove(id, replaceWithId),
     onSuccess: () => { setDeleting(null); setError(''); invalidate() },
     onError: e => setError(e instanceof Error ? e.message : 'Delete failed'),
   })
 
   const archive = useMutation({
     mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
-      archived ? adminIssueTypes.unarchive(id) : adminIssueTypes.archive(id),
+      archived ? api.issueTypes.unarchive(id) : api.issueTypes.archive(id),
     onSuccess: () => { setDeleting(null); invalidate() },
   })
 
   const delSet = useMutation({
-    mutationFn: (id: string) => adminIssueTypeSets.remove(id),
+    mutationFn: (id: string) => api.issueTypeSets.remove(id),
     onSuccess: invalidate,
     onError: e => window.alert(e instanceof Error ? e.message : 'Delete failed'),
   })
@@ -43,7 +43,9 @@ export default function AdminIssueTypesPage() {
     <>
       <PageHeader
         title="Issue types"
-        subtitle="Global catalog. Type sets pick which of these a project offers for new issues and type changes — existing issues keep their type."
+        subtitle={scope === 'project'
+          ? 'Issue types private to this project. Type sets pick which are offered for new issues and type changes — existing issues keep their type.'
+          : 'Catalog of issue types. Type sets pick which of these a project offers for new issues and type changes — existing issues keep their type.'}
         action={<Button variant="primary" onClick={() => setEditing('new')}>+ New type</Button>}
       />
       <ArchivedToggle archivedCount={types.filter(t => t.archived).length}
@@ -61,16 +63,20 @@ export default function AdminIssueTypesPage() {
             <td className="px-3 py-2.5">
               <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{t.icon ?? '—'}</span>
             </td>
-            <td className="px-3 py-2.5"><UsageChip usage={t.usage} fetchDetail={() => adminIssueTypes.usage(t.id)} /></td>
+            <td className="px-3 py-2.5"><UsageChip usage={t.usage} fetchDetail={() => api.issueTypes.usage(t.id)} /></td>
             <td className="px-3 py-2.5 text-right whitespace-nowrap">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(t)}>Edit</Button>
-              <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: t.id, archived: t.archived })}>
-                {t.archived ? 'Unarchive' : 'Archive'}
-              </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { setError(''); setDeleting(t) }}>
-                Delete
-              </Button>
+              {t.scope === ownTag ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(t)}>Edit</Button>
+                  <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: t.id, archived: t.archived })}>
+                    {t.archived ? 'Unarchive' : 'Archive'}
+                  </Button>
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { setError(''); setDeleting(t) }}>
+                    Delete
+                  </Button>
+                </>
+              ) : <InheritedBadge scope={t.scope} />}
             </td>
           </tr>
         ))}
@@ -103,13 +109,17 @@ export default function AdminIssueTypesPage() {
                   style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
               {set.projectsUsing} project{set.projectsUsing !== 1 ? 's' : ''}
             </span>
-            <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
-            {!set.systemDefault && (
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
-                Delete
-              </Button>
-            )}
+            {set.scope === ownTag ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
+                {!set.systemDefault && (
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
+                    Delete
+                  </Button>
+                )}
+              </>
+            ) : <InheritedBadge scope={set.scope} />}
           </div>
         ))}
       </div>
@@ -148,6 +158,7 @@ function TypeSetForm({ set, types, onClose, onSaved }: {
   onClose: () => void
   onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(set?.name ?? '')
   const [selected, setSelected] = useState<string[]>(set?.types.map(t => t.id) ?? [])
   const [error, setError] = useState('')
@@ -160,7 +171,7 @@ function TypeSetForm({ set, types, onClose, onSaved }: {
     mutationFn: () => {
       // Types in catalog order, like priority sets
       const payload = { name: name.trim(), typeIds: types.filter(t => selected.includes(t.id)).map(t => t.id) }
-      return set ? adminIssueTypeSets.update(set.id, payload) : adminIssueTypeSets.create(payload)
+      return set ? api.issueTypeSets.update(set.id, payload) : api.issueTypeSets.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),
@@ -202,6 +213,7 @@ function TypeSetForm({ set, types, onClose, onSaved }: {
 function TypeForm({ type, onClose, onSaved }: {
   type: AdminIssueType | null; onClose: () => void; onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(type?.name ?? '')
   const [color, setColor] = useState(type?.color ?? '#6B7280')
   const [icon, setIcon] = useState(type?.icon ?? '')
@@ -210,7 +222,7 @@ function TypeForm({ type, onClose, onSaved }: {
   const save = useMutation({
     mutationFn: () => {
       const payload = { name: name.trim(), color, icon: icon.trim() || undefined }
-      return type ? adminIssueTypes.update(type.id, payload) : adminIssueTypes.create(payload)
+      return type ? api.issueTypes.update(type.id, payload) : api.issueTypes.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),

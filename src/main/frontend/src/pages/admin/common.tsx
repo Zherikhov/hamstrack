@@ -2,15 +2,17 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import type { UsageDetail, UsageInfo } from '../../types'
 import { Button, Checkbox, Select } from '../../components/ui'
+import { useAdminApi } from './AdminApiContext'
 
 // Shared building blocks of the admin console (see DESIGN.md: data-dense
 // tables, usage-first chips, warm neutrals)
 
 export function PageHeader({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
+  const { eyebrow } = useAdminApi()
   return (
     <div className="flex items-start justify-between mb-5">
       <div>
-        <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Administration</div>
+        <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{eyebrow}</div>
         <h1 className="font-display font-bold" style={{ fontSize: 24, letterSpacing: '-0.4px' }}>{title}</h1>
         {/* Inline maxWidth: our @theme --spacing-* scale shadows Tailwind's
             max-w-{xs..3xl} sizes (max-w-xl would be 32px!) — see CLAUDE.md */}
@@ -159,6 +161,16 @@ export function ArchivedBadge() {
     <span className="text-xs px-2 py-0.5 rounded-full"
           style={{ color: 'var(--color-warning)', background: '#FBF3E8' }}>
       archived
+    </span>
+  )
+}
+
+/** Marks a row a delegated console inherits (from the workspace or the global catalog) and can't edit. */
+export function InheritedBadge({ scope }: { scope: 'GLOBAL' | 'WORKSPACE' | 'PROJECT' }) {
+  return (
+    <span className="text-xs px-2 py-0.5 rounded-full" title="Inherited — edit it in the console that owns it"
+          style={{ color: 'var(--color-text-muted)', background: 'var(--color-surface-2)' }}>
+      {scope === 'WORKSPACE' ? 'workspace' : 'global'}
     </span>
   )
 }

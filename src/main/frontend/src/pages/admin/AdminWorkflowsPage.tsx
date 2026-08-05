@@ -1,20 +1,20 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { ArrowRight, X } from 'lucide-react'
-import { adminStatuses, adminWorkflows } from '../../api'
 import type { AdminWorkflow, TransitionRule } from '../../types'
 import { Button, Input, Select } from '../../components/ui'
-import { AdminTable, ImpactBanner, Modal, PageHeader } from './common'
+import { AdminTable, ImpactBanner, InheritedBadge, Modal, PageHeader } from './common'
+import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 
 export default function AdminWorkflowsPage() {
-  const qc = useQueryClient()
-  const { data: workflows = [] } = useQuery({ queryKey: ['admin', 'workflows'], queryFn: adminWorkflows.list })
+  const { api, keyPrefix, scope } = useAdminApi()
+  const ownTag = ownScopeTag(scope)
+  const invalidate = useAdminInvalidate()
+  const { data: workflows = [] } = useQuery({ queryKey: [...keyPrefix, 'workflows'], queryFn: api.workflows.list })
   const [editing, setEditing] = useState<AdminWorkflow | 'new' | null>(null)
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['admin'] })
-
   const del = useMutation({
-    mutationFn: (id: string) => adminWorkflows.remove(id),
+    mutationFn: (id: string) => api.workflows.remove(id),
     onSuccess: invalidate,
     onError: e => window.alert(e instanceof Error ? e.message : 'Delete failed'),
   })
@@ -53,13 +53,17 @@ export default function AdminWorkflowsPage() {
               </span>
             </td>
             <td className="px-3 py-2.5 text-right whitespace-nowrap">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(wf)}>Edit</Button>
-              {!wf.systemDefault && (
-                <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                        onClick={() => { if (window.confirm(`Delete workflow “${wf.name}”?`)) del.mutate(wf.id) }}>
-                  Delete
-                </Button>
-              )}
+              {wf.scope === ownTag ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(wf)}>Edit</Button>
+                  {!wf.systemDefault && (
+                    <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                            onClick={() => { if (window.confirm(`Delete workflow “${wf.name}”?`)) del.mutate(wf.id) }}>
+                      Delete
+                    </Button>
+                  )}
+                </>
+              ) : <InheritedBadge scope={wf.scope} />}
             </td>
           </tr>
         ))}
@@ -77,7 +81,8 @@ export default function AdminWorkflowsPage() {
 function WorkflowForm({ workflow, onClose, onSaved }: {
   workflow: AdminWorkflow | null; onClose: () => void; onSaved: () => void
 }) {
-  const { data: catalog = [] } = useQuery({ queryKey: ['admin', 'statuses'], queryFn: adminStatuses.list })
+  const { api, keyPrefix } = useAdminApi()
+  const { data: catalog = [] } = useQuery({ queryKey: [...keyPrefix, 'statuses'], queryFn: api.statuses.list })
   const [name, setName] = useState(workflow?.name ?? '')
   const [description, setDescription] = useState(workflow?.description ?? '')
   // Ordered list of status ids = board column order
@@ -122,7 +127,7 @@ function WorkflowForm({ workflow, onClose, onSaved }: {
   const save = useMutation({
     mutationFn: () => {
       const payload = { name: name.trim(), description: description.trim() || undefined, statusIds, transitions }
-      return workflow ? adminWorkflows.update(workflow.id, payload) : adminWorkflows.create(payload)
+      return workflow ? api.workflows.update(workflow.id, payload) : api.workflows.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),

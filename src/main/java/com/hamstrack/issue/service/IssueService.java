@@ -225,22 +225,26 @@ public class IssueService {
                 Map.of("projectId", projectId.toString(), "issueNumber", number));
     }
 
-    // ---- catalog resolution (global rows; workspace scoping reserved) ----
+    // ---- catalog resolution ----
+    // Find by id across ALL scopes (global / workspace / project-private); the
+    // real gate is ProjectConfigService.requireXInSet/Workflow at every call
+    // site, which rejects anything not in this project's effective config —
+    // so a foreign or wrong-scope id can never attach to an issue.
 
     private IssueType resolveType(UUID id) {
-        return issueTypeRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+        return issueTypeRepository.findById(id)
                 .filter(t -> t.getArchivedAt() == null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
     }
 
     private Status resolveStatus(UUID id) {
-        return statusRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+        return statusRepository.findById(id)
                 .filter(s -> s.getArchivedAt() == null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
     }
 
     private Priority resolvePriority(UUID id) {
-        return priorityRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+        return priorityRepository.findById(id)
                 .filter(p -> p.getArchivedAt() == null)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority"));
     }

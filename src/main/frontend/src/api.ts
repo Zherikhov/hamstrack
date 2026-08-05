@@ -3,7 +3,7 @@ import type {
   Notification, WorkspaceMember, ProjectConfig,
   AdminStatus, AdminPriority, AdminIssueType, AdminWorkflow, AdminPrioritySet,
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
-  ProjectBinding, TransitionRule, UsageDetail, AdminUser, PendingInvite,
+  ProjectBinding, BindingOptions, TransitionRule, UsageDetail, AdminUser, PendingInvite,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -333,25 +333,26 @@ export interface UpsertCatalogPayload {
   position?: number
 }
 
-function adminCrud<TResp>(resource: string) {
+// Each admin group is a factory bound to a base path: '/admin' for the system
+// console, or a delegated scope like '/workspaces/{ws}/projects/{p}/admin'. The
+// server enforces the scope; the shapes are identical, so the same pages drive
+// all three consoles (see makeAdminApi + the AdminApi context on the frontend).
+
+function catalogGroup<T>(base: string, resource: string) {
+  const at = (id: string) => `${base}/${resource}/${id}`
   return {
-    list: () => request<TResp[]>(`/admin/${resource}`),
+    list: () => request<T[]>(`${base}/${resource}`),
     create: (payload: UpsertCatalogPayload) =>
-      request<TResp>(`/admin/${resource}`, { method: 'POST', body: JSON.stringify(payload) }),
+      request<T>(`${base}/${resource}`, { method: 'POST', body: JSON.stringify(payload) }),
     update: (id: string, payload: UpsertCatalogPayload) =>
-      request<TResp>(`/admin/${resource}/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
-    archive: (id: string) => request<void>(`/admin/${resource}/${id}/archive`, { method: 'POST' }),
-    unarchive: (id: string) => request<void>(`/admin/${resource}/${id}/unarchive`, { method: 'POST' }),
+      request<T>(at(id), { method: 'PATCH', body: JSON.stringify(payload) }),
+    archive: (id: string) => request<void>(`${at(id)}/archive`, { method: 'POST' }),
+    unarchive: (id: string) => request<void>(`${at(id)}/unarchive`, { method: 'POST' }),
     remove: (id: string, replaceWithId?: string) =>
-      request<void>(`/admin/${resource}/${id}${replaceWithId ? `?replaceWithId=${replaceWithId}` : ''}`,
-        { method: 'DELETE' }),
-    usage: (id: string) => request<UsageDetail>(`/admin/${resource}/${id}/usage`),
+      request<void>(`${at(id)}${replaceWithId ? `?replaceWithId=${replaceWithId}` : ''}`, { method: 'DELETE' }),
+    usage: (id: string) => request<UsageDetail>(`${at(id)}/usage`),
   }
 }
-
-export const adminStatuses = adminCrud<AdminStatus>('statuses')
-export const adminPriorities = adminCrud<AdminPriority>('priorities')
-export const adminIssueTypes = adminCrud<AdminIssueType>('issue-types')
 
 export interface UpsertWorkflowPayload {
   name: string
@@ -360,13 +361,15 @@ export interface UpsertWorkflowPayload {
   transitions: TransitionRule[]
 }
 
-export const adminWorkflows = {
-  list: () => request<AdminWorkflow[]>('/admin/workflows'),
-  create: (p: UpsertWorkflowPayload) =>
-    request<AdminWorkflow>('/admin/workflows', { method: 'POST', body: JSON.stringify(p) }),
-  update: (id: string, p: UpsertWorkflowPayload) =>
-    request<AdminWorkflow>(`/admin/workflows/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
-  remove: (id: string) => request<void>(`/admin/workflows/${id}`, { method: 'DELETE' }),
+function workflowGroup(base: string) {
+  return {
+    list: () => request<AdminWorkflow[]>(`${base}/workflows`),
+    create: (p: UpsertWorkflowPayload) =>
+      request<AdminWorkflow>(`${base}/workflows`, { method: 'POST', body: JSON.stringify(p) }),
+    update: (id: string, p: UpsertWorkflowPayload) =>
+      request<AdminWorkflow>(`${base}/workflows/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+    remove: (id: string) => request<void>(`${base}/workflows/${id}`, { method: 'DELETE' }),
+  }
 }
 
 export interface UpsertPrioritySetPayload {
@@ -374,13 +377,15 @@ export interface UpsertPrioritySetPayload {
   items: { priorityId: string; isDefault: boolean }[]  // display order
 }
 
-export const adminPrioritySets = {
-  list: () => request<AdminPrioritySet[]>('/admin/priority-sets'),
-  create: (p: UpsertPrioritySetPayload) =>
-    request<AdminPrioritySet>('/admin/priority-sets', { method: 'POST', body: JSON.stringify(p) }),
-  update: (id: string, p: UpsertPrioritySetPayload) =>
-    request<AdminPrioritySet>(`/admin/priority-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
-  remove: (id: string) => request<void>(`/admin/priority-sets/${id}`, { method: 'DELETE' }),
+function prioritySetGroup(base: string) {
+  return {
+    list: () => request<AdminPrioritySet[]>(`${base}/priority-sets`),
+    create: (p: UpsertPrioritySetPayload) =>
+      request<AdminPrioritySet>(`${base}/priority-sets`, { method: 'POST', body: JSON.stringify(p) }),
+    update: (id: string, p: UpsertPrioritySetPayload) =>
+      request<AdminPrioritySet>(`${base}/priority-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+    remove: (id: string) => request<void>(`${base}/priority-sets/${id}`, { method: 'DELETE' }),
+  }
 }
 
 export interface UpsertFieldPayload {
@@ -391,19 +396,22 @@ export interface UpsertFieldPayload {
   description?: string
 }
 
-export const adminFields = {
-  list: () => request<AdminField[]>('/admin/fields'),
-  create: (p: UpsertFieldPayload) =>
-    request<AdminField>('/admin/fields', { method: 'POST', body: JSON.stringify(p) }),
-  update: (id: string, p: UpsertFieldPayload) =>
-    request<AdminField>(`/admin/fields/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
-  archive: (id: string) => request<void>(`/admin/fields/${id}/archive`, { method: 'POST' }),
-  unarchive: (id: string) => request<void>(`/admin/fields/${id}/unarchive`, { method: 'POST' }),
-  // No remap for arbitrary value shapes — deleting a field with values needs
-  // the explicit dropValues confirmation (409 otherwise)
-  remove: (id: string, dropValues = false) =>
-    request<void>(`/admin/fields/${id}${dropValues ? '?dropValues=true' : ''}`, { method: 'DELETE' }),
-  usage: (id: string) => request<UsageDetail>(`/admin/fields/${id}/usage`),
+function fieldGroup(base: string) {
+  const at = (id: string) => `${base}/fields/${id}`
+  return {
+    list: () => request<AdminField[]>(`${base}/fields`),
+    create: (p: UpsertFieldPayload) =>
+      request<AdminField>(`${base}/fields`, { method: 'POST', body: JSON.stringify(p) }),
+    update: (id: string, p: UpsertFieldPayload) =>
+      request<AdminField>(at(id), { method: 'PATCH', body: JSON.stringify(p) }),
+    archive: (id: string) => request<void>(`${at(id)}/archive`, { method: 'POST' }),
+    unarchive: (id: string) => request<void>(`${at(id)}/unarchive`, { method: 'POST' }),
+    // No remap for arbitrary value shapes — deleting a field with values needs
+    // the explicit dropValues confirmation (409 otherwise)
+    remove: (id: string, dropValues = false) =>
+      request<void>(`${at(id)}${dropValues ? '?dropValues=true' : ''}`, { method: 'DELETE' }),
+    usage: (id: string) => request<UsageDetail>(`${at(id)}/usage`),
+  }
 }
 
 export interface UpsertFieldSetPayload {
@@ -411,13 +419,15 @@ export interface UpsertFieldSetPayload {
   items: { fieldId: string; required: boolean; showOnCreate: boolean }[]  // display order
 }
 
-export const adminFieldSets = {
-  list: () => request<AdminFieldSet[]>('/admin/field-sets'),
-  create: (p: UpsertFieldSetPayload) =>
-    request<AdminFieldSet>('/admin/field-sets', { method: 'POST', body: JSON.stringify(p) }),
-  update: (id: string, p: UpsertFieldSetPayload) =>
-    request<AdminFieldSet>(`/admin/field-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
-  remove: (id: string) => request<void>(`/admin/field-sets/${id}`, { method: 'DELETE' }),
+function fieldSetGroup(base: string) {
+  return {
+    list: () => request<AdminFieldSet[]>(`${base}/field-sets`),
+    create: (p: UpsertFieldSetPayload) =>
+      request<AdminFieldSet>(`${base}/field-sets`, { method: 'POST', body: JSON.stringify(p) }),
+    update: (id: string, p: UpsertFieldSetPayload) =>
+      request<AdminFieldSet>(`${base}/field-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+    remove: (id: string) => request<void>(`${base}/field-sets/${id}`, { method: 'DELETE' }),
+  }
 }
 
 export interface UpsertIssueTypeSetPayload {
@@ -425,14 +435,35 @@ export interface UpsertIssueTypeSetPayload {
   typeIds: string[]                   // display order
 }
 
-export const adminIssueTypeSets = {
-  list: () => request<AdminIssueTypeSet[]>('/admin/issue-type-sets'),
-  create: (p: UpsertIssueTypeSetPayload) =>
-    request<AdminIssueTypeSet>('/admin/issue-type-sets', { method: 'POST', body: JSON.stringify(p) }),
-  update: (id: string, p: UpsertIssueTypeSetPayload) =>
-    request<AdminIssueTypeSet>(`/admin/issue-type-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
-  remove: (id: string) => request<void>(`/admin/issue-type-sets/${id}`, { method: 'DELETE' }),
+function issueTypeSetGroup(base: string) {
+  return {
+    list: () => request<AdminIssueTypeSet[]>(`${base}/issue-type-sets`),
+    create: (p: UpsertIssueTypeSetPayload) =>
+      request<AdminIssueTypeSet>(`${base}/issue-type-sets`, { method: 'POST', body: JSON.stringify(p) }),
+    update: (id: string, p: UpsertIssueTypeSetPayload) =>
+      request<AdminIssueTypeSet>(`${base}/issue-type-sets/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+    remove: (id: string) => request<void>(`${base}/issue-type-sets/${id}`, { method: 'DELETE' }),
+  }
 }
+
+/** All admin groups bound to one base path. Drives the system, workspace and project consoles. */
+export function makeAdminApi(base: string) {
+  return {
+    statuses: catalogGroup<AdminStatus>(base, 'statuses'),
+    priorities: catalogGroup<AdminPriority>(base, 'priorities'),
+    issueTypes: catalogGroup<AdminIssueType>(base, 'issue-types'),
+    workflows: workflowGroup(base),
+    prioritySets: prioritySetGroup(base),
+    fields: fieldGroup(base),
+    fieldSets: fieldSetGroup(base),
+    issueTypeSets: issueTypeSetGroup(base),
+  }
+}
+
+export type AdminApi = ReturnType<typeof makeAdminApi>
+
+// The system console (system ADMIN); delegated scopes use makeAdminApi(base) too.
+export const globalAdminApi = makeAdminApi('/admin')
 
 export interface ProjectBindings {
   workflowId: string | null
@@ -449,6 +480,37 @@ export const adminProjects = {
       method: 'PATCH',
       body: JSON.stringify(bindings),
     }),
+}
+
+// ── Delegated admin: project settings (project MANAGER; server-guarded) ──────
+// Same shapes as the system admin console, scoped to one project. A project may
+// bind only sets visible to it (global ∪ its workspace ∪ its own project-private).
+
+export function projectAdminApi(wsId: string, projectId: string) {
+  const base = `/workspaces/${wsId}/projects/${projectId}/admin`
+  return {
+    bindings: () => request<ProjectBinding>(`${base}/bindings`),
+    bindingOptions: () => request<BindingOptions>(`${base}/binding-options`),
+    // Full replacement of all four bindings; null = the system default set
+    updateBindings: (bindings: ProjectBindings) =>
+      request<ProjectBinding>(`${base}/bindings`, { method: 'PATCH', body: JSON.stringify(bindings) }),
+  }
+}
+
+// ── Delegated admin: workspace settings (workspace OWNER/ADMIN; server-guarded) ──
+// The catalog/set consoles use makeAdminApi('/workspaces/{ws}/admin'); this covers
+// the binding matrix for every project in the workspace.
+
+export function workspaceAdminApi(wsId: string) {
+  const base = `/workspaces/${wsId}/admin`
+  return {
+    matrix: () => request<ProjectBinding[]>(`${base}/projects`),
+    bindingOptions: () => request<BindingOptions>(`${base}/binding-options`),
+    updateProjectBindings: (projectId: string, bindings: ProjectBindings) =>
+      request<ProjectBinding>(`${base}/projects/${projectId}/bindings`, {
+        method: 'PATCH', body: JSON.stringify(bindings),
+      }),
+  }
 }
 
 // ── Admin users (system ADMIN only; server-guarded) ──────────────────────────

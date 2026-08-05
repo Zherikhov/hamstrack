@@ -2,6 +2,7 @@ package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.AdminIssueTypeSetResponse;
 import com.hamstrack.admin.dto.UpsertIssueTypeSetRequest;
+import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.dto.IssueTypeResponse;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.IssueTypeSet;
@@ -36,29 +37,32 @@ public class AdminIssueTypeSetService {
     private final ProjectCountService projectCountService;
 
     @Transactional(readOnly = true)
-    public List<AdminIssueTypeSetResponse> list() {
-        return setRepository.findAllByScopeWorkspaceIdIsNullOrderByName().stream()
-                .map(this::toResponse)
-                .toList();
+    public List<AdminIssueTypeSetResponse> list(ScopeContext scope) {
+        // Inherited sets are shown read-only in delegated consoles (see AdminWorkflowService.list)
+        var sets = scope.isGlobal()
+                ? setRepository.findAllAtScope(null, null)
+                : setRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
+        return sets.stream().map(this::toResponse).toList();
     }
 
     @Transactional
-    public AdminIssueTypeSetResponse create(UpsertIssueTypeSetRequest req) {
-        if (setRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+    public AdminIssueTypeSetResponse create(ScopeContext scope, UpsertIssueTypeSetRequest req) {
+        if (setRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Issue type set name already exists");
         }
         var set = new IssueTypeSet();
+        scope.stamp(set);
         set.setName(req.name());
         setRepository.save(set);
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toResponse(set);
     }
 
     @Transactional
-    public AdminIssueTypeSetResponse update(UUID id, UpsertIssueTypeSetRequest req) {
-        var set = require(id);
+    public AdminIssueTypeSetResponse update(ScopeContext scope, UUID id, UpsertIssueTypeSetRequest req) {
+        var set = require(scope, id);
         if (!set.getName().equals(req.name())
-                && setRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+                && setRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Issue type set name already exists");
         }
         set.setName(req.name());
@@ -67,13 +71,13 @@ public class AdminIssueTypeSetService {
         // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
         // DELETEs in one flush, colliding with UNIQUE(set_id, type_id).
         itemRepository.flush();
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toResponse(set);
     }
 
     @Transactional
-    public void delete(UUID id) {
-        var set = require(id);
+    public void delete(ScopeContext scope, UUID id) {
+        var set = require(scope, id);
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default issue type set cannot be deleted");
         }
@@ -85,14 +89,14 @@ public class AdminIssueTypeSetService {
         setRepository.delete(set);
     }
 
-    private void applyItems(IssueTypeSet set, UpsertIssueTypeSetRequest req) {
+    private void applyItems(ScopeContext scope, IssueTypeSet set, UpsertIssueTypeSetRequest req) {
         var seen = new HashSet<UUID>();
         short pos = 0;
         for (var typeId : req.typeIds()) {
             if (!seen.add(typeId)) continue;
             var item = new IssueTypeSetItem();
             item.setSet(set);
-            item.setType(requireType(typeId));
+            item.setType(requireType(scope, typeId));
             item.setPosition(pos++);
             itemRepository.save(item);
         }
@@ -103,16 +107,17 @@ public class AdminIssueTypeSetService {
                 .map(i -> IssueTypeResponse.of(i.getType()))
                 .toList();
         return new AdminIssueTypeSetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                types, projectCountService.projectsUsingIssueTypeSet(set));
+                types, projectCountService.projectsUsingIssueTypeSet(set), set.scopeLabel());
     }
 
-    private IssueTypeSet require(UUID id) {
-        return setRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    private IssueTypeSet require(ScopeContext scope, UUID id) {
+        return setRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Issue type set not found"));
     }
 
-    private IssueType requireType(UUID id) {
-        return issueTypeRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    /** A type the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
+    private IssueType requireType(ScopeContext scope, UUID id) {
+        return issueTypeRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
     }
 }

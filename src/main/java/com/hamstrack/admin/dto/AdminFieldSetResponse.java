@@ -6,7 +6,7 @@ import java.util.UUID;
 public record AdminFieldSetResponse(
         UUID id, String name, boolean systemDefault,
         List<Item> items,
-        long projectsUsing
+        long projectsUsing, String scope
 ) {
     public record Item(AdminFieldResponse field, boolean required, boolean showOnCreate) {}
 }

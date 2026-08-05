@@ -8,7 +8,7 @@ import java.util.UUID;
 public record AdminPrioritySetResponse(
         UUID id, String name, boolean systemDefault,
         List<Item> items,
-        long projectsUsing
+        long projectsUsing, String scope
 ) {
     public record Item(PriorityResponse priority, boolean isDefault) {}
 }

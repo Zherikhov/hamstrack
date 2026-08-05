@@ -1,17 +1,19 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { EyeOff, Trash2 } from 'lucide-react'
-import { adminFields, adminFieldSets } from '../../api'
 import type { UpsertFieldPayload } from '../../api'
 import type { AdminField, AdminFieldSet, FieldType } from '../../types'
 import { FIELD_TYPE_LABELS } from '../../components/fields'
 import { Button, Checkbox, Input, Select } from '../../components/ui'
-import { AdminTable, ArchivedBadge, ArchivedToggle, ImpactBanner, Modal, PageHeader, UsageChip } from './common'
+import { AdminTable, ArchivedBadge, ArchivedToggle, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
+import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 
 export default function AdminFieldsPage() {
-  const qc = useQueryClient()
-  const { data: fields = [] } = useQuery({ queryKey: ['admin', 'fields'], queryFn: adminFields.list })
-  const { data: sets = [] } = useQuery({ queryKey: ['admin', 'field-sets'], queryFn: adminFieldSets.list })
+  const { api, keyPrefix, scope } = useAdminApi()
+  const ownTag = ownScopeTag(scope)
+  const invalidate = useAdminInvalidate()
+  const { data: fields = [] } = useQuery({ queryKey: [...keyPrefix, 'fields'], queryFn: api.fields.list })
+  const { data: sets = [] } = useQuery({ queryKey: [...keyPrefix, 'field-sets'], queryFn: api.fieldSets.list })
   const [editing, setEditing] = useState<AdminField | 'new' | null>(null)
   const [editingSet, setEditingSet] = useState<AdminFieldSet | 'new' | null>(null)
   const [deleting, setDeleting] = useState<AdminField | null>(null)
@@ -19,16 +21,14 @@ export default function AdminFieldsPage() {
 
   const visible = showArchived ? fields : fields.filter(f => !f.archived)
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['admin'] })
-
   const archive = useMutation({
     mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
-      archived ? adminFields.unarchive(id) : adminFields.archive(id),
+      archived ? api.fields.unarchive(id) : api.fields.archive(id),
     onSuccess: () => { setDeleting(null); invalidate() },
   })
 
   const delSet = useMutation({
-    mutationFn: (id: string) => adminFieldSets.remove(id),
+    mutationFn: (id: string) => api.fieldSets.remove(id),
     onSuccess: invalidate,
     onError: e => window.alert(e instanceof Error ? e.message : 'Delete failed'),
   })
@@ -37,7 +37,9 @@ export default function AdminFieldsPage() {
     <>
       <PageHeader
         title="Fields"
-        subtitle="Global catalog of custom fields. Field sets pick which of these a project shows on its issues, in what order, and how they behave on the create form."
+        subtitle={scope === 'project'
+          ? 'Custom fields private to this project. Field sets pick which appear on issues, in what order, and how they behave on the create form.'
+          : 'Catalog of custom fields. Field sets pick which of these a project shows on its issues, in what order, and how they behave on the create form.'}
         action={<Button variant="primary" onClick={() => setEditing('new')}>+ New field</Button>}
       />
       <ArchivedToggle archivedCount={fields.filter(f => f.archived).length}
@@ -73,16 +75,20 @@ export default function AdminFieldsPage() {
                 )}
               </span>
             </td>
-            <td className="px-3 py-2.5">{f.usage && <UsageChip usage={f.usage} fetchDetail={() => adminFields.usage(f.id)} />}</td>
+            <td className="px-3 py-2.5">{f.usage && <UsageChip usage={f.usage} fetchDetail={() => api.fields.usage(f.id)} />}</td>
             <td className="px-3 py-2.5 text-right whitespace-nowrap">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(f)}>Edit</Button>
-              <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: f.id, archived: f.archived })}>
-                {f.archived ? 'Unarchive' : 'Archive'}
-              </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => setDeleting(f)}>
-                Delete
-              </Button>
+              {f.scope === ownTag ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(f)}>Edit</Button>
+                  <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: f.id, archived: f.archived })}>
+                    {f.archived ? 'Unarchive' : 'Archive'}
+                  </Button>
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => setDeleting(f)}>
+                    Delete
+                  </Button>
+                </>
+              ) : <InheritedBadge scope={f.scope} />}
             </td>
           </tr>
         ))}
@@ -123,13 +129,17 @@ export default function AdminFieldsPage() {
                   style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
               {set.projectsUsing} project{set.projectsUsing !== 1 ? 's' : ''}
             </span>
-            <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
-            {!set.systemDefault && (
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
-                Delete
-              </Button>
-            )}
+            {set.scope === ownTag ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
+                {!set.systemDefault && (
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
+                    Delete
+                  </Button>
+                )}
+              </>
+            ) : <InheritedBadge scope={set.scope} />}
           </div>
         ))}
       </div>
@@ -163,12 +173,13 @@ export default function AdminFieldsPage() {
 function FieldDeleteDialog({ field, onArchive, onClose, onDeleted }: {
   field: AdminField; onArchive: () => void; onClose: () => void; onDeleted: () => void
 }) {
+  const { api } = useAdminApi()
   const issues = field.usage?.issues ?? 0
   const [confirmed, setConfirmed] = useState(false)
   const [error, setError] = useState('')
 
   const del = useMutation({
-    mutationFn: () => adminFields.remove(field.id, issues > 0),
+    mutationFn: () => api.fields.remove(field.id, issues > 0),
     onSuccess: onDeleted,
     onError: e => setError(e instanceof Error ? e.message : 'Delete failed'),
   })
@@ -212,6 +223,7 @@ function slugify(s: string) {
 function FieldForm({ field, onClose, onSaved }: {
   field: AdminField | null; onClose: () => void; onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const isNew = field === null
   const [name, setName] = useState(field?.name ?? '')
   const [key, setKey] = useState(field?.key ?? '')
@@ -243,7 +255,7 @@ function FieldForm({ field, onClose, onSaved }: {
             ? { ...(min !== '' ? { min: Number(min) } : {}), ...(max !== '' ? { max: Number(max) } : {}) }
             : null,
       }
-      return field ? adminFields.update(field.id, payload) : adminFields.create(payload)
+      return field ? api.fields.update(field.id, payload) : api.fields.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),
@@ -327,6 +339,7 @@ function FieldSetForm({ set, fields, onClose, onSaved }: {
   onClose: () => void
   onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(set?.name ?? '')
   const [items, setItems] = useState<Map<string, { required: boolean; showOnCreate: boolean }>>(
     new Map(set?.items.map(i => [i.field.id, { required: i.required, showOnCreate: i.showOnCreate }]) ?? [])
@@ -363,7 +376,7 @@ function FieldSetForm({ set, fields, onClose, onSaved }: {
         name: name.trim(),
         items: ordered.map(f => ({ fieldId: f.id, ...items.get(f.id)! })),
       }
-      return set ? adminFieldSets.update(set.id, payload) : adminFieldSets.create(payload)
+      return set ? api.fieldSets.update(set.id, payload) : api.fieldSets.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),

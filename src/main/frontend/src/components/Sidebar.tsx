@@ -47,6 +47,11 @@ export default function Sidebar() {
       {[
         { icon: Columns3, label: 'Board', to: `/w/${wsId}/p/${projectId}`, end: true },
         { icon: ListTodo, label: 'Backlog', to: `/w/${wsId}/p/${projectId}/backlog`, end: false },
+        // Project settings (taxonomy, workflows, fields) — MANAGERs only; the
+        // server guards /admin regardless
+        ...(project?.myRole === 'MANAGER'
+          ? [{ icon: Settings, label: 'Settings', to: `/w/${wsId}/p/${projectId}/settings`, end: false }]
+          : []),
       ].map(({ icon: Icon, label, to, end }) => (
         <NavLink
           key={label}
@@ -70,7 +75,6 @@ export default function Sidebar() {
       {/* Future sections — kept visible so the shell structure reads correctly */}
       {[
         { icon: BarChart3, label: 'Reports' },
-        { icon: Settings, label: 'Settings' },
       ].map(({ icon: Icon, label }) => (
         <div
           key={label}

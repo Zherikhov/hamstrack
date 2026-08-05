@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { adminFieldSets, adminIssueTypeSets, adminPrioritySets, adminProjects, adminWorkflows } from '../../api'
+import { adminProjects, globalAdminApi } from '../../api'
 import type { ProjectBindings } from '../../api'
 import type { ProjectBinding } from '../../types'
 import { Button } from '../../components/ui'
@@ -27,10 +27,10 @@ function bindingsOf(p: ProjectBinding): ProjectBindings {
 export default function AdminProjectsPage() {
   const qc = useQueryClient()
   const { data: projects = [] } = useQuery({ queryKey: ['admin', 'projects'], queryFn: adminProjects.list })
-  const { data: workflows = [] } = useQuery({ queryKey: ['admin', 'workflows'], queryFn: adminWorkflows.list })
-  const { data: prioritySets = [] } = useQuery({ queryKey: ['admin', 'priority-sets'], queryFn: adminPrioritySets.list })
-  const { data: fieldSets = [] } = useQuery({ queryKey: ['admin', 'field-sets'], queryFn: adminFieldSets.list })
-  const { data: typeSets = [] } = useQuery({ queryKey: ['admin', 'issue-type-sets'], queryFn: adminIssueTypeSets.list })
+  const { data: workflows = [] } = useQuery({ queryKey: ['admin', 'workflows'], queryFn: globalAdminApi.workflows.list })
+  const { data: prioritySets = [] } = useQuery({ queryKey: ['admin', 'priority-sets'], queryFn: globalAdminApi.prioritySets.list })
+  const { data: fieldSets = [] } = useQuery({ queryKey: ['admin', 'field-sets'], queryFn: globalAdminApi.fieldSets.list })
+  const { data: typeSets = [] } = useQuery({ queryKey: ['admin', 'issue-type-sets'], queryFn: globalAdminApi.issueTypeSets.list })
   const [wsFilter, setWsFilter] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')

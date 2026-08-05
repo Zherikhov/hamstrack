@@ -16,10 +16,13 @@ import java.util.UUID;
 @Table(name = "priority_sets")
 @Getter
 @Setter
-public class PrioritySet extends CreatedOnlyEntity {
+public class PrioritySet extends CreatedOnlyEntity implements Scoped {
 
     @Column(name = "scope_workspace_id")
     private UUID scopeWorkspaceId;
+
+    @Column(name = "scope_project_id")
+    private UUID scopeProjectId;
 
     @Column(nullable = false, length = 100)
     private String name;

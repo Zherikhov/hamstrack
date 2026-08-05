@@ -1,18 +1,20 @@
 import { useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Star } from 'lucide-react'
-import { adminPriorities, adminPrioritySets } from '../../api'
 import type { AdminPriority, AdminPrioritySet } from '../../types'
 import { Button, Checkbox, Input, PriorityIcon, Select } from '../../components/ui'
-import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, Modal, PageHeader, UsageChip } from './common'
+import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
+import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 import { ColorField } from './AdminStatusesPage'
 
 const ICONS = ['chevrons-up', 'chevron-up', 'equal', 'chevron-down', 'minus'] as const
 
 export default function AdminPrioritiesPage() {
-  const qc = useQueryClient()
-  const { data: priorities = [] } = useQuery({ queryKey: ['admin', 'priorities'], queryFn: adminPriorities.list })
-  const { data: sets = [] } = useQuery({ queryKey: ['admin', 'priority-sets'], queryFn: adminPrioritySets.list })
+  const { api, keyPrefix, scope } = useAdminApi()
+  const ownTag = ownScopeTag(scope)
+  const invalidate = useAdminInvalidate()
+  const { data: priorities = [] } = useQuery({ queryKey: [...keyPrefix, 'priorities'], queryFn: api.priorities.list })
+  const { data: sets = [] } = useQuery({ queryKey: [...keyPrefix, 'priority-sets'], queryFn: api.prioritySets.list })
   const [editing, setEditing] = useState<AdminPriority | 'new' | null>(null)
   const [editingSet, setEditingSet] = useState<AdminPrioritySet | 'new' | null>(null)
   const [deleting, setDeleting] = useState<AdminPriority | null>(null)
@@ -21,23 +23,21 @@ export default function AdminPrioritiesPage() {
 
   const visible = showArchived ? priorities : priorities.filter(p => !p.archived)
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ['admin'] })
-
   const del = useMutation({
     mutationFn: ({ id, replaceWithId }: { id: string; replaceWithId?: string }) =>
-      adminPriorities.remove(id, replaceWithId),
+      api.priorities.remove(id, replaceWithId),
     onSuccess: () => { setDeleting(null); setError(''); invalidate() },
     onError: e => setError(e instanceof Error ? e.message : 'Delete failed'),
   })
 
   const archive = useMutation({
     mutationFn: ({ id, archived }: { id: string; archived: boolean }) =>
-      archived ? adminPriorities.unarchive(id) : adminPriorities.archive(id),
+      archived ? api.priorities.unarchive(id) : api.priorities.archive(id),
     onSuccess: () => { setDeleting(null); invalidate() },
   })
 
   const delSet = useMutation({
-    mutationFn: (id: string) => adminPrioritySets.remove(id),
+    mutationFn: (id: string) => api.prioritySets.remove(id),
     onSuccess: invalidate,
     onError: e => window.alert(e instanceof Error ? e.message : 'Delete failed'),
   })
@@ -46,7 +46,9 @@ export default function AdminPrioritiesPage() {
     <>
       <PageHeader
         title="Priorities"
-        subtitle="Global catalog. Priority sets pick which of these a project offers and which one is the default for new issues."
+        subtitle={scope === 'project'
+          ? 'Priorities private to this project. Priority sets pick which are offered and the default for new issues.'
+          : 'Catalog of priorities. Priority sets pick which of these a project offers and which one is the default for new issues.'}
         action={<Button variant="primary" onClick={() => setEditing('new')}>+ New priority</Button>}
       />
       <ArchivedToggle archivedCount={priorities.filter(p => p.archived).length}
@@ -67,16 +69,20 @@ export default function AdminPrioritiesPage() {
                 <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{p.color}</span>
               </span>
             </td>
-            <td className="px-3 py-2.5"><UsageChip usage={p.usage} fetchDetail={() => adminPriorities.usage(p.id)} /></td>
+            <td className="px-3 py-2.5"><UsageChip usage={p.usage} fetchDetail={() => api.priorities.usage(p.id)} /></td>
             <td className="px-3 py-2.5 text-right whitespace-nowrap">
-              <Button variant="ghost" size="sm" onClick={() => setEditing(p)}>Edit</Button>
-              <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: p.id, archived: p.archived })}>
-                {p.archived ? 'Unarchive' : 'Archive'}
-              </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { setError(''); setDeleting(p) }}>
-                Delete
-              </Button>
+              {p.scope === ownTag ? (
+                <>
+                  <Button variant="ghost" size="sm" onClick={() => setEditing(p)}>Edit</Button>
+                  <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: p.id, archived: p.archived })}>
+                    {p.archived ? 'Unarchive' : 'Archive'}
+                  </Button>
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { setError(''); setDeleting(p) }}>
+                    Delete
+                  </Button>
+                </>
+              ) : <InheritedBadge scope={p.scope} />}
             </td>
           </tr>
         ))}
@@ -110,13 +116,17 @@ export default function AdminPrioritiesPage() {
                   style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
               {set.projectsUsing} project{set.projectsUsing !== 1 ? 's' : ''}
             </span>
-            <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
-            {!set.systemDefault && (
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
-                      onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
-                Delete
-              </Button>
-            )}
+            {set.scope === ownTag ? (
+              <>
+                <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
+                {!set.systemDefault && (
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                          onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
+                    Delete
+                  </Button>
+                )}
+              </>
+            ) : <InheritedBadge scope={set.scope} />}
           </div>
         ))}
       </div>
@@ -152,6 +162,7 @@ export default function AdminPrioritiesPage() {
 function PriorityForm({ priority, onClose, onSaved }: {
   priority: AdminPriority | null; onClose: () => void; onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(priority?.name ?? '')
   const [color, setColor] = useState(priority?.color ?? '#8B8680')
   const [icon, setIcon] = useState(priority?.icon ?? 'minus')
@@ -160,7 +171,7 @@ function PriorityForm({ priority, onClose, onSaved }: {
   const save = useMutation({
     mutationFn: () => {
       const payload = { name: name.trim(), color, icon }
-      return priority ? adminPriorities.update(priority.id, payload) : adminPriorities.create(payload)
+      return priority ? api.priorities.update(priority.id, payload) : api.priorities.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),
@@ -192,6 +203,7 @@ function PrioritySetForm({ set, priorities, onClose, onSaved }: {
   onClose: () => void
   onSaved: () => void
 }) {
+  const { api } = useAdminApi()
   const [name, setName] = useState(set?.name ?? '')
   const [selected, setSelected] = useState<string[]>(set?.items.map(i => i.priority.id) ?? [])
   const [defaultId, setDefaultId] = useState(set?.items.find(i => i.isDefault)?.priority.id ?? '')
@@ -209,7 +221,7 @@ function PrioritySetForm({ set, priorities, onClose, onSaved }: {
         name: name.trim(),
         items: ordered.map(p => ({ priorityId: p.id, isDefault: p.id === defaultId })),
       }
-      return set ? adminPrioritySets.update(set.id, payload) : adminPrioritySets.create(payload)
+      return set ? api.prioritySets.update(set.id, payload) : api.prioritySets.create(payload)
     },
     onSuccess: onSaved,
     onError: e => setError(e instanceof Error ? e.message : 'Save failed'),

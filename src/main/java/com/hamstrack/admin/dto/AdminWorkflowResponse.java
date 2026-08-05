@@ -9,7 +9,7 @@ public record AdminWorkflowResponse(
         UUID id, String name, String description, boolean systemDefault,
         List<StatusResponse> statuses,
         List<TransitionRule> transitions,
-        long projectsUsing
+        long projectsUsing, String scope
 ) {
     /** fromStatusId NULL = "from any status" */
     public record TransitionRule(UUID fromStatusId, UUID toStatusId) {}

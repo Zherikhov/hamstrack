@@ -50,20 +50,22 @@ public class AdminProjectService {
         var project = projectRepository.findById(projectId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Project not found"));
 
+        // The system matrix binds only GLOBAL sets (both scopes null); scoped
+        // sets reach their own projects through the delegated admin consoles.
         var newWorkflow = req.workflowId() != null
-                ? workflowRepository.findByIdAndScopeWorkspaceIdIsNull(req.workflowId())
+                ? workflowRepository.findByIdAtScope(req.workflowId(), null, null)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown workflow"))
                 : null;
         var newSet = req.prioritySetId() != null
-                ? prioritySetRepository.findByIdAndScopeWorkspaceIdIsNull(req.prioritySetId())
+                ? prioritySetRepository.findByIdAtScope(req.prioritySetId(), null, null)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority set"))
                 : null;
         var newFieldSet = req.fieldSetId() != null
-                ? fieldSetRepository.findByIdAndScopeWorkspaceIdIsNull(req.fieldSetId())
+                ? fieldSetRepository.findByIdAtScope(req.fieldSetId(), null, null)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown field set"))
                 : null;
         var newTypeSet = req.issueTypeSetId() != null
-                ? issueTypeSetRepository.findByIdAndScopeWorkspaceIdIsNull(req.issueTypeSetId())
+                ? issueTypeSetRepository.findByIdAtScope(req.issueTypeSetId(), null, null)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type set"))
                 : null;
 

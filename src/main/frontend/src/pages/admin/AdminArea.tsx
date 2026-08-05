@@ -1,6 +1,8 @@
 import { Navigate, NavLink, Route, Routes } from 'react-router'
 import { useAuthStore } from '../../auth'
+import { globalAdminApi } from '../../api'
 import TopBar from '../../components/TopBar'
+import { AdminApiProvider } from './AdminApiContext'
 import AdminStatusesPage from './AdminStatusesPage'
 import AdminPrioritiesPage from './AdminPrioritiesPage'
 import AdminIssueTypesPage from './AdminIssueTypesPage'
@@ -60,16 +62,18 @@ export default function AdminArea() {
         </nav>
         <main className="flex-1 overflow-y-auto p-8" style={{ background: 'var(--color-surface)' }}>
           <div style={{ maxWidth: 960 }}>
-            <Routes>
-              <Route index element={<Navigate to="statuses" replace />} />
-              <Route path="statuses" element={<AdminStatusesPage />} />
-              <Route path="priorities" element={<AdminPrioritiesPage />} />
-              <Route path="issue-types" element={<AdminIssueTypesPage />} />
-              <Route path="fields" element={<AdminFieldsPage />} />
-              <Route path="workflows" element={<AdminWorkflowsPage />} />
-              <Route path="projects" element={<AdminProjectsPage />} />
-              <Route path="users" element={<AdminUsersPage />} />
-            </Routes>
+            <AdminApiProvider value={{ api: globalAdminApi, scope: 'global', eyebrow: 'Administration', keyPrefix: ['admin'] }}>
+              <Routes>
+                <Route index element={<Navigate to="statuses" replace />} />
+                <Route path="statuses" element={<AdminStatusesPage />} />
+                <Route path="priorities" element={<AdminPrioritiesPage />} />
+                <Route path="issue-types" element={<AdminIssueTypesPage />} />
+                <Route path="fields" element={<AdminFieldsPage />} />
+                <Route path="workflows" element={<AdminWorkflowsPage />} />
+                <Route path="projects" element={<AdminProjectsPage />} />
+                <Route path="users" element={<AdminUsersPage />} />
+              </Routes>
+            </AdminApiProvider>
           </div>
         </main>
       </div>

@@ -1,8 +1,8 @@
 import { useEffect } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArchiveRestore, FolderOpen, Plus } from 'lucide-react'
-import { apiListProjects, apiUnarchiveProject } from '../api'
+import { ArchiveRestore, FolderOpen, Plus, Settings } from 'lucide-react'
+import { apiGetWorkspace, apiListProjects, apiUnarchiveProject } from '../api'
 import { Button } from '../components/ui'
 import { useState } from 'react'
 import CreateProjectModal from '../components/CreateProjectModal'
@@ -23,6 +23,13 @@ export default function WorkspaceHomePage() {
     queryFn: () => apiListProjects(wsId!, true),
     enabled: !!wsId,
   })
+
+  const { data: workspace } = useQuery({
+    queryKey: ['workspace', wsId],
+    queryFn: () => apiGetWorkspace(wsId!),
+    enabled: !!wsId,
+  })
+  const canAdminWorkspace = workspace?.myRole === 'OWNER' || workspace?.myRole === 'ADMIN'
 
   const active = projects.filter(p => !p.archived)
   const archived = projects.filter(p => p.archived)
@@ -61,10 +68,18 @@ export default function WorkspaceHomePage() {
           <h1 className="font-display font-bold text-xl" style={{ color: 'var(--color-text)' }}>
             Projects
           </h1>
-          <Button variant="primary" size="sm" onClick={() => setShowCreate(true)}>
-            <Plus size={14} />
-            New project
-          </Button>
+          <div className="flex items-center gap-2">
+            {canAdminWorkspace && (
+              <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}/settings`)}>
+                <Settings size={14} />
+                Workspace settings
+              </Button>
+            )}
+            <Button variant="primary" size="sm" onClick={() => setShowCreate(true)}>
+              <Plus size={14} />
+              New project
+            </Button>
+          </div>
         </div>
 
         {active.length === 0 ? (

@@ -1,6 +1,7 @@
 package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.*;
+import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -40,23 +41,26 @@ public class AdminFieldService {
     // ---------- field defs ----------
 
     @Transactional(readOnly = true)
-    public List<AdminFieldResponse> listFields() {
-        return fieldDefRepository.findAllByScopeWorkspaceIdIsNullOrderByName().stream()
-                .map(f -> AdminFieldResponse.of(f, fieldUsage(f)))
-                .toList();
+    public List<AdminFieldResponse> listFields(ScopeContext scope) {
+        // Inherited fields are shown read-only in delegated consoles (see AdminCatalogService.listStatuses)
+        var rows = scope.isGlobal()
+                ? fieldDefRepository.findAllAtScope(null, null)
+                : fieldDefRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
+        return rows.stream().map(f -> AdminFieldResponse.of(f, fieldUsage(f))).toList();
     }
 
     @Transactional
-    public AdminFieldResponse createField(UpsertFieldRequest req) {
+    public AdminFieldResponse createField(ScopeContext scope, UpsertFieldRequest req) {
         var key = req.key() == null || req.key().isBlank() ? slugify(req.name()) : req.key();
-        if (fieldDefRepository.existsByScopeWorkspaceIdIsNullAndKey(key)) {
+        if (fieldDefRepository.existsAtScopeAndKey(scope.workspaceId(), scope.projectId(), key)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Field key already exists");
         }
-        if (fieldDefRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+        if (fieldDefRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Field name already exists");
         }
         requireSelectOptions(req.type(), req);
         var f = new FieldDef();
+        scope.stamp(f);
         f.setKey(key);
         f.setName(req.name());
         f.setType(req.type());
@@ -68,10 +72,10 @@ public class AdminFieldService {
 
     /** Type and key are immutable — stored values depend on both. */
     @Transactional
-    public AdminFieldResponse updateField(UUID id, UpsertFieldRequest req) {
-        var f = requireField(id);
+    public AdminFieldResponse updateField(ScopeContext scope, UUID id, UpsertFieldRequest req) {
+        var f = requireField(scope, id);
         if (!f.getName().equals(req.name())
-                && fieldDefRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+                && fieldDefRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Field name already exists");
         }
         if (req.type() != null && req.type() != f.getType()) {
@@ -87,15 +91,15 @@ public class AdminFieldService {
     }
 
     @Transactional
-    public void setFieldArchived(UUID id, boolean archived) {
-        var f = requireField(id);
+    public void setFieldArchived(ScopeContext scope, UUID id, boolean archived) {
+        var f = requireField(scope, id);
         f.setArchivedAt(archived ? Instant.now() : null);
         fieldDefRepository.save(f);
     }
 
     @Transactional
-    public void deleteField(UUID id, boolean dropValues) {
-        var f = requireField(id);
+    public void deleteField(ScopeContext scope, UUID id, boolean dropValues) {
+        var f = requireField(scope, id);
         long values = valueRepository.countByField(f);
         if (values > 0 && !dropValues) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -108,29 +112,31 @@ public class AdminFieldService {
     // ---------- field sets ----------
 
     @Transactional(readOnly = true)
-    public List<AdminFieldSetResponse> listSets() {
-        return fieldSetRepository.findAllByScopeWorkspaceIdIsNullOrderByName().stream()
-                .map(this::toSetResponse)
-                .toList();
+    public List<AdminFieldSetResponse> listSets(ScopeContext scope) {
+        var sets = scope.isGlobal()
+                ? fieldSetRepository.findAllAtScope(null, null)
+                : fieldSetRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
+        return sets.stream().map(this::toSetResponse).toList();
     }
 
     @Transactional
-    public AdminFieldSetResponse createSet(UpsertFieldSetRequest req) {
-        if (fieldSetRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+    public AdminFieldSetResponse createSet(ScopeContext scope, UpsertFieldSetRequest req) {
+        if (fieldSetRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Field set name already exists");
         }
         var set = new FieldSet();
+        scope.stamp(set);
         set.setName(req.name());
         fieldSetRepository.save(set);
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toSetResponse(set);
     }
 
     @Transactional
-    public AdminFieldSetResponse updateSet(UUID id, UpsertFieldSetRequest req) {
-        var set = requireSet(id);
+    public AdminFieldSetResponse updateSet(ScopeContext scope, UUID id, UpsertFieldSetRequest req) {
+        var set = requireSet(scope, id);
         if (!set.getName().equals(req.name())
-                && fieldSetRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+                && fieldSetRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Field set name already exists");
         }
         set.setName(req.name());
@@ -139,13 +145,13 @@ public class AdminFieldService {
         // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
         // DELETEs in one flush, colliding with UNIQUE(set_id, field_id).
         fieldSetItemRepository.flush();
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toSetResponse(set);
     }
 
     @Transactional
-    public void deleteSet(UUID id) {
-        var set = requireSet(id);
+    public void deleteSet(ScopeContext scope, UUID id) {
+        var set = requireSet(scope, id);
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default field set cannot be deleted");
         }
@@ -165,8 +171,8 @@ public class AdminFieldService {
     // ---------- usage detail (popovers) ----------
 
     @Transactional(readOnly = true)
-    public UsageDetailResponse fieldUsageDetail(UUID id) {
-        var f = requireField(id);
+    public UsageDetailResponse fieldUsageDetail(ScopeContext scope, UUID id) {
+        var f = requireField(scope, id);
         var sets = fieldSetItemRepository.findSetsUsingField(f.getId());
         var projects = sets.stream()
                 .flatMap(set -> projectCountService.projectsListUsingFieldSet(set).stream())
@@ -180,12 +186,14 @@ public class AdminFieldService {
 
     // ---------- helpers ----------
 
-    private void applyItems(FieldSet set, UpsertFieldSetRequest req) {
+    private void applyItems(ScopeContext scope, FieldSet set, UpsertFieldSetRequest req) {
         var seen = new HashSet<UUID>();
         short pos = 0;
         for (var itemReq : req.items()) {
             if (!seen.add(itemReq.fieldId())) continue;
-            var field = fieldDefRepository.findByIdAndScopeWorkspaceIdIsNull(itemReq.fieldId())
+            // A field the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project)
+            var field = fieldDefRepository.findByIdVisibleTo(
+                            itemReq.fieldId(), scope.visibleWorkspaceId(), scope.visibleProjectId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown field"));
             var item = new FieldSetItem();
             item.setSet(set);
@@ -229,7 +237,7 @@ public class AdminFieldService {
                         i.isRequired(), i.isShowOnCreate()))
                 .toList();
         return new AdminFieldSetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                items, projectsUsing(set));
+                items, projectsUsing(set), set.scopeLabel());
     }
 
     private String slugify(String name) {
@@ -237,13 +245,13 @@ public class AdminFieldService {
         return slug.isBlank() ? "field" : slug.substring(0, Math.min(slug.length(), 50));
     }
 
-    private FieldDef requireField(UUID id) {
-        return fieldDefRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    private FieldDef requireField(ScopeContext scope, UUID id) {
+        return fieldDefRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Field not found"));
     }
 
-    private FieldSet requireSet(UUID id) {
-        return fieldSetRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    private FieldSet requireSet(ScopeContext scope, UUID id) {
+        return fieldSetRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Field set not found"));
     }
 }

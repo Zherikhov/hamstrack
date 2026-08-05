@@ -2,6 +2,7 @@ package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.AdminPrioritySetResponse;
 import com.hamstrack.admin.dto.UpsertPrioritySetRequest;
+import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.dto.PriorityResponse;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.PrioritySet;
@@ -34,29 +35,32 @@ public class AdminPrioritySetService {
     private final ProjectCountService projectCountService;
 
     @Transactional(readOnly = true)
-    public List<AdminPrioritySetResponse> list() {
-        return prioritySetRepository.findAllByScopeWorkspaceIdIsNullOrderByName().stream()
-                .map(this::toResponse)
-                .toList();
+    public List<AdminPrioritySetResponse> list(ScopeContext scope) {
+        // Inherited sets are shown read-only in delegated consoles (see AdminWorkflowService.list)
+        var sets = scope.isGlobal()
+                ? prioritySetRepository.findAllAtScope(null, null)
+                : prioritySetRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
+        return sets.stream().map(this::toResponse).toList();
     }
 
     @Transactional
-    public AdminPrioritySetResponse create(UpsertPrioritySetRequest req) {
-        if (prioritySetRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+    public AdminPrioritySetResponse create(ScopeContext scope, UpsertPrioritySetRequest req) {
+        if (prioritySetRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Priority set name already exists");
         }
         var set = new PrioritySet();
+        scope.stamp(set);
         set.setName(req.name());
         prioritySetRepository.save(set);
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toResponse(set);
     }
 
     @Transactional
-    public AdminPrioritySetResponse update(UUID id, UpsertPrioritySetRequest req) {
-        var set = require(id);
+    public AdminPrioritySetResponse update(ScopeContext scope, UUID id, UpsertPrioritySetRequest req) {
+        var set = require(scope, id);
         if (!set.getName().equals(req.name())
-                && prioritySetRepository.existsByScopeWorkspaceIdIsNullAndName(req.name())) {
+                && prioritySetRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Priority set name already exists");
         }
         set.setName(req.name());
@@ -65,13 +69,13 @@ public class AdminPrioritySetService {
         // Flush DELETEs before re-inserting — Hibernate orders INSERTs ahead of
         // DELETEs in one flush, colliding with UNIQUE(set_id, priority_id).
         prioritySetItemRepository.flush();
-        applyItems(set, req);
+        applyItems(scope, set, req);
         return toResponse(set);
     }
 
     @Transactional
-    public void delete(UUID id) {
-        var set = require(id);
+    public void delete(ScopeContext scope, UUID id) {
+        var set = require(scope, id);
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default priority set cannot be deleted");
         }
@@ -83,14 +87,14 @@ public class AdminPrioritySetService {
         prioritySetRepository.delete(set);
     }
 
-    private void applyItems(PrioritySet set, UpsertPrioritySetRequest req) {
+    private void applyItems(ScopeContext scope, PrioritySet set, UpsertPrioritySetRequest req) {
         var seen = new HashSet<UUID>();
         boolean hasDefault = req.items().stream().anyMatch(UpsertPrioritySetRequest.Item::isDefault);
         short pos = 0;
         boolean first = true;
         for (var itemReq : req.items()) {
             if (!seen.add(itemReq.priorityId())) continue;
-            var priority = requirePriority(itemReq.priorityId());
+            var priority = requirePriority(scope, itemReq.priorityId());
             var item = new PrioritySetItem();
             item.setSet(set);
             item.setPriority(priority);
@@ -107,16 +111,17 @@ public class AdminPrioritySetService {
                         PriorityResponse.of(i.getPriority()), i.isDefaultForNewIssues()))
                 .toList();
         return new AdminPrioritySetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                items, projectCountService.projectsUsingPrioritySet(set));
+                items, projectCountService.projectsUsingPrioritySet(set), set.scopeLabel());
     }
 
-    private PrioritySet require(UUID id) {
-        return prioritySetRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    private PrioritySet require(ScopeContext scope, UUID id) {
+        return prioritySetRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Priority set not found"));
     }
 
-    private Priority requirePriority(UUID id) {
-        return priorityRepository.findByIdAndScopeWorkspaceIdIsNull(id)
+    /** A priority the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
+    private Priority requirePriority(ScopeContext scope, UUID id) {
+        return priorityRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority"));
     }
 }

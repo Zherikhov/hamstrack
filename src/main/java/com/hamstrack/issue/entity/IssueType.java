@@ -17,10 +17,13 @@ import java.util.UUID;
 @Table(name = "issue_types")
 @Getter
 @Setter
-public class IssueType extends CreatedOnlyEntity {
+public class IssueType extends CreatedOnlyEntity implements Scoped {
 
     @Column(name = "scope_workspace_id")
     private UUID scopeWorkspaceId;
+
+    @Column(name = "scope_project_id")
+    private UUID scopeProjectId;
 
     @Column(nullable = false, length = 100)
     private String name;

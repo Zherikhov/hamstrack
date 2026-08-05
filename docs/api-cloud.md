@@ -127,7 +127,9 @@ The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verif
 |---|---|
 | See a workspace and its projects, issues, members | workspace member |
 | Invite workspace members | workspace `ADMIN` |
-| Manage statuses / priorities / issue types / workflows / project bindings | system `ADMIN` |
+| Manage the **global** taxonomy (statuses / priorities / issue types / fields / workflows / sets) and any project's bindings | system `ADMIN` |
+| Manage **workspace-scoped** taxonomy and the bindings of projects in the workspace | workspace `OWNER`/`ADMIN` ([delegated](#delegated-administration)) |
+| Manage **project-private** taxonomy and this project's bindings | project `MANAGER` ([delegated](#delegated-administration)) |
 | Create a project | workspace member (creator becomes project `MANAGER`) |
 | Edit / archive a project, manage its members | project `MANAGER` |
 | Create / edit issues, comment, attach files | workspace member |
@@ -241,7 +243,7 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 
 ## Project configuration
 
-The taxonomy (statuses, priorities, issue types, custom fields) lives in a **global catalog maintained by the system administrator** and reaches projects through reusable bindings: a *workflow* (statuses + allowed transitions), a *priority set* (offered priorities + the default for new issues), a *field set* (which custom fields the project's issues carry, their order and create-form behavior) and an *issue type set* (which types the project offers — restricting only issue creation and type changes; existing issues keep their type). Regular users read a project's **effective configuration** from one endpoint and never touch the catalog:
+The taxonomy (statuses, priorities, issue types, custom fields) lives in a catalog — **global** (maintained by the system administrator) and optionally **workspace-scoped** or **project-private** (see [Delegated administration](#delegated-administration)) — and reaches projects through reusable bindings: a *workflow* (statuses + allowed transitions), a *priority set* (offered priorities + the default for new issues), a *field set* (which custom fields the project's issues carry, their order and create-form behavior) and an *issue type set* (which types the project offers — restricting only issue creation and type changes; existing issues keep their type). Regular users read a project's **effective configuration** from one endpoint and never touch the catalog:
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -293,6 +295,42 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH` | `/admin/users/{id}` | Change `systemRole` (`ADMIN`/`USER`) and/or `status` (`ACTIVE`/`DISABLED`); `409` when it would disable/demote the last active admin or your own account (disabling revokes the user's refresh tokens) |
 
 Integrity rules: deletions never leave dangling references (remap or `409`), no workflow can end up empty, every priority set keeps a default, and a workflow change is refused while it would strand issues in statuses invisible to the board.
+
+## Delegated administration
+
+The same catalog and binding operations are available at two **delegated** scopes so teams self-serve without a system admin. Authorization is membership-based (not the system `ADMIN` role):
+
+- **Workspace settings** — `/api/workspaces/{wsId}/admin/**`, for workspace `OWNER`/`ADMIN`.
+- **Project settings** — `/api/workspaces/{wsId}/projects/{projectId}/admin/**`, for project `MANAGER`.
+
+Each scope owns its own rows: a workspace admin creates **workspace-scoped** statuses/priorities/types/fields and reusable sets; a project admin creates **project-private** ones. Tenancy: a non-member gets `404`; a member without the required role gets `403`.
+
+**Scoping & visibility**
+
+- List endpoints return everything **visible** to the scope: global ∪ workspace ∪ (for a project) its own private rows. Every row carries a `scope` field (`GLOBAL` / `WORKSPACE` / `PROJECT`); only own-scope rows are editable — a write to an inherited (higher-scope) row returns `404`.
+- A set (workflow / priority set / field set / type set) may reference only catalog rows visible to its scope; a foreign or wrong-scope reference is rejected `422`.
+- A project (or the workspace matrix) may bind only a set visible to the target project — global, its workspace's, or its own — else `422`.
+
+**Catalog & sets** — identical shapes and integrity rules to [System administration](#system-administration); `{base}` is the scope prefix above:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` `POST` | `{base}/statuses` · `/priorities` · `/issue-types` · `/fields` | List (visible, scope-tagged) / create at this scope |
+| `PATCH` | `{base}/{catalog}/{id}` | Update an own-scope row |
+| `POST` | `{base}/{catalog}/{id}/archive` · `/unarchive` | Archive / restore an own-scope row |
+| `DELETE` | `{base}/{catalog}/{id}?replaceWithId=` (fields: `?dropValues=`) | Delete an own-scope row |
+| `GET` | `{base}/{catalog}/{id}/usage` | Usage detail |
+| `GET` `POST` `PATCH` `DELETE` | `{base}/workflows` · `/priority-sets` · `/field-sets` · `/issue-type-sets` [`/{id}`] | Reusable sets at this scope |
+
+**Bindings**
+
+| Method | Path | Role | Description |
+|---|---|---|---|
+| `GET` `PATCH` | `/api/workspaces/{wsId}/projects/{pId}/admin/bindings` | project `MANAGER` | Read / set this project's four bindings (`{"workflowId","prioritySetId","fieldSetId","issueTypeSetId"}`, null = system default) |
+| `GET` | `/api/workspaces/{wsId}/projects/{pId}/admin/binding-options` | project `MANAGER` | Sets bindable to this project, per dimension — each `{id, name, scope}` |
+| `GET` | `/api/workspaces/{wsId}/admin/projects` | workspace `OWNER`/`ADMIN` | Binding matrix for every project in the workspace |
+| `PATCH` | `/api/workspaces/{wsId}/admin/projects/{pId}/bindings` | workspace `OWNER`/`ADMIN` | Set a project's bindings |
+| `GET` | `/api/workspaces/{wsId}/admin/binding-options` | workspace `OWNER`/`ADMIN` | Sets bindable within the workspace (global ∪ workspace) |
 
 ## Issues
 
