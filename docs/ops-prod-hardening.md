@@ -177,6 +177,47 @@ GitHub repo secrets: add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 
 ```
 
+> The snapshot above is the original SSH→SSM migration shape. The live
+> `deploy.yml` since then is `workflow_run`-triggered (fires after a green
+> `Build` on `main`) with the instance id **inlined** (not a secret), and the SSM
+> command has grown — see the config auto-sync note next.
+
+#### Config auto-sync from the repo (2026-08-06)
+
+Originally the SSM command only pulled the app **image** (`docker compose pull`),
+so the config files in `/opt/hamstrack` (`docker-compose.prod.yml`, `Caddyfile`,
+`.env`, and now the observability stack) were maintained **by hand** — committing
+a compose change did not put it on the server. The deploy now **downloads the
+repo-owned config for the exact built commit** before bringing the stack up, so a
+push of a config change ships to prod automatically. The `--parameters` command is:
+
+```bash
+--parameters 'commands=["cd /opt/hamstrack && rm -rf /opt/hamstrack/.synctmp && mkdir -p /opt/hamstrack/.synctmp && curl -fsSL https://codeload.github.com/Zherikhov/hamstrack/tar.gz/${{ github.event.workflow_run.head_sha }} | tar xz -C /opt/hamstrack/.synctmp --strip-components=1 && cp -f /opt/hamstrack/.synctmp/docker-compose.prod.yml /opt/hamstrack/.synctmp/docker-compose.observability.yml /opt/hamstrack/ && rm -rf /opt/hamstrack/observability && cp -rf /opt/hamstrack/.synctmp/observability /opt/hamstrack/observability && rm -rf /opt/hamstrack/.synctmp && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml pull && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d --remove-orphans && docker image prune -f"]'
+```
+
+Notes:
+
+- **Downloads by `head_sha`**, so the config always matches the image that was
+  just built (atomic). `--strip-components=1` flattens the tarball's top dir
+  (`hamstrack-<sha>/` — the repo was renamed easyTask→hamstrack, so never
+  hardcode the prefix). Repo is **public**, so codeload needs no token; if you
+  make it private, add a PAT to the URL.
+- **Only three paths are synced**: `docker-compose.prod.yml`,
+  `docker-compose.observability.yml`, and the whole `observability/` dir (replaced
+  wholesale). **`Caddyfile` and `.env` are deliberately NOT touched** — the prod
+  `Caddyfile` diverges from the repo (the manual Cloudflare `trusted_proxies`
+  block, §2) and `.env` holds secrets. Both stay operator-owned.
+- **Both `-f` files, always** (`docker-compose.prod.yml` +
+  `docker-compose.observability.yml`) in `pull` and `up`. Never run
+  `up --remove-orphans` with only the prod file once the obs stack is up — it
+  would delete loki/alloy/grafana/prometheus/exporters as orphans.
+- **One-time server prerequisite** (secrets can't come from the repo): set at
+  least `GF_SECURITY_ADMIN_PASSWORD` in `/opt/hamstrack/.env` **before** the first
+  deploy that includes the observability file, or Grafana's `${...:?}` fail-fast
+  aborts the whole `up`. Optional: `OBS_ALERT_EMAIL_TO`, `PROMETHEUS_RETENTION_*`,
+  `DB_MONITOR_USER`/`DB_MONITOR_PASSWORD` (read-only `pg_monitor` role for
+  postgres-exporter — see the [Self-hosting guide](self-hosting.md#observability-optional)).
+
 Deploy this change and verify one green deploy via SSM **before** the last step:
 
 ```bash
