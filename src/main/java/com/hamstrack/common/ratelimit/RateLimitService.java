@@ -1,6 +1,8 @@
 package com.hamstrack.common.ratelimit;
 
 import com.hamstrack.common.config.RateLimitProperties;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.RateLimitKind;
 import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -29,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class RateLimitService {
 
     private final RateLimitProperties properties;
+    private final ProductMetrics metrics;
 
     // key: client IP → requests in the current epoch-minute
     private final Map<String, IpWindow> ipWindows = new ConcurrentHashMap<>();
@@ -43,6 +46,7 @@ public class RateLimitService {
                 (w == null || w.epochMinute != nowMinute) ? new IpWindow(nowMinute) : w);
         if (window.count.incrementAndGet() > properties.authIpRequestsPerMinute()) {
             long retryAfter = (nowMinute + 1) * 60 - Instant.now().getEpochSecond();
+            metrics.rateLimitHit(RateLimitKind.IP_WINDOW);
             throw new RateLimitedException(Math.max(retryAfter, 1));
         }
     }
@@ -55,6 +59,7 @@ public class RateLimitService {
         long blockedUntil = state.blockedUntilEpochMs(properties);
         long now = System.currentTimeMillis();
         if (now < blockedUntil) {
+            metrics.rateLimitHit(RateLimitKind.LOGIN_BACKOFF);
             throw new RateLimitedException(Math.max((blockedUntil - now) / 1000, 1));
         }
     }

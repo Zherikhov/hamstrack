@@ -18,7 +18,7 @@ jobs:
 
     # AWS instance ids are not secret (useless without credentials), so it's
     # pinned literally. This also avoids a subtle failure mode: a mistyped
-    # secret is masked as *** in logs, so a wrong value looks correct yet 403s
+    # secret is masked as *** in logs, so a wrong value looks correct, yet 403s
     # the SSM call against the exact-match IAM policy.
     env:
       INSTANCE_ID: i-019fe684b25ad831f
@@ -37,7 +37,7 @@ jobs:
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "hamstrack deploy ${{ github.event.workflow_run.head_sha }}" \
-            --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml pull && docker compose -f docker-compose.prod.yml up -d --remove-orphans && docker image prune -f"]' \
+            --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml pull && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d --remove-orphans && docker image prune -f"]' \
             --query 'Command.CommandId' --output text)
           echo "Command: $CMD_ID"
           # `wait` polls until the command finishes; it exits non-zero on failure

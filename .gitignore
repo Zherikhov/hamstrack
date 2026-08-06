@@ -45,6 +45,9 @@ src/main/resources/static/
 ### Local attachment storage (app.storage.type=local) ###
 /data/
 
+### Local JSON log file (dev observability — tailed by the dev Alloy stack) ###
+/logs/
+
 ### Production secrets — never commit ###
 .env
 application-local.properties

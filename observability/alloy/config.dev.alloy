@@ -1,0 +1,44 @@
+// DEV-ONLY Alloy config — used by docker-compose.observability.dev.yml.
+//
+// Unlike the prod config (which scrapes docker container stdout via the socket),
+// this tails the JSON log FILE that an app run from your IDE (IntelliJ IDEA)
+// writes on the host — because that app is a plain process, not a container.
+// The file is bind-mounted read-only at /logs.
+
+local.file_match "app" {
+	path_targets = [{
+		"__path__"        = "/logs/*.json",
+		"container"       = "hamstrack-app",   // synthetic label so the Logs dashboard works
+		"compose_project" = "hamstrack-dev",
+	}]
+}
+
+loki.source.file "app" {
+	targets    = local.file_match.app.targets
+	forward_to = [loki.process.parse.receiver]
+}
+
+loki.process "parse" {
+	forward_to = [loki.write.default.receiver]
+
+	// Each line is one JSON object (logstash schema). Lift level + deployment
+	// (deployment is present only if you run with the dc/cloud profile).
+	stage.json {
+		expressions = {
+			level      = "level",
+			deployment = "deployment",
+		}
+	}
+	stage.labels {
+		values = {
+			level      = "",
+			deployment = "",
+		}
+	}
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}

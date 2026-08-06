@@ -47,7 +47,7 @@ public class DataSeeder implements ApplicationRunner {
             if (existing.getSystemRole() != SystemRole.ADMIN) {
                 existing.setSystemRole(SystemRole.ADMIN);
                 userRepository.save(existing);
-                log.info("Existing seed account promoted to system ADMIN: {}", email);
+                log.info("Existing seed account promoted to system ADMIN (from seed.admin.email)");
             }
             return;
         }
@@ -60,6 +60,6 @@ public class DataSeeder implements ApplicationRunner {
         admin.setSystemRole(SystemRole.ADMIN);
         userRepository.save(admin);
 
-        log.info("Admin account created: {}", email);
+        log.info("Admin account created from seed.admin.email");
     }
 }

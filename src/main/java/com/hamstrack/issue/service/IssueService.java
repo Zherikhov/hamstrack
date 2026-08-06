@@ -2,6 +2,7 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.sse.SseRegistry;
 import com.hamstrack.issue.dto.CreateIssueRequest;
 import com.hamstrack.issue.dto.IssueHistoryResponse;
@@ -48,6 +49,7 @@ public class IssueService {
     private final FieldValueService fieldValueService;
     private final AttachmentService attachmentService;
     private final SseRegistry sseRegistry;
+    private final ProductMetrics metrics;
 
     @Transactional
     public IssueResponse create(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
@@ -86,6 +88,8 @@ public class IssueService {
         }
         issue.setDueDate(req.dueDate());
         issueRepository.save(issue);
+        // type name is a bounded catalog (Bug/Task/Story/Epic + admin types)
+        metrics.issueCreated(type.getName());
 
         // Custom fields: validates against the project's field set (incl.
         // required-on-create); no history entries for initial values

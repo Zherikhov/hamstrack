@@ -1,0 +1,126 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 0,
+  "title": "Product",
+  "uid": "hamstrack-product",
+  "tags": ["hamstrack", "product"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Users total",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_users_total" } ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Users active",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_users_active" } ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "New registrations (24h)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "increase(hamstrack_users_registered_total[24h])" } ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Attachment bytes stored",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_attachments_bytes_sum" } ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Logins / min (by outcome)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_auth_login_total[5m])) by (outcome) * 60", "legendFormat": "{{outcome}}" } ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Content created / hr (issues, projects, workspaces)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_issues_created_total[30m])) * 3600", "legendFormat": "issues" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_projects_created_total[30m])) * 3600", "legendFormat": "projects" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_workspaces_created_total[30m])) * 3600", "legendFormat": "workspaces" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Issues created by type / hr",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_issues_created_total[30m])) by (type) * 3600", "legendFormat": "{{type}}" } ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Invites / hr (sent, accepted, declined)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_invites_sent_total[30m])) * 3600", "legendFormat": "sent" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_invites_accepted_total[30m])) * 3600", "legendFormat": "accepted" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_invites_declined_total[30m])) * 3600", "legendFormat": "declined" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Email sent / hr (by type, outcome)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_email_sent_total[30m])) by (type, outcome) * 3600", "legendFormat": "{{type}} {{outcome}}" } ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Rate-limit hits / hr (by kind)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [ { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum(rate(hamstrack_ratelimit_hit_total[30m])) by (kind) * 3600", "legendFormat": "{{kind}}" } ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Totals over time (issues, projects, workspaces)",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_issues_total", "legendFormat": "issues" },
+        { "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_projects_total", "legendFormat": "projects" },
+        { "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "hamstrack_workspaces_total", "legendFormat": "workspaces" }
+      ]
+    }
+  ]
+}

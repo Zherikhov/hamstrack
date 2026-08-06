@@ -1,0 +1,48 @@
+# Loki 3.x — single-binary, filesystem-backed. Sized for a single small host,
+# not a cluster. Retention is enforced by the compactor. ${LOKI_RETENTION_PERIOD}
+# is substituted at startup because the container runs with -config.expand-env=true.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: ${LOKI_RETENTION_PERIOD}
+  # Keep ingestion lenient for a small single-tenant deploy.
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  max_streams_per_user: 10000
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true          # required for retention_period to actually delete
+  delete_request_store: filesystem
+  compaction_interval: 10m
+
+# No analytics phone-home.
+analytics:
+  reporting_enabled: false

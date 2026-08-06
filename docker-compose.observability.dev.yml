@@ -1,0 +1,127 @@
+# DEV observability stack — for trying Phase 1 on your dev machine when you run
+# the APP FROM IntelliJ IDEA (a host process, not a container).
+#
+#   docker compose -f docker-compose.observability.dev.yml up -d
+#
+# Alloy tails the JSON log file the IDEA app writes (./logs/*.json) instead of
+# scraping docker containers. Standalone (not layered onto the prod file) and
+# uses its own dev volumes, so it won't touch prod data. Grafana admin is
+# admin/admin — fine for localhost, do NOT copy this to a server.
+#
+# See docs/self-hosting.md#observability-optional for the real (prod) stack.
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+      - -config.expand-env=true
+    environment:
+      LOKI_RETENTION_PERIOD: 168h
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_dev_data:/loki
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.7.1
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.dev.alloy:/etc/alloy/config.alloy:ro
+      - ./logs:/logs:ro                 # the IDEA app writes JSON logs here
+      - alloy_dev_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Alerting → dev MailHog (SMTP 1025). Alert emails land in the MailHog UI
+      # at http://localhost:8025 instead of being delivered.
+      OBS_ALERT_EMAIL_TO: alerts@localhost
+      GF_SMTP_ENABLED: "true"
+      GF_SMTP_HOST: host.docker.internal:1025
+      GF_SMTP_FROM_ADDRESS: alerts@hamstrack.local
+      GF_SMTP_SKIP_VERIFY: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_dev_data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"           # browse http://localhost:3000
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  # ── Phase 2: metrics (dev) ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      # dev config: the app job points at host.docker.internal (IDEA-run app)
+      - ./observability/prometheus/prometheus.dev.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_dev_data:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    # Docker Desktop / WSL2 can't do the rslave root mount the prod file uses, so
+    # mount /proc + /sys directly. This reports the WSL2 VM, not the Windows host
+    # — good enough to see the metrics wired up in dev.
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)
+    pid: host
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      # Dev: reach the standalone hamstrack-postgres via the host's published
+      # port (works on Docker Desktop regardless of compose networks).
+      DATA_SOURCE_URI: "host.docker.internal:15432/hamstrack?sslmode=disable"
+      DATA_SOURCE_USER: hamstrack
+      DATA_SOURCE_PASS: hamstrack
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  loki_dev_data:
+  grafana_dev_data:
+  alloy_dev_data:
+  prometheus_dev_data:

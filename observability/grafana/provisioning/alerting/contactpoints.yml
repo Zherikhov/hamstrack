@@ -1,0 +1,14 @@
+# Email contact point. The address comes from the OBS_ALERT_EMAIL_TO env var
+# (Grafana expands ${...} in provisioning files). Grafana's SMTP is configured
+# via GF_SMTP_* on the grafana service.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: email
+    receivers:
+      - uid: hamstrack-email
+        type: email
+        settings:
+          addresses: ${OBS_ALERT_EMAIL_TO}
+          singleEmail: false

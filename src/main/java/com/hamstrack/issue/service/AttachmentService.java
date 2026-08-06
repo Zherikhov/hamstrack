@@ -1,6 +1,7 @@
 package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.sse.SseRegistry;
 import com.hamstrack.common.storage.FileStorage;
 import com.hamstrack.issue.dto.AttachmentResponse;
@@ -47,6 +48,7 @@ public class AttachmentService {
     private final IssueAttachmentRepository attachmentRepository;
     private final FileStorage fileStorage;
     private final SseRegistry sseRegistry;
+    private final ProductMetrics metrics;
 
     public record AttachmentDownload(String filename, String contentType, long sizeBytes, InputStream stream) {}
 
@@ -76,6 +78,7 @@ public class AttachmentService {
         } catch (IOException e) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store file");
         }
+        metrics.attachmentUploaded(file.getSize());
 
         sseRegistry.broadcast(workspaceId, "ATTACHMENT_ADDED",
                 Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));

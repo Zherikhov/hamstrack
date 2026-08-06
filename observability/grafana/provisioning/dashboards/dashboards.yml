@@ -1,0 +1,15 @@
+# Load dashboard JSON from disk (mounted at /var/lib/grafana/dashboards).
+apiVersion: 1
+
+providers:
+  - name: Hamstrack
+    orgId: 1
+    folder: Hamstrack
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

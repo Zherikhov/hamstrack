@@ -22,6 +22,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
     // Guards the admin console against locking itself out (last active ADMIN)
     long countBySystemRoleAndStatus(SystemRole systemRole, com.hamstrack.auth.entity.UserStatus status);
 
+    // Backs the hamstrack.users.active gauge (see ProductMetrics) — evaluated
+    // at scrape time, so it must stay a single cheap count query.
+    long countByStatus(com.hamstrack.auth.entity.UserStatus status);
+
     // Atomic claim: only one concurrent authentication wins the right to seed
     // demo data. Returns 0 when already seeded (or claimed in parallel).
     @Modifying(clearAutomatically = true)

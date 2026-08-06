@@ -7,6 +7,10 @@ import com.hamstrack.auth.repository.*;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.config.JwtProperties;
 import com.hamstrack.common.mail.MailService;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
+import com.hamstrack.common.observability.ProductMetrics.LoginReason;
+import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.security.JwtService;
 import com.hamstrack.common.util.TokenUtils;
@@ -40,6 +44,7 @@ public class AuthService {
     private final AppProperties appProperties;
     private final MailService mailService;
     private final RateLimitService rateLimitService;
+    private final ProductMetrics metrics;
 
     @Transactional
     public void register(RegisterRequest req) {
@@ -66,6 +71,7 @@ public class AuthService {
             user.setTermsAcceptedAt(Instant.now());
         }
         userRepository.save(user);
+        metrics.userRegistered();
 
         sendVerificationEmail(user);
     }
@@ -84,6 +90,7 @@ public class AuthService {
         var user = verification.getUser();
         user.setStatus(UserStatus.ACTIVE);
         userRepository.save(user);
+        metrics.emailVerified();
 
         // The one-time token proves email ownership — same trust level as a
         // password reset link — so the user is logged in directly
@@ -101,15 +108,19 @@ public class AuthService {
         var user = userRepository.findByEmail(email).orElse(null);
         if (user == null || !passwordEncoder.matches(req.password(), user.getPasswordHash())) {
             rateLimitService.recordLoginFailure(email);
+            metrics.recordLogin(LoginOutcome.FAILURE, LoginReason.BAD_CREDENTIALS);
             throw new InvalidCredentialsException();
         }
         if (user.getStatus() == UserStatus.PENDING) {
+            metrics.recordLogin(LoginOutcome.FAILURE, LoginReason.NOT_VERIFIED);
             throw new EmailNotVerifiedException();
         }
         if (user.getStatus() == UserStatus.DISABLED) {
+            metrics.recordLogin(LoginOutcome.FAILURE, LoginReason.DISABLED);
             throw new InvalidCredentialsException();
         }
         rateLimitService.resetLoginFailures(email);
+        metrics.recordLogin(LoginOutcome.SUCCESS, LoginReason.OK);
         return issueTokens(user, response);
     }
 
@@ -161,6 +172,7 @@ public class AuthService {
             reset.setTokenHash(sha256(raw));
             reset.setExpiresAt(Instant.now().plusSeconds(3600)); // 1 hour
             passwordResetRepository.save(reset);
+            metrics.passwordReset(PasswordResetPhase.REQUESTED);
             mailService.sendPasswordResetEmail(user.getEmail(), raw);
         });
     }
@@ -182,6 +194,7 @@ public class AuthService {
 
         // Invalidate all existing refresh tokens after password change
         refreshTokenRepository.deleteAllByUser(user);
+        metrics.passwordReset(PasswordResetPhase.COMPLETED);
     }
 
     // --- helpers ---

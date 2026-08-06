@@ -23,6 +23,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [First run & the admin account](#first-run--the-admin-account)
 - [Attachment storage](#attachment-storage)
 - [Optional toggles](#optional-toggles)
+- [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
@@ -335,6 +336,92 @@ Rate-limit tuning (all optional; defaults shown):
 
 The limiter is **in-memory / single-node**. If you run multiple app replicas it
 applies per-node (there's no shared store yet), so keep it in mind when scaling out.
+
+## Observability (optional)
+
+Hamstrack always logs to stdout — in the `dc` profile as **structured JSON, one
+object per line** (`docker compose logs app` shows them; fields include `level`,
+`logger`, `message`, `stack_trace` and `deployment=dc`). Tune verbosity with
+`LOG_LEVEL` (root) and `LOG_LEVEL_APP` (the `com.hamstrack` package), both default
+`INFO`.
+
+For centralized logs with search and dashboards, the repo ships an **opt-in**
+stack you layer on top of your compose file — [Grafana](https://grafana.com/) +
+[Loki](https://grafana.com/oss/loki/) (log store) + [Alloy](https://grafana.com/docs/alloy/)
+(collector that tails every container's stdout via the docker socket):
+
+```bash
+# from the dir holding docker-compose.prod.yml + the observability/ config dir
+docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
+```
+
+You need these files next to your compose file (they're in the repo):
+`docker-compose.observability.yml` and the `observability/` directory
+(`loki/loki-config.yml`, `alloy/config.alloy`, `grafana/provisioning/…`,
+`grafana/dashboards/…`).
+
+The same stack also collects **metrics** — [Prometheus](https://prometheus.io/)
+scrapes host CPU/RAM/disk (node-exporter), per-container CPU/RAM (cAdvisor),
+PostgreSQL (postgres-exporter) and the **app itself** (Spring Boot Actuator +
+Micrometer: HTTP latency/throughput/errors, JVM heap/GC/threads, HikariCP pool).
+The **App Overview**, **JVM & DB**, **Host & Containers**, **Postgres** and
+**Product** (registrations, active users, issues/projects/workspaces created,
+logins, invites, email, attachments) dashboards are auto-provisioned alongside
+**Logs**. The app serves metrics on a
+separate internal management port (`MANAGEMENT_PORT`, default `9090`) that is
+**never published or proxied** — only in-network Prometheus reaches it.
+
+Set in your `.env` (see [`.env.prod.example`](../.env.prod.example)):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GF_SECURITY_ADMIN_PASSWORD` | — | Grafana admin password (**required** when the stack runs) |
+| `GF_SECURITY_ADMIN_USER` | `admin` | Grafana admin username |
+| `LOKI_RETENTION_PERIOD` | `168h` | how long Loki keeps logs (7 days) |
+| `PROMETHEUS_RETENTION_TIME` / `PROMETHEUS_RETENTION_SIZE` | `15d` / `2GB` | metrics retention (whichever is hit first) |
+
+**postgres-exporter database login (least privilege).** By default the exporter
+reuses your app `DB_USERNAME`/`DB_PASSWORD`, which is a read-write role — more
+than it needs. Create a dedicated read-only monitoring role and point the
+exporter at it via `DB_MONITOR_USER`/`DB_MONITOR_PASSWORD`:
+
+```sql
+-- run once against the hamstrack database
+CREATE ROLE hamstrack_exporter LOGIN PASSWORD 'a-strong-password';
+GRANT pg_monitor TO hamstrack_exporter;
+```
+
+Then set in `.env`:
+
+```
+DB_MONITOR_USER=hamstrack_exporter
+DB_MONITOR_PASSWORD=a-strong-password
+```
+
+`pg_monitor` is a built-in PostgreSQL role granting read-only access to the
+statistics views the exporter reads — no access to your table data. Leave
+`DB_MONITOR_*` unset to fall back to the app credentials.
+
+**Alerts** are provisioned too (AppDown, Postgres down, high 5xx rate, high
+latency, disk filling, email-send failures, JVM heap pressure). Set
+`OBS_ALERT_EMAIL_TO` to receive them by email — Grafana's SMTP reuses your
+`MAIL_*` settings. Leave it empty to keep the rules evaluating (visible in
+Grafana → Alerting) without email delivery.
+
+**Nothing is exposed publicly.** Grafana binds `127.0.0.1:3000` on the host only;
+Loki and Alloy publish no port at all. Reach Grafana by tunnelling to it (SSH
+port-forward, `ssh -L 3000:localhost:3000 you@server`, or an SSM port-forward on
+AWS — see [ops-prod-hardening §4](ops-prod-hardening.md#4-observability--reaching-grafana-over-ssm)),
+then open `http://localhost:3000`. The Loki datasource and a **Logs** dashboard are
+auto-provisioned.
+
+> **Always pass both `-f` files together** on later `up`/`pull`. Running
+> `up --remove-orphans` with only `docker-compose.prod.yml` would delete the
+> observability containers.
+
+Budget ~0.7–0.8 GB extra RAM for the full stack (Loki, Alloy, Grafana,
+Prometheus + the three exporters). Application/JVM metrics and alerts are added
+in later phases.
 
 ## Upgrading
 

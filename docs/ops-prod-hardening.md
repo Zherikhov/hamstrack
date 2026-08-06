@@ -191,3 +191,44 @@ aws ec2 revoke-security-group-ingress --region eu-north-1 --group-id $SG_ID \
 
 Ad-hoc shell access afterwards: `aws ssm start-session --target <INSTANCE_ID>`
 (or the browser-based Session Manager in the console) — no open ports needed.
+
+## 4. Observability — reaching Grafana over SSM
+
+The observability stack (`docker-compose.observability.yml`: Loki + Alloy +
+Grafana, Prometheus/exporters in later phases) publishes **no public port**.
+Grafana binds `127.0.0.1:3000` on the instance, so it's reachable from the host's
+loopback but not the internet. You tunnel to it with an SSM port-forward — the
+same credentials/instance role already used for deploys, no SSH, no security-group
+change.
+
+Prerequisite on the server: the stack must be running and its config present under
+`/opt/hamstrack/observability/` (see the [Self-hosting guide](self-hosting.md#observability-optional)
+for the file layout). Bring it up alongside the app:
+
+```bash
+cd /opt/hamstrack
+docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
+```
+
+> **Always pass BOTH `-f` files together.** Running `up --remove-orphans` with only
+> `docker-compose.prod.yml` once the stack is up would treat loki/alloy/grafana as
+> orphans and delete them.
+
+Then, from your laptop (needs AWS creds with `ssm:StartSession` + the SSM plugin):
+
+```bash
+aws ssm start-session \
+  --region eu-north-1 \
+  --target i-019fe684b25ad831f \
+  --document-name AWS-StartPortForwardingSession \
+  --parameters '{"portNumber":["3000"],"localPortNumber":["3000"]}'
+```
+
+Leave it running and open **http://localhost:3000** — log in with
+`GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSWORD` from `/opt/hamstrack/.env`.
+The Loki datasource and the **Logs** dashboard are auto-provisioned; use
+**Explore → Loki** for ad-hoc `{container="hamstrack-app-1"}` queries.
+
+To debug Loki/Prometheus directly, forward their ports the same way (they don't
+bind a host port, so use `AWS-StartPortForwardingSessionToRemoteHost` targeting the
+container, or query them from inside Grafana).

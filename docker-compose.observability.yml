@@ -1,0 +1,142 @@
+# Observability stack — OPTIONAL, layered onto docker-compose.prod.yml.
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
+#
+# Phase 1 (this file, current): centralized logging — Loki (store) + Alloy
+# (collector, reads every container's stdout via the docker socket) + Grafana
+# (view). Phases 2+ add Prometheus + node/cadvisor/postgres exporters here.
+#
+# Design rules (see docs/design/observability-proposal.md):
+#   * No service publishes a PUBLIC host port. Grafana binds 127.0.0.1 only so it
+#     is reachable via an SSM port-forward from the host, never from the internet.
+#   * Same compose project as the prod file, so everything shares the default
+#     network and resolves each other by service name (loki, app, postgres…).
+#   * Every service has a mem_limit, so the stack can't OOM the box.
+#   * DC self-hosters opt in by adding the second -f; Cloud/prod always runs it.
+services:
+  loki:
+    image: grafana/loki:3.4.2
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+      - -config.expand-env=true   # allow ${LOKI_RETENTION_PERIOD} substitution
+    environment:
+      LOKI_RETENTION_PERIOD: ${LOKI_RETENTION_PERIOD:-168h}   # 7 days
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    mem_limit: 256m
+    restart: unless-stopped
+
+  alloy:
+    image: grafana/alloy:v1.7.1
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only docker socket: Alloy discovers containers and tails their logs
+      # through the docker API. This is the highest-privilege grant in the stack —
+      # a read-only mount limits it to reads; docker-socket-proxy is a hardening
+      # follow-up (see spec §11).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+    depends_on:
+      - loki
+    mem_limit: 128m
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.5.2
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?set GF_SECURITY_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # Only needed if you reverse-proxy Grafana under a sub-path; default is fine
+      # for the SSM port-forward (localhost:3000).
+      GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://localhost:3000}
+      # Alerting → email. The contact-point address is OBS_ALERT_EMAIL_TO; Grafana's
+      # SMTP reuses your MAIL_* settings. Leave OBS_ALERT_EMAIL_TO unset to keep
+      # rules evaluating without an email delivery.
+      OBS_ALERT_EMAIL_TO: ${OBS_ALERT_EMAIL_TO:-alerts@example.com}
+      GF_SMTP_ENABLED: ${GF_SMTP_ENABLED:-true}
+      GF_SMTP_HOST: ${MAIL_HOST:-localhost}:${MAIL_PORT:-587}
+      GF_SMTP_USER: ${MAIL_USERNAME:-}
+      GF_SMTP_PASSWORD: ${MAIL_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${MAIL_FROM:-noreply@example.com}
+      GF_SMTP_FROM_NAME: Hamstrack Alerts
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      # Loopback-only: NOT internet-exposed. Reach it with an SSM port-forward
+      # (see docs/ops-prod-hardening.md §4). On a plain dev box, browse localhost:3000.
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - loki
+    mem_limit: 128m
+    restart: unless-stopped
+
+  # ── Phase 2: metrics ──────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-2GB}
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    mem_limit: 256m
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.9.0
+    command:
+      - --path.rootfs=/host
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    mem_limit: 64m
+    restart: unless-stopped
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    privileged: true
+    devices:
+      - /dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    mem_limit: 128m
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      # Reach the postgres compose service. Least privilege: set DB_MONITOR_USER/
+      # DB_MONITOR_PASSWORD to a read-only pg_monitor role (see the self-hosting
+      # guide for the CREATE ROLE SQL). If unset, it falls back to the app
+      # DB_USERNAME/ DB_PASSWORD, so metrics still work out of the box.
+      DATA_SOURCE_URI: "postgres:5432/hamstrack?sslmode=disable"
+      DATA_SOURCE_USER: ${DB_MONITOR_USER:-${DB_USERNAME}}
+      DATA_SOURCE_PASS: ${DB_MONITOR_PASSWORD:-${DB_PASSWORD}}
+    depends_on:
+      - postgres
+    mem_limit: 64m
+    restart: unless-stopped
+
+volumes:
+  loki_data:
+  grafana_data:
+  alloy_data:
+  prometheus_data:

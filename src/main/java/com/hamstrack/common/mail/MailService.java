@@ -1,6 +1,9 @@
 package com.hamstrack.common.mail;
 
 import com.hamstrack.common.config.AppProperties;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.EmailOutcome;
+import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import jakarta.mail.MessagingException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.mail.MailPreparationException;
@@ -19,6 +22,7 @@ public class MailService {
 
     private final JavaMailSender mailSender;
     private final AppProperties appProperties;
+    private final ProductMetrics metrics;
 
     @Async
     public void sendVerificationEmail(String to, String token) {
@@ -28,13 +32,13 @@ public class MailService {
         var text = "Confirm your email address to activate your Hamstrack account:\n\n" + link
                 + "\n\nThis link expires in 24 hours."
                 + " If you didn't create a Hamstrack account, you can safely ignore this email.";
-        sendHtml(to, "Confirm your Hamstrack email", text, verificationHtml(link));
+        sendHtml(EmailType.VERIFICATION, to, "Confirm your Hamstrack email", text, verificationHtml(link));
     }
 
     @Async
     public void sendPasswordResetEmail(String to, String token) {
         var link = appProperties.baseUrl() + "/reset-password?token=" + token;
-        send(to, "Reset your Hamstrack password",
+        send(EmailType.PASSWORD_RESET, to, "Reset your Hamstrack password",
                 "Click the link to reset your password:\n\n" + link
                 + "\n\nThis link expires in 1 hour.");
     }
@@ -42,7 +46,7 @@ public class MailService {
     @Async
     public void sendWorkspaceInviteEmail(String to, String workspaceName, String token) {
         var link = appProperties.baseUrl() + "/accept-invite?token=" + token;
-        send(to, "You've been invited to " + workspaceName + " on Hamstrack",
+        send(EmailType.INVITE, to, "You've been invited to " + workspaceName + " on Hamstrack",
                 "You've been invited to join \"" + workspaceName + "\".\n\nAccept the invite:\n\n"
                 + link + "\n\nThis link expires in 7 days.");
     }
@@ -93,16 +97,25 @@ public class MailService {
                 """.formatted(FONT, link);
     }
 
-    private void send(String to, String subject, String text) {
-        var message = new SimpleMailMessage();
-        message.setTo(to);
-        message.setSubject(subject);
-        message.setText(text);
-        message.setFrom(appProperties.mailFrom());
-        mailSender.send(message);
+    // These run on the @Async executor and may throw (SMTP failure); the metric
+    // records success/failure but MUST NOT swallow the exception — behavior is
+    // unchanged, we only observe it, so record failure then rethrow.
+    private void send(EmailType type, String to, String subject, String text) {
+        try {
+            var message = new SimpleMailMessage();
+            message.setTo(to);
+            message.setSubject(subject);
+            message.setText(text);
+            message.setFrom(appProperties.mailFrom());
+            mailSender.send(message);
+            metrics.emailSent(type, EmailOutcome.SUCCESS);
+        } catch (RuntimeException e) {
+            metrics.emailSent(type, EmailOutcome.FAILURE);
+            throw e;
+        }
     }
 
-    private void sendHtml(String to, String subject, String plainText, String html) {
+    private void sendHtml(EmailType type, String to, String subject, String plainText, String html) {
         try {
             var message = mailSender.createMimeMessage();
             // multipart/alternative: HTML for normal clients, plain text as fallback
@@ -112,8 +125,13 @@ public class MailService {
             helper.setFrom(appProperties.mailFrom());
             helper.setText(plainText, html);
             mailSender.send(message);
+            metrics.emailSent(type, EmailOutcome.SUCCESS);
         } catch (MessagingException e) {
+            metrics.emailSent(type, EmailOutcome.FAILURE);
             throw new MailPreparationException("Failed to build email", e);
+        } catch (RuntimeException e) {
+            metrics.emailSent(type, EmailOutcome.FAILURE);
+            throw e;
         }
     }
 }

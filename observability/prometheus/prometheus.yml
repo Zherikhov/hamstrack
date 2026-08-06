@@ -1,0 +1,40 @@
+# Prometheus scrape config — shared by the prod and dev observability stacks.
+# All targets are reached by service name on the shared compose network.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: hamstrack
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Host CPU / RAM / disk / network.
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # Per-container CPU / RAM / IO.
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  # PostgreSQL — connections, db size, cache hit ratio, tps.
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  # Loki's own metrics.
+  - job_name: loki
+    static_configs:
+      - targets: ['loki:3100']
+
+  # The app's Actuator/Micrometer endpoint on the internal management port.
+  # In prod the app is a container reachable as 'app'. (Dev uses prometheus.dev.yml,
+  # which points this at host.docker.internal since the app runs from the IDE.)
+  - job_name: hamstrack-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['app:9090']

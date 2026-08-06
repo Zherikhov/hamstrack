@@ -3,6 +3,8 @@ package com.hamstrack.workspace.service;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.mail.MailService;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
 import com.hamstrack.common.util.TokenUtils;
 import com.hamstrack.workspace.dto.*;
 import com.hamstrack.workspace.entity.*;
@@ -25,6 +27,7 @@ public class WorkspaceService {
     private final WorkspaceInviteRepository inviteRepository;
     private final UserRepository userRepository;
     private final MailService mailService;
+    private final ProductMetrics metrics;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -55,6 +58,15 @@ public class WorkspaceService {
 
         // No per-workspace taxonomy seeding since M1: statuses/types/priorities
         // live in the global catalog and reach projects through bindings
+
+        // Metric source classification: the only signal on this method is the
+        // completesOnboarding flag. The demo seeder is the single caller that
+        // passes false, so false => demo and true => a real user-initiated
+        // creation. There is no distinct "onboarding" workspace-creation call
+        // site today (OnboardingController completes onboarding + demo-seeds but
+        // creates no workspace of its own), so WorkspaceSource.ONBOARDING is
+        // reserved for future use and not emitted here.
+        metrics.workspaceCreated(completesOnboarding ? WorkspaceSource.USER : WorkspaceSource.DEMO);
 
         if (completesOnboarding) {
             // Creating a team completes first-login onboarding (Cloud; no-op otherwise)
@@ -117,6 +129,7 @@ public class WorkspaceService {
         invite.setInvitedBy(actor);
         invite.setExpiresAt(Instant.now().plusSeconds(7 * 24 * 3600)); // 7 days
         inviteRepository.save(invite);
+        metrics.inviteSent();
 
         mailService.sendWorkspaceInviteEmail(req.email(), workspace.getName(), rawToken);
     }
@@ -162,6 +175,7 @@ public class WorkspaceService {
             throw new WorkspaceNotFoundException();
         }
         inviteRepository.delete(invite);
+        metrics.inviteDeclined();
     }
 
     private WorkspaceResponse acceptInvite(User actor, WorkspaceInvite invite) {
@@ -185,6 +199,7 @@ public class WorkspaceService {
 
         invite.setAcceptedAt(Instant.now());
         inviteRepository.save(invite);
+        metrics.inviteAccepted();
 
         // Joining a team completes first-login onboarding (Cloud; no-op otherwise)
         userRepository.markOnboarded(actor.getId(), Instant.now());

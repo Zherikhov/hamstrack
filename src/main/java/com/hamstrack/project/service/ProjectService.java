@@ -3,6 +3,7 @@ package com.hamstrack.project.service;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.exception.UserNotFoundException;
+import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.project.dto.*;
 import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
@@ -29,6 +30,7 @@ public class ProjectService {
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
     private final UserRepository userRepository;
+    private final ProductMetrics metrics;
 
     @Transactional
     public ProjectResponse create(User actor, UUID workspaceId, CreateProjectRequest req) {
@@ -49,6 +51,7 @@ public class ProjectService {
         member.setUser(actor);
         member.setRole(ProjectRole.MANAGER);
         projectMemberRepository.save(member);
+        metrics.projectCreated();
 
         return ProjectResponse.of(project, ProjectRole.MANAGER);
     }

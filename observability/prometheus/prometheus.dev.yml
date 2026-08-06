@@ -1,0 +1,37 @@
+# DEV Prometheus scrape config (used by docker-compose.observability.dev.yml).
+# Identical to prometheus.yml except the app job points at host.docker.internal,
+# because in dev the app runs from IntelliJ IDEA on the host (management port 9090),
+# not as a container.
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: hamstrack-dev
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: ['cadvisor:8080']
+
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+
+  - job_name: loki
+    static_configs:
+      - targets: ['loki:3100']
+
+  # The IDEA-run app's Actuator endpoint on the host. Run the app with Actuator
+  # on 9090 (the application.properties default) for this target to come UP.
+  - job_name: hamstrack-app
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ['host.docker.internal:9090']

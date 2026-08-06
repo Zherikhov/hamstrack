@@ -1,0 +1,63 @@
+// Grafana Alloy — tail every docker container's stdout and ship it to Loki.
+//
+// Labels are kept deliberately LOW-CARDINALITY (container, compose_project,
+// service, level, deployment) — never per-request/user/workspace ids, which
+// would explode Loki's stream count and leak tenant data (see spec §6/§11).
+
+// Discover running containers through the (read-only) docker socket.
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+}
+
+// Turn docker metadata into clean labels.
+discovery.relabel "containers" {
+	targets = discovery.docker.containers.targets
+
+	// "/hamstrack-app-1" -> "hamstrack-app-1"
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+		target_label  = "compose_project"
+	}
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+}
+
+loki.source.docker "containers" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.containers.targets
+	relabel_rules = discovery.relabel.containers.rules
+	forward_to    = [loki.process.parse.receiver]
+}
+
+loki.process "parse" {
+	forward_to = [loki.write.default.receiver]
+
+	// The app logs one JSON object per line under the cloud/dc profiles. Lift
+	// `level` and `deployment` into labels. Non-JSON lines (postgres, caddy,
+	// local console) simply skip these stages — no error, just no extra labels.
+	stage.json {
+		expressions = {
+			level      = "level",
+			deployment = "deployment",
+		}
+	}
+	stage.labels {
+		values = {
+			level      = "",
+			deployment = "",
+		}
+	}
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+}
