@@ -339,6 +339,10 @@ applies per-node (there's no shared store yet), so keep it in mind when scaling 
 
 ## Observability (optional)
 
+> Full operator guide (Cloud + DC, backend internals, metric reference, alerts,
+> dev setup, security): **[docs/observability.md](observability.md)**. This is the
+> DC quick version.
+
 Hamstrack always logs to stdout — in the `dc` profile as **structured JSON, one
 object per line** (`docker compose logs app` shows them; fields include `level`,
 `logger`, `message`, `stack_trace` and `deployment=dc`). Tune verbosity with

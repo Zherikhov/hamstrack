@@ -42,6 +42,7 @@ Markdown references per deployment model:
 
 - **[API reference — Cloud](docs/api-cloud.md)** (`https://hamstrack.com/api`)
 - **[API reference — DC / self-hosted](docs/api-dc.md)** (`https://your-host/api`)
+- **[Observability guide](docs/observability.md)** — logs, metrics, dashboards & alerts (Cloud + DC), backend internals, and the dev setup.
 
 ## Development
 
