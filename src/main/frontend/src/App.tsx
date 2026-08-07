@@ -42,21 +42,24 @@ function AuthInit({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     async function initAuth() {
+      // Try the in-memory access token first (survives page reloads within a tab).
       if (accessToken) {
         try {
-          const user = await apiMe()
-          setUser(user)
+          setUser(await apiMe())
+          return
         } catch {
-          // Token stale — try refresh
-          try {
-            const data = await apiRefresh()
-            setToken(data.accessToken)
-            const user = await apiMe()
-            setUser(user)
-          } catch {
-            clear()
-          }
+          // Access token stale/expired — fall through to the refresh cookie below.
         }
+      }
+      // No usable access token (e.g. a fresh tab after the browser was closed —
+      // sessionStorage is gone). The 30-day HttpOnly refresh cookie may still be
+      // valid, so always attempt a silent refresh to restore the session.
+      try {
+        const data = await apiRefresh()
+        setToken(data.accessToken)
+        setUser(await apiMe())
+      } catch {
+        clear()
       }
     }
     async function initConfig() {
