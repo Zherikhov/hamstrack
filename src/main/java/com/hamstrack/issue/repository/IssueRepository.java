@@ -23,6 +23,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
 
     Optional<Issue> findByIdAndProject(UUID id, Project project);
 
+    long countByProject(Project project);
+
     boolean existsByStatus(Status status);
 
     boolean existsByType(IssueType type);

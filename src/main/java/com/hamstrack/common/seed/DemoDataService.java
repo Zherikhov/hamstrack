@@ -209,7 +209,14 @@ public class DemoDataService {
                 "Power-user navigation: j/k to move between cards, enter to open the side "
                         + "panel, esc to close it, and a \"?\" overlay listing all shortcuts.",
                 null, null, null));
-        seedDemoFieldValues(projectId);
+        // Best-effort (as the javadoc promises): a field-value hiccup (e.g. seeded
+        // option ids diverging from the sample values) must not roll back the whole
+        // demo seed and its claim, or first-login seeding would retry-and-fail forever
+        try {
+            seedDemoFieldValues(projectId);
+        } catch (RuntimeException e) {
+            log.warn("Demo field-value seeding skipped for project {}: {}", projectId, e.toString());
+        }
 
         log.info("Demo data seeded for user {}: workspace {}, project {}", userId, wsId, projectId);
     }

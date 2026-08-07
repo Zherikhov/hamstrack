@@ -32,6 +32,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 
 @Service
@@ -209,10 +210,14 @@ public class IssueService {
                     issue.getPriority().getName(), newPriority.getName()));
             issue.setPriority(newPriority);
         }
-        if (newAssignee != null) {
-            String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
-            if (!newAssignee.getId().equals(issue.getAssignee() != null ? issue.getAssignee().getId() : null)) {
-                historyEntries.add(makeHistory(issue, actor, "assignee", oldName, newAssignee.getDisplayName()));
+        // Assignee: a non-null id sets it; clearAssignee (when no id) unsets it
+        if (newAssignee != null || req.clearAssignee()) {
+            var oldId = issue.getAssignee() != null ? issue.getAssignee().getId() : null;
+            var newId = newAssignee != null ? newAssignee.getId() : null;
+            if (!Objects.equals(oldId, newId)) {
+                String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
+                String newName = newAssignee != null ? newAssignee.getDisplayName() : null;
+                historyEntries.add(makeHistory(issue, actor, "assignee", oldName, newName));
                 issue.setAssignee(newAssignee);
             }
         }
@@ -221,6 +226,9 @@ public class IssueService {
                     issue.getDueDate() != null ? issue.getDueDate().toString() : null,
                     req.dueDate().toString()));
             issue.setDueDate(req.dueDate());
+        } else if (req.clearDueDate() && issue.getDueDate() != null) {
+            historyEntries.add(makeHistory(issue, actor, "dueDate", issue.getDueDate().toString(), null));
+            issue.setDueDate(null);
         }
 
         // Custom fields: partial map, JSON null clears; changes land in history

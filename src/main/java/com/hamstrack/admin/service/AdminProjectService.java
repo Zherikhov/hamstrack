@@ -3,11 +3,9 @@ package com.hamstrack.admin.service;
 import com.hamstrack.admin.dto.ProjectBindingResponse;
 import com.hamstrack.admin.dto.UpdateProjectBindingsRequest;
 import com.hamstrack.issue.repository.FieldSetRepository;
-import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.issue.repository.IssueTypeSetRepository;
 import com.hamstrack.issue.repository.PrioritySetRepository;
 import com.hamstrack.issue.repository.WorkflowRepository;
-import com.hamstrack.issue.service.ProjectConfigService;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.repository.ProjectRepository;
 import lombok.RequiredArgsConstructor;
@@ -35,8 +33,7 @@ public class AdminProjectService {
     private final PrioritySetRepository prioritySetRepository;
     private final FieldSetRepository fieldSetRepository;
     private final IssueTypeSetRepository issueTypeSetRepository;
-    private final IssueRepository issueRepository;
-    private final ProjectConfigService projectConfigService;
+    private final WorkflowRebindGuard workflowRebindGuard;
 
     @Transactional(readOnly = true)
     public List<ProjectBindingResponse> list() {
@@ -70,17 +67,7 @@ public class AdminProjectService {
                 : null;
 
         // Workflow change guard: no issue may sit in a status the new workflow lacks
-        var currentWorkflowId = project.getWorkflow() != null ? project.getWorkflow().getId() : null;
-        var newWorkflowId = newWorkflow != null ? newWorkflow.getId() : null;
-        if (!java.util.Objects.equals(currentWorkflowId, newWorkflowId)) {
-            project.setWorkflow(newWorkflow); // set before resolving effective statuses
-            var newStatuses = projectConfigService.statuses(project);
-            long stranded = issueRepository.countByProjectAndStatusNotIn(project, newStatuses);
-            if (stranded > 0) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        stranded + " issues are in statuses the new workflow doesn't contain — move them first");
-            }
-        }
+        workflowRebindGuard.check(project, newWorkflow);
 
         project.setWorkflow(newWorkflow);
         project.setPrioritySet(newSet);

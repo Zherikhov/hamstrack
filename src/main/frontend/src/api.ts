@@ -282,7 +282,9 @@ export async function apiUpdateIssue(
   number: number,
   // version enables the backend's optimistic-lock check: 409 if someone else saved first;
   // fields is partial — only listed ids change, null clears a value
-  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; fields: Record<string, FieldValue | null>; version: number }>
+  // clearAssignee/clearDueDate explicitly unset those nullable fields (a plain
+  // null can't be distinguished from "not sent" server-side)
+  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; clearAssignee: boolean; clearDueDate: boolean; fields: Record<string, FieldValue | null>; version: number }>
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, {
     method: 'PATCH',

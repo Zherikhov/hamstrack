@@ -2395,6 +2395,8 @@ components:
         priorityId: { type: string, format: uuid, description: Must be offered by the project's priority set }
         assigneeId: { type: string, format: uuid }
         dueDate: { type: string, format: date }
+        clearAssignee: { type: boolean, default: false, description: 'Unset the assignee (a null assigneeId cannot be distinguished from "not sent"); ignored when assigneeId is also given' }
+        clearDueDate: { type: boolean, default: false, description: Unset the due date; ignored when dueDate is also given }
         fields:
           type: object
           additionalProperties: true

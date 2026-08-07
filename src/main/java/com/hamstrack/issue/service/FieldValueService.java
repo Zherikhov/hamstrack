@@ -116,7 +116,7 @@ public class FieldValueService {
                     row.setValue(value);
                     valueRepository.save(row);
                     onChange.changed(field.getName(), null, render(field, value));
-                } else if (!value.equals(existing.getValue())) {
+                } else if (!jsonEquals(value, existing.getValue())) {
                     onChange.changed(field.getName(), render(field, existing.getValue()), render(field, value));
                     existing.setValue(value);
                     valueRepository.save(existing);
@@ -138,6 +138,17 @@ public class FieldValueService {
     }
 
     // ---- type validation (value shapes documented on FieldType) ----
+
+    /**
+     * Dirty-check for a stored value. Numeric-aware: {@code JsonNode.equals}
+     * treats an int {@code 5} and a double {@code 5.0} as different, which would
+     * write a spurious history entry on a no-op re-save of a NUMBER field.
+     */
+    private static boolean jsonEquals(JsonNode a, JsonNode b) {
+        if (a == null || b == null) return a == b;
+        if (a.isNumber() && b.isNumber()) return a.decimalValue().compareTo(b.decimalValue()) == 0;
+        return a.equals(b);
+    }
 
     private void validate(Issue issue, FieldDef field, JsonNode value) {
         switch (field.getType()) {

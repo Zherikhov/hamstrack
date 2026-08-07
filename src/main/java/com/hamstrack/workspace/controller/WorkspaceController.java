@@ -18,8 +18,8 @@ import java.util.UUID;
  * email and accept invites. The workspace is the tenant boundary — every
  * nested resource is resolved through the caller's membership, and a
  * non-member gets 404 (never 403) so workspace existence is not revealed.
- * Creating a workspace makes the caller OWNER and seeds default issue types
- * and statuses.
+ * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
+ * (since M1), so workspace creation no longer seeds any issue types or statuses.
  */
 @RestController
 @RequestMapping("/api/workspaces")

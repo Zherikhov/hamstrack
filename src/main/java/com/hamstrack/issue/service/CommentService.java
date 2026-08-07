@@ -28,7 +28,9 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -53,25 +55,8 @@ public class CommentService {
         comment.setBody(req.body());
         commentRepository.save(comment);
 
-        // Parse @mentions and notify mentioned workspace members
-        var members = workspaceMemberRepository
-                .findAllByWorkspaceWithUser(issue.getWorkspace());
-        parseMentions(req.body(), members).forEach(mentioned -> {
-            if (mentioned.getId().equals(actor.getId())) return; // don't notify yourself
-            var m = new CommentMention();
-            m.setComment(comment);
-            m.setUser(mentioned);
-            mentionRepository.save(m);
-
-            String link = "/w/" + workspaceId + "/p/" + projectId + "?issue=" + issueNumber;
-            notificationService.create(
-                    mentioned, workspaceId,
-                    "MENTIONED",
-                    actor.getDisplayName() + " mentioned you",
-                    req.body().length() > 120 ? req.body().substring(0, 120) + "…" : req.body(),
-                    link
-            );
-        });
+        // Notify @mentioned members (none previously mentioned on a new comment)
+        applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, Set.of());
 
         sseRegistry.broadcast(workspaceId, "COMMENT_ADDED",
                 Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
@@ -96,6 +81,15 @@ public class CommentService {
         }
         comment.setBody(req.body());
         commentRepository.save(comment);
+
+        // Re-parse @mentions: notify anyone newly mentioned by the edit (skip those
+        // already mentioned so an edit can't re-notify the same person)
+        var already = mentionRepository.findAllByComment(comment).stream()
+                .map(m -> m.getUser().getId()).collect(Collectors.toSet());
+        applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, already);
+
+        sseRegistry.broadcast(workspaceId, "COMMENT_UPDATED",
+                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
         return CommentResponse.of(comment);
     }
 
@@ -109,6 +103,9 @@ public class CommentService {
         }
         comment.setDeletedAt(Instant.now());
         commentRepository.save(comment);
+
+        sseRegistry.broadcast(workspaceId, "COMMENT_DELETED",
+                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
     }
 
     /**
@@ -118,6 +115,34 @@ public class CommentService {
      * at each '@' the longest matching display name wins, so "@John Doe" prefers the
      * member "John Doe" over "John".
      */
+    /**
+     * Parse @mentions in {@code body} and, for each mentioned member who isn't the
+     * actor and wasn't {@code alreadyMentioned}, record a {@link CommentMention}
+     * and send a notification. Shared by create (empty already-set) and edit
+     * (already-set = existing mentions, so an edit only notifies the newly added).
+     */
+    private void applyMentions(IssueComment comment, String body, User actor,
+                               UUID workspaceId, UUID projectId, long issueNumber,
+                               Set<UUID> alreadyMentioned) {
+        var members = workspaceMemberRepository.findAllByWorkspaceWithUser(comment.getIssue().getWorkspace());
+        for (var mentioned : parseMentions(body, members)) {
+            if (mentioned.getId().equals(actor.getId()) || alreadyMentioned.contains(mentioned.getId())) {
+                continue;
+            }
+            var m = new CommentMention();
+            m.setComment(comment);
+            m.setUser(mentioned);
+            mentionRepository.save(m);
+
+            String link = "/w/" + workspaceId + "/p/" + projectId + "?issue=" + issueNumber;
+            notificationService.create(
+                    mentioned, workspaceId, "MENTIONED",
+                    actor.getDisplayName() + " mentioned you",
+                    body.length() > 120 ? body.substring(0, 120) + "…" : body,
+                    link);
+        }
+    }
+
     private List<User> parseMentions(String body, List<WorkspaceMember> members) {
         var result = new java.util.LinkedHashSet<User>();
         var lowerBody = body.toLowerCase();

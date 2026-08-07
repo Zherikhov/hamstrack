@@ -8,11 +8,9 @@ import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.issue.entity.Scoped;
 import com.hamstrack.issue.repository.FieldSetRepository;
-import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.issue.repository.IssueTypeSetRepository;
 import com.hamstrack.issue.repository.PrioritySetRepository;
 import com.hamstrack.issue.repository.WorkflowRepository;
-import com.hamstrack.issue.service.ProjectConfigService;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectRepository;
@@ -24,7 +22,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
-import java.util.Objects;
 import java.util.UUID;
 
 /**
@@ -45,8 +42,7 @@ public class ScopedProjectAdminService {
     private final PrioritySetRepository prioritySetRepository;
     private final FieldSetRepository fieldSetRepository;
     private final IssueTypeSetRepository issueTypeSetRepository;
-    private final IssueRepository issueRepository;
-    private final ProjectConfigService projectConfigService;
+    private final WorkflowRebindGuard workflowRebindGuard;
 
     // ---------- workspace admin ----------
 
@@ -113,17 +109,7 @@ public class ScopedProjectAdminService {
         var newTypeSet = req.issueTypeSetId() == null ? null
                 : requireBindable(issueTypeSetRepository.findById(req.issueTypeSetId()).orElse(null), project, "Issue type set");
 
-        var currentWorkflowId = project.getWorkflow() != null ? project.getWorkflow().getId() : null;
-        var newWorkflowId = newWorkflow != null ? newWorkflow.getId() : null;
-        if (!Objects.equals(currentWorkflowId, newWorkflowId)) {
-            project.setWorkflow(newWorkflow); // set before resolving effective statuses
-            var newStatuses = projectConfigService.statuses(project);
-            long stranded = issueRepository.countByProjectAndStatusNotIn(project, newStatuses);
-            if (stranded > 0) {
-                throw new ResponseStatusException(HttpStatus.CONFLICT,
-                        stranded + " issues are in statuses the new workflow doesn't contain — move them first");
-            }
-        }
+        workflowRebindGuard.check(project, newWorkflow);
 
         project.setWorkflow(newWorkflow);
         project.setPrioritySet(newPrioritySet);

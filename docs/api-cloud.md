@@ -388,7 +388,7 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
 }
 ```
 
-**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
+**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). To unset a nullable core field send `clearAssignee: true` / `clearDueDate: true` — a plain `null` can't be told apart from an omitted field (ignored when the id/date is also given). Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
 
 ```bash
 curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \

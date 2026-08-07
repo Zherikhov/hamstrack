@@ -35,13 +35,17 @@ public class ProjectService {
     @Transactional
     public ProjectResponse create(User actor, UUID workspaceId, CreateProjectRequest req) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        if (projectRepository.existsByWorkspaceAndKey(workspace, req.key())) {
+        // Normalize once and use the same value for the uniqueness check and the
+        // insert — otherwise a future relaxed key pattern could 500 on the unique
+        // constraint instead of returning a clean 409.
+        var key = req.key().toUpperCase();
+        if (projectRepository.existsByWorkspaceAndKey(workspace, key)) {
             throw new ProjectKeyConflictException();
         }
         var project = new Project();
         project.setWorkspace(workspace);
         project.setName(req.name());
-        project.setKey(req.key().toUpperCase());
+        project.setKey(key);
         project.setDescription(req.description());
         project.setCreatedBy(actor);
         projectRepository.save(project);
