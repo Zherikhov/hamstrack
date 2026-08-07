@@ -17,9 +17,15 @@ info:
     `refresh_token` cookie with `POST /api/auth/refresh`.
 
     **Access model** — a resource you cannot see returns `404`, whether it
-    does not exist or you are not a member of its workspace. Lists are
-    currently unpaginated (beta). The API is unversioned while in beta;
-    breaking changes are announced in release notes.
+    does not exist or you are not a member of its workspace. The API is
+    unversioned while in beta; breaking changes are announced in release notes.
+
+    **Pagination** — paginated endpoints take `page` (zero-based, default 0)
+    and `size` (default 50, clamped server-side to a maximum of 100) and return
+    a uniform `PageResponse` envelope (`content` plus `page`/`size`/
+    `totalElements`/`totalPages`/`hasNext`). The issue list is the deliberate
+    exception: without `size` it returns the full unpaginated array (the board
+    needs every card), and only switches to the envelope when `size` is passed.
 
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
@@ -1019,15 +1025,24 @@ paths:
     get:
       tags: [Admin]
       summary: List all user accounts (admin)
+      description: Paginated, ordered by creation time (oldest first).
       operationId: adminListUsers
+      parameters:
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/sizeParam'
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/AdminUser' }
+                allOf:
+                  - $ref: '#/components/schemas/PageResponse'
+                  - type: object
+                    properties:
+                      content:
+                        type: array
+                        items: { $ref: '#/components/schemas/AdminUser' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [Admin]
@@ -1312,6 +1327,13 @@ paths:
     get:
       tags: [Issues]
       summary: List issues
+      description: |
+        Dual-shape by design. **Without** `size` the response is the full
+        unpaginated `IssueResponse` array — the board/kanban needs every card.
+        **With** `size` the response is a paginated `PageResponse` envelope (the
+        backlog path), and the optional `excludeDone` flag drops issues whose
+        status is in the DONE category server-side. The `statusId`/`assigneeId`/
+        `priorityId` filters apply in both modes.
       operationId: listIssues
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1325,14 +1347,30 @@ paths:
         - name: priorityId
           in: query
           schema: { type: string, format: uuid }
+        - name: excludeDone
+          in: query
+          description: Paginated mode only — drop issues in a DONE-category status
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/sizeParam'
       responses:
         '200':
-          description: OK
+          description: |
+            Full array when `size` is omitted; a `PageResponse` envelope when
+            `size` is present.
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/IssueResponse' }
+                oneOf:
+                  - type: array
+                    items: { $ref: '#/components/schemas/IssueResponse' }
+                  - allOf:
+                      - $ref: '#/components/schemas/PageResponse'
+                      - type: object
+                        properties:
+                          content:
+                            type: array
+                            items: { $ref: '#/components/schemas/IssueResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}:
@@ -1400,19 +1438,27 @@ paths:
     get:
       tags: [Issues]
       summary: Field-level change history
+      description: Paginated, oldest first.
       operationId: getIssueHistory
       parameters:
         - $ref: '#/components/parameters/workspaceId'
         - $ref: '#/components/parameters/projectId'
         - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/sizeParam'
       responses:
         '200':
           description: OK, oldest first
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/IssueHistoryResponse' }
+                allOf:
+                  - $ref: '#/components/schemas/PageResponse'
+                  - type: object
+                    properties:
+                      content:
+                        type: array
+                        items: { $ref: '#/components/schemas/IssueHistoryResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments:
@@ -1440,20 +1486,27 @@ paths:
     get:
       tags: [Comments]
       summary: List comments
-      description: Soft-deleted comments are excluded.
+      description: Soft-deleted comments are excluded. Paginated, oldest first.
       operationId: listComments
       parameters:
         - $ref: '#/components/parameters/workspaceId'
         - $ref: '#/components/parameters/projectId'
         - $ref: '#/components/parameters/issueNumber'
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/sizeParam'
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                type: array
-                items: { $ref: '#/components/schemas/CommentResponse' }
+                allOf:
+                  - $ref: '#/components/schemas/PageResponse'
+                  - type: object
+                    properties:
+                      content:
+                        type: array
+                        items: { $ref: '#/components/schemas/CommentResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments/{commentId}:
@@ -1715,6 +1768,16 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    pageParam:
+      name: page
+      in: query
+      description: Zero-based page index (default 0)
+      schema: { type: integer, minimum: 0, default: 0 }
+    sizeParam:
+      name: size
+      in: query
+      description: Page size (default 50, clamped server-side to a maximum of 100)
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
 
   responses:
     AuthOk:
@@ -1781,6 +1844,23 @@ components:
       type: object
       properties:
         message: { type: string }
+
+    PageResponse:
+      type: object
+      description: >-
+        Uniform pagination envelope. `content` holds the page of rows (the item
+        type is documented per endpoint); the rest is the cursor metadata the
+        client needs to render a pager.
+      properties:
+        content:
+          type: array
+          description: The rows on this page (item type per endpoint)
+          items: {}
+        page: { type: integer, description: Zero-based index of this page, example: 0 }
+        size: { type: integer, description: Page size actually used, example: 50 }
+        totalElements: { type: integer, format: int64, description: Total rows across all pages, example: 137 }
+        totalPages: { type: integer, description: Total number of pages, example: 3 }
+        hasNext: { type: boolean, description: Whether a further page exists, example: true }
 
     MetaResponse:
       type: object

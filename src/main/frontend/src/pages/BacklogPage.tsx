@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Plus, Filter } from 'lucide-react'
-import { apiGetProjectConfig, apiListIssues, apiListWorkspaceMembers } from '../api'
+import { apiGetProjectConfig, apiListIssuesPaged, apiListWorkspaceMembers } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
 import { Button, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
+import { Pager } from '../components/Pager'
 import { FieldValueDisplay } from '../components/fields'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
@@ -20,6 +21,8 @@ export default function BacklogPage() {
   const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterStatusId, setFilterStatusId] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
+  const [page, setPage] = useState(0)
+  const [size, setSize] = useState(50)
 
   const { data: config } = useQuery({
     queryKey: ['projectConfig', wsId, projectId],
@@ -40,9 +43,11 @@ export default function BacklogPage() {
 
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
-  const { data: allIssues = [], isLoading, isError } = useQuery({
-    queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority],
-    queryFn: () => apiListIssues(wsId!, projectId!, {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority, page, size],
+    // Backlog = non-DONE issues only; excludeDone filters them out server-side so pages are correct
+    queryFn: () => apiListIssuesPaged(wsId!, projectId!, {
+      page, size, excludeDone: true,
       statusId: filterStatusId || undefined,
       priorityId: filterPriority || undefined,
     }),
@@ -55,7 +60,11 @@ export default function BacklogPage() {
     if (isError && user && projectId) forgetProject(user.id, projectId)
   }, [isError, user, projectId])
 
-  const issues = allIssues.filter(i => i.status.category !== 'DONE')
+  const issues = data?.content ?? []
+  const totalElements = data?.totalElements ?? 0
+
+  // Filter/size changes reset to the first page
+  useEffect(() => { setPage(0) }, [filterStatusId, filterPriority, size])
 
   const panelOpen = openIssueNumber !== undefined
 
@@ -121,7 +130,7 @@ export default function BacklogPage() {
             </button>
           )}
           <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
-            {issues.length} issue{issues.length !== 1 ? 's' : ''}
+            {totalElements} issue{totalElements !== 1 ? 's' : ''}
           </span>
         </div>
 
@@ -175,6 +184,17 @@ export default function BacklogPage() {
             </table>
           )}
         </div>
+
+        {data && totalElements > 0 && (
+          <Pager
+            page={page}
+            size={size}
+            totalPages={data.totalPages}
+            totalElements={totalElements}
+            onPage={setPage}
+            onSize={setSize}
+          />
+        )}
       </div>
 
       {/* Side panel — keyed so switching issues remounts it with fresh state */}

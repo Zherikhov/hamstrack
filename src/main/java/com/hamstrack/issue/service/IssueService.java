@@ -2,6 +2,7 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.sse.SseRegistry;
 import com.hamstrack.issue.dto.CreateIssueRequest;
@@ -22,6 +23,7 @@ import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -116,6 +118,24 @@ public class IssueService {
                 .toList();
     }
 
+    /**
+     * Paged issue list (backlog). {@code excludeDone} filters out DONE-category
+     * statuses server-side so page counts are correct. The board keeps using the
+     * full-list {@link #list} above.
+     */
+    @Transactional(readOnly = true)
+    public PageResponse<IssueResponse> listPaged(User actor, UUID workspaceId, UUID projectId,
+                                                 UUID statusId, UUID assigneeId, UUID priorityId,
+                                                 boolean excludeDone, Pageable pageable) {
+        var workspace = resolveWorkspace(actor, workspaceId);
+        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
+                .orElseThrow(ProjectNotFoundException::new);
+        var page = issueRepository.findByProjectFilteredPaged(
+                project, statusId, assigneeId, priorityId, excludeDone, StatusCategory.DONE, pageable);
+        var valuesByIssue = fieldValueService.valuesByIssue(page.getContent());
+        return PageResponse.of(page.map(i -> IssueResponse.of(i, valuesByIssue.get(i.getId()))));
+    }
+
     @Transactional(readOnly = true)
     public IssueResponse get(User actor, UUID workspaceId, UUID projectId, long number) {
         var workspace = resolveWorkspace(actor, workspaceId);
@@ -127,14 +147,14 @@ public class IssueService {
     }
 
     @Transactional(readOnly = true)
-    public List<IssueHistoryResponse> getHistory(User actor, UUID workspaceId, UUID projectId, long number) {
+    public PageResponse<IssueHistoryResponse> getHistory(User actor, UUID workspaceId, UUID projectId,
+                                                         long number, Pageable pageable) {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
-        return historyRepository.findAllByIssueOrderByCreatedAtAsc(issue)
-                .stream().map(IssueHistoryResponse::of).toList();
+        return PageResponse.of(historyRepository.findByIssue(issue, pageable).map(IssueHistoryResponse::of));
     }
 
     @Transactional

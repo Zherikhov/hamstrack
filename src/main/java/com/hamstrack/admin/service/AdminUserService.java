@@ -10,8 +10,10 @@ import com.hamstrack.auth.repository.PasswordResetRepository;
 import com.hamstrack.auth.repository.RefreshTokenRepository;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.config.AppProperties;
+import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.util.TokenUtils;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,7 +21,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -43,10 +44,8 @@ public class AdminUserService {
     private final AppProperties appProperties;
 
     @Transactional(readOnly = true)
-    public List<AdminUserResponse> list() {
-        return userRepository.findAllByOrderByCreatedAtAsc().stream()
-                .map(AdminUserResponse::of)
-                .toList();
+    public PageResponse<AdminUserResponse> list(Pageable pageable) {
+        return PageResponse.of(userRepository.findAll(pageable).map(AdminUserResponse::of));
     }
 
     @Transactional

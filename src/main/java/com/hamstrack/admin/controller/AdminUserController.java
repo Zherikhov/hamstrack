@@ -3,13 +3,15 @@ package com.hamstrack.admin.controller;
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.service.AdminUserService;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.dto.PageResponse;
+import com.hamstrack.common.dto.Paging;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.UUID;
 
 /**
@@ -27,8 +29,9 @@ public class AdminUserController {
     private final AdminUserService userService;
 
     @GetMapping
-    public List<AdminUserResponse> list() {
-        return userService.list();
+    public PageResponse<AdminUserResponse> list(@RequestParam(required = false) Integer page,
+                                                @RequestParam(required = false) Integer size) {
+        return userService.list(Paging.of(page, size, Sort.by("createdAt").ascending()));
     }
 
     @PostMapping

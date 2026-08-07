@@ -77,7 +77,13 @@ All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#
 - **Partial updates** — `PATCH` endpoints accept any subset of fields; omitted (or `null`) fields are left unchanged.
 - **Access model** — a resource you cannot see returns `404 Not Found`, whether it doesn't exist or you simply aren't a member of its workspace. Membership is never revealed via `403`.
 - **Optimistic locking** — issues carry a `version`; send it back in `PATCH` and get `409 Conflict` if someone changed the issue in between (see [Issues](#issues)).
-- **Pagination** — list endpoints are currently unpaginated (beta); pagination parameters will be added in a backward-compatible way.
+- **Pagination** — paginated list endpoints accept `page` (zero-based, default `0`) and `size` (default `50`, clamped server-side to a maximum of `100`) and return a uniform envelope:
+
+  ```json
+  { "content": [ /* rows */ ], "page": 0, "size": 50, "totalElements": 137, "totalPages": 3, "hasNext": true }
+  ```
+
+  Currently paginated: [`GET /admin/users`](#system-administration), issue [comments](#comments) and [history](#issues), and the issue [list](#issues) **when `size` is passed**. The issue list is the deliberate exception — without `size` it returns the full unpaginated array (the board needs every card), switching to the envelope only when `size` is present.
 
 ## Errors
 
@@ -291,7 +297,7 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH/DELETE` | `/admin/issue-type-sets/{id}` | Full replacement / delete (`409` while in use; the system default "All types" set is not deletable) |
 | `GET` | `/admin/projects` | Assignment matrix: every project × its bindings |
 | `PATCH` | `/admin/projects/{id}/bindings` | `{"workflowId", "prioritySetId", "fieldSetId", "issueTypeSetId"}` (null = system default); `409` when issues sit in statuses the new workflow lacks |
-| `GET/POST` | `/admin/users` | List accounts / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person |
+| `GET/POST` | `/admin/users` | List accounts (paginated `?page=&size=`, oldest first) / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person |
 | `POST` | `/admin/users/{id}/setup-link` | Regenerate the one-time setup link → `{"setupLink"}` |
 | `PATCH` | `/admin/users/{id}` | Change `systemRole` (`ADMIN`/`USER`) and/or `status` (`ACTIVE`/`DISABLED`); `409` when it would disable/demote the last active admin or your own account (disabling revokes the user's refresh tokens) |
 
@@ -338,12 +344,14 @@ Each scope owns its own rows: a workspace admin creates **workspace-scoped** sta
 
 Issues live under a project and are addressed by **number** — the numeric part of their key (`DEMO-42` → `…/issues/42`). Numbers are sequential per project and never reused.
 
+**Listing — dual shape.** Without `size`, `GET …/issues` returns the full unpaginated `IssueResponse` array (the board/kanban needs every card). Pass `size` to switch to a paginated [envelope](#conventions) (the backlog path); the optional `excludeDone=true` then drops issues in a DONE-category status server-side. The `statusId` / `assigneeId` / `priorityId` filters apply in both modes.
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | member | Create. `201` |
-| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=` | member | List with optional filters |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=&excludeDone=&page=&size=` | member | List with optional filters — **dual shape** (see below) |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Get one |
-| `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history` | member | Field-level change history |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history?page=&size=` | member | Field-level change history (paginated, oldest first) |
 | `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Partial update with optimistic locking |
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `MANAGER` | Delete issue + comments + attachments. `204` |
 
@@ -388,7 +396,7 @@ curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
   -d '{"statusId": "…", "version": 3}'
 ```
 
-**History entries:**
+**History** is paginated (oldest first) — the [envelope](#conventions) wraps entries of this shape in `content`:
 
 ```json
 { "id": "…", "field": "status", "oldValue": "To Do", "newValue": "In Progress",
@@ -402,11 +410,13 @@ Custom field changes appear with the field's display name in `field` and human-r
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `…/issues/{number}/comments` | member | Create (`{"body"}`). `201` |
-| `GET` | `…/issues/{number}/comments` | member | List (deleted comments excluded) |
+| `GET` | `…/issues/{number}/comments?page=&size=` | member | List (deleted comments excluded; paginated, oldest first) |
 | `PATCH` | `…/issues/{number}/comments/{commentId}` | author | Edit (`{"body"}`) |
 | `DELETE` | `…/issues/{number}/comments/{commentId}` | author | Soft delete. `204` |
 
 `@DisplayName` mentions in a comment body notify the mentioned workspace members.
+
+Listing is paginated (oldest first) — the [envelope](#conventions) wraps comments of this shape in `content`:
 
 ```json
 { "id": "…", "authorId": "…", "authorName": "Ada Lovelace", "body": "Looks good!",

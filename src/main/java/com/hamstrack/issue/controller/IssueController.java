@@ -1,6 +1,8 @@
 package com.hamstrack.issue.controller;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.dto.PageResponse;
+import com.hamstrack.common.dto.Paging;
 import com.hamstrack.issue.dto.*;
 import com.hamstrack.issue.service.AttachmentService;
 import com.hamstrack.issue.service.CommentService;
@@ -8,6 +10,7 @@ import com.hamstrack.issue.service.IssueService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -48,14 +51,30 @@ public class IssueController {
         return issueService.create(actor, workspaceId, projectId, req);
     }
 
+    /**
+     * Issue list. Without {@code size} → the full list (the board needs every
+     * card; this is the documented exception to pagination). With {@code size} →
+     * a {@link PageResponse} (backlog); {@code excludeDone} drops DONE-category
+     * statuses server-side.
+     */
     @GetMapping
-    public List<IssueResponse> list(@AuthenticationPrincipal User actor,
-                                    @PathVariable UUID workspaceId,
-                                    @PathVariable UUID projectId,
-                                    @RequestParam(required = false) UUID statusId,
-                                    @RequestParam(required = false) UUID assigneeId,
-                                    @RequestParam(required = false) UUID priorityId) {
-        return issueService.list(actor, workspaceId, projectId, statusId, assigneeId, priorityId);
+    public ResponseEntity<?> list(@AuthenticationPrincipal User actor,
+                                  @PathVariable UUID workspaceId,
+                                  @PathVariable UUID projectId,
+                                  @RequestParam(required = false) UUID statusId,
+                                  @RequestParam(required = false) UUID assigneeId,
+                                  @RequestParam(required = false) UUID priorityId,
+                                  @RequestParam(required = false) Integer page,
+                                  @RequestParam(required = false) Integer size,
+                                  @RequestParam(defaultValue = "false") boolean excludeDone) {
+        if (size == null) {
+            return ResponseEntity.ok(
+                    issueService.list(actor, workspaceId, projectId, statusId, assigneeId, priorityId));
+        }
+        var pageable = Paging.of(page, size,
+                Sort.by(Sort.Order.asc("position"), Sort.Order.desc("createdAt")));
+        return ResponseEntity.ok(issueService.listPaged(
+                actor, workspaceId, projectId, statusId, assigneeId, priorityId, excludeDone, pageable));
     }
 
     @GetMapping("/{number}")
@@ -67,11 +86,14 @@ public class IssueController {
     }
 
     @GetMapping("/{number}/history")
-    public List<IssueHistoryResponse> history(@AuthenticationPrincipal User actor,
-                                              @PathVariable UUID workspaceId,
-                                              @PathVariable UUID projectId,
-                                              @PathVariable long number) {
-        return issueService.getHistory(actor, workspaceId, projectId, number);
+    public PageResponse<IssueHistoryResponse> history(@AuthenticationPrincipal User actor,
+                                                      @PathVariable UUID workspaceId,
+                                                      @PathVariable UUID projectId,
+                                                      @PathVariable long number,
+                                                      @RequestParam(required = false) Integer page,
+                                                      @RequestParam(required = false) Integer size) {
+        return issueService.getHistory(actor, workspaceId, projectId, number,
+                Paging.of(page, size, Sort.by("createdAt").ascending()));
     }
 
     @PatchMapping("/{number}")
@@ -105,11 +127,14 @@ public class IssueController {
     }
 
     @GetMapping("/{number}/comments")
-    public List<CommentResponse> listComments(@AuthenticationPrincipal User actor,
-                                              @PathVariable UUID workspaceId,
-                                              @PathVariable UUID projectId,
-                                              @PathVariable long number) {
-        return commentService.list(actor, workspaceId, projectId, number);
+    public PageResponse<CommentResponse> listComments(@AuthenticationPrincipal User actor,
+                                                      @PathVariable UUID workspaceId,
+                                                      @PathVariable UUID projectId,
+                                                      @PathVariable long number,
+                                                      @RequestParam(required = false) Integer page,
+                                                      @RequestParam(required = false) Integer size) {
+        return commentService.list(actor, workspaceId, projectId, number,
+                Paging.of(page, size, Sort.by("createdAt").ascending()));
     }
 
     @PatchMapping("/{number}/comments/{commentId}")

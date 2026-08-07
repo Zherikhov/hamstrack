@@ -219,6 +219,17 @@ export async function apiGetProjectConfig(wsId: string, projectId: string): Prom
 
 // ── Issues ─────────────────────────────────────────────────────────────────────
 
+/** Uniform pagination envelope returned by paginated list endpoints. */
+export interface Page<T> {
+  content: T[]
+  page: number
+  size: number
+  totalElements: number
+  totalPages: number
+  hasNext: boolean
+}
+
+// Board: the full list (no pagination — the kanban needs every card).
 export async function apiListIssues(
   wsId: string,
   projectId: string,
@@ -230,6 +241,22 @@ export async function apiListIssues(
   if (filters?.priorityId) params.set('priorityId', filters.priorityId)
   const qs = params.toString()
   return request(`/workspaces/${wsId}/projects/${projectId}/issues${qs ? `?${qs}` : ''}`)
+}
+
+// Backlog: paginated; excludeDone drops DONE-category statuses server-side.
+export async function apiListIssuesPaged(
+  wsId: string,
+  projectId: string,
+  opts: { page?: number; size?: number; excludeDone?: boolean; statusId?: string; priorityId?: string; assigneeId?: string }
+): Promise<Page<Issue>> {
+  const params = new URLSearchParams()
+  params.set('page', String(opts.page ?? 0))
+  params.set('size', String(opts.size ?? 50))
+  if (opts.excludeDone) params.set('excludeDone', 'true')
+  if (opts.statusId) params.set('statusId', opts.statusId)
+  if (opts.priorityId) params.set('priorityId', opts.priorityId)
+  if (opts.assigneeId) params.set('assigneeId', opts.assigneeId)
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues?${params.toString()}`)
 }
 
 export async function apiGetIssue(wsId: string, projectId: string, number: number): Promise<Issue> {
@@ -269,8 +296,13 @@ export async function apiDeleteIssue(wsId: string, projectId: string, number: nu
 
 // ── Comments ──────────────────────────────────────────────────────────────────
 
-export async function apiListComments(wsId: string, projectId: string, number: number): Promise<Comment[]> {
-  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/comments`)
+export async function apiListComments(
+  wsId: string, projectId: string, number: number, opts?: { page?: number; size?: number }
+): Promise<Page<Comment>> {
+  const params = new URLSearchParams()
+  params.set('page', String(opts?.page ?? 0))
+  params.set('size', String(opts?.size ?? 50))
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/comments?${params.toString()}`)
 }
 
 export async function apiCreateComment(wsId: string, projectId: string, number: number, body: string): Promise<Comment> {
@@ -319,8 +351,13 @@ export async function apiDeleteAttachment(wsId: string, projectId: string, numbe
 
 // ── Issue History ──────────────────────────────────────────────────────────────
 
-export async function apiGetIssueHistory(wsId: string, projectId: string, number: number): Promise<IssueHistoryEntry[]> {
-  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/history`)
+export async function apiGetIssueHistory(
+  wsId: string, projectId: string, number: number, opts?: { page?: number; size?: number }
+): Promise<Page<IssueHistoryEntry>> {
+  const params = new URLSearchParams()
+  params.set('page', String(opts?.page ?? 0))
+  params.set('size', String(opts?.size ?? 50))
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/history?${params.toString()}`)
 }
 
 // ── Admin console (system ADMIN only; server-guarded) ────────────────────────
@@ -518,7 +555,8 @@ export function workspaceAdminApi(wsId: string) {
 // one-time setup link (/reset-password?token=) the admin hands over.
 
 export const adminUsers = {
-  list: () => request<AdminUser[]>('/admin/users'),
+  list: (opts?: { page?: number; size?: number }) =>
+    request<Page<AdminUser>>(`/admin/users?page=${opts?.page ?? 0}&size=${opts?.size ?? 50}`),
   create: (payload: { email: string; displayName: string; systemRole: 'ADMIN' | 'USER' }) =>
     request<{ user: AdminUser; setupLink: string }>('/admin/users', {
       method: 'POST', body: JSON.stringify(payload),

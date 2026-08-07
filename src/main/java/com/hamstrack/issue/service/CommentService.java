@@ -11,6 +11,7 @@ import com.hamstrack.issue.exception.IssueNotFoundException;
 import com.hamstrack.issue.repository.CommentMentionRepository;
 import com.hamstrack.issue.repository.IssueCommentRepository;
 import com.hamstrack.issue.repository.IssueRepository;
+import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.notification.service.NotificationService;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectRepository;
@@ -78,11 +79,10 @@ public class CommentService {
     }
 
     @Transactional(readOnly = true)
-    public List<CommentResponse> list(User actor, UUID workspaceId, UUID projectId, long issueNumber) {
+    public PageResponse<CommentResponse> list(User actor, UUID workspaceId, UUID projectId,
+                                              long issueNumber, org.springframework.data.domain.Pageable pageable) {
         var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
-        return commentRepository.findAllForIssueWithAuthor(issue).stream()
-                .map(CommentResponse::of)
-                .toList();
+        return PageResponse.of(commentRepository.findForIssueWithAuthor(issue, pageable).map(CommentResponse::of));
     }
 
     @Transactional

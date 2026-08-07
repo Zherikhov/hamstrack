@@ -108,9 +108,9 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     try {
       const [iss, cmts, atts, hist] = await Promise.all([
         apiGetIssue(wsId, projectId, issueNumber),
-        apiListComments(wsId, projectId, issueNumber),
+        apiListComments(wsId, projectId, issueNumber, { size: 100 }),
         apiListAttachments(wsId, projectId, issueNumber),
-        apiGetIssueHistory(wsId, projectId, issueNumber),
+        apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 }),
       ])
       setIssue(iss)
       setTitle(iss.title)
@@ -119,9 +119,9 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setStatusId(iss.status.id)
       setPriorityId(iss.priority.id)
       setFieldValues(fieldValuesOf(iss))
-      setComments(cmts)
+      setComments(cmts.content)
       setAttachments(atts)
-      setHistory(hist)
+      setHistory(hist.content)
     } finally {
       setLoading(false)
     }
@@ -165,7 +165,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setIssue(updated)
       setFieldValues(fieldValuesOf(updated))
       // Reload history after update
-      apiGetIssueHistory(wsId, projectId, issueNumber).then(setHistory).catch(() => {})
+      apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 }).then(h => setHistory(h.content)).catch(() => {})
       await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
       setEditing(false)
     } catch (err: unknown) {

@@ -4,7 +4,10 @@ import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.Status;
+import com.hamstrack.issue.entity.StatusCategory;
 import com.hamstrack.project.entity.Project;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -98,4 +101,34 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("statusId") UUID statusId,
             @Param("assigneeId") UUID assigneeId,
             @Param("priorityId") UUID priorityId);
+
+    // Paged variant for the backlog (the board uses the full-list method above).
+    // excludeDone applies the backlog's "not in a DONE-category status" filter
+    // server-side so page counts are correct. ToOne fetch joins → LIMIT/OFFSET in
+    // SQL; ordering comes from the Pageable's Sort.
+    @Query(value = "SELECT i FROM Issue i " +
+           "LEFT JOIN FETCH i.type " +
+           "LEFT JOIN FETCH i.status " +
+           "LEFT JOIN FETCH i.priority " +
+           "LEFT JOIN FETCH i.assignee " +
+           "LEFT JOIN FETCH i.reporter " +
+           "WHERE i.project = :project " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
+           "AND (:excludeDone = false OR i.status.category <> :doneCategory)",
+           countQuery = "SELECT count(i) FROM Issue i " +
+           "WHERE i.project = :project " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
+           "AND (:excludeDone = false OR i.status.category <> :doneCategory)")
+    Page<Issue> findByProjectFilteredPaged(
+            @Param("project") Project project,
+            @Param("statusId") UUID statusId,
+            @Param("assigneeId") UUID assigneeId,
+            @Param("priorityId") UUID priorityId,
+            @Param("excludeDone") boolean excludeDone,
+            @Param("doneCategory") StatusCategory doneCategory,
+            Pageable pageable);
 }

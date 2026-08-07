@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminUsers } from '../../api'
 import { useAuthStore } from '../../auth'
 import type { AdminUser } from '../../types'
 import { Avatar, Badge, Button, Input, Select } from '../../components/ui'
+import { Pager } from '../../components/Pager'
 import { AdminTable, Modal, PageHeader } from './common'
 
 const ROLE_LABEL: Record<AdminUser['systemRole'], string> = { ADMIN: 'Admin', USER: 'User' }
@@ -22,7 +23,14 @@ const STATUS_COLOR: Record<AdminUser['status'], string> = {
 export default function AdminUsersPage() {
   const qc = useQueryClient()
   const me = useAuthStore(s => s.user)
-  const { data: users = [], isLoading } = useQuery({ queryKey: ['admin', 'users'], queryFn: adminUsers.list })
+  const [page, setPage] = useState(0)
+  const [size, setSize] = useState(50)
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin', 'users', page, size],
+    queryFn: () => adminUsers.list({ page, size }),
+  })
+  const users = data?.content ?? []
+  useEffect(() => { setPage(0) }, [size])
   const [showCreate, setShowCreate] = useState(false)
   const [linkModal, setLinkModal] = useState<{ email: string; link: string } | null>(null)
   const [error, setError] = useState('')
@@ -105,6 +113,17 @@ export default function AdminUsersPage() {
             )
           })}
         </AdminTable>
+      )}
+
+      {data && data.totalElements > 0 && (
+        <Pager
+          page={page}
+          size={size}
+          totalPages={data.totalPages}
+          totalElements={data.totalElements}
+          onPage={setPage}
+          onSize={setSize}
+        />
       )}
 
       {showCreate && (
