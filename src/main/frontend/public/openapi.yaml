@@ -13,7 +13,7 @@ info:
 
     **Authentication** — call `POST /api/auth/login` and send the returned
     access token as `Authorization: Bearer <token>` (use the **Authorize**
-    button here). Tokens expire after 24 h; refresh via the rotating
+    button here). Tokens are short-lived (default 30 min); refresh via the rotating
     `refresh_token` cookie with `POST /api/auth/refresh`.
 
     **Access model** — a resource you cannot see returns `404`, whether it
@@ -684,6 +684,12 @@ paths:
     post:
       tags: [Admin]
       summary: Create a status (admin)
+      description: >-
+        Names must be unique among the statuses **visible** to the target scope — not only
+        own-scope rows but also inherited ones (a global/system status, or a workspace status
+        inherited by a project). A colliding name returns `409`; reuse the inherited status
+        instead of creating a scoped duplicate. The same visible-scope uniqueness applies to
+        priorities, issue types and fields (fields also on `key`), and to renames via PATCH.
       operationId: adminCreateStatus
       requestBody:
         required: true
@@ -698,7 +704,7 @@ paths:
               schema: { $ref: '#/components/schemas/AdminStatus' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Name already exists
+          description: Name already exists or is inherited from a wider scope
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -707,6 +713,9 @@ paths:
     patch:
       tags: [Admin]
       summary: Update a status (admin)
+      description: >-
+        A rename is refused (`409`) when the new name collides with any status visible to the
+        scope, inherited ones included — reuse the inherited status instead.
       operationId: adminUpdateStatus
       parameters: [ { $ref: '#/components/parameters/adminId' } ]
       requestBody:
@@ -722,6 +731,11 @@ paths:
               schema: { $ref: '#/components/schemas/AdminStatus' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Name already exists or is inherited from a wider scope
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
     delete:
       tags: [Admin]
       summary: Delete a status, optionally remapping issues (admin)
@@ -819,7 +833,7 @@ paths:
               schema: { $ref: '#/components/schemas/AdminField' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Name or key already exists
+          description: Name or key already exists or is inherited from a wider scope
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1485,7 +1499,13 @@ paths:
     post:
       tags: [Attachments]
       summary: Upload an attachment
-      description: '`multipart/form-data` with a `file` field. Default size limit 25 MB (`413` when exceeded).'
+      description: >-
+        `multipart/form-data` with a `file` field. A per-file size limit is enforced in-app
+        (default 20 MB; `413` when exceeded) in addition to the servlet hard ceiling
+        (default 25 MB). The file extension must be in the allow-list (default: png, jpg, jpeg,
+        gif, webp, bmp, svg, pdf, txt, csv, log, md, json, doc, docx, xls, xlsx, ppt, pptx, zip)
+        or the upload is rejected with `415`. The stored/returned `contentType` is derived from
+        the filename on the server — the client-supplied header is ignored.
       operationId: uploadAttachment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1510,7 +1530,12 @@ paths:
               schema: { $ref: '#/components/schemas/AttachmentResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
         '413':
-          description: File exceeds the upload size limit
+          description: File exceeds the per-file size limit
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '415':
+          description: File extension is not in the allow-list
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1651,7 +1676,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: Access token from `POST /api/auth/login` (24 h lifetime).
+      description: Access token from `POST /api/auth/login` (default 30 min lifetime).
     cookieAuth:
       type: apiKey
       in: cookie
@@ -1793,7 +1818,7 @@ components:
       type: object
       properties:
         accessToken: { type: string, description: JWT for the Authorization header }
-        expiresIn: { type: integer, format: int64, example: 86400, description: 'Access token lifetime, seconds' }
+        expiresIn: { type: integer, format: int64, example: 1800, description: 'Access token lifetime, seconds (default 30 min)' }
         userId: { type: string, format: uuid }
         email: { type: string, format: email }
         displayName: { type: string }

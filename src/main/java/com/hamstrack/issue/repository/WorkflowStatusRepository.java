@@ -24,4 +24,9 @@ public interface WorkflowStatusRepository extends JpaRepository<WorkflowStatus, 
 
     @Query("select distinct ws.workflow from WorkflowStatus ws where ws.status.id = :statusId")
     List<Workflow> findWorkflowsUsingStatus(@Param("statusId") UUID statusId);
+
+    // Board-ordered statuses of a workflow, by id — feeds the cached effective
+    // config (selecting the Status directly keeps it fully loaded for detached reads)
+    @Query("select ws.status from WorkflowStatus ws where ws.workflow.id = :workflowId order by ws.position")
+    List<Status> findStatusesByWorkflowId(@Param("workflowId") UUID workflowId);
 }

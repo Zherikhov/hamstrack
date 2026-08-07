@@ -46,4 +46,14 @@ public interface StatusRepository extends JpaRepository<Status, UUID> {
     @Query("select s from Status s where (s.scopeWorkspaceId is null and s.scopeProjectId is null) "
             + "or s.scopeWorkspaceId = :ws or s.scopeProjectId = :proj order by s.position")
     List<Status> findAllVisibleTo(@Param("ws") UUID ws, @Param("proj") UUID proj);
+
+    /**
+     * A name already visible to a scope (global ∪ workspace ∪ project). Used on
+     * create/rename so a delegated admin reuses an inherited (e.g. system) status
+     * instead of minting a scoped duplicate of the same name.
+     */
+    @Query("select case when count(s) > 0 then true else false end from Status s "
+            + "where ((s.scopeWorkspaceId is null and s.scopeProjectId is null) "
+            + "or s.scopeWorkspaceId = :ws or s.scopeProjectId = :proj) and s.name = :name")
+    boolean existsVisibleToAndName(@Param("ws") UUID ws, @Param("proj") UUID proj, @Param("name") String name);
 }

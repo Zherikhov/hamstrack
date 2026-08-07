@@ -118,6 +118,6 @@ public class AdminIssueTypeSetService {
     /** A type the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
     private IssueType requireType(ScopeContext scope, UUID id) {
         return issueTypeRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown issue type"));
     }
 }

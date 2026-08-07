@@ -54,19 +54,19 @@ public class AdminProjectService {
         // sets reach their own projects through the delegated admin consoles.
         var newWorkflow = req.workflowId() != null
                 ? workflowRepository.findByIdAtScope(req.workflowId(), null, null)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown workflow"))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown workflow"))
                 : null;
         var newSet = req.prioritySetId() != null
                 ? prioritySetRepository.findByIdAtScope(req.prioritySetId(), null, null)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority set"))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown priority set"))
                 : null;
         var newFieldSet = req.fieldSetId() != null
                 ? fieldSetRepository.findByIdAtScope(req.fieldSetId(), null, null)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown field set"))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown field set"))
                 : null;
         var newTypeSet = req.issueTypeSetId() != null
                 ? issueTypeSetRepository.findByIdAtScope(req.issueTypeSetId(), null, null)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type set"))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown issue type set"))
                 : null;
 
         // Workflow change guard: no issue may sit in a status the new workflow lacks

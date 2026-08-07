@@ -50,11 +50,13 @@ public class AdminFieldService {
     @Transactional
     public AdminFieldResponse createField(ScopeContext scope, UpsertFieldRequest req) {
         var key = req.key() == null || req.key().isBlank() ? slugify(req.name()) : req.key();
-        if (fieldDefRepository.existsAtScopeAndKey(scope.workspaceId(), scope.projectId(), key)) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Field key already exists");
+        if (fieldDefRepository.existsVisibleToAndKey(scope.visibleWorkspaceId(), scope.visibleProjectId(), key)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A field with key '" + key + "' already exists or is inherited — reuse it instead of duplicating");
         }
-        if (fieldDefRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Field name already exists");
+        if (fieldDefRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A field named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         requireSelectOptions(req.type(), req);
         var f = new FieldDef();
@@ -73,11 +75,12 @@ public class AdminFieldService {
     public AdminFieldResponse updateField(ScopeContext scope, UUID id, UpsertFieldRequest req) {
         var f = requireField(scope, id);
         if (!f.getName().equals(req.name())
-                && fieldDefRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Field name already exists");
+                && fieldDefRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A field named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         if (req.type() != null && req.type() != f.getType()) {
-            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                     "Field type cannot change once created — stored values depend on it");
         }
         requireSelectOptions(f.getType(), req);
@@ -192,7 +195,7 @@ public class AdminFieldService {
             // A field the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project)
             var field = fieldDefRepository.findByIdVisibleTo(
                             itemReq.fieldId(), scope.visibleWorkspaceId(), scope.visibleProjectId())
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown field"));
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown field"));
             var item = new FieldSetItem();
             item.setSet(set);
             item.setField(field);
@@ -208,13 +211,13 @@ public class AdminFieldService {
         if (type == FieldType.SELECT || type == FieldType.MULTI_SELECT) {
             var cfg = req.config();
             if (cfg == null || !cfg.has("options") || !cfg.get("options").isArray() || cfg.get("options").isEmpty()) {
-                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                         "Select fields need at least one option");
             }
             for (var opt : cfg.get("options")) {
                 if (!opt.hasNonNull("id") || opt.get("id").asText().isBlank()
                         || !opt.hasNonNull("label") || opt.get("label").asText().isBlank()) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Every option needs an id and a label");
                 }
             }

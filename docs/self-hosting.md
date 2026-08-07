@@ -140,13 +140,17 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
+| `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required) |
+| `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
 | `STORAGE_TYPE` | `local` (dc) / `s3` (cloud) | Attachment storage backend |
 | `STORAGE_LOCAL_DIR` | `./data/attachments` | Local storage path (mount a volume) |
 | `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION` / `STORAGE_S3_ENDPOINT` / `STORAGE_S3_PATH_STYLE` / `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY` | — | S3 or S3-compatible storage (MinIO etc.); empty keys fall back to the AWS default credentials chain |
-| `ATTACHMENT_MAX_FILE_SIZE` | `25MB` | Upload size limit |
+| `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
+| `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
+| `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
 | `PUBLIC_SIGNUP_ENABLED` | `false` | Self-registration is **closed by default** on self-hosted installs — create accounts in the Admin console (Users → New user → share the setup link, no email needed). Set `true` to let anyone register |
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
@@ -196,7 +200,7 @@ server {
     listen 443 ssl;
     server_name tracker.example.com;
     # ssl_certificate ... ; ssl_certificate_key ... ;
-    client_max_body_size 25m;          # match ATTACHMENT_MAX_FILE_SIZE
+    client_max_body_size 25m;          # match ATTACHMENT_MAX_UPLOAD_SIZE
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_set_header Host $host;
@@ -306,11 +310,21 @@ STORAGE_S3_ACCESS_KEY=...
 STORAGE_S3_SECRET_KEY=...
 ```
 
-### Upload size limit
+### Upload size + file-type limits
 
-`ATTACHMENT_MAX_FILE_SIZE` (default `25MB`) caps both the file and the request
-size. If you raise it, bump your reverse proxy's body limit to match (nginx
-`client_max_body_size`); Caddy has no default limit.
+Two layers guard uploads:
+
+- **`ATTACHMENT_MAX_UPLOAD_SIZE`** (default `25MB`) is the hard servlet ceiling —
+  the multipart parser rejects anything larger at parse time (DoS guard). If you
+  raise it, bump your reverse proxy's body limit to match (nginx
+  `client_max_body_size`); Caddy has no default limit.
+- **`ATTACHMENT_MAX_FILE_SIZE`** (default `20MB`, must stay ≤ the ceiling) is the
+  per-file business limit, enforced in the app so a future in-app admin setting
+  can tune it without a redeploy.
+- **`ATTACHMENT_ALLOWED_EXTENSIONS`** is a comma-separated, case-insensitive
+  allow-list of uploadable file extensions. Uploads outside it are rejected with
+  `415`. The stored content-type is derived from the filename (never the client
+  header), so a spoofed/malformed type can't break downloads.
 
 ## Optional toggles
 
@@ -488,7 +502,8 @@ versioning/backup. Take a backup **before every minor upgrade**.
 | Logged out immediately / can't stay signed in | `APP_BASE_URL` scheme doesn't match how users reach the app. The `refresh_token` cookie is `Secure` only with an `https` base — serve HTTPS end-to-end (https base) or use an `http` base for plain HTTP. |
 | `502` right after `up` | The app is still starting (Spring Boot needs ~30–40 s; it has a healthcheck). Wait, or check `docker compose logs app`. |
 | Attachment upload returns `500` | `STORAGE_TYPE=s3` without a valid bucket/region/credentials, or the local dir isn't writable. |
-| Upload rejected (`413` / too large) | `ATTACHMENT_MAX_FILE_SIZE` and/or the proxy body-size limit is too small — raise both. |
+| Upload rejected (`413` / too large) | Over `ATTACHMENT_MAX_FILE_SIZE` (app limit) or `ATTACHMENT_MAX_UPLOAD_SIZE` (servlet ceiling); raise both, and the proxy body-size limit to match. |
+| Upload rejected (`415` / type not allowed) | The file extension isn't in `ATTACHMENT_ALLOWED_EXTENSIONS` — add it (comma-separated, case-insensitive). |
 | Everyone shares one IP / false `429`s | Behind a proxy/CDN that doesn't pass `X-Forwarded-For` (or passes an untrusted one). Ensure the proxy sets it; the app trusts the right-most entry. |
 | Startup fails with a schema validation error after changing the image | You moved to an **older** image than the DB was migrated to. Use the newer image, or restore a pre-upgrade backup. |
 

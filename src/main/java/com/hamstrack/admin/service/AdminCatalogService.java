@@ -3,8 +3,11 @@ package com.hamstrack.admin.service;
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.entity.IssueType;
+import com.hamstrack.issue.entity.IssueTypeSet;
 import com.hamstrack.issue.entity.Priority;
+import com.hamstrack.issue.entity.PrioritySet;
 import com.hamstrack.issue.entity.Status;
+import com.hamstrack.issue.entity.Workflow;
 import com.hamstrack.issue.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -57,8 +60,9 @@ public class AdminCatalogService {
 
     @Transactional
     public AdminStatusResponse createStatus(ScopeContext scope, UpsertStatusRequest req) {
-        if (statusRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Status name already exists");
+        if (statusRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A status named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         var s = new Status();
         scope.stamp(s);
@@ -76,8 +80,9 @@ public class AdminCatalogService {
     public AdminStatusResponse updateStatus(ScopeContext scope, UUID id, UpsertStatusRequest req) {
         var s = requireStatus(scope, id);
         if (!s.getName().equals(req.name())
-                && statusRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Status name already exists");
+                && statusRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A status named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         s.setName(req.name());
         s.setCategory(req.category());
@@ -118,7 +123,7 @@ public class AdminCatalogService {
             var replacement = statusRepository.findById(replaceWithId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Replacement status not found"));
             if (replacement.getId().equals(s.getId())) {
-                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Replacement must differ");
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Replacement must differ");
             }
             // Every workflow that contains the deleted status must offer the
             // replacement, otherwise remapped issues would leave their board
@@ -145,8 +150,9 @@ public class AdminCatalogService {
 
     @Transactional
     public AdminPriorityResponse createPriority(ScopeContext scope, UpsertPriorityRequest req) {
-        if (priorityRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Priority name already exists");
+        if (priorityRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A priority named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         var p = new Priority();
         scope.stamp(p);
@@ -164,8 +170,9 @@ public class AdminCatalogService {
     public AdminPriorityResponse updatePriority(ScopeContext scope, UUID id, UpsertPriorityRequest req) {
         var p = requirePriority(scope, id);
         if (!p.getName().equals(req.name())
-                && priorityRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Priority name already exists");
+                && priorityRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A priority named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         p.setName(req.name());
         if (req.color() != null) p.setColor(req.color());
@@ -202,7 +209,7 @@ public class AdminCatalogService {
             replacement = priorityRepository.findById(replaceWithId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Replacement priority not found"));
             if (replacement.getId().equals(p.getId())) {
-                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Replacement must differ");
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Replacement must differ");
             }
             issueRepository.remapPriority(p, replacement);
         }
@@ -218,7 +225,7 @@ public class AdminCatalogService {
                 var repl = replacement;
                 var heir = remaining.stream()
                         .filter(i -> repl != null && i.getPriority().getId().equals(repl.getId()))
-                        .findFirst().orElse(remaining.get(0));
+                        .findFirst().orElse(remaining.getFirst());
                 heir.setDefaultForNewIssues(true);
                 prioritySetItemRepository.save(heir);
             }
@@ -239,8 +246,9 @@ public class AdminCatalogService {
 
     @Transactional
     public AdminIssueTypeResponse createIssueType(ScopeContext scope, UpsertIssueTypeRequest req) {
-        if (issueTypeRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Issue type name already exists");
+        if (issueTypeRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "An issue type named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         var t = new IssueType();
         scope.stamp(t);
@@ -258,8 +266,9 @@ public class AdminCatalogService {
     public AdminIssueTypeResponse updateIssueType(ScopeContext scope, UUID id, UpsertIssueTypeRequest req) {
         var t = requireIssueType(scope, id);
         if (!t.getName().equals(req.name())
-                && issueTypeRepository.existsAtScopeAndName(scope.workspaceId(), scope.projectId(), req.name())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Issue type name already exists");
+                && issueTypeRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "An issue type named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
         t.setName(req.name());
         if (req.color() != null) t.setColor(req.color());
@@ -299,7 +308,7 @@ public class AdminCatalogService {
             var replacement = issueTypeRepository.findById(replaceWithId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Replacement type not found"));
             if (replacement.getId().equals(t.getId())) {
-                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Replacement must differ");
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Replacement must differ");
             }
             issueRepository.remapType(t, replacement);
         }
@@ -318,7 +327,7 @@ public class AdminCatalogService {
                 .flatMap(wf -> projectCountService.projectsListUsingWorkflow(scope, wf).stream())
                 .toList();
         return new UsageDetailResponse(
-                workflows.stream().map(w -> w.getName()).toList(),
+                workflows.stream().map(Workflow::getName).toList(),
                 List.of(),
                 UsageDetailResponse.dedupe(projects),
                 issueRepository.countByStatusScoped(s, scope.workspaceId(), scope.projectId()));
@@ -334,7 +343,7 @@ public class AdminCatalogService {
                 .toList();
         return new UsageDetailResponse(
                 List.of(),
-                sets.stream().map(s -> s.getName()).toList(),
+                sets.stream().map(PrioritySet::getName).toList(),
                 UsageDetailResponse.dedupe(projects),
                 issueRepository.countByPriorityScoped(p, scope.workspaceId(), scope.projectId()));
     }
@@ -349,7 +358,7 @@ public class AdminCatalogService {
                 .toList();
         return new UsageDetailResponse(
                 List.of(),
-                sets.stream().map(s -> s.getName()).toList(),
+                sets.stream().map(IssueTypeSet::getName).toList(),
                 UsageDetailResponse.dedupe(projects),
                 issueRepository.countByTypeScoped(t, scope.workspaceId(), scope.projectId()));
     }

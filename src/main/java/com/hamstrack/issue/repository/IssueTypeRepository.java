@@ -44,4 +44,10 @@ public interface IssueTypeRepository extends JpaRepository<IssueType, UUID> {
     @Query("select t from IssueType t where (t.scopeWorkspaceId is null and t.scopeProjectId is null) "
             + "or t.scopeWorkspaceId = :ws or t.scopeProjectId = :proj order by t.position")
     List<IssueType> findAllVisibleTo(@Param("ws") UUID ws, @Param("proj") UUID proj);
+
+    /** A name already visible to a scope — forces reuse of an inherited issue type. */
+    @Query("select case when count(t) > 0 then true else false end from IssueType t "
+            + "where ((t.scopeWorkspaceId is null and t.scopeProjectId is null) "
+            + "or t.scopeWorkspaceId = :ws or t.scopeProjectId = :proj) and t.name = :name")
+    boolean existsVisibleToAndName(@Param("ws") UUID ws, @Param("proj") UUID proj, @Param("name") String name);
 }

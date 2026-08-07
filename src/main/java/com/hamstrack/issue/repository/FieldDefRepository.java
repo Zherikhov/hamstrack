@@ -54,4 +54,19 @@ public interface FieldDefRepository extends JpaRepository<FieldDef, UUID> {
     @Query("select f from FieldDef f where (f.scopeWorkspaceId is null and f.scopeProjectId is null) "
             + "or f.scopeWorkspaceId = :ws or f.scopeProjectId = :proj order by f.name")
     List<FieldDef> findAllVisibleTo(@Param("ws") UUID ws, @Param("proj") UUID proj);
+
+    /**
+     * Key/name already visible to a scope (global ∪ workspace ∪ project). Used on
+     * create/rename so a delegated admin reuses an inherited (e.g. system) field
+     * instead of minting a scoped duplicate of the same key or name.
+     */
+    @Query("select case when count(f) > 0 then true else false end from FieldDef f "
+            + "where ((f.scopeWorkspaceId is null and f.scopeProjectId is null) "
+            + "or f.scopeWorkspaceId = :ws or f.scopeProjectId = :proj) and f.key = :key")
+    boolean existsVisibleToAndKey(@Param("ws") UUID ws, @Param("proj") UUID proj, @Param("key") String key);
+
+    @Query("select case when count(f) > 0 then true else false end from FieldDef f "
+            + "where ((f.scopeWorkspaceId is null and f.scopeProjectId is null) "
+            + "or f.scopeWorkspaceId = :ws or f.scopeProjectId = :proj) and f.name = :name")
+    boolean existsVisibleToAndName(@Param("ws") UUID ws, @Param("proj") UUID proj, @Param("name") String name);
 }

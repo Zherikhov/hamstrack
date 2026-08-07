@@ -1,5 +1,6 @@
 package com.hamstrack.common.security;
 
+import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -34,7 +35,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             var userId = jwtService.extractUserId(token);
             // Only ACTIVE users authenticate — a disabled user's token must stop working immediately
             userRepository.findById(userId)
-                    .filter(user -> user.isEnabled())
+                    .filter(User::isEnabled)
                     .ifPresent(user -> {
                         var auth = new UsernamePasswordAuthenticationToken(user, null, user.getAuthorities());
                         SecurityContextHolder.getContext().setAuthentication(auth);

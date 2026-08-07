@@ -122,6 +122,6 @@ public class AdminPrioritySetService {
     /** A priority the set may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
     private Priority requirePriority(ScopeContext scope, UUID id) {
         return priorityRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown priority"));
     }
 }

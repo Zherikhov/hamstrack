@@ -120,11 +120,11 @@ public class AdminWorkflowService {
         if (req.transitions() != null) {
             for (var rule : req.transitions()) {
                 if (rule.fromStatusId() != null && !seen.contains(rule.fromStatusId())) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Transition source status is not part of the workflow");
                 }
                 if (!seen.contains(rule.toStatusId())) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Transition target status is not part of the workflow");
                 }
                 var t = new WorkflowTransition();
@@ -158,6 +158,6 @@ public class AdminWorkflowService {
     /** A status the workflow may include: visible to this scope (global ∪ ancestor-ws ∪ own project). */
     private Status requireStatus(ScopeContext scope, UUID id) {
         return statusRepository.findByIdVisibleTo(id, scope.visibleWorkspaceId(), scope.visibleProjectId())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown status"));
     }
 }

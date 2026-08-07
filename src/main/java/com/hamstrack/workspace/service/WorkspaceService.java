@@ -96,7 +96,7 @@ public class WorkspaceService {
         var workspace = workspaceRepository.findById(workspaceId)
                 .orElseThrow(WorkspaceNotFoundException::new);
         requireMembership(actor, workspace);
-        return memberRepository.findAllByWorkspace(workspace).stream()
+        return memberRepository.findAllByWorkspaceWithUser(workspace).stream()
                 .map(WorkspaceMemberResponse::of)
                 .toList();
     }

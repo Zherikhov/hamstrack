@@ -79,7 +79,16 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
                                          @Param("workflow") com.hamstrack.issue.entity.Workflow workflow,
                                          @Param("isDefault") boolean isDefault);
 
-    @Query("SELECT i FROM Issue i WHERE i.project = :project " +
+    // Fetch-join the ToOne associations IssueResponse.of renders so a board/backlog
+    // page is one query instead of 1 + ~5N (parent is not fetched — only its id is
+    // read, which a lazy proxy already carries; the shared project is the query param)
+    @Query("SELECT i FROM Issue i " +
+           "LEFT JOIN FETCH i.type " +
+           "LEFT JOIN FETCH i.status " +
+           "LEFT JOIN FETCH i.priority " +
+           "LEFT JOIN FETCH i.assignee " +
+           "LEFT JOIN FETCH i.reporter " +
+           "WHERE i.project = :project " +
            "AND (:statusId IS NULL OR i.status.id = :statusId) " +
            "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
            "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +

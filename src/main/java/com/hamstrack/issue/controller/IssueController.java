@@ -159,8 +159,16 @@ public class IssueController {
                                                                   @PathVariable long number,
                                                                   @PathVariable UUID attachmentId) {
         var download = attachmentService.download(actor, workspaceId, projectId, number, attachmentId);
+        // New uploads store a server-derived type, but legacy rows may hold a
+        // malformed client-supplied one — fall back instead of 500ing the download.
+        MediaType mediaType;
+        try {
+            mediaType = MediaType.parseMediaType(download.contentType());
+        } catch (org.springframework.http.InvalidMediaTypeException e) {
+            mediaType = MediaType.APPLICATION_OCTET_STREAM;
+        }
         return ResponseEntity.ok()
-                .contentType(MediaType.parseMediaType(download.contentType()))
+                .contentType(mediaType)
                 .contentLength(download.sizeBytes())
                 .header("Content-Disposition", ContentDisposition.attachment()
                         .filename(download.filename(), StandardCharsets.UTF_8)

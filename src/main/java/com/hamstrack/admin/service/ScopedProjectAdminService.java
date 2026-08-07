@@ -136,13 +136,13 @@ public class ScopedProjectAdminService {
     /** 422 unless the set exists and is visible to the project (global / its ws / itself). */
     private <T extends Scoped> T requireBindable(T set, Project project, String label) {
         if (set == null) {
-            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown " + label.toLowerCase());
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown " + label.toLowerCase());
         }
         boolean visible = (set.getScopeWorkspaceId() == null && set.getScopeProjectId() == null)
                 || project.getWorkspace().getId().equals(set.getScopeWorkspaceId())
                 || project.getId().equals(set.getScopeProjectId());
         if (!visible) {
-            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                     label + " is not available to this project");
         }
         return set;

@@ -15,6 +15,11 @@ public interface WorkspaceMemberRepository extends JpaRepository<WorkspaceMember
     List<WorkspaceMember> findAllByWorkspace(Workspace workspace);
     boolean existsByWorkspaceAndUser(Workspace workspace, User user);
 
+    // Member listing + @mention parsing both read m.user for every row — fetch it
+    // in one query rather than a lazy load per member.
+    @Query("SELECT m FROM WorkspaceMember m JOIN FETCH m.user WHERE m.workspace = :workspace")
+    List<WorkspaceMember> findAllByWorkspaceWithUser(Workspace workspace);
+
     @Query("SELECT m FROM WorkspaceMember m JOIN FETCH m.workspace WHERE m.user.id = :userId")
     List<WorkspaceMember> findAllByUserIdWithWorkspace(UUID userId);
 }

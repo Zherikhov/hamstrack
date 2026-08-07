@@ -1,6 +1,7 @@
 package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.config.AttachmentProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.sse.SseRegistry;
 import com.hamstrack.common.storage.FileStorage;
@@ -21,6 +22,8 @@ import com.hamstrack.workspace.repository.WorkspaceRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -49,6 +52,7 @@ public class AttachmentService {
     private final FileStorage fileStorage;
     private final SseRegistry sseRegistry;
     private final ProductMetrics metrics;
+    private final AttachmentProperties attachmentProperties;
 
     public record AttachmentDownload(String filename, String contentType, long sizeBytes, InputStream stream) {}
 
@@ -59,13 +63,18 @@ public class AttachmentService {
         if (file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "File is empty");
         }
+        validateUpload(file);
 
+        var filename = sanitizeFilename(file.getOriginalFilename());
         var attachment = new IssueAttachment();
         attachment.setIssue(issue);
-        attachment.setFilename(sanitizeFilename(file.getOriginalFilename()));
+        attachment.setFilename(filename);
         attachment.setSizeBytes(file.getSize());
-        attachment.setContentType(truncate(
-                file.getContentType() != null ? file.getContentType() : "application/octet-stream", 255));
+        // Never trust the client Content-Type: derive a safe one from the filename.
+        // A malformed client header would otherwise be stored verbatim and later
+        // 500 the download (MediaType.parseMediaType) or spoof how a browser renders.
+        attachment.setContentType(MediaTypeFactory.getMediaType(filename)
+                .map(MediaType::toString).orElse(MediaType.APPLICATION_OCTET_STREAM_VALUE));
         attachment.setUploadedBy(actor);
         // Key is server-generated (no user input) — the original filename lives only in the DB
         attachment.setStorageKey("ws/" + workspaceId + "/issues/" + issue.getId() + "/" + UUID.randomUUID());
@@ -142,6 +151,24 @@ public class AttachmentService {
                 }
             }
         });
+    }
+
+    // Business-policy gate (size + file type), enforced here rather than only at
+    // the servlet multipart layer so a future global-admin setting can drive it.
+    private void validateUpload(MultipartFile file) {
+        var limit = attachmentProperties.maxFileSize();
+        if (file.getSize() > limit.toBytes()) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+                    "File exceeds the " + limit.toMegabytes() + " MB limit");
+        }
+        var ext = StringUtils.getFilenameExtension(file.getOriginalFilename());
+        boolean allowed = ext != null && attachmentProperties.allowedExtensions().stream()
+                .anyMatch(a -> a.equalsIgnoreCase(ext));
+        if (!allowed) {
+            throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "File type '" + (ext == null ? "" : ext) + "' is not allowed. Allowed types: "
+                            + String.join(", ", attachmentProperties.allowedExtensions()));
+        }
     }
 
     private String sanitizeFilename(String original) {

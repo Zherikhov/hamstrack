@@ -54,7 +54,7 @@ public class CommentService {
 
         // Parse @mentions and notify mentioned workspace members
         var members = workspaceMemberRepository
-                .findAllByWorkspace(issue.getWorkspace());
+                .findAllByWorkspaceWithUser(issue.getWorkspace());
         parseMentions(req.body(), members).forEach(mentioned -> {
             if (mentioned.getId().equals(actor.getId())) return; // don't notify yourself
             var m = new CommentMention();
@@ -80,7 +80,7 @@ public class CommentService {
     @Transactional(readOnly = true)
     public List<CommentResponse> list(User actor, UUID workspaceId, UUID projectId, long issueNumber) {
         var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
-        return commentRepository.findAllByIssueAndDeletedAtIsNullOrderByCreatedAtAsc(issue).stream()
+        return commentRepository.findAllForIssueWithAuthor(issue).stream()
                 .map(CommentResponse::of)
                 .toList();
     }

@@ -117,16 +117,16 @@ public class ProductMetrics {
                 .baseUnit("bytes").register(registry);
 
         // Gauges — evaluated at scrape time, each a single cheap count query.
-        Gauge.builder("hamstrack.users.total", userRepository, r -> r.count())
+        Gauge.builder("hamstrack.users.total", userRepository, UserRepository::count)
                 .description("Total user accounts").register(registry);
         Gauge.builder("hamstrack.users.active", userRepository,
                         r -> r.countByStatus(UserStatus.ACTIVE))
                 .description("Active user accounts").register(registry);
-        Gauge.builder("hamstrack.workspaces.total", workspaceRepository, r -> r.count())
+        Gauge.builder("hamstrack.workspaces.total", workspaceRepository, WorkspaceRepository::count)
                 .description("Total workspaces").register(registry);
-        Gauge.builder("hamstrack.projects.total", projectRepository, r -> r.count())
+        Gauge.builder("hamstrack.projects.total", projectRepository, ProjectRepository::count)
                 .description("Total projects").register(registry);
-        Gauge.builder("hamstrack.issues.total", issueRepository, r -> r.count())
+        Gauge.builder("hamstrack.issues.total", issueRepository, IssueRepository::count)
                 .description("Total issues").register(registry);
     }
 
@@ -173,11 +173,15 @@ public class ProductMetrics {
     }
 
     /**
-     * {@code hamstrack.issues.created{type}} — {@code type} is the issue-type
-     * NAME, a bounded catalog (Bug/Task/Story/Epic + admin-defined types).
+     * {@code hamstrack.issues.created{type}}. Cardinality guard: only SYSTEM
+     * (global-catalog) type names are a bounded, operator-controlled set and safe
+     * as a label value. Delegated (workspace/project) admins can mint arbitrarily
+     * many scoped type names, so those all collapse into a single {@code custom}
+     * series — otherwise every custom type name would be a new Prometheus series.
      */
-    public void issueCreated(String typeName) {
-        registry.counter("hamstrack.issues.created", "type", typeName).increment();
+    public void issueCreated(String typeName, boolean systemType) {
+        registry.counter("hamstrack.issues.created",
+                "type", systemType ? typeName : "custom").increment();
     }
 
     // --- invites ---

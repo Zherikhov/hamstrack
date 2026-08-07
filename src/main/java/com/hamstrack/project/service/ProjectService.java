@@ -112,7 +112,7 @@ public class ProjectService {
         var workspace = resolveWorkspace(actor, workspaceId);
         var project = resolveProject(workspace, projectId);
         requireRole(actor, project, ProjectRole.VIEWER);
-        return projectMemberRepository.findAllByProject(project).stream()
+        return projectMemberRepository.findAllByProjectWithUser(project).stream()
                 .map(ProjectMemberResponse::of)
                 .toList();
     }

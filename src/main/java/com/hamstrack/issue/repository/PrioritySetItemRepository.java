@@ -22,4 +22,9 @@ public interface PrioritySetItemRepository extends JpaRepository<PrioritySetItem
 
     @Query("select distinct i.set from PrioritySetItem i where i.priority.id = :priorityId")
     List<PrioritySet> findSetsUsingPriority(@Param("priorityId") UUID priorityId);
+
+    // Items of a set, by id, with the priority fetched — feeds the cached
+    // effective config so its detached entities are safe to read
+    @Query("select i from PrioritySetItem i join fetch i.priority where i.set.id = :setId order by i.position")
+    List<PrioritySetItem> findBySetIdWithPriority(@Param("setId") UUID setId);
 }

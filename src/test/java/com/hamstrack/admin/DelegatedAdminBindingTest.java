@@ -511,6 +511,31 @@ class DelegatedAdminBindingTest {
                 .andExpect(jsonPath("$.issues").value(0));
     }
 
+    // ---------- reuse over duplication: a scoped admin can't shadow an inherited (system) name ----------
+
+    @Test
+    void workspaceAdminCannotDuplicateAnInheritedStatusName() throws Exception {
+        var owner = user();
+        var ws = workspace(owner);
+        member(ws, owner, WorkspaceRole.OWNER);
+        var token = login(owner);
+
+        // "To Do" is a seeded GLOBAL status, inherited (visible) by every workspace.
+        // Creating a workspace-scoped duplicate is refused — reuse the inherited one.
+        mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/admin/statuses")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"To Do\",\"category\":\"TODO\"}"))
+                .andExpect(status().isConflict());
+
+        // A genuinely new name is still allowed at the workspace scope
+        mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/admin/statuses")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"WS-Only-" + System.nanoTime() + "\",\"category\":\"TODO\"}"))
+                .andExpect(status().isCreated());
+    }
+
     // ---------- cross-tenant usage isolation (the P0 leak: usage stats must not span tenants) ----------
 
     @Test

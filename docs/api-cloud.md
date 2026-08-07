@@ -64,7 +64,7 @@ Hamstrack uses short-lived **JWT access tokens** plus a rotating **refresh-token
    Authorization: Bearer <accessToken>
    ```
 
-5. When the access token expires (`expiresIn` seconds, currently 24 h), call `POST /auth/refresh` — the cookie authenticates the call and is **rotated** on each use (an old cookie value becomes invalid). Refresh tokens live 30 days.
+5. When the access token expires (`expiresIn` seconds, currently 30 min), call `POST /auth/refresh` — the cookie authenticates the call and is **rotated** on each use (an old cookie value becomes invalid). Refresh tokens live 30 days.
 6. `POST /auth/logout` revokes the refresh token and clears the cookie.
 
 All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#instance-metadata) require the `Authorization` header. A missing or expired token yields `401 Unauthorized`.
@@ -111,7 +111,8 @@ Validation failures (`400`) additionally carry a per-field `errors` map:
 | `403` | Authenticated but not allowed (e.g. insufficient role) |
 | `404` | Not found — or not a member of the containing workspace |
 | `409` | Conflict: stale `version`, duplicate name/key, resource in use |
-| `413` | Attachment exceeds the upload size limit (25 MB) |
+| `413` | Attachment exceeds the per-file size limit (default 20 MB) |
+| `415` | Attachment file extension is not in the allow-list |
 | `422` | Semantically invalid reference (unknown status/type/assignee, workflow-forbidden transition) |
 | `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
 
@@ -179,7 +180,7 @@ curl -X POST $BASE/auth/register -H "Content-Type: application/json" -d '{
 ```json
 {
   "accessToken": "eyJhbGciOiJIUzUxMiJ9…",
-  "expiresIn": 86400,
+  "expiresIn": 1800,
   "userId": "0197fa30-…",
   "email": "you@example.com",
   "displayName": "Ada Lovelace"
@@ -272,7 +273,7 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 
 | Method | Path | Description |
 |---|---|---|
-| `GET/POST` | `/admin/statuses` · `/admin/priorities` · `/admin/issue-types` | List catalog (with usage counts) / create. `201` |
+| `GET/POST` | `/admin/statuses` · `/admin/priorities` · `/admin/issue-types` | List catalog (with usage counts) / create. `201`. Create/rename returns `409` when the name collides with any item **visible** to the scope — including one inherited from a wider scope (reuse it instead of duplicating) |
 | `PATCH` | `/admin/{catalog}/{id}` | Update |
 | `POST` | `/admin/{catalog}/{id}/archive` · `/unarchive` | Hide from new use / restore |
 | `DELETE` | `/admin/{catalog}/{id}?replaceWithId=` | Delete; `409` while issues reference it and no replacement is given — with `replaceWithId`, affected issues are remapped |
@@ -281,7 +282,7 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH/DELETE` | `/admin/workflows/{id}` | Full replacement / delete (`409` while projects use it; the system default is not deletable) |
 | `GET/POST` | `/admin/priority-sets` | List / create (`{"name", "items": [{"priorityId", "isDefault"}]}`) |
 | `PATCH/DELETE` | `/admin/priority-sets/{id}` | Full replacement / delete (`409` while in use) |
-| `GET/POST` | `/admin/fields` | List custom fields (with usage counts) / create (`{"name", "key?", "type", "config?", "description?"}`; blank `key` is derived from the name — key and type are immutable afterwards) |
+| `GET/POST` | `/admin/fields` | List custom fields (with usage counts) / create (`{"name", "key?", "type", "config?", "description?"}`; blank `key` is derived from the name — key and type are immutable afterwards). Create/rename returns `409` when the name **or** key collides with any field visible to the scope, inherited ones included (reuse it instead of duplicating) |
 | `PATCH` | `/admin/fields/{id}` | Update name/config/description (also `POST /{id}/archive` · `/unarchive`) |
 | `DELETE` | `/admin/fields/{id}?dropValues=` | Delete; `409` while issues hold values unless `dropValues=true` (drops them — there is no remap across value shapes; archive instead to keep them) |
 | `GET/POST` | `/admin/field-sets` | List / create (`{"name", "items": [{"fieldId", "required", "showOnCreate"}]}` — a required field is always shown on create) |
@@ -308,6 +309,7 @@ Each scope owns its own rows: a workspace admin creates **workspace-scoped** sta
 **Scoping & visibility**
 
 - List endpoints return everything **visible** to the scope: global ∪ workspace ∪ (for a project) its own private rows. Every row carries a `scope` field (`GLOBAL` / `WORKSPACE` / `PROJECT`); only own-scope rows are editable — a write to an inherited (higher-scope) row returns `404`.
+- **Reuse over duplication** — creating or renaming a status / priority / issue type / field (fields also on `key`) is refused with `409` when the name collides with any item **visible** to the scope, whether it's an own-scope row or one inherited from a wider scope (a system/global item, or a workspace item inherited by a project). Bind the inherited item instead of minting a scoped duplicate.
 - A set (workflow / priority set / field set / type set) may reference only catalog rows visible to its scope; a foreign or wrong-scope reference is rejected `422`.
 - A project (or the workspace matrix) may bind only a set visible to the target project — global, its workspace's, or its own — else `422`.
 
@@ -420,7 +422,7 @@ Custom field changes appear with the field's display name in `field` and human-r
 | `GET` | `…/issues/{number}/attachments/{attachmentId}` | member | Download (binary, `Content-Disposition: attachment`) |
 | `DELETE` | `…/issues/{number}/attachments/{attachmentId}` | uploader / `MANAGER` | Delete file + metadata. `204` |
 
-Upload size limit: **25 MB** (`413` when exceeded).
+Uploads are validated in two ways: a **per-file size limit** (default 20 MB — `413 Payload Too Large` when exceeded; a separate, larger servlet ceiling rejects grossly oversized bodies) and a **file-extension allow-list** (images, PDF, common Office/text formats and `zip` by default — a disallowed extension returns `415 Unsupported Media Type`). The stored/returned `contentType` is derived from the filename on the server; the client-supplied content type is ignored.
 
 ```bash
 curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/attachments \

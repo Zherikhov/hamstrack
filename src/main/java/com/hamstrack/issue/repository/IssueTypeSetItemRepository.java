@@ -22,4 +22,9 @@ public interface IssueTypeSetItemRepository extends JpaRepository<IssueTypeSetIt
 
     @Query("select distinct i.set from IssueTypeSetItem i where i.type.id = :typeId")
     List<IssueTypeSet> findSetsUsingType(@Param("typeId") UUID typeId);
+
+    // Types of a set, by id, in display order — feeds the cached effective config
+    // (selecting the IssueType directly keeps it fully loaded for detached reads)
+    @Query("select i.type from IssueTypeSetItem i where i.set.id = :setId order by i.position")
+    List<IssueType> findTypesBySetId(@Param("setId") UUID setId);
 }

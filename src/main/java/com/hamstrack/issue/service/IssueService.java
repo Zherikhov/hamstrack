@@ -12,6 +12,7 @@ import com.hamstrack.issue.entity.*;
 import com.hamstrack.issue.exception.IssueNotFoundException;
 import com.hamstrack.issue.repository.*;
 import com.hamstrack.project.entity.Project;
+import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
@@ -62,7 +63,8 @@ public class IssueService {
         var status = projectConfigService.requireStatusInWorkflow(project, resolveStatus(req.statusId()));
         var priority = req.priorityId() != null
                 ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
-                : projectConfigService.defaultPriority(project);
+                // re-resolve the default id to a managed entity (the config cache hands back detached ones)
+                : resolvePriority(projectConfigService.defaultPriorityId(project));
 
         // Atomic seq increment
         long seq = projectRepository.incrementAndGetIssueSeq(project.getId());
@@ -84,12 +86,13 @@ public class IssueService {
         }
         if (req.parentId() != null) {
             issue.setParent(issueRepository.findByIdAndProject(req.parentId(), project)
-                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown parent issue")));
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown parent issue")));
         }
         issue.setDueDate(req.dueDate());
         issueRepository.save(issue);
-        // type name is a bounded catalog (Bug/Task/Story/Epic + admin types)
-        metrics.issueCreated(type.getName());
+        // Only system (global) type names are label-safe; scoped types → "custom"
+        metrics.issueCreated(type.getName(),
+                type.getScopeWorkspaceId() == null && type.getScopeProjectId() == null);
 
         // Custom fields: validates against the project's field set (incl.
         // required-on-create); no history entries for initial values
@@ -238,19 +241,19 @@ public class IssueService {
     private IssueType resolveType(UUID id) {
         return issueTypeRepository.findById(id)
                 .filter(t -> t.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown issue type"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown issue type"));
     }
 
     private Status resolveStatus(UUID id) {
         return statusRepository.findById(id)
                 .filter(s -> s.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown status"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown status"));
     }
 
     private Priority resolvePriority(UUID id) {
         return priorityRepository.findById(id)
                 .filter(p -> p.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown priority"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown priority"));
     }
 
     private IssueHistory makeHistory(Issue issue, User actor, String field, String oldVal, String newVal) {
@@ -274,7 +277,7 @@ public class IssueService {
     private User resolveAssignee(Workspace workspace, UUID assigneeId) {
         return userRepository.findById(assigneeId)
                 .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY, "Unknown assignee"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee"));
     }
 
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {
@@ -287,7 +290,7 @@ public class IssueService {
 
     private void requireProjectRole(User actor, Project project, ProjectRole required) {
         var role = projectMemberRepository.findByProjectAndUser(project, actor)
-                .map(pm -> pm.getRole())
+                .map(ProjectMember::getRole)
                 .orElse(ProjectRole.VIEWER);
         if (!role.isAtLeast(required)) {
             throw new com.hamstrack.project.exception.InsufficientProjectRoleException();

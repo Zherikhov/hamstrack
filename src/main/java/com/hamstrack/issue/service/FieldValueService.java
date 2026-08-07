@@ -7,6 +7,7 @@ import com.hamstrack.issue.repository.FieldSetRepository;
 import com.hamstrack.issue.repository.IssueFieldValueRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -85,19 +86,19 @@ public class FieldValueService {
             for (var entry : requested.entrySet()) {
                 var item = itemsByFieldId.get(entry.getKey());
                 if (item == null) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Field is not part of this project's field set");
                 }
                 var field = item.getField();
                 if (field.getArchivedAt() != null) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Field '" + field.getName() + "' is archived");
                 }
                 var value = entry.getValue();
                 boolean clearing = value == null || value.isNull();
                 if (clearing) {
                     if (item.isRequired()) {
-                        throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                        throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                                 "Field '" + field.getName() + "' is required and cannot be cleared");
                     }
                     valueRepository.findByIssueAndField(issue, field).ifPresent(existing -> {
@@ -129,7 +130,7 @@ public class FieldValueService {
                         && requested.get(item.getField().getId()) != null
                         && !requested.get(item.getField().getId()).isNull();
                 if (item.isRequired() && item.isShowOnCreate() && !provided) {
-                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Field '" + item.getField().getName() + "' is required");
                 }
             }
@@ -226,7 +227,7 @@ public class FieldValueService {
                 yield String.join(", ", labels);
             }
             case USER -> userRepository.findById(UUID.fromString(value.asText()))
-                    .map(u -> u.getDisplayName()).orElse(value.asText());
+                    .map(User::getDisplayName).orElse(value.asText());
             case CHECKBOX -> value.asBoolean() ? "yes" : "no";
             default -> value.asText();
         };
@@ -243,7 +244,7 @@ public class FieldValueService {
     }
 
     private void reject(FieldDef field, String why) {
-        throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_ENTITY,
+        throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                 "Field '" + field.getName() + "' " + why);
     }
 }
