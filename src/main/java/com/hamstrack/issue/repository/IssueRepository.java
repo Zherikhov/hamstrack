@@ -32,6 +32,27 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
 
     long countByPriority(Priority priority);
 
+    // Scope-filtered issue counts for admin usage display. wsId/projectId = null
+    // → whole-install (global/system-admin console); a workspace or project id →
+    // a delegated console, so a tenant's usage figure never spans other tenants.
+    @Query("select count(i) from Issue i where i.status = :status "
+            + "and (:wsId is null or i.workspace.id = :wsId) "
+            + "and (:projectId is null or i.project.id = :projectId)")
+    long countByStatusScoped(@Param("status") Status status,
+                             @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
+
+    @Query("select count(i) from Issue i where i.type = :type "
+            + "and (:wsId is null or i.workspace.id = :wsId) "
+            + "and (:projectId is null or i.project.id = :projectId)")
+    long countByTypeScoped(@Param("type") IssueType type,
+                           @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
+
+    @Query("select count(i) from Issue i where i.priority = :priority "
+            + "and (:wsId is null or i.workspace.id = :wsId) "
+            + "and (:projectId is null or i.project.id = :projectId)")
+    long countByPriorityScoped(@Param("priority") Priority priority,
+                               @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
+
     // Bulk remaps for admin delete-with-remap; clearAutomatically so stale
     // entities don't linger in the persistence context (see CLAUDE.md gotchas)
     @Modifying(clearAutomatically = true)

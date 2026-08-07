@@ -7,7 +7,6 @@ import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.repository.*;
-import com.hamstrack.project.repository.ProjectRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -35,7 +34,6 @@ public class AdminFieldService {
     private final FieldSetRepository fieldSetRepository;
     private final FieldSetItemRepository fieldSetItemRepository;
     private final IssueFieldValueRepository valueRepository;
-    private final ProjectRepository projectRepository;
     private final ProjectCountService projectCountService;
 
     // ---------- field defs ----------
@@ -46,7 +44,7 @@ public class AdminFieldService {
         var rows = scope.isGlobal()
                 ? fieldDefRepository.findAllAtScope(null, null)
                 : fieldDefRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return rows.stream().map(f -> AdminFieldResponse.of(f, fieldUsage(f))).toList();
+        return rows.stream().map(f -> AdminFieldResponse.of(f, fieldUsage(scope, f))).toList();
     }
 
     @Transactional
@@ -87,7 +85,7 @@ public class AdminFieldService {
         f.setConfig(req.config());
         f.setDescription(req.description());
         fieldDefRepository.save(f);
-        return AdminFieldResponse.of(f, fieldUsage(f));
+        return AdminFieldResponse.of(f, fieldUsage(scope, f));
     }
 
     @Transactional
@@ -116,7 +114,7 @@ public class AdminFieldService {
         var sets = scope.isGlobal()
                 ? fieldSetRepository.findAllAtScope(null, null)
                 : fieldSetRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return sets.stream().map(this::toSetResponse).toList();
+        return sets.stream().map(set -> toSetResponse(scope, set)).toList();
     }
 
     @Transactional
@@ -129,7 +127,7 @@ public class AdminFieldService {
         set.setName(req.name());
         fieldSetRepository.save(set);
         applyItems(scope, set, req);
-        return toSetResponse(set);
+        return toSetResponse(scope, set);
     }
 
     @Transactional
@@ -146,7 +144,7 @@ public class AdminFieldService {
         // DELETEs in one flush, colliding with UNIQUE(set_id, field_id).
         fieldSetItemRepository.flush();
         applyItems(scope, set, req);
-        return toSetResponse(set);
+        return toSetResponse(scope, set);
     }
 
     @Transactional
@@ -155,7 +153,7 @@ public class AdminFieldService {
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default field set cannot be deleted");
         }
-        long projects = projectsUsing(set);
+        long projects = projectsUsing(scope, set);
         if (projects > 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     projects + " projects use this field set — reassign them first");
@@ -163,9 +161,8 @@ public class AdminFieldService {
         fieldSetRepository.delete(set);
     }
 
-    public long projectsUsing(FieldSet set) {
-        long bound = projectRepository.countByFieldSetId(set.getId());
-        return set.isSystemDefault() ? bound + projectRepository.countByFieldSetIdIsNull() : bound;
+    public long projectsUsing(ScopeContext scope, FieldSet set) {
+        return projectCountService.projectsUsingFieldSet(scope, set);
     }
 
     // ---------- usage detail (popovers) ----------
@@ -173,15 +170,16 @@ public class AdminFieldService {
     @Transactional(readOnly = true)
     public UsageDetailResponse fieldUsageDetail(ScopeContext scope, UUID id) {
         var f = requireField(scope, id);
-        var sets = fieldSetItemRepository.findSetsUsingField(f.getId());
+        var sets = fieldSetItemRepository.findSetsUsingField(f.getId()).stream()
+                .filter(scope::canSee).toList();
         var projects = sets.stream()
-                .flatMap(set -> projectCountService.projectsListUsingFieldSet(set).stream())
+                .flatMap(set -> projectCountService.projectsListUsingFieldSet(scope, set).stream())
                 .toList();
         return new UsageDetailResponse(
                 List.of(),
                 sets.stream().map(FieldSet::getName).toList(),
                 UsageDetailResponse.dedupe(projects),
-                valueRepository.countByField(f));
+                valueRepository.countByFieldScoped(f, scope.workspaceId(), scope.projectId()));
     }
 
     // ---------- helpers ----------
@@ -223,21 +221,23 @@ public class AdminFieldService {
         }
     }
 
-    private UsageInfo fieldUsage(FieldDef f) {
-        long sets = fieldSetItemRepository.countByField(f);
-        long projects = fieldSetItemRepository.findSetsUsingField(f.getId()).stream()
-                .mapToLong(this::projectsUsing).sum();
-        return new UsageInfo(0, sets, projects, valueRepository.countByField(f));
+    private UsageInfo fieldUsage(ScopeContext scope, FieldDef f) {
+        var sets = fieldSetItemRepository.findSetsUsingField(f.getId()).stream()
+                .filter(scope::canSee).toList();
+        long projects = sets.stream()
+                .mapToLong(set -> projectCountService.projectsUsingFieldSet(scope, set)).sum();
+        return new UsageInfo(0, sets.size(), projects,
+                valueRepository.countByFieldScoped(f, scope.workspaceId(), scope.projectId()));
     }
 
-    private AdminFieldSetResponse toSetResponse(FieldSet set) {
+    private AdminFieldSetResponse toSetResponse(ScopeContext scope, FieldSet set) {
         var items = fieldSetItemRepository.findAllBySetOrderByPosition(set).stream()
                 .map(i -> new AdminFieldSetResponse.Item(
                         AdminFieldResponse.of(i.getField(), null),
                         i.isRequired(), i.isShowOnCreate()))
                 .toList();
         return new AdminFieldSetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                items, projectsUsing(set), set.scopeLabel());
+                items, projectsUsing(scope, set), set.scopeLabel());
     }
 
     private String slugify(String name) {

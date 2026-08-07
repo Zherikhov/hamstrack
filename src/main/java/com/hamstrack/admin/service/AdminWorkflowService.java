@@ -40,7 +40,7 @@ public class AdminWorkflowService {
         var workflows = scope.isGlobal()
                 ? workflowRepository.findAllAtScope(null, null)
                 : workflowRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return workflows.stream().map(this::toResponse).toList();
+        return workflows.stream().map(wf -> toResponse(scope, wf)).toList();
     }
 
     @Transactional
@@ -54,7 +54,7 @@ public class AdminWorkflowService {
         wf.setDescription(req.description());
         workflowRepository.save(wf);
         applyStatusesAndTransitions(scope, wf, req);
-        return toResponse(wf);
+        return toResponse(scope, wf);
     }
 
     @Transactional
@@ -88,7 +88,7 @@ public class AdminWorkflowService {
         // that was already present collides with UNIQUE(workflow_id, status_id).
         workflowStatusRepository.flush();
         applyStatusesAndTransitions(scope, wf, req);
-        return toResponse(wf);
+        return toResponse(scope, wf);
     }
 
     @Transactional
@@ -97,7 +97,7 @@ public class AdminWorkflowService {
         if (wf.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default workflow cannot be deleted");
         }
-        long projects = projectCountService.projectsUsingWorkflow(wf);
+        long projects = projectCountService.projectsUsingWorkflow(scope, wf);
         if (projects > 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     projects + " projects use this workflow — reassign them first");
@@ -136,7 +136,7 @@ public class AdminWorkflowService {
         }
     }
 
-    private AdminWorkflowResponse toResponse(Workflow wf) {
+    private AdminWorkflowResponse toResponse(ScopeContext scope, Workflow wf) {
         var statuses = workflowStatusRepository.findAllByWorkflowOrderByPosition(wf).stream()
                 .map(ws -> StatusResponse.of(ws.getStatus()))
                 .toList();
@@ -147,7 +147,7 @@ public class AdminWorkflowService {
                 .toList();
         return new AdminWorkflowResponse(wf.getId(), wf.getName(), wf.getDescription(),
                 wf.isSystemDefault(), statuses, transitions,
-                projectCountService.projectsUsingWorkflow(wf), wf.scopeLabel());
+                projectCountService.projectsUsingWorkflow(scope, wf), wf.scopeLabel());
     }
 
     private Workflow require(ScopeContext scope, UUID id) {

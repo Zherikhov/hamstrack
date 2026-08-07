@@ -1,5 +1,6 @@
 package com.hamstrack.admin.service;
 
+import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.IssueTypeSet;
 import com.hamstrack.issue.entity.PrioritySet;
@@ -7,14 +8,17 @@ import com.hamstrack.issue.entity.Workflow;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.repository.ProjectRepository;
 
-import java.util.ArrayList;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
 /**
- * "Used by N projects" counters. Projects with a NULL binding implicitly use
- * the system default, so defaults also count the unbound projects.
+ * "Used by N projects" counters and "where is this used?" listings, scoped to
+ * the caller's {@link ScopeContext}. A global scope (system admin / DC) counts
+ * across the whole install; a delegated (workspace/project) scope counts only
+ * projects the caller can see, so a tenant never learns usage spanning other
+ * tenants. Projects with a NULL binding implicitly use the system default, so
+ * defaults also count the unbound projects — but only within the same scope.
  */
 @Service
 @RequiredArgsConstructor
@@ -22,44 +26,45 @@ public class ProjectCountService {
 
     private final ProjectRepository projectRepository;
 
-    public long projectsUsingWorkflow(Workflow workflow) {
-        long bound = projectRepository.countByWorkflowId(workflow.getId());
-        return workflow.isSystemDefault() ? bound + projectRepository.countByWorkflowIdIsNull() : bound;
+    public long projectsUsingWorkflow(ScopeContext scope, Workflow workflow) {
+        return projectRepository.countProjectsUsingWorkflow(
+                workflow.getId(), workflow.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
-    public long projectsUsingPrioritySet(PrioritySet set) {
-        long bound = projectRepository.countByPrioritySetId(set.getId());
-        return set.isSystemDefault() ? bound + projectRepository.countByPrioritySetIdIsNull() : bound;
+    public long projectsUsingPrioritySet(ScopeContext scope, PrioritySet set) {
+        return projectRepository.countProjectsUsingPrioritySet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
-    public long projectsUsingIssueTypeSet(IssueTypeSet set) {
-        long bound = projectRepository.countByIssueTypeSetId(set.getId());
-        return set.isSystemDefault() ? bound + projectRepository.countByIssueTypeSetIdIsNull() : bound;
+    public long projectsUsingIssueTypeSet(ScopeContext scope, IssueTypeSet set) {
+        return projectRepository.countProjectsUsingIssueTypeSet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
+    }
+
+    public long projectsUsingFieldSet(ScopeContext scope, FieldSet set) {
+        return projectRepository.countProjectsUsingFieldSet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
     // ---- listings for the "where is this used?" popovers ----
 
-    public List<Project> projectsListUsingWorkflow(Workflow workflow) {
-        var list = new ArrayList<>(projectRepository.findAllByWorkflowId(workflow.getId()));
-        if (workflow.isSystemDefault()) list.addAll(projectRepository.findAllByWorkflowIdIsNull());
-        return list;
+    public List<Project> projectsListUsingWorkflow(ScopeContext scope, Workflow workflow) {
+        return projectRepository.findProjectsUsingWorkflow(
+                workflow.getId(), workflow.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
-    public List<Project> projectsListUsingPrioritySet(PrioritySet set) {
-        var list = new ArrayList<>(projectRepository.findAllByPrioritySetId(set.getId()));
-        if (set.isSystemDefault()) list.addAll(projectRepository.findAllByPrioritySetIdIsNull());
-        return list;
+    public List<Project> projectsListUsingPrioritySet(ScopeContext scope, PrioritySet set) {
+        return projectRepository.findProjectsUsingPrioritySet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
-    public List<Project> projectsListUsingFieldSet(FieldSet set) {
-        var list = new ArrayList<>(projectRepository.findAllByFieldSetId(set.getId()));
-        if (set.isSystemDefault()) list.addAll(projectRepository.findAllByFieldSetIdIsNull());
-        return list;
+    public List<Project> projectsListUsingFieldSet(ScopeContext scope, FieldSet set) {
+        return projectRepository.findProjectsUsingFieldSet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 
-    public List<Project> projectsListUsingIssueTypeSet(IssueTypeSet set) {
-        var list = new ArrayList<>(projectRepository.findAllByIssueTypeSetId(set.getId()));
-        if (set.isSystemDefault()) list.addAll(projectRepository.findAllByIssueTypeSetIdIsNull());
-        return list;
+    public List<Project> projectsListUsingIssueTypeSet(ScopeContext scope, IssueTypeSet set) {
+        return projectRepository.findProjectsUsingIssueTypeSet(
+                set.getId(), set.isSystemDefault(), scope.workspaceId(), scope.projectId());
     }
 }

@@ -42,7 +42,7 @@ public class AdminIssueTypeSetService {
         var sets = scope.isGlobal()
                 ? setRepository.findAllAtScope(null, null)
                 : setRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return sets.stream().map(this::toResponse).toList();
+        return sets.stream().map(set -> toResponse(scope, set)).toList();
     }
 
     @Transactional
@@ -55,7 +55,7 @@ public class AdminIssueTypeSetService {
         set.setName(req.name());
         setRepository.save(set);
         applyItems(scope, set, req);
-        return toResponse(set);
+        return toResponse(scope, set);
     }
 
     @Transactional
@@ -72,7 +72,7 @@ public class AdminIssueTypeSetService {
         // DELETEs in one flush, colliding with UNIQUE(set_id, type_id).
         itemRepository.flush();
         applyItems(scope, set, req);
-        return toResponse(set);
+        return toResponse(scope, set);
     }
 
     @Transactional
@@ -81,7 +81,7 @@ public class AdminIssueTypeSetService {
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default issue type set cannot be deleted");
         }
-        long projects = projectCountService.projectsUsingIssueTypeSet(set);
+        long projects = projectCountService.projectsUsingIssueTypeSet(scope, set);
         if (projects > 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     projects + " projects use this issue type set — reassign them first");
@@ -102,12 +102,12 @@ public class AdminIssueTypeSetService {
         }
     }
 
-    private AdminIssueTypeSetResponse toResponse(IssueTypeSet set) {
+    private AdminIssueTypeSetResponse toResponse(ScopeContext scope, IssueTypeSet set) {
         var types = itemRepository.findAllBySetOrderByPosition(set).stream()
                 .map(i -> IssueTypeResponse.of(i.getType()))
                 .toList();
         return new AdminIssueTypeSetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                types, projectCountService.projectsUsingIssueTypeSet(set), set.scopeLabel());
+                types, projectCountService.projectsUsingIssueTypeSet(scope, set), set.scopeLabel());
     }
 
     private IssueTypeSet require(ScopeContext scope, UUID id) {

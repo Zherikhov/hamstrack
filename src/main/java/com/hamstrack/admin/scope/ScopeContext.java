@@ -47,6 +47,23 @@ public record ScopeContext(UUID workspaceId, UUID projectId, UUID ancestorWorksp
     }
 
     /**
+     * True if this scope may <em>see</em> the entity (global ∪ ancestor-workspace ∪
+     * own project) — the same visibility {@code findByIdVisibleTo}/{@code findAllVisibleTo}
+     * enforce at the DB layer. Used to keep usage aggregation (counts, "used-by"
+     * lists) from spanning containers of other tenants: a delegated console
+     * computes usage only over containers it can see. Global scope sees everything.
+     */
+    public boolean canSee(Scoped entity) {
+        if (isGlobal()) return true;
+        boolean global = entity.getScopeWorkspaceId() == null && entity.getScopeProjectId() == null;
+        boolean ownWorkspace = ancestorWorkspaceId != null
+                && ancestorWorkspaceId.equals(entity.getScopeWorkspaceId());
+        boolean ownProject = projectId != null
+                && projectId.equals(entity.getScopeProjectId());
+        return global || ownWorkspace || ownProject;
+    }
+
+    /**
      * Workspace whose rows are visible as children of a set built here (its own
      * workspace, or a project's ancestor workspace); null at global scope. Used
      * with {@link #visibleProjectId()} to check a status/priority/type a scoped

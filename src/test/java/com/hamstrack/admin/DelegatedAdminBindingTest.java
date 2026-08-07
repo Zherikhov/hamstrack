@@ -22,6 +22,7 @@ import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -508,6 +509,47 @@ class DelegatedAdminBindingTest {
         mockMvc.perform(get(base + "/statuses/" + id + "/usage").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.issues").value(0));
+    }
+
+    // ---------- cross-tenant usage isolation (the P0 leak: usage stats must not span tenants) ----------
+
+    @Test
+    void catalogUsageCountsAreScopedToTheCallersWorkspace() throws Exception {
+        // Workspace A with one project; workspace B with two — all unbound, so all
+        // three implicitly use the global system-default workflow that the seeded
+        // global "To Do" status belongs to. A delegated console must report only the
+        // caller's own workspace's projects, never a global figure spanning tenants.
+        var ownerA = user();
+        var wsA = workspace(ownerA);
+        member(wsA, ownerA, WorkspaceRole.OWNER);
+        project(wsA, ownerA);
+        var tokenA = login(ownerA);
+
+        var ownerB = user();
+        var wsB = workspace(ownerB);
+        member(wsB, ownerB, WorkspaceRole.OWNER);
+        project(wsB, ownerB);
+        project(wsB, ownerB);
+        var tokenB = login(ownerB);
+
+        // Workspace A sees exactly its 1 project using the shared global "To Do"
+        mockMvc.perform(get("/api/workspaces/" + wsA.getId() + "/admin/statuses")
+                        .header("Authorization", "Bearer " + tokenA))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.name == 'To Do')].usage.projects").value(Matchers.contains(1)));
+
+        // Workspace B sees exactly its 2 — A's project never inflates B's figure and vice versa
+        mockMvc.perform(get("/api/workspaces/" + wsB.getId() + "/admin/statuses")
+                        .header("Authorization", "Bearer " + tokenB))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.name == 'To Do')].usage.projects").value(Matchers.contains(2)));
+
+        // The global (system-admin / DC) console still counts across the whole install
+        var admin = adminToken();
+        mockMvc.perform(get("/api/admin/statuses").header("Authorization", "Bearer " + admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.name == 'To Do')].usage.projects")
+                        .value(Matchers.contains(Matchers.greaterThanOrEqualTo(3))));
     }
 
     // ---------- setup helpers ----------

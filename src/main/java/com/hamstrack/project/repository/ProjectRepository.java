@@ -20,41 +20,71 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
 
     boolean existsByWorkspaceAndKey(Workspace workspace, String key);
 
-    // Admin matrix + usage counts
+    // Admin matrix
     List<Project> findAllByOrderByCreatedAtAsc();
 
-    long countByWorkflowId(UUID workflowId);
+    // ---- "used by N projects" counts + "where is this used?" listings ----
+    // Every query is scope-filtered: pass wsId/projectId = null for the global
+    // (system-admin / DC) console — no predicate, whole-install counts; pass a
+    // workspace or project for a delegated console so a tenant never sees usage
+    // spanning other tenants. includeNull adds implicitly-bound projects (NULL
+    // binding = the system-default set) but only within the same scope filter.
 
-    long countByPrioritySetId(UUID prioritySetId);
+    @Query("select count(p) from Project p where "
+            + "(p.workflow.id = :id or (:includeNull = true and p.workflow is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    long countProjectsUsingWorkflow(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                    @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByWorkflowIdIsNull();
+    @Query("select count(p) from Project p where "
+            + "(p.prioritySet.id = :id or (:includeNull = true and p.prioritySet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    long countProjectsUsingPrioritySet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                       @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByPrioritySetIdIsNull();
+    @Query("select count(p) from Project p where "
+            + "(p.fieldSet.id = :id or (:includeNull = true and p.fieldSet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    long countProjectsUsingFieldSet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                    @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByFieldSetId(UUID fieldSetId);
+    @Query("select count(p) from Project p where "
+            + "(p.issueTypeSet.id = :id or (:includeNull = true and p.issueTypeSet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    long countProjectsUsingIssueTypeSet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                        @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByFieldSetIdIsNull();
+    @Query("select p from Project p where "
+            + "(p.workflow.id = :id or (:includeNull = true and p.workflow is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    List<Project> findProjectsUsingWorkflow(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                            @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByIssueTypeSetId(UUID issueTypeSetId);
+    @Query("select p from Project p where "
+            + "(p.prioritySet.id = :id or (:includeNull = true and p.prioritySet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    List<Project> findProjectsUsingPrioritySet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                               @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    long countByIssueTypeSetIdIsNull();
+    @Query("select p from Project p where "
+            + "(p.fieldSet.id = :id or (:includeNull = true and p.fieldSet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    List<Project> findProjectsUsingFieldSet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                            @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
-    // Usage-detail listings for the admin "where is this used?" popovers
-    List<Project> findAllByWorkflowId(UUID workflowId);
-
-    List<Project> findAllByWorkflowIdIsNull();
-
-    List<Project> findAllByPrioritySetId(UUID prioritySetId);
-
-    List<Project> findAllByPrioritySetIdIsNull();
-
-    List<Project> findAllByFieldSetId(UUID fieldSetId);
-
-    List<Project> findAllByFieldSetIdIsNull();
-
-    List<Project> findAllByIssueTypeSetId(UUID issueTypeSetId);
-
-    List<Project> findAllByIssueTypeSetIdIsNull();
+    @Query("select p from Project p where "
+            + "(p.issueTypeSet.id = :id or (:includeNull = true and p.issueTypeSet is null)) "
+            + "and (:wsId is null or p.workspace.id = :wsId) "
+            + "and (:projectId is null or p.id = :projectId)")
+    List<Project> findProjectsUsingIssueTypeSet(@Param("id") UUID id, @Param("includeNull") boolean includeNull,
+                                                @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
     // UPDATE ... RETURNING gives each concurrent transaction its own value — an
     // increment followed by a separate read lets two creates observe the same seq

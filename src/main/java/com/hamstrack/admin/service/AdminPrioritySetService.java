@@ -40,7 +40,7 @@ public class AdminPrioritySetService {
         var sets = scope.isGlobal()
                 ? prioritySetRepository.findAllAtScope(null, null)
                 : prioritySetRepository.findAllBindableForProject(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return sets.stream().map(this::toResponse).toList();
+        return sets.stream().map(set -> toResponse(scope, set)).toList();
     }
 
     @Transactional
@@ -53,7 +53,7 @@ public class AdminPrioritySetService {
         set.setName(req.name());
         prioritySetRepository.save(set);
         applyItems(scope, set, req);
-        return toResponse(set);
+        return toResponse(scope, set);
     }
 
     @Transactional
@@ -70,7 +70,7 @@ public class AdminPrioritySetService {
         // DELETEs in one flush, colliding with UNIQUE(set_id, priority_id).
         prioritySetItemRepository.flush();
         applyItems(scope, set, req);
-        return toResponse(set);
+        return toResponse(scope, set);
     }
 
     @Transactional
@@ -79,7 +79,7 @@ public class AdminPrioritySetService {
         if (set.isSystemDefault()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "The system default priority set cannot be deleted");
         }
-        long projects = projectCountService.projectsUsingPrioritySet(set);
+        long projects = projectCountService.projectsUsingPrioritySet(scope, set);
         if (projects > 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     projects + " projects use this priority set — reassign them first");
@@ -105,13 +105,13 @@ public class AdminPrioritySetService {
         }
     }
 
-    private AdminPrioritySetResponse toResponse(PrioritySet set) {
+    private AdminPrioritySetResponse toResponse(ScopeContext scope, PrioritySet set) {
         var items = prioritySetItemRepository.findAllBySetOrderByPosition(set).stream()
                 .map(i -> new AdminPrioritySetResponse.Item(
                         PriorityResponse.of(i.getPriority()), i.isDefaultForNewIssues()))
                 .toList();
         return new AdminPrioritySetResponse(set.getId(), set.getName(), set.isSystemDefault(),
-                items, projectCountService.projectsUsingPrioritySet(set), set.scopeLabel());
+                items, projectCountService.projectsUsingPrioritySet(scope, set), set.scopeLabel());
     }
 
     private PrioritySet require(ScopeContext scope, UUID id) {

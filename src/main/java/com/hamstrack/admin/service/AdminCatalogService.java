@@ -52,7 +52,7 @@ public class AdminCatalogService {
         var rows = scope.isGlobal()
                 ? statusRepository.findAllAtScope(null, null)
                 : statusRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return rows.stream().map(s -> AdminStatusResponse.of(s, statusUsage(s))).toList();
+        return rows.stream().map(s -> AdminStatusResponse.of(s, statusUsage(scope, s))).toList();
     }
 
     @Transactional
@@ -69,7 +69,7 @@ public class AdminCatalogService {
                 statusRepository.findAllAtScope(scope.workspaceId(), scope.projectId()).stream()
                         .mapToInt(Status::getPosition).max().orElse(-1)));
         statusRepository.save(s);
-        return AdminStatusResponse.of(s, statusUsage(s));
+        return AdminStatusResponse.of(s, statusUsage(scope, s));
     }
 
     @Transactional
@@ -84,7 +84,7 @@ public class AdminCatalogService {
         if (req.color() != null) s.setColor(req.color());
         if (req.position() != null) s.setPosition(req.position());
         statusRepository.save(s);
-        return AdminStatusResponse.of(s, statusUsage(s));
+        return AdminStatusResponse.of(s, statusUsage(scope, s));
     }
 
     @Transactional
@@ -140,7 +140,7 @@ public class AdminCatalogService {
         var rows = scope.isGlobal()
                 ? priorityRepository.findAllAtScope(null, null)
                 : priorityRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return rows.stream().map(p -> AdminPriorityResponse.of(p, priorityUsage(p))).toList();
+        return rows.stream().map(p -> AdminPriorityResponse.of(p, priorityUsage(scope, p))).toList();
     }
 
     @Transactional
@@ -157,7 +157,7 @@ public class AdminCatalogService {
                 priorityRepository.findAllAtScope(scope.workspaceId(), scope.projectId()).stream()
                         .mapToInt(Priority::getPosition).max().orElse(-1)));
         priorityRepository.save(p);
-        return AdminPriorityResponse.of(p, priorityUsage(p));
+        return AdminPriorityResponse.of(p, priorityUsage(scope, p));
     }
 
     @Transactional
@@ -172,7 +172,7 @@ public class AdminCatalogService {
         p.setIcon(req.icon());
         if (req.position() != null) p.setPosition(req.position());
         priorityRepository.save(p);
-        return AdminPriorityResponse.of(p, priorityUsage(p));
+        return AdminPriorityResponse.of(p, priorityUsage(scope, p));
     }
 
     @Transactional
@@ -234,7 +234,7 @@ public class AdminCatalogService {
         var rows = scope.isGlobal()
                 ? issueTypeRepository.findAllAtScope(null, null)
                 : issueTypeRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return rows.stream().map(t -> AdminIssueTypeResponse.of(t, issueTypeUsage(t))).toList();
+        return rows.stream().map(t -> AdminIssueTypeResponse.of(t, issueTypeUsage(scope, t))).toList();
     }
 
     @Transactional
@@ -266,7 +266,7 @@ public class AdminCatalogService {
         t.setIcon(req.icon());
         if (req.position() != null) t.setPosition(req.position());
         issueTypeRepository.save(t);
-        return AdminIssueTypeResponse.of(t, issueTypeUsage(t));
+        return AdminIssueTypeResponse.of(t, issueTypeUsage(scope, t));
     }
 
     @Transactional
@@ -312,66 +312,78 @@ public class AdminCatalogService {
     @Transactional(readOnly = true)
     public UsageDetailResponse statusUsageDetail(ScopeContext scope, UUID id) {
         var s = requireStatus(scope, id);
-        var workflows = workflowStatusRepository.findWorkflowsUsingStatus(s.getId());
+        var workflows = workflowStatusRepository.findWorkflowsUsingStatus(s.getId()).stream()
+                .filter(scope::canSee).toList();
         var projects = workflows.stream()
-                .flatMap(wf -> projectCountService.projectsListUsingWorkflow(wf).stream())
+                .flatMap(wf -> projectCountService.projectsListUsingWorkflow(scope, wf).stream())
                 .toList();
         return new UsageDetailResponse(
                 workflows.stream().map(w -> w.getName()).toList(),
                 List.of(),
                 UsageDetailResponse.dedupe(projects),
-                issueRepository.countByStatus(s));
+                issueRepository.countByStatusScoped(s, scope.workspaceId(), scope.projectId()));
     }
 
     @Transactional(readOnly = true)
     public UsageDetailResponse priorityUsageDetail(ScopeContext scope, UUID id) {
         var p = requirePriority(scope, id);
-        var sets = prioritySetItemRepository.findSetsUsingPriority(p.getId());
+        var sets = prioritySetItemRepository.findSetsUsingPriority(p.getId()).stream()
+                .filter(scope::canSee).toList();
         var projects = sets.stream()
-                .flatMap(set -> projectCountService.projectsListUsingPrioritySet(set).stream())
+                .flatMap(set -> projectCountService.projectsListUsingPrioritySet(scope, set).stream())
                 .toList();
         return new UsageDetailResponse(
                 List.of(),
                 sets.stream().map(s -> s.getName()).toList(),
                 UsageDetailResponse.dedupe(projects),
-                issueRepository.countByPriority(p));
+                issueRepository.countByPriorityScoped(p, scope.workspaceId(), scope.projectId()));
     }
 
     @Transactional(readOnly = true)
     public UsageDetailResponse issueTypeUsageDetail(ScopeContext scope, UUID id) {
         var t = requireIssueType(scope, id);
-        var sets = issueTypeSetItemRepository.findSetsUsingType(t.getId());
+        var sets = issueTypeSetItemRepository.findSetsUsingType(t.getId()).stream()
+                .filter(scope::canSee).toList();
         var projects = sets.stream()
-                .flatMap(set -> projectCountService.projectsListUsingIssueTypeSet(set).stream())
+                .flatMap(set -> projectCountService.projectsListUsingIssueTypeSet(scope, set).stream())
                 .toList();
         return new UsageDetailResponse(
                 List.of(),
                 sets.stream().map(s -> s.getName()).toList(),
                 UsageDetailResponse.dedupe(projects),
-                issueRepository.countByType(t));
+                issueRepository.countByTypeScoped(t, scope.workspaceId(), scope.projectId()));
     }
 
     // ---------- helpers ----------
 
-    private UsageInfo statusUsage(Status s) {
-        long workflows = workflowStatusRepository.countByStatus(s);
-        long projects = workflowStatusRepository.findWorkflowsUsingStatus(s.getId()).stream()
-                .mapToLong(projectCountService::projectsUsingWorkflow).sum();
-        return new UsageInfo(workflows, 0, projects, issueRepository.countByStatus(s));
+    // Usage is aggregated only over containers (workflows/sets) the scope can
+    // see and only over projects/issues within the scope — so a delegated
+    // console never reports figures spanning other tenants (see ScopeContext.canSee).
+    private UsageInfo statusUsage(ScopeContext scope, Status s) {
+        var workflows = workflowStatusRepository.findWorkflowsUsingStatus(s.getId()).stream()
+                .filter(scope::canSee).toList();
+        long projects = workflows.stream()
+                .mapToLong(wf -> projectCountService.projectsUsingWorkflow(scope, wf)).sum();
+        return new UsageInfo(workflows.size(), 0, projects,
+                issueRepository.countByStatusScoped(s, scope.workspaceId(), scope.projectId()));
     }
 
-    private UsageInfo priorityUsage(Priority p) {
-        long sets = prioritySetItemRepository.countByPriority(p);
-        long projects = prioritySetItemRepository.findSetsUsingPriority(p.getId()).stream()
-                .mapToLong(projectCountService::projectsUsingPrioritySet).sum();
-        return new UsageInfo(0, sets, projects, issueRepository.countByPriority(p));
+    private UsageInfo priorityUsage(ScopeContext scope, Priority p) {
+        var sets = prioritySetItemRepository.findSetsUsingPriority(p.getId()).stream()
+                .filter(scope::canSee).toList();
+        long projects = sets.stream()
+                .mapToLong(set -> projectCountService.projectsUsingPrioritySet(scope, set)).sum();
+        return new UsageInfo(0, sets.size(), projects,
+                issueRepository.countByPriorityScoped(p, scope.workspaceId(), scope.projectId()));
     }
 
-    private UsageInfo issueTypeUsage(IssueType t) {
-        long sets = issueTypeSetItemRepository.countByType(t);
-        long projects = issueTypeSetItemRepository.findSetsUsingType(t.getId()).stream()
-                .mapToLong(projectCountService::projectsUsingIssueTypeSet).sum();
-        return new UsageInfo(0, sets, projects, issueRepository.countByType(t));
+    private UsageInfo issueTypeUsage(ScopeContext scope, IssueType t) {
+        var sets = issueTypeSetItemRepository.findSetsUsingType(t.getId()).stream()
+                .filter(scope::canSee).toList();
+        long projects = sets.stream()
+                .mapToLong(set -> projectCountService.projectsUsingIssueTypeSet(scope, set)).sum();
+        return new UsageInfo(0, sets.size(), projects,
+                issueRepository.countByTypeScoped(t, scope.workspaceId(), scope.projectId()));
     }
 
     private short nextPosition(int currentMax) {
