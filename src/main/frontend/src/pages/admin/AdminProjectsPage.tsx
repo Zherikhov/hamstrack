@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { adminProjects, globalAdminApi } from '../../api'
 import type { ProjectBindings } from '../../api'
 import type { ProjectBinding } from '../../types'
-import { Button } from '../../components/ui'
+import { Button, Select } from '../../components/ui'
 import { AdminTable, PageHeader } from './common'
 
 /** Bulk-bar sentinel: leave this dimension of the selected projects untouched. */
@@ -70,22 +70,16 @@ export default function AdminProjectsPage() {
       options: typeSets.filter(s => !s.systemDefault).map(s => ({ id: s.id, name: s.name })) },
   ]
 
-  const selectStyle: React.CSSProperties = {
-    fontSize: 13, padding: '4px 8px', borderRadius: 'var(--radius-sm)',
-    border: '1px solid var(--color-border-2)', background: 'white',
-    color: 'var(--color-text)', cursor: 'pointer', maxWidth: 180,
-  }
-
   return (
     <>
       <PageHeader
         title="Project configuration"
         subtitle="Every project × its workflow, priority set, field set and issue type set — assign everything from one screen. Empty value = the system default."
         action={
-          <select value={wsFilter} onChange={e => setWsFilter(e.target.value)} style={selectStyle}>
+          <Select compact style={{ maxWidth: 180 }} value={wsFilter} onChange={e => setWsFilter(e.target.value)}>
             <option value="">All workspaces</option>
             {workspaces.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
-          </select>
+          </Select>
         }
       />
       {error && <p className="text-xs mb-3" style={{ color: 'var(--color-error)' }}>{error}</p>}
@@ -140,11 +134,11 @@ export default function AdminProjectsPage() {
             <td className="px-3 py-2.5 text-sm" style={{ color: 'var(--color-text-secondary)' }}>{p.workspaceName}</td>
             {dimensions.map(d => (
               <td key={d.key} className="px-3 py-2.5">
-                <select style={selectStyle} value={p[d.key] ?? ''}
+                <Select compact style={{ maxWidth: 180 }} value={p[d.key] ?? ''}
                         onChange={e => update.mutate({ p, patch: { [d.key]: e.target.value || null } })}>
                   <option value="">{d.defaultLabel}</option>
                   {d.options.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-                </select>
+                </Select>
               </td>
             ))}
           </tr>
@@ -184,15 +178,12 @@ function BulkBar({ count, dimensions, onApply, onClear }: {
         <label key={d.key} className="inline-flex items-center gap-1.5 text-xs"
                style={{ color: 'var(--color-text-secondary)' }}>
           {d.header}
-          <select value={choice[d.key]}
-                  onChange={e => setChoice(prev => ({ ...prev, [d.key]: e.target.value }))}
-                  style={{ fontSize: 12, padding: '3px 6px', borderRadius: 'var(--radius-sm)',
-                           border: '1px solid var(--color-border-2)', background: 'white',
-                           color: 'var(--color-text)', cursor: 'pointer', maxWidth: 150 }}>
+          <Select compact style={{ maxWidth: 160 }} value={choice[d.key]}
+                  onChange={e => setChoice(prev => ({ ...prev, [d.key]: e.target.value }))}>
             <option value={KEEP}>— keep —</option>
             <option value="">{d.defaultLabel}</option>
             {d.options.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-          </select>
+          </Select>
         </label>
       ))}
       <span className="ml-auto flex items-center gap-2">

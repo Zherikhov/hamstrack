@@ -5,7 +5,7 @@ import { Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
-import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress } from '../components/ui'
+import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
 import type { Issue, IssueType, Status } from '../types'
 
@@ -122,7 +122,7 @@ export default function BoardPage() {
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-display font-bold text-sm truncate">Board</span>
+            <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>Board</span>
           </div>
         </div>
 
@@ -132,15 +132,10 @@ export default function BoardPage() {
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <Filter size={13} style={{ color: 'var(--color-text-muted)' }} />
-          <select
-            value={filterPriority}
-            onChange={e => setFilterPriority(e.target.value)}
-            className="text-xs px-2 py-1 rounded border cursor-pointer outline-none"
-            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
-          >
+          <Select compact value={filterPriority} onChange={e => setFilterPriority(e.target.value)}>
             <option value="">All priorities</option>
             {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          </Select>
           {filterPriority && (
             <button
               className="text-xs cursor-pointer hover:underline"

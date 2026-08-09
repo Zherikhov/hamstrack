@@ -1,4 +1,5 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
+import { Select } from './ui'
 
 export const PAGE_SIZES = [10, 20, 50, 100]
 
@@ -20,14 +21,9 @@ export function Pager({ page, size, totalPages, totalElements, onPage, onSize }:
     >
       <label className="text-xs flex items-center gap-1.5" style={{ color: 'var(--color-text-muted)' }}>
         Per page
-        <select
-          value={size}
-          onChange={e => onSize(Number(e.target.value))}
-          className="text-xs px-1.5 py-1 rounded border cursor-pointer outline-none"
-          style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
-        >
+        <Select compact value={size} onChange={e => onSize(Number(e.target.value))}>
           {PAGE_SIZES.map(s => <option key={s} value={s}>{s}</option>)}
-        </select>
+        </Select>
       </label>
       <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
         {from}–{to} of {totalElements}

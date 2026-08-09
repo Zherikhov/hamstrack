@@ -4,7 +4,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, LayoutGrid } from 'lucide-react'
 import { apiListWorkspaces, apiCreateWorkspace } from '../api'
 import { Button, Input } from '../components/ui'
-import TopBar from '../components/TopBar'
 import type { Workspace } from '../types'
 
 export default function WorkspacesPage() {
@@ -43,8 +42,6 @@ export default function WorkspacesPage() {
 
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--color-surface)' }}>
-      <TopBar />
-
       <div className="flex-1 overflow-y-auto p-8">
         <div style={{ maxWidth: 720, margin: '0 auto' }}>
           {/* Header */}

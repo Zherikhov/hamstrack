@@ -2,7 +2,6 @@ import { Fragment, Suspense, lazy, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useParams, useLocation } from 'react-router' // Navigate used for / → /workspaces
 import { useAuthStore } from './auth'
 import { useConfigStore } from './config'
-import { getLastProject } from './recentProjects'
 import { apiRefresh, apiMe, apiPublicConfig } from './api'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
@@ -12,6 +11,8 @@ import WorkspacesPage from './pages/WorkspacesPage'
 import WorkspaceHomePage from './pages/WorkspaceHomePage'
 import WelcomePage from './pages/welcome/WelcomePage'
 import JoinTeamPage from './pages/welcome/JoinTeamPage'
+import HomePage from './pages/HomePage'
+import MyWorkPage from './pages/MyWorkPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
 import ProjectSettingsArea from './pages/settings/ProjectSettingsArea'
@@ -113,17 +114,15 @@ function RequirePublicSignup({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-// "/" is public: signed-in users go to their last active project (fallback:
-// workspace list), anonymous visitors see the landing page (unless a DC
-// install disabled it via app.legal.*)
+// "/" is public: signed-in users land on the Home dashboard (Beacon default),
+// anonymous visitors see the landing page (unless a DC install disabled it via
+// app.legal.*)
 function RootRoute() {
   const { accessToken, user } = useAuthStore()
   const publicLandingEnabled = useConfigStore((s) => s.config.publicLandingEnabled)
   if (accessToken) {
     if (user?.needsOnboarding) return <Navigate to="/welcome" replace />
-    const last = user ? getLastProject(user.id) : null
-    if (last) return <Navigate to={`/w/${last.wsId}/p/${last.projectId}`} replace />
-    return <Navigate to="/workspaces" replace />
+    return <Navigate to="/home" replace />
   }
   if (!publicLandingEnabled) return <Navigate to="/login" replace />
   return <LandingPage />
@@ -147,13 +146,18 @@ export default function App() {
             <Route path="/welcome" element={<WelcomePage />} />
             <Route path="/welcome/invites" element={<JoinTeamPage />} />
             <Route path="/admin/*" element={<Suspense fallback={<LazyFallback />}><AdminArea /></Suspense>} />
-            <Route path="/workspaces" element={<WorkspacesPage />} />
-            <Route path="/w/:wsId" element={<AppShell />}>
-              <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
-              <Route path="settings/*" element={<ParamKeyed><WorkspaceSettingsArea /></ParamKeyed>} />
-              <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
-              <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
-              <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
+            {/* Beacon shell (rail + top bar) wraps all global + project pages */}
+            <Route element={<AppShell />}>
+              <Route path="/home" element={<HomePage />} />
+              <Route path="/my-work" element={<MyWorkPage />} />
+              <Route path="/workspaces" element={<WorkspacesPage />} />
+              <Route path="/w/:wsId">
+                <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
+                <Route path="settings/*" element={<ParamKeyed><WorkspaceSettingsArea /></ParamKeyed>} />
+                <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
+                <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
+                <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
+              </Route>
             </Route>
           </Route>
         </Routes>

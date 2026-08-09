@@ -8,8 +8,10 @@ import { getRecentProjects, recordProjectVisit, type RecentProject } from '../re
 import CreateProjectModal from './CreateProjectModal'
 
 interface Props {
-  wsId: string
+  wsId?: string
   projectId?: string
+  /** Trigger tone: 'dark' for the ink rail, 'light' for the top search bar. */
+  tone?: 'dark' | 'light'
 }
 
 /**
@@ -18,16 +20,17 @@ interface Props {
  * workspace (padded with the current workspace's projects while history is
  * short), plus View all projects / View all workspaces / New project.
  */
-export default function ProjectSwitcher({ wsId, projectId }: Props) {
+export default function ProjectSwitcher({ wsId, projectId, tone = 'dark' }: Props) {
   const navigate = useNavigate()
   const { user } = useAuthStore()
   const [open, setOpen] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
+  const dark = tone === 'dark'
 
   const { data: projects = [] } = useQuery({
     queryKey: ['projects', wsId],
-    queryFn: () => apiListProjects(wsId),
+    queryFn: () => apiListProjects(wsId!),
     enabled: !!wsId,
   })
 
@@ -41,7 +44,7 @@ export default function ProjectSwitcher({ wsId, projectId }: Props) {
 
   // Journal the visit — feeds this dropdown and the "/" redirect
   useEffect(() => {
-    if (user && current) {
+    if (user && current && wsId) {
       recordProjectVisit(user.id, { wsId, projectId: current.id, key: current.key, name: current.name })
     }
   }, [user, current, wsId])
@@ -52,10 +55,12 @@ export default function ProjectSwitcher({ wsId, projectId }: Props) {
   const known = workspacesLoaded
     ? recents.filter(r => workspaces.some(w => w.id === r.wsId))
     : recents
-  const padding: RecentProject[] = active
-    .filter(p => !known.some(r => r.projectId === p.id))
-    .slice(0, Math.max(0, 5 - known.length))
-    .map(p => ({ wsId, projectId: p.id, key: p.key, name: p.name, visitedAt: 0 }))
+  const padding: RecentProject[] = wsId
+    ? active
+        .filter(p => !known.some(r => r.projectId === p.id))
+        .slice(0, Math.max(0, 5 - known.length))
+        .map(p => ({ wsId, projectId: p.id, key: p.key, name: p.name, visitedAt: 0 }))
+    : []
   const entries = [...known, ...padding]
 
   // Group by workspace, current workspace first, then by most recent visit
@@ -90,22 +95,24 @@ export default function ProjectSwitcher({ wsId, projectId }: Props) {
     <div ref={ref} style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen(v => !v)}
-        className="flex items-center gap-2 px-2.5 py-1.5 text-sm cursor-pointer transition-colors rounded"
+        className="flex items-center gap-2 px-2.5 py-2 text-sm cursor-pointer transition-colors rounded-md"
         style={{
-          background: open ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)',
-          border: '1px solid rgba(255,255,255,0.10)',
-          color: 'white',
+          background: dark
+            ? (open ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.07)')
+            : (open ? 'var(--color-surface-2)' : 'var(--color-surface)'),
+          border: `1px solid ${dark ? 'rgba(255,255,255,0.10)' : 'var(--color-border-2)'}`,
+          color: dark ? 'white' : 'var(--color-text)',
         }}
       >
         {current ? (
           <>
-            <span className="mono text-xs" style={{ color: 'rgba(255,255,255,0.55)' }}>{current.key}</span>
+            <span className="mono text-xs" style={{ color: dark ? 'rgba(255,255,255,0.55)' : 'var(--color-text-muted)' }}>{current.key}</span>
             <span className="max-w-44 truncate" style={{ fontSize: 13.5 }}>{current.name}</span>
           </>
         ) : (
           <span style={{ fontSize: 13.5 }}>Projects</span>
         )}
-        <ChevronDown size={13} style={{ color: 'rgba(255,255,255,0.4)' }} />
+        <ChevronDown size={13} style={{ color: dark ? 'rgba(255,255,255,0.4)' : 'var(--color-text-muted)' }} />
       </button>
 
       {open && (
@@ -172,18 +179,20 @@ export default function ProjectSwitcher({ wsId, projectId }: Props) {
           </div>
 
           <div className="border-t" style={{ borderColor: 'var(--color-border)' }}>
-            <button
-              // showAll suppresses WorkspaceHome's single-project auto-redirect:
-              // an explicit "View all projects" click must always land on the list
-              onClick={() => { setOpen(false); navigate(`/w/${wsId}`, { state: { showAll: true } }) }}
-              className={footerBtnClass}
-              style={{ color: 'var(--color-text-secondary)' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <LayoutGrid size={13} />
-              View all projects
-            </button>
+            {wsId && (
+              <button
+                // showAll suppresses WorkspaceHome's single-project auto-redirect:
+                // an explicit "View all projects" click must always land on the list
+                onClick={() => { setOpen(false); navigate(`/w/${wsId}`, { state: { showAll: true } }) }}
+                className={footerBtnClass}
+                style={{ color: 'var(--color-text-secondary)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <LayoutGrid size={13} />
+                View all projects
+              </button>
+            )}
             <button
               onClick={() => { setOpen(false); navigate('/workspaces') }}
               className={footerBtnClass}
@@ -194,21 +203,23 @@ export default function ProjectSwitcher({ wsId, projectId }: Props) {
               <Globe size={13} />
               View all workspaces
             </button>
-            <button
-              onClick={() => { setOpen(false); setShowCreate(true) }}
-              className={footerBtnClass}
-              style={{ color: 'var(--color-brand)' }}
-              onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
-              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-            >
-              <Plus size={13} />
-              New project
-            </button>
+            {wsId && (
+              <button
+                onClick={() => { setOpen(false); setShowCreate(true) }}
+                className={footerBtnClass}
+                style={{ color: 'var(--color-brand)' }}
+                onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
+                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+              >
+                <Plus size={13} />
+                New project
+              </button>
+            )}
           </div>
         </div>
       )}
 
-      {showCreate && <CreateProjectModal wsId={wsId} onClose={() => setShowCreate(false)} />}
+      {wsId && showCreate && <CreateProjectModal wsId={wsId} onClose={() => setShowCreate(false)} />}
     </div>
   )
 }

@@ -1,7 +1,7 @@
 import { clsx } from 'clsx'
-import { forwardRef } from 'react'
+import { forwardRef, useState, useRef, useEffect, useMemo, Children, isValidElement } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
-import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, type LucideIcon } from 'lucide-react'
+import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, Check, type LucideIcon } from 'lucide-react'
 import type { Priority } from '../types'
 
 // ── Button ────────────────────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean
 }
 
-const buttonBase = 'inline-flex items-center gap-1.5 font-medium rounded transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed select-none'
+const buttonBase = 'inline-flex items-center gap-1.5 font-semibold rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed select-none'
 
 const buttonVariants: Record<ButtonVariant, string> = {
   primary: 'text-white',
@@ -78,7 +78,7 @@ export function Input({ label, error, className, id, ...props }: InputProps) {
       )}
       <input
         id={inputId}
-        className={clsx('w-full px-3 py-1.5 text-sm rounded border outline-none transition-colors', className)}
+        className={clsx('w-full px-3 py-2 text-sm rounded-md border outline-none transition-colors', className)}
         style={{
           background: 'white',
           borderColor: error ? 'var(--color-error)' : 'var(--color-border-2)',
@@ -131,7 +131,7 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
         <textarea
           ref={ref}
           id={inputId}
-          className={clsx('w-full px-3 py-1.5 text-sm rounded border outline-none resize-none transition-colors', className)}
+          className={clsx('w-full px-3 py-2 text-sm rounded-md border outline-none resize-none transition-colors', className)}
           style={{
             background: 'white',
             borderColor: 'var(--color-border-2)',
@@ -144,33 +144,159 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(
   }
 )
 
-// ── Select ────────────────────────────────────────────────────────────────────
+// ── Select (custom, Beacon-styled popover) ────────────────────────────────────
+// Native <select> option popups are drawn by the OS and can't be styled to match
+// the UI (sharp corners, wrong colours). This keeps the familiar API —
+// <Select value onChange><option/></Select> — but renders a styled dropdown.
+// onChange receives a { target: { value } } shape, so existing handlers
+// (e => setX(e.target.value)) keep working unchanged.
 
-interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
+interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, 'onChange' | 'size'> {
   label?: string
+  onChange?: React.ChangeEventHandler<HTMLSelectElement>
+  /** Inline, content-width, smaller — for filter bars and table cells. */
+  compact?: boolean
 }
 
-export function Select({ label, className, id, children, ...props }: SelectProps) {
+interface SelectOption { value: string; label: ReactNode; disabled: boolean }
+
+export function Select({ label, className, id, children, value, onChange, disabled, style, compact }: SelectProps) {
   const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-')
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const popRef = useRef<HTMLDivElement>(null)
+  const [open, setOpen] = useState(false)
+  const [hi, setHi] = useState(0)
+  const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
+
+  const options: SelectOption[] = useMemo(() =>
+    Children.toArray(children)
+      .filter(isValidElement)
+      .filter(c => (c as { type?: unknown }).type === 'option')
+      .map(c => {
+        const p = (c as { props: { value?: unknown; children?: ReactNode; disabled?: boolean } }).props
+        return { value: String(p.value ?? p.children ?? ''), label: (p.children ?? p.value ?? '') as ReactNode, disabled: !!p.disabled }
+      }),
+  [children])
+
+  const current = options.find(o => o.value === String(value ?? '')) ?? options[0]
+
+  function place() {
+    const r = btnRef.current?.getBoundingClientRect()
+    if (!r) return
+    const estH = Math.min(options.length * 36 + 8, 264)
+    const dropUp = r.bottom + estH > window.innerHeight && r.top > estH
+    setPos({ left: r.left, top: dropUp ? r.top - estH - 4 : r.bottom + 4, width: r.width })
+  }
+  function toggle() {
+    if (disabled) return
+    if (!open) { place(); setHi(Math.max(0, options.findIndex(o => o.value === current?.value))) }
+    setOpen(o => !o)
+  }
+  function choose(o: SelectOption) {
+    if (o.disabled) return
+    setOpen(false)
+    if (o.value !== String(value ?? '')) onChange?.({ target: { value: o.value } } as unknown as React.ChangeEvent<HTMLSelectElement>)
+  }
+
+  useEffect(() => {
+    if (!open) return
+    function onDoc(e: MouseEvent) {
+      if (wrapRef.current?.contains(e.target as Node) || popRef.current?.contains(e.target as Node)) return
+      setOpen(false)
+    }
+    function onScroll(e: Event) { if (!popRef.current?.contains(e.target as Node)) setOpen(false) }
+    function onResize() { setOpen(false) }
+    document.addEventListener('mousedown', onDoc)
+    window.addEventListener('scroll', onScroll, true)
+    window.addEventListener('resize', onResize)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      window.removeEventListener('scroll', onScroll, true)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [open])
+
+  function onKey(e: React.KeyboardEvent) {
+    if (disabled) return
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle() }
+      return
+    }
+    if (e.key === 'Escape') { e.preventDefault(); setOpen(false) }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(options.length - 1, h + 1)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, h - 1)) }
+    else if (e.key === 'Enter') { e.preventDefault(); const o = options[hi]; if (o) choose(o) }
+  }
+
   return (
-    <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-1" ref={wrapRef}>
       {label && (
         <label htmlFor={inputId} className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>
           {label}
         </label>
       )}
-      <select
+      <button
+        type="button"
         id={inputId}
-        className={clsx('w-full px-3 py-1.5 text-sm rounded border outline-none cursor-pointer', className)}
-        style={{
-          background: 'white',
-          borderColor: 'var(--color-border-2)',
-          color: 'var(--color-text)',
-        }}
-        {...props}
+        ref={btnRef}
+        disabled={disabled}
+        onClick={toggle}
+        onKeyDown={onKey}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className={clsx(
+          'rounded-md border outline-none cursor-pointer flex items-center gap-2 text-left transition-colors',
+          compact ? 'px-2.5 py-1.5 text-xs' : 'w-full px-3 py-2 text-sm',
+          className,
+        )}
+        style={{ background: 'var(--color-card)', borderColor: open ? 'var(--color-brand)' : 'var(--color-border-2)', color: 'var(--color-text)', opacity: disabled ? 0.6 : 1, ...(style as React.CSSProperties) }}
       >
-        {children}
-      </select>
+        <span className="flex-1 min-w-0 truncate">{current ? current.label : ''}</span>
+        <ChevronDown size={14} style={{ color: 'var(--color-text-muted)', flexShrink: 0, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 120ms' }} />
+      </button>
+
+      {open && pos && (
+        <div
+          ref={popRef}
+          role="listbox"
+          style={{
+            position: 'fixed', left: pos.left, top: pos.top, minWidth: pos.width, maxWidth: 360,
+            maxHeight: 264, overflowY: 'auto', zIndex: 80,
+            background: 'var(--color-card)', border: '1px solid var(--color-border-2)',
+            borderRadius: 'var(--radius-md)', boxShadow: 'var(--shadow-lg)', padding: 4,
+          }}
+        >
+          {options.map((o, idx) => {
+            const selected = o.value === current?.value
+            const active = idx === hi
+            return (
+              <div
+                key={o.value + ':' + idx}
+                role="option"
+                aria-selected={selected}
+                onMouseEnter={() => setHi(idx)}
+                onClick={() => choose(o)}
+                className="flex items-center gap-2 cursor-pointer"
+                style={{
+                  padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: 13.5,
+                  color: o.disabled ? 'var(--color-text-muted)' : 'var(--color-text)',
+                  background: selected
+                    ? 'color-mix(in srgb, var(--color-brand) 12%, var(--color-card))'
+                    : (active ? 'var(--color-surface)' : 'transparent'),
+                  opacity: o.disabled ? 0.55 : 1,
+                }}
+              >
+                <span className="flex-1 min-w-0 truncate">{o.label}</span>
+                {selected && <Check size={14} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />}
+              </div>
+            )
+          })}
+          {options.length === 0 && (
+            <div style={{ padding: '8px 10px', fontSize: 13, color: 'var(--color-text-muted)' }}>No options</div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -289,7 +415,7 @@ export function ChildrenProgress({
 
   if (compact) {
     // Teal tint when all children are done (production-trusted state), muted otherwise.
-    const brand = '#0F6E63'
+    const brand = '#0EA5A4'
     return (
       <span
         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full mono"

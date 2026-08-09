@@ -5,7 +5,7 @@ import { Plus, Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssuesPaged, apiListWorkspaceMembers } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
-import { Button, StatusBadge, PriorityBadge, Avatar, ParentChip, ChildrenProgress } from '../components/ui'
+import { Button, StatusBadge, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import { Pager } from '../components/Pager'
 import { FieldValueDisplay } from '../components/fields'
 import { useUiStore } from '../uiStore'
@@ -102,24 +102,14 @@ export default function BacklogPage() {
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <Filter size={13} style={{ color: 'var(--color-text-muted)' }} />
-          <select
-            value={filterStatusId}
-            onChange={e => setFilterStatusId(e.target.value)}
-            className="text-xs px-2 py-1 rounded border cursor-pointer outline-none"
-            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
-          >
+          <Select compact value={filterStatusId} onChange={e => setFilterStatusId(e.target.value)}>
             <option value="">All open statuses</option>
             {openStatuses.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <select
-            value={filterPriority}
-            onChange={e => setFilterPriority(e.target.value)}
-            className="text-xs px-2 py-1 rounded border cursor-pointer outline-none"
-            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)', background: 'white' }}
-          >
+          </Select>
+          <Select compact value={filterPriority} onChange={e => setFilterPriority(e.target.value)}>
             <option value="">All priorities</option>
             {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+          </Select>
           {(filterStatusId || filterPriority) && (
             <button
               className="text-xs cursor-pointer hover:underline"

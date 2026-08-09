@@ -7,9 +7,11 @@ import type { Notification } from '../types'
 interface Props {
   /** Injected notification from SSE — added to list in real-time. */
   incoming?: Notification | null
+  /** Trigger tone: 'dark' for the ink rail, 'light' for the top search bar. */
+  tone?: 'dark' | 'light'
 }
 
-export default function NotificationBell({ incoming }: Props) {
+export default function NotificationBell({ incoming, tone = 'dark' }: Props) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
@@ -73,8 +75,12 @@ export default function NotificationBell({ incoming }: Props) {
       <button
         ref={btnRef}
         onClick={handleToggle}
-        className="relative flex items-center justify-center cursor-pointer hover:opacity-80 transition-opacity"
-        style={{ width: 28, height: 28, color: 'rgba(255,255,255,0.65)' }}
+        className="relative flex items-center justify-center cursor-pointer transition-colors rounded-lg"
+        style={{
+          width: tone === 'light' ? 38 : 28,
+          height: tone === 'light' ? 38 : 28,
+          color: tone === 'light' ? 'var(--color-text-secondary)' : 'rgba(255,255,255,0.65)',
+        }}
         title="Notifications"
       >
         <Bell size={15} />

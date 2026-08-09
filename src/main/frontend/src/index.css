@@ -1,45 +1,60 @@
 @import "tailwindcss";
 
 @theme {
-  /* Brand / safety-state palette */
-  --color-brand: #0F6E63;
-  --color-brand-hover: #0C5950;
-  --color-pending: #B45309;
-  --color-sandbox: #64748B;
+  /* ─────────────────────────────────────────────────────────────────────────
+     Beacon design system (2026-08-09). Slate neutrals + teal accent, dark ink
+     navigation rail. Token NAMES are kept stable so existing components re-skin
+     without edits; only the VALUES changed from the old warm-neutral/navy scheme.
+     ───────────────────────────────────────────────────────────────────────── */
 
-  /* Warm neutrals */
-  --color-surface: #F7F6F3;
-  --color-surface-2: #EFEDE7;
-  --color-border: #E4E1DA;
-  --color-border-2: #CBC7BC;
-  --color-text-muted: #8B8680;
-  --color-text-secondary: #5C5950;
-  --color-text: #1C1B19;
-  --color-ink: #1C1B19;
+  /* Brand / accent (teal) */
+  --color-brand: #0EA5A4;
+  --color-brand-hover: #0C9188;
+  --color-accent-2: #14B8A6;
 
-  /* Top bar: near-black navy → navy diagonal gradient (30% near-black) */
-  --color-ink-blue-deep: #0B0D16;
-  --color-ink-blue: #263764;
-  --color-ink-menu: #272E48; /* dropdowns anchored to the top bar */
+  /* Safety-state accents (product trust machine — see DESIGN.md) */
+  --color-pending: #F79009;   /* amber — pending approval / in progress */
+  --color-sandbox: #667085;   /* slate — sandbox / draft */
+
+  /* Slate neutrals (cool) */
+  --color-surface: #F3F5F9;   /* app background */
+  --color-surface-2: #EEF1F6; /* subtle raised / hover fill */
+  --color-card: #FFFFFF;      /* card / panel surface */
+  --color-border: #E8EBF1;
+  --color-border-2: #DDE1EA;
+  --color-text-muted: #98A2B3;
+  --color-text-secondary: #5B6676;
+  --color-text: #16202E;
+
+  /* Dark navigation rail (Beacon "ink" nav) */
+  --color-ink: #101828;            /* rail background / dark surfaces */
+  --color-ink-blue-deep: #101828;  /* rail gradient start */
+  --color-ink-blue: #17203260;     /* (legacy alias) subtle rail depth */
+  --color-ink-menu: #1C2536;       /* menus/dropdowns anchored on the dark rail */
+  --color-rail-text: #9AA5B5;      /* rail item label */
+  --color-rail-active: #5EEAD4;    /* rail active label (bright teal) */
+  --color-rail-muted: #6B7688;     /* rail section labels / meta */
 
   /* Semantic */
-  --color-success: #15803D;
-  --color-warning: #B45309;
-  --color-error: #B91C1C;
-  --color-info: #64748B;
+  --color-success: #12B981;
+  --color-warning: #F79009;
+  --color-error: #F04438;
+  --color-info: #667085;
 
-  /* Typography */
-  --font-display: "Cabinet Grotesk", sans-serif;
-  --font-body: "Instrument Sans", sans-serif;
+  /* Typography — Inter everywhere; IBM Plex Mono kept for keys/tables/audit
+     ("inspectable, not magic"), JetBrains Mono for script/validator source. */
+  --font-display: "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --font-code: "JetBrains Mono", monospace;
 
   /* Border radius (hierarchical) */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
 
-  /* Spacing scale (8px base) */
+  /* Spacing scale (8px base) — unchanged (shadows Tailwind max-w-*, see CLAUDE.md) */
   --spacing-2xs: 2px;
   --spacing-xs: 4px;
   --spacing-sm: 8px;
@@ -48,6 +63,11 @@
   --spacing-xl: 32px;
   --spacing-2xl: 48px;
   --spacing-3xl: 64px;
+
+  /* Elevation */
+  --shadow-card: 0 1px 3px rgba(20, 30, 50, 0.05);
+  --shadow-pop: 0 6px 18px rgba(20, 30, 50, 0.09);
+  --shadow-lg: 0 18px 50px rgba(20, 30, 50, 0.14);
 }
 
 * {
@@ -62,7 +82,7 @@ html, body, #root {
 
 body {
   font-family: var(--font-body);
-  font-size: 15px;
+  font-size: 14px;
   color: var(--color-text);
   background: var(--color-surface);
   -webkit-font-smoothing: antialiased;
@@ -89,9 +109,9 @@ body {
 }
 .legal-prose h2 {
   font-family: var(--font-display);
-  font-weight: 700;
+  font-weight: 800;
   font-size: 22px;
-  letter-spacing: -0.3px;
+  letter-spacing: -0.02em;
   color: var(--color-text);
   margin: 32px 0 8px;
 }
@@ -120,7 +140,7 @@ body {
 }
 
 /* Scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--color-border-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--color-border-2); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-text-muted); }

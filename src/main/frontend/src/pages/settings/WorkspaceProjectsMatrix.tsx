@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { workspaceAdminApi } from '../../api'
 import type { BindingOptions, ProjectBinding, SetOption } from '../../types'
 import { AdminTable, PageHeader } from '../admin/common'
+import { Select } from '../../components/ui'
 
 type Dim = 'workflowId' | 'prioritySetId' | 'fieldSetId' | 'issueTypeSetId'
 
@@ -57,11 +58,6 @@ export default function WorkspaceProjectsMatrix() {
     onError: e => setError(e instanceof Error ? e.message : 'Update failed'),
   })
 
-  const selectStyle: React.CSSProperties = {
-    fontSize: 13, padding: '4px 8px', borderRadius: 'var(--radius-sm)',
-    border: '1px solid var(--color-border-2)', background: 'white',
-  }
-
   return (
     <>
       <PageHeader
@@ -84,7 +80,7 @@ export default function WorkspaceProjectsMatrix() {
             </td>
             {DIMENSIONS.map(d => (
               <td key={d.key} className="px-3 py-2.5">
-                <select style={selectStyle} value={p[d.key] ?? ''} disabled={!options}
+                <Select compact style={{ maxWidth: 200 }} value={p[d.key] ?? ''} disabled={!options}
                         onChange={e => update.mutate({ p, dim: d.key, value: e.target.value })}>
                   <option value="">System default</option>
                   {(options?.[d.optionsKey] ?? []).map((o: SetOption) => (
@@ -92,7 +88,7 @@ export default function WorkspaceProjectsMatrix() {
                       {o.name}{o.scope !== 'GLOBAL' ? ` (${o.scope.toLowerCase()})` : ''}
                     </option>
                   ))}
-                </select>
+                </Select>
               </td>
             ))}
           </tr>

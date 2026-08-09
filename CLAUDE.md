@@ -178,6 +178,10 @@ Schema managed entirely by Flyway; `spring.jpa.hibernate.ddl-auto=validate` only
 
 Always read `DESIGN.md` before making any visual or UI decisions. All font choices, colors, spacing, and aesthetic direction are defined there. Do not deviate without explicit user approval.
 
+**Current visual language: "Beacon" (2026-08-09)** — slate neutrals + teal accent (`--color-brand` `#0EA5A4`), a dark navigation rail (`--color-ink` `#101828`), **Inter** everywhere (IBM Plex Mono kept for keys/tables/audit, JetBrains Mono for code). This replaced the warm-neutral palette + navy top bar and the Cabinet Grotesk/Instrument Sans typefaces. Chosen from the 10-variant study in `mockups/` (winner: `mockups/09-beacon.html`). **Token strategy:** `src/main/frontend/src/index.css` keeps the old CSS variable *names* and only remaps *values*, so any component reading `var(--color-*)`/`var(--font-*)` re-skinned for free — do NOT reintroduce hardcoded hex like `#0F6E63`; use the tokens.
+
+**App shell (Beacon):** a dark left **navigation rail** (`components/NavRail.tsx`, ~214px) — brand, teal "New issue" button (`uiStore.openCreateIssue()`), global **Home** + **My work**, the current project's section (Board / Backlog / Reports[SOON] / Settings) under a switchable project header, and a user footer → user menu (About, System administration, Sign out) — plus a slim light **top search bar** (`components/TopSearchBar.tsx`, HQL stub + `NotificationBell` + SSE). Composed by `AppShell`. **Home is the default post-login screen** (`pages/HomePage.tsx`): a work-centric dashboard (greeting, stat cards, "assigned to me", board snapshot, "due soon", priority breakdown, recent activity) — live data where an endpoint exists, a labelled "coming soon" placeholder otherwise; `RootRoute`/post-login redirect goes to Home, not the last project. Cross-project "My work" is `pages/MyWorkPage.tsx`. Issue detail is a right **drawer** (`IssueSidePanel`, Beacon-styled) over Board/Backlog. New UI elements that have no backend yet are drawn with a visible "coming soon" stub rather than omitted.
+
 ## Phase 3 API surface
 
 ```

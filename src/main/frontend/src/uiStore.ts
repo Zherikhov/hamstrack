@@ -11,7 +11,7 @@ export interface CreateIssuePreset {
 }
 
 interface UiState {
-  /** Create-issue dialog visibility — rendered by TopBar, triggerable from any page. */
+  /** Create-issue dialog visibility — rendered by AppShell, triggerable from any page. */
   createIssueOpen: boolean
   /** Optional pre-fill (e.g. "create sub-task"); undefined = a blank create. */
   createIssuePreset?: CreateIssuePreset

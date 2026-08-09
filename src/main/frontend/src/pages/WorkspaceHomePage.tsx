@@ -17,7 +17,7 @@ export default function WorkspaceHomePage() {
   const [showCreate, setShowCreate] = useState(false)
   const [unarchiving, setUnarchiving] = useState<string | null>(null)
 
-  // Distinct key from the Sidebar's ['projects', wsId] — this query includes archived
+  // Distinct key from ProjectSwitcher's ['projects', wsId] — this query includes archived
   const { data: projects = [], isLoading } = useQuery({
     queryKey: ['projects', wsId, 'all'],
     queryFn: () => apiListProjects(wsId!, true),
