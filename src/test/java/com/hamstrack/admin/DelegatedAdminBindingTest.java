@@ -129,7 +129,7 @@ class DelegatedAdminBindingTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"prioritySetId\":\"" + foreign.getId() + "\"}"))
-                .andExpect(status().isUnprocessableEntity());
+                .andExpect(status().isUnprocessableContent());
     }
 
     // ---------- project admin ----------
@@ -200,7 +200,7 @@ class DelegatedAdminBindingTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"prioritySetId\":\"" + priv.getId() + "\"}"))
-                .andExpect(status().isUnprocessableEntity());
+                .andExpect(status().isUnprocessableContent());
     }
 
     // ---------- scoped catalog ----------
@@ -360,7 +360,7 @@ class DelegatedAdminBindingTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"WF-" + System.nanoTime() + "\",\"statusIds\":[\"" + foreign.getId() + "\"]}"))
-                .andExpect(status().isUnprocessableEntity());
+                .andExpect(status().isUnprocessableContent());
     }
 
     @Test
@@ -445,7 +445,7 @@ class DelegatedAdminBindingTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"FSET-" + System.nanoTime() + "\",\"items\":[{\"fieldId\":\""
                                 + foreign.getId() + "\",\"required\":false,\"showOnCreate\":true}]}"))
-                .andExpect(status().isUnprocessableEntity());
+                .andExpect(status().isUnprocessableContent());
     }
 
     @Test

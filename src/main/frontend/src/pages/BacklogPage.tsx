@@ -5,12 +5,12 @@ import { Plus, Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssuesPaged, apiListWorkspaceMembers } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
-import { Button, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
+import { Button, StatusBadge, PriorityBadge, Avatar, ParentChip, ChildrenProgress } from '../components/ui'
 import { Pager } from '../components/Pager'
 import { FieldValueDisplay } from '../components/fields'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue, ProjectField, WorkspaceMember } from '../types'
+import type { Issue, IssueType, ProjectField, WorkspaceMember } from '../types'
 
 /** Backlog — every issue that is not in a DONE-category status, as a flat list. */
 export default function BacklogPage() {
@@ -146,7 +146,7 @@ export default function BacklogPage() {
                 {filterStatusId || filterPriority ? 'No issues match the filter' : 'Backlog is empty'}
               </span>
               {!filterStatusId && !filterPriority && (
-                <Button variant="secondary" size="sm" onClick={openCreateIssue}>
+                <Button variant="secondary" size="sm" onClick={() => openCreateIssue()}>
                   <Plus size={14} />
                   Create issue
                 </Button>
@@ -156,7 +156,7 @@ export default function BacklogPage() {
             <table className="w-full border-collapse">
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Assignee', ...fields.map(f => f.name)].map(h => (
+                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Parent', 'Assignee', ...fields.map(f => f.name)].map(h => (
                     <th
                       key={h}
                       className="text-left px-4 py-2 text-xs font-medium"
@@ -173,11 +173,13 @@ export default function BacklogPage() {
                     key={issue.id}
                     issue={issue}
                     fields={fields}
+                    issueTypes={issueTypes}
                     members={members}
                     active={openIssueNumber === issue.number}
                     onClick={() => setOpenIssueNumber(
                       openIssueNumber === issue.number ? undefined : issue.number
                     )}
+                    onOpenNumber={setOpenIssueNumber}
                   />
                 ))}
               </tbody>
@@ -208,6 +210,7 @@ export default function BacklogPage() {
           statuses={statuses}
           priorities={priorities}
           fields={fields}
+          onOpenIssue={setOpenIssueNumber}
           onClose={() => setOpenIssueNumber(undefined)}
         />
       )}
@@ -215,10 +218,17 @@ export default function BacklogPage() {
   )
 }
 
-function IssueRow({ issue, fields, members, active, onClick }: {
-  issue: Issue; fields: ProjectField[]; members: WorkspaceMember[]; active: boolean; onClick: () => void
+function IssueRow({ issue, fields, issueTypes, members, active, onClick, onOpenNumber }: {
+  issue: Issue; fields: ProjectField[]; issueTypes: IssueType[]; members: WorkspaceMember[]
+  active: boolean; onClick: () => void; onOpenNumber: (number: number) => void
 }) {
   const values = Object.fromEntries(issue.fields.map(f => [f.fieldId, f.value]))
+  const parentColor = issue.parentTypeId
+    ? issueTypes.find(t => t.id === issue.parentTypeId)?.color
+    : undefined
+  const parentNumber = issue.parentKey
+    ? Number(issue.parentKey.slice(issue.parentKey.lastIndexOf('-') + 1))
+    : undefined
   return (
     <tr
       onClick={onClick}
@@ -244,7 +254,24 @@ function IssueRow({ issue, fields, members, active, onClick }: {
         <PriorityBadge priority={issue.priority} />
       </td>
       <td className="px-4 py-2.5">
-        <span className="text-xs" style={{ color: issue.type.color }}>{issue.type.name}</span>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs" style={{ color: issue.type.color }}>{issue.type.name}</span>
+          {issue.childCount > 0 && (
+            <ChildrenProgress done={issue.doneChildCount} total={issue.childCount} compact />
+          )}
+        </div>
+      </td>
+      <td className="px-4 py-2.5" style={{ maxWidth: 140 }}>
+        {issue.parentKey && parentNumber !== undefined && Number.isFinite(parentNumber) ? (
+          <ParentChip
+            parentKey={issue.parentKey}
+            color={parentColor}
+            title={issue.parentTitle}
+            onClick={e => { e.stopPropagation(); onOpenNumber(parentNumber) }}
+          />
+        ) : (
+          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
+        )}
       </td>
       <td className="px-4 py-2.5">
         {issue.assignee ? (

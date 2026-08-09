@@ -261,7 +261,7 @@ The taxonomy (statuses, priorities, issue types, custom fields) lives in a catal
   "statuses":    [ { "id": "…", "name": "To Do", "color": "#6B7280", "category": "TODO", "position": 0 }, … ],
   "transitions": [ { "fromStatusId": null, "toStatusId": "…" } ],
   "priorities":  [ { "id": "…", "name": "High", "color": "#EA580C", "icon": "chevron-up", "isDefault": false }, … ],
-  "issueTypes":  [ { "id": "…", "name": "Bug", "color": "#EF4444", "icon": "bug", "position": 0 } ],
+  "issueTypes":  [ { "id": "…", "name": "Bug", "color": "#EF4444", "icon": "bug", "position": 0, "hierarchyLevel": 1 } ],
   "fields":      [ { "id": "…", "key": "severity", "name": "Severity", "type": "SELECT",
                      "config": { "options": [ { "id": "critical", "label": "Critical", "color": "#B91C1C" }, … ] },
                      "description": "Impact of the defect on users",
@@ -272,6 +272,8 @@ The taxonomy (statuses, priorities, issue types, custom fields) lives in a catal
 Transition semantics: a status with no source-specific rules is open (any move allowed); once it has rules, only its listed targets plus wildcard (`fromStatusId: null` = "from any") targets are accepted — a forbidden move returns `422` on issue updates and board drag-and-drop.
 
 Custom field types and their JSON value shapes: `TEXT`/`TEXTAREA`/`URL` — string; `NUMBER` — number (`config.min`/`max` enforced); `DATE` — `"YYYY-MM-DD"` string; `SELECT` — option id string; `MULTI_SELECT` — array of option ids; `USER` — user UUID (must be a workspace member); `CHECKBOX` — boolean. A `required` field must be filled on create and can never be cleared; `showOnCreate: false` fields are only offered when editing.
+
+Each issue type carries a `hierarchyLevel`: a parent must be **exactly one level above** its child (adjacent tiers only). The seeded taxonomy is `Epic` = 2, `Story`/`Task`/`Bug` = 1 and `Sub-task` = 0 — so an Epic can parent a Story/Task/Bug (but **not** a Sub-task directly), a Story/Task/Bug can parent a Sub-task, and a Sub-task can parent nothing. Use these levels to filter parent pickers and offer "create sub-task" (see [Issues](#issues)).
 
 ## System administration
 
@@ -344,6 +346,8 @@ Each scope owns its own rows: a workspace admin creates **workspace-scoped** sta
 
 Issues live under a project and are addressed by **number** — the numeric part of their key (`DEMO-42` → `…/issues/42`). Numbers are sequential per project and never reused.
 
+**Hierarchy.** An issue may have a parent in the same project, governed by issue-type [hierarchy levels](#project-configuration) (a parent's type level must be strictly greater than the child's). Every `IssueResponse` carries the parent summary (`parentId`, `parentKey`, `parentTitle`, `parentTypeId`, all `null` when there is no parent) and a direct-children roll-up (`childCount`, and `doneChildCount` for children in a DONE-category status). `GET …/issues/{number}/children` lists the direct children in board order.
+
 **Listing — dual shape.** Without `size`, `GET …/issues` returns the full unpaginated `IssueResponse` array (the board/kanban needs every card). Pass `size` to switch to a paginated [envelope](#conventions) (the backlog path); the optional `excludeDone=true` then drops issues in a DONE-category status server-side. The `statusId` / `assigneeId` / `priorityId` filters apply in both modes.
 
 | Method | Path | Auth | Description |
@@ -351,11 +355,12 @@ Issues live under a project and are addressed by **number** — the numeric part
 | `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | member | Create. `201` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=&excludeDone=&page=&size=` | member | List with optional filters — **dual shape** (see below) |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Get one |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/children` | member | Direct children of the issue, in board order |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history?page=&size=` | member | Field-level change history (paginated, oldest first) |
 | `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Partial update with optimistic locking |
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `MANAGER` | Delete issue + comments + attachments. `204` |
 
-**Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links a sub-task to a parent issue in the same project; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`:
+**Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links the issue to a parent in the same project — rejected with `422` if the parent is unknown, in another project, or its type's [hierarchy level](#project-configuration) is not strictly greater than this issue's type level; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`:
 
 ```bash
 curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
@@ -375,12 +380,17 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
   "id": "…", "number": 18, "key": "DEMO-18",
   "title": "Rate-limit authentication endpoints",
   "description": "Login accepts unlimited attempts…",
-  "type":   { "id": "…", "name": "Task", "color": "#3B82F6", "icon": "task", "position": 1 },
+  "type":   { "id": "…", "name": "Task", "color": "#3B82F6", "icon": "task", "position": 1, "hierarchyLevel": 1 },
   "status": { "id": "…", "name": "To Do", "color": "#6B7280", "category": "TODO", "position": 0 },
   "priority": { "id": "…", "name": "High", "color": "#EA580C", "icon": "chevron-up", "position": 1 },
   "assignee": { "id": "…", "displayName": "Ada Lovelace", "avatarUrl": null },
   "reporter": { "id": "…", "displayName": "Ada Lovelace", "avatarUrl": null },
   "parentId": null,
+  "parentKey": null,
+  "parentTitle": null,
+  "parentTypeId": null,
+  "childCount": 0,
+  "doneChildCount": 0,
   "dueDate": "2026-07-24",
   "fields": [ { "fieldId": "e1b2…", "value": 5 }, { "fieldId": "f3c4…", "value": "critical" } ],
   "version": 0,
@@ -388,7 +398,7 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
 }
 ```
 
-**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). To unset a nullable core field send `clearAssignee: true` / `clearDueDate: true` — a plain `null` can't be told apart from an omitted field (ignored when the id/date is also given). Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
+**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). To unset a nullable core field send `clearAssignee: true` / `clearDueDate: true` — a plain `null` can't be told apart from an omitted field (ignored when the id/date is also given). A `parentId` sets or changes the parent and `clearParent: true` detaches it (same convention); an illegal parent — unknown, in another project, self, a cycle, a [hierarchy-level](#project-configuration) violation, or a type change that conflicts with an existing parent or child edge — returns `422`. Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
 
 ```bash
 curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \

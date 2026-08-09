@@ -1299,8 +1299,9 @@ paths:
       summary: Create an issue
       description: |
         `assigneeId` must be a workspace member; `parentId` links a sub-task
-        to a parent issue in the same project. The issue gets the next
-        sequential project-scoped `number`.
+        to a parent issue in the same project (rejected with `422` if unknown,
+        in another project, or a hierarchy-level violation). The issue gets the
+        next sequential project-scoped `number`.
       operationId: createIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1396,7 +1397,10 @@ paths:
         Partial update — send any subset of fields plus the `version` you last
         read; a stale version returns `409` (omit `version` to skip the check).
         Status changes are validated against workflow transition rules (`422`
-        when forbidden).
+        when forbidden). `parentId` sets/changes the parent and `clearParent`
+        detaches it; an illegal parent (unknown/foreign-project, self, cycle,
+        hierarchy-level violation, or a type change that conflicts with an
+        existing parent/child edge) returns `422`.
       operationId: updateIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1432,6 +1436,26 @@ paths:
       responses:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/children:
+    get:
+      tags: [Issues]
+      summary: List an issue's direct children
+      description: The direct children of the issue, in board order (`position` then newest).
+      operationId: listIssueChildren
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      responses:
+        '200':
+          description: OK, board order
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/IssueResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/history:
@@ -2298,6 +2322,7 @@ components:
         color: { type: string, example: '#EF4444' }
         icon: { type: string, nullable: true, example: bug }
         position: { type: integer }
+        hierarchyLevel: { type: integer, description: 'Nesting level: Epic=2, Story/Task/Bug=1, Sub-task=0. A parent must be exactly one level above its child (adjacent tiers only): Epic parents Story/Task/Bug (not a Sub-task directly), which parent Sub-task.' }
 
     StatusResponse:
       type: object
@@ -2372,7 +2397,7 @@ components:
         statusId: { type: string, format: uuid, description: Must belong to the project's workflow }
         priorityId: { type: string, format: uuid, nullable: true, description: Omitted = the project's default priority }
         assigneeId: { type: string, format: uuid, nullable: true, description: Must be a workspace member }
-        parentId: { type: string, format: uuid, nullable: true, description: Parent issue in the same project }
+        parentId: { type: string, format: uuid, nullable: true, description: 'Parent issue in the same project. Rejected with 422 if unknown/foreign-project, or if the parent type''s hierarchy level is not strictly greater than this issue''s type level.' }
         dueDate: { type: string, format: date, nullable: true }
         fields:
           type: object
@@ -2397,6 +2422,8 @@ components:
         dueDate: { type: string, format: date }
         clearAssignee: { type: boolean, default: false, description: 'Unset the assignee (a null assigneeId cannot be distinguished from "not sent"); ignored when assigneeId is also given' }
         clearDueDate: { type: boolean, default: false, description: Unset the due date; ignored when dueDate is also given }
+        parentId: { type: string, format: uuid, nullable: true, description: 'Set/change the parent issue. Rejected with 422 for an unknown/foreign-project parent, self-parenting, a cycle, a hierarchy-level violation, or a type change that conflicts with an existing parent or child edge.' }
+        clearParent: { type: boolean, default: false, description: 'Detach the parent (mirrors clearAssignee/clearDueDate); ignored when parentId is also given' }
         fields:
           type: object
           additionalProperties: true
@@ -2422,6 +2449,11 @@ components:
         assignee: { $ref: '#/components/schemas/UserRef' }
         reporter: { $ref: '#/components/schemas/UserRef' }
         parentId: { type: string, format: uuid, nullable: true }
+        parentKey: { type: string, nullable: true, example: DEMO-12, description: Key of the parent issue; null if none }
+        parentTitle: { type: string, nullable: true, description: Title of the parent issue; null if none }
+        parentTypeId: { type: string, format: uuid, nullable: true, description: Type id of the parent issue (for its type icon); null if none }
+        childCount: { type: integer, description: Number of direct children }
+        doneChildCount: { type: integer, description: Direct children in a DONE-category status }
         dueDate: { type: string, format: date, nullable: true }
         fields:
           type: array

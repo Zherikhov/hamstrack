@@ -5,9 +5,9 @@ import { Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
-import { Button, PriorityBadge, Avatar } from '../components/ui'
+import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue, Status } from '../types'
+import type { Issue, IssueType, Status } from '../types'
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
@@ -222,11 +222,13 @@ export default function BoardPage() {
                       <IssueCard
                         key={issue.id}
                         issue={issue}
+                        issueTypes={issueTypes}
                         active={openIssueNumber === issue.number}
                         isDragging={dragging?.id === issue.id}
                         onClick={() => setOpenIssueNumber(
                           openIssueNumber === issue.number ? undefined : issue.number
                         )}
+                        onOpenNumber={setOpenIssueNumber}
                         onDragStart={e => {
                           e.dataTransfer.effectAllowed = 'move'
                           setDragging(issue)
@@ -261,6 +263,7 @@ export default function BoardPage() {
           statuses={statuses}
           priorities={priorities}
           fields={fields}
+          onOpenIssue={setOpenIssueNumber}
           onClose={() => setOpenIssueNumber(undefined)}
         />
       )}
@@ -269,15 +272,23 @@ export default function BoardPage() {
 }
 
 function IssueCard({
-  issue, active, isDragging, onClick, onDragStart, onDragEnd,
+  issue, issueTypes, active, isDragging, onClick, onOpenNumber, onDragStart, onDragEnd,
 }: {
   issue: Issue
+  issueTypes: IssueType[]
   active: boolean
   isDragging: boolean
   onClick: () => void
+  onOpenNumber: (number: number) => void
   onDragStart: (e: React.DragEvent) => void
   onDragEnd: () => void
 }) {
+  const parentColor = issue.parentTypeId
+    ? issueTypes.find(t => t.id === issue.parentTypeId)?.color
+    : undefined
+  const parentNumber = issue.parentKey
+    ? Number(issue.parentKey.slice(issue.parentKey.lastIndexOf('-') + 1))
+    : undefined
   return (
     <div
       draggable
@@ -295,6 +306,17 @@ function IssueCard({
       onMouseEnter={e => { if (!active) e.currentTarget.style.borderColor = 'var(--color-border-2)' }}
       onMouseLeave={e => { if (!active) e.currentTarget.style.borderColor = 'var(--color-border)' }}
     >
+      {/* Parent chip — one line, truncates; stops propagation so it opens the parent */}
+      {issue.parentKey && parentNumber !== undefined && Number.isFinite(parentNumber) && (
+        <div className="mb-1.5 min-w-0">
+          <ParentChip
+            parentKey={issue.parentKey}
+            color={parentColor}
+            title={issue.parentTitle}
+            onClick={e => { e.stopPropagation(); onOpenNumber(parentNumber) }}
+          />
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2 mb-1">
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{issue.key}</span>
         <PriorityBadge priority={issue.priority} />
@@ -303,7 +325,12 @@ function IssueCard({
         {issue.title}
       </div>
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs" style={{ color: issue.type.color }}>{issue.type.name}</span>
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="text-xs truncate" style={{ color: issue.type.color }}>{issue.type.name}</span>
+          {issue.childCount > 0 && (
+            <ChildrenProgress done={issue.doneChildCount} total={issue.childCount} compact />
+          )}
+        </div>
         {issue.assignee ? (
           <Avatar name={issue.assignee.displayName} avatarUrl={issue.assignee.avatarUrl} size={20} />
         ) : (

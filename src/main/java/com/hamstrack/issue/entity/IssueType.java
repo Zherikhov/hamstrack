@@ -37,6 +37,11 @@ public class IssueType extends CreatedOnlyEntity implements Scoped {
     @Column(nullable = false)
     private short position = 0;
 
+    // Hierarchy level: higher = higher in the tree (may parent strictly-lower
+    // levels). Epic=2, Story/Task/Bug=1, Sub-task=0. See issue-hierarchy-proposal §4.1.
+    @Column(name = "hierarchy_level", nullable = false)
+    private short hierarchyLevel = 1;
+
     @Column(name = "archived_at")
     private Instant archivedAt;
 }

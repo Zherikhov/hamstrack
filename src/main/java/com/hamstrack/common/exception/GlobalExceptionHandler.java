@@ -34,8 +34,8 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
     public ResponseEntity<ProblemDetail> handleMaxUploadSize(MaxUploadSizeExceededException ex) {
-        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.PAYLOAD_TOO_LARGE, "File is too large");
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE).body(problem);
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONTENT_TOO_LARGE, "File is too large");
+        return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).body(problem);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

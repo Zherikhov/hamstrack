@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { X, Trash2, Paperclip } from 'lucide-react'
+import { X, Trash2, Paperclip, Plus, CornerDownRight } from 'lucide-react'
 import {
   apiGetIssue, apiUpdateIssue, apiDeleteIssue,
   apiListComments, apiCreateComment, apiDeleteComment,
   apiListAttachments, apiUploadAttachment, apiDownloadAttachment, apiDeleteAttachment,
-  apiGetIssueHistory, apiListWorkspaceMembers,
+  apiGetIssueHistory, apiListWorkspaceMembers, apiListIssues, apiGetIssueChildren,
 } from '../api'
 import { useAuthStore } from '../auth'
-import { Button, Input, Textarea, Select, StatusBadge, PriorityBadge, Avatar } from '../components/ui'
+import { useUiStore } from '../uiStore'
+import { Button, Input, Textarea, Select, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
 import { FieldInput, FieldValueDisplay } from '../components/fields'
 import type { Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, Comment, Attachment, IssueHistoryEntry, WorkspaceMember } from '../types'
 
@@ -24,6 +25,12 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+// A parent key is "<projectKey>-<number>"; the trailing segment is the number.
+function numberFromKey(key: string): number | undefined {
+  const n = Number(key.slice(key.lastIndexOf('-') + 1))
+  return Number.isFinite(n) ? n : undefined
+}
+
 interface Props {
   wsId: string
   projectId: string
@@ -33,13 +40,18 @@ interface Props {
   priorities: PriorityOption[]   // the project's offered priorities (from config)
   fields: ProjectField[]         // the project's custom fields (from config)
   onClose: () => void
+  /** Open a different issue in the same panel (parent/child navigation). */
+  onOpenIssue?: (number: number) => void
 }
 
-export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, priorities, fields, onClose }: Props) {
+export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, priorities, fields, onClose, onOpenIssue }: Props) {
   const qc = useQueryClient()
   const { user } = useAuthStore()
+  const openCreateIssue = useUiStore(s => s.openCreateIssue)
 
   const [issue, setIssue] = useState<Issue | null>(null)
+  const [children, setChildren] = useState<Issue[]>([])
+  const [candidateParents, setCandidateParents] = useState<Issue[]>([])
   const [comments, setComments] = useState<Comment[]>([])
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [history, setHistory] = useState<IssueHistoryEntry[]>([])
@@ -52,6 +64,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   const [typeId, setTypeId] = useState('')
   const [statusId, setStatusId] = useState('')
   const [priorityId, setPriorityId] = useState('')
+  const [parentId, setParentId] = useState('')   // edit form; '' = no parent
   const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -106,11 +119,12 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   const loadIssue = useCallback(async () => {
     setLoading(true)
     try {
-      const [iss, cmts, atts, hist] = await Promise.all([
+      const [iss, cmts, atts, hist, kids] = await Promise.all([
         apiGetIssue(wsId, projectId, issueNumber),
         apiListComments(wsId, projectId, issueNumber, { size: 100 }),
         apiListAttachments(wsId, projectId, issueNumber),
         apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 }),
+        apiGetIssueChildren(wsId, projectId, issueNumber),
       ])
       setIssue(iss)
       setTitle(iss.title)
@@ -118,16 +132,58 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setTypeId(iss.type.id)
       setStatusId(iss.status.id)
       setPriorityId(iss.priority.id)
+      setParentId(iss.parentId ?? '')
       setFieldValues(fieldValuesOf(iss))
       setComments(cmts.content)
       setAttachments(atts)
       setHistory(hist.content)
+      setChildren(kids)
     } finally {
       setLoading(false)
     }
   }, [wsId, projectId, issueNumber])
 
   useEffect(() => { loadIssue() }, [loadIssue])
+
+  // ── Hierarchy: strict adjacency (Revision 2), config-driven ──
+  // A parent→child edge is legal iff parentLevel - childLevel == 1 (adjacent tiers).
+  // The selected (possibly just-changed) type's level; parents must be EXACTLY one above.
+  const selectedTypeLevel = issueTypes.find(t => t.id === typeId)?.hierarchyLevel
+  const eligibleParentTypeIds = useMemo(() => {
+    if (selectedTypeLevel === undefined) return new Set<string>()
+    return new Set(issueTypes.filter(t => t.hierarchyLevel === selectedTypeLevel + 1).map(t => t.id))
+  }, [issueTypes, selectedTypeLevel])
+  const canHaveParent = eligibleParentTypeIds.size > 0
+
+  // An issue "can have children" iff the project's type set offers at least one
+  // type EXACTLY one level below it (adjChild(issue.level) is non-empty).
+  const issueLevel = issue ? issue.type.hierarchyLevel : undefined
+  const canHaveChildren = issueLevel !== undefined
+    && issueTypes.some(t => t.hierarchyLevel === issueLevel - 1)
+
+  // Candidate parents (excluding self) — loaded lazily on first edit.
+  const eligibleParents = candidateParents
+    .filter(i => i.id !== issue?.id && eligibleParentTypeIds.has(i.type.id))
+
+  useEffect(() => {
+    if (editing && candidateParents.length === 0 && canHaveParent) {
+      apiListIssues(wsId, projectId).then(setCandidateParents).catch(() => {})
+    }
+  }, [editing, canHaveParent, wsId, projectId, candidateParents.length])
+
+  // Fail-fast client mirror of the backend 422: a type change that makes the
+  // chosen parent illegal blocks the save.
+  const parentConflict = useMemo(() => {
+    if (!parentId || selectedTypeLevel === undefined) return false
+    // Prefer the parent's type from the loaded candidate list; fall back to the
+    // resolved parentTypeId from config when the list hasn't loaded yet.
+    const parent = candidateParents.find(i => i.id === parentId)
+    const parentTypeId = parent?.type.id
+      ?? (parentId === issue?.parentId ? issue?.parentTypeId : undefined)
+    const parentLevel = issueTypes.find(t => t.id === parentTypeId)?.hierarchyLevel
+    // Adjacency: legal only when parentLevel is EXACTLY one above the child's.
+    return parentLevel === undefined || parentLevel !== selectedTypeLevel + 1
+  }, [parentId, selectedTypeLevel, candidateParents, issue?.parentId, issue?.parentTypeId, issueTypes])
 
   function setFieldValue(fieldId: string, value: FieldValue | undefined) {
     setFieldValues(prev => {
@@ -160,13 +216,26 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     setError('')
     setSaving(true)
     try {
+      // Parent diff — mirrors the clearAssignee/clearDueDate convention: an explicit
+      // clearParent detaches, a parentId sets/changes it. Only send when it changed.
+      const origParent = issue?.parentId ?? ''
+      const parentPatch: { parentId?: string; clearParent?: boolean } = {}
+      if (parentId !== origParent) {
+        if (parentId) parentPatch.parentId = parentId
+        else parentPatch.clearParent = true
+      }
       const updated = await apiUpdateIssue(wsId, projectId, issueNumber,
-        { title, description, typeId, statusId, priorityId, fields: changedFields(), version: issue?.version })
+        { title, description, typeId, statusId, priorityId, ...parentPatch, fields: changedFields(), version: issue?.version })
       setIssue(updated)
+      setParentId(updated.parentId ?? '')
       setFieldValues(fieldValuesOf(updated))
-      // Reload history after update
+      // Reload history + children after update (parent/type change shifts the tree)
       apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 }).then(h => setHistory(h.content)).catch(() => {})
+      apiGetIssueChildren(wsId, projectId, issueNumber).then(setChildren).catch(() => {})
       await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+      // Roll-up counts on the (old/new) parent refresh via the issues invalidation;
+      // also drop any cached single-issue reads so breadcrumbs stay in sync.
+      await qc.invalidateQueries({ queryKey: ['issue', wsId, projectId] })
       setEditing(false)
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to save')
@@ -264,6 +333,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     const labels: Record<string, string> = {
       title: 'Title', description: 'Description', status: 'Status',
       priority: 'Priority', type: 'Type', assignee: 'Assignee', dueDate: 'Due date',
+      parent: 'Parent',
     }
     return labels[field] ?? field
   }
@@ -325,6 +395,31 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
         {/* ── Details tab / edit form ── */}
         {(tab === 'details' || editing) && (
           <>
+            {/* Parent breadcrumb (view) — navigates to the parent issue */}
+            {!editing && issue?.parentId && issue.parentKey && (() => {
+              const parentColor = issueTypes.find(t => t.id === issue.parentTypeId)?.color
+                ?? 'var(--color-text-muted)'
+              const parentNumber = numberFromKey(issue.parentKey)
+              return (
+                <button
+                  type="button"
+                  disabled={parentNumber === undefined || !onOpenIssue}
+                  onClick={() => parentNumber !== undefined && onOpenIssue?.(parentNumber)}
+                  className="flex items-center gap-1.5 text-xs text-left rounded px-2 py-1 -mx-1 transition-colors disabled:cursor-default enabled:cursor-pointer enabled:hover:bg-[var(--color-surface-2)]"
+                  style={{ color: 'var(--color-text-secondary)', width: 'fit-content', maxWidth: '100%' }}
+                >
+                  <CornerDownRight size={12} style={{ color: parentColor, flexShrink: 0 }} />
+                  <span style={{ color: 'var(--color-text-muted)' }}>under</span>
+                  <span className="mono" style={{ color: parentColor }}>{issue.parentKey}</span>
+                  {issue.parentTitle && (
+                    <span className="truncate" style={{ color: 'var(--color-text-muted)' }}>
+                      · {issue.parentTitle}
+                    </span>
+                  )}
+                </button>
+              )
+            })()}
+
             {/* Title */}
             {editing ? (
               <Input
@@ -382,6 +477,28 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
               ) : null}
             </div>
 
+            {/* Parent picker (edit) — level-filtered; blank detaches (clearParent) */}
+            {editing && canHaveParent && (
+              <div>
+                <Select label="Parent" value={parentId} onChange={e => setParentId(e.target.value)}>
+                  <option value="">No parent</option>
+                  {eligibleParents.map(i => (
+                    <option key={i.id} value={i.id}>{i.key} — {i.title}</option>
+                  ))}
+                  {/* Keep the current parent selectable even if it isn't yet in the
+                      loaded candidate list (e.g. list still loading) */}
+                  {parentId && !eligibleParents.some(i => i.id === parentId) && issue?.parentKey && (
+                    <option value={parentId}>{issue.parentKey} — {issue.parentTitle ?? ''}</option>
+                  )}
+                </Select>
+                {parentConflict && (
+                  <p className="text-xs mt-1" style={{ color: 'var(--color-error)' }}>
+                    This type can't be a child of the selected parent — a parent must be exactly one level above its child. Clear the parent or pick an adjacent parent.
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Description */}
             {editing ? (
               <Textarea
@@ -417,17 +534,78 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
               </div>
             ) : null}
 
+            {/* ── Child issues (view) — roll-up progress + list + create sub-task ── */}
+            {!editing && issue && (canHaveChildren || children.length > 0) && (
+              <div className="flex flex-col gap-2 pt-1 border-t" style={{ borderColor: 'var(--color-border)' }}>
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-secondary)' }}>
+                    Sub-issues
+                  </span>
+                  {canHaveChildren && (
+                    <button
+                      type="button"
+                      onClick={() => openCreateIssue({
+                        parentId: issue.id,
+                        projectId,
+                        parentLevel: issue.type.hierarchyLevel,
+                      })}
+                      className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
+                      style={{ color: 'var(--color-brand)' }}
+                    >
+                      <Plus size={12} /> Create sub-task
+                    </button>
+                  )}
+                </div>
+
+                {children.length > 0 && (
+                  <ChildrenProgress
+                    done={children.filter(c => c.status.category === 'DONE').length}
+                    total={children.length}
+                  />
+                )}
+
+                <div className="flex flex-col gap-1">
+                  {children.map(c => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => onOpenIssue?.(c.number)}
+                      disabled={!onOpenIssue}
+                      className="flex items-center gap-2 rounded border px-2 py-1.5 text-left transition-colors disabled:cursor-default enabled:cursor-pointer enabled:hover:border-[var(--color-border-2)]"
+                      style={{ background: 'white', borderColor: 'var(--color-border)' }}
+                    >
+                      <span
+                        className="rounded-full flex-shrink-0"
+                        style={{ width: 7, height: 7, background: c.type.color }}
+                        title={c.type.name}
+                      />
+                      <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{c.key}</span>
+                      <span className="text-xs truncate flex-1" style={{ color: 'var(--color-text)' }}>{c.title}</span>
+                      <StatusBadge name={c.status.name} category={c.status.category} color={c.status.color} />
+                    </button>
+                  ))}
+                  {children.length === 0 && (
+                    <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No sub-issues yet.</p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
 
             {/* Save / Cancel */}
             {editing && (
               <div className="flex gap-2">
-                <Button variant="primary" onClick={handleSave} loading={saving} disabled={!title.trim() || missingRequired}>
+                <Button variant="primary" onClick={handleSave} loading={saving} disabled={!title.trim() || missingRequired || parentConflict}>
                   Save changes
                 </Button>
                 <Button variant="ghost" onClick={() => {
                   setEditing(false); setError('')
-                  if (issue) setFieldValues(fieldValuesOf(issue))
+                  if (issue) {
+                    setFieldValues(fieldValuesOf(issue))
+                    setTypeId(issue.type.id)
+                    setParentId(issue.parentId ?? '')
+                  }
                 }}>Cancel</Button>
               </div>
             )}

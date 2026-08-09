@@ -27,6 +27,7 @@ export default function TopBar({ wsId }: Props) {
   const qc = useQueryClient()
   const { user, clear } = useAuthStore()
   const createIssueOpen = useUiStore(s => s.createIssueOpen)
+  const createIssuePreset = useUiStore(s => s.createIssuePreset)
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
   const closeCreateIssue = useUiStore(s => s.closeCreateIssue)
   const projectMatch = useMatch('/w/:wsId/p/:projectId/*')
@@ -145,7 +146,7 @@ export default function TopBar({ wsId }: Props) {
 
       <div className="flex items-center gap-3 ml-auto">
         <button
-          onClick={openCreateIssue}
+          onClick={() => openCreateIssue()}
           className="flex items-center gap-1.5 font-medium cursor-pointer rounded transition-colors"
           style={{ background: 'var(--color-brand)', color: 'white', border: 'none', padding: '7px 14px', fontSize: 13.5 }}
           onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-brand-hover)')}
@@ -233,7 +234,12 @@ export default function TopBar({ wsId }: Props) {
       </div>
 
       {createIssueOpen && (
-        <CreateIssueModal wsId={wsId} defaultProjectId={projectId} onClose={closeCreateIssue} />
+        <CreateIssueModal
+          wsId={wsId}
+          defaultProjectId={projectId}
+          preset={createIssuePreset}
+          onClose={closeCreateIssue}
+        />
       )}
 
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}

@@ -1,7 +1,7 @@
 import { clsx } from 'clsx'
 import { forwardRef } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
-import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, type LucideIcon } from 'lucide-react'
+import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, type LucideIcon } from 'lucide-react'
 import type { Priority } from '../types'
 
 // ── Button ────────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ export function Button({ variant = 'secondary', size = 'md', loading, children, 
         className,
       )}
       style={styles}
-      disabled={loading ?? props.disabled}
+      disabled={loading || props.disabled}
       {...props}
     >
       {loading && <span className="mono text-xs">…</span>}
@@ -252,4 +252,74 @@ const categoryColors: Record<string, string> = {
 export function StatusBadge({ name, category, color }: { name: string; category: string; color?: string }) {
   const c = color ?? categoryColors[category] ?? 'var(--color-text-muted)'
   return <Badge label={name} color={c} />
+}
+
+// ── ParentChip ────────────────────────────────────────────────────────────────
+// Compact "↳ PARENT-KEY" pill tinted by the parent's issue-type color. The color
+// is config-driven (passed in from the resolved issue type) — never hardcoded.
+
+export function ParentChip({
+  parentKey, color, title, onClick,
+}: { parentKey: string; color?: string; title?: string; onClick?: (e: React.MouseEvent) => void }) {
+  const c = color ?? 'var(--color-text-muted)'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title ? `${parentKey} · ${title}` : parentKey}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full max-w-full cursor-pointer transition-opacity hover:opacity-80"
+      style={{ background: `${c}18`, border: `1px solid ${c}40` }}
+    >
+      <CornerDownRight size={11} style={{ color: c, flexShrink: 0 }} />
+      <span className="mono truncate" style={{ fontSize: 11, color: c }}>{parentKey}</span>
+    </button>
+  )
+}
+
+// ── ChildrenProgress ──────────────────────────────────────────────────────────
+// Roll-up bar for a parent issue: "N of M done". Teal fill (production-trusted
+// state, DESIGN.md). `compact` renders a slim inline pill for board/backlog cards.
+
+export function ChildrenProgress({
+  done, total, compact,
+}: { done: number; total: number; compact?: boolean }) {
+  if (total <= 0) return null
+  const pct = Math.round((done / total) * 100)
+  const complete = done >= total
+
+  if (compact) {
+    // Teal tint when all children are done (production-trusted state), muted otherwise.
+    const brand = '#0F6E63'
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full mono"
+        title={`${done} of ${total} sub-issues done`}
+        style={{
+          fontSize: 10.5,
+          background: complete ? `${brand}18` : 'var(--color-surface-2)',
+          color: complete ? brand : 'var(--color-text-muted)',
+          border: `1px solid ${complete ? `${brand}40` : 'var(--color-border)'}`,
+        }}
+      >
+        {done}/{total}
+      </span>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between">
+        <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Sub-issues</span>
+        <span className="mono text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          {done} of {total} done
+        </span>
+      </div>
+      <div className="w-full rounded-full overflow-hidden" style={{ height: 6, background: 'var(--color-surface-2)' }}>
+        <div
+          className="h-full rounded-full transition-all"
+          style={{ width: `${pct}%`, background: 'var(--color-brand)' }}
+        />
+      </div>
+    </div>
+  )
 }

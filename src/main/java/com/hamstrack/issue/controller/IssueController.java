@@ -42,13 +42,22 @@ public class IssueController {
     private final CommentService commentService;
     private final AttachmentService attachmentService;
 
+    /**
+     * Create an issue. The service assembles AND serializes the response body
+     * inside the create transaction (returning raw JSON bytes), so the request is
+     * atomic from the client's view — a 201 with a complete body, or a 4xx/5xx
+     * with nothing persisted. This closes the "row committed, then 500 during
+     * post-commit response serialization → client retries → duplicate" defect.
+     */
     @PostMapping
-    @ResponseStatus(HttpStatus.CREATED)
-    public IssueResponse create(@AuthenticationPrincipal User actor,
-                                @PathVariable UUID workspaceId,
-                                @PathVariable UUID projectId,
-                                @Valid @RequestBody CreateIssueRequest req) {
-        return issueService.create(actor, workspaceId, projectId, req);
+    public ResponseEntity<byte[]> create(@AuthenticationPrincipal User actor,
+                                         @PathVariable UUID workspaceId,
+                                         @PathVariable UUID projectId,
+                                         @Valid @RequestBody CreateIssueRequest req) {
+        var body = issueService.createSerialized(actor, workspaceId, projectId, req);
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .contentType(MediaType.APPLICATION_JSON)
+                .body(body);
     }
 
     /**
@@ -83,6 +92,15 @@ public class IssueController {
                              @PathVariable UUID projectId,
                              @PathVariable long number) {
         return issueService.get(actor, workspaceId, projectId, number);
+    }
+
+    /** Direct children of an issue, in board order. Same tenant scoping as the issue itself. */
+    @GetMapping("/{number}/children")
+    public List<IssueResponse> children(@AuthenticationPrincipal User actor,
+                                        @PathVariable UUID workspaceId,
+                                        @PathVariable UUID projectId,
+                                        @PathVariable long number) {
+        return issueService.children(actor, workspaceId, projectId, number);
     }
 
     @GetMapping("/{number}/history")

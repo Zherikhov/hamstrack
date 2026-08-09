@@ -263,12 +263,18 @@ export async function apiGetIssue(wsId: string, projectId: string, number: numbe
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`)
 }
 
+// Direct children of an issue, in board order (no pagination — a parent's fan-out is small)
+export async function apiGetIssueChildren(wsId: string, projectId: string, number: number): Promise<Issue[]> {
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/children`)
+}
+
 export async function apiCreateIssue(
   wsId: string,
   projectId: string,
   // priorityId omitted = the project's default priority;
+  // parentId attaches the new issue under a legal parent (higher type level, same project);
   // fields keyed by field id — value shapes per field type (see FieldValue)
-  payload: { title: string; typeId: string; statusId: string; priorityId?: string; description?: string; assigneeId?: string; dueDate?: string; fields?: Record<string, FieldValue> }
+  payload: { title: string; typeId: string; statusId: string; priorityId?: string; description?: string; assigneeId?: string; dueDate?: string; parentId?: string; fields?: Record<string, FieldValue> }
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues`, {
     method: 'POST',
@@ -282,9 +288,9 @@ export async function apiUpdateIssue(
   number: number,
   // version enables the backend's optimistic-lock check: 409 if someone else saved first;
   // fields is partial — only listed ids change, null clears a value
-  // clearAssignee/clearDueDate explicitly unset those nullable fields (a plain
-  // null can't be distinguished from "not sent" server-side)
-  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; clearAssignee: boolean; clearDueDate: boolean; fields: Record<string, FieldValue | null>; version: number }>
+  // clearAssignee/clearDueDate/clearParent explicitly unset those nullable fields (a plain
+  // null can't be distinguished from "not sent" server-side); parentId sets/changes the parent
+  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; parentId: string; clearAssignee: boolean; clearDueDate: boolean; clearParent: boolean; fields: Record<string, FieldValue | null>; version: number }>
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, {
     method: 'PATCH',

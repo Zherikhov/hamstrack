@@ -158,7 +158,7 @@ public class AttachmentService {
     private void validateUpload(MultipartFile file) {
         var limit = attachmentProperties.maxFileSize();
         if (file.getSize() > limit.toBytes()) {
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE,
+            throw new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE,
                     "File exceeds the " + limit.toMegabytes() + " MB limit");
         }
         var ext = StringUtils.getFilenameExtension(file.getOriginalFilename());

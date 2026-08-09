@@ -14,12 +14,14 @@ You review database migrations and entity mappings for Hamstrack (Spring Boot 4 
 4. **UUID v7 for ids.** New id columns are app-generated UUID v7 (`@UuidGenerator(style = TIME)`). Never `BIGSERIAL` / `@GeneratedValue(IDENTITY)`.
 5. **Timestamps.** Entities use Spring Data `@CreatedDate`/`@LastModifiedDate` (+ `@EntityListeners(AuditingEntityListener.class)`), NOT Hibernate `@CreationTimestamp`/`@UpdateTimestamp` (null after `save()` in Hibernate 7). Schema should also carry `DEFAULT NOW()` + triggers as a safety net for raw SQL writes.
 6. **Entity ⇄ schema parity.** Every column in the migration must match the entity mapping (name, nullability, type, length) or `validate` fails at startup. Check both directions.
-7. **Never edit an already-applied migration file.** Flyway checksum validation fails on every already-migrated DB (prod, local). New change = new `V{n+1}` file. For data resets, follow the V5 pattern (add a new migration, don't rewrite).
+7. **Never edit an already-applied migration file.** Flyway checksum validation fails on every already-migrated DB (prod, local). New change = new `V{n+1}` file. For data resets, add a NEW migration (don't rewrite). NOTE: the former V1..V12 chain was squashed into a single `V1__init_schema.sql` baseline (2026-08-07) — new migrations continue from **V2**; verify the version is the next unused `V{n}`. A checksum mismatch on prod means a DB predates the squash and its volume must be recreated (there was no prod data to preserve).
 8. **JSONB fields** stay on Jackson 2 `com.fasterxml.jackson.databind.JsonNode` (Hibernate reads/writes them); don't introduce `tools.jackson` node types on entities.
 
 ## Also check
 - Foreign keys and cascade behavior — remember `issues.workspace_id` has NO cascade (data-reset order matters: delete issues first).
-- `scope_workspace_id NULL` = global for taxonomy tables; `is_system_default` rows.
+- **`DROP TABLE … CASCADE` silently drops inbound FKs** from OTHER tables that reference it. If a migration drops+recreates a table, verify every inbound FK is re-added — `issues.type_id`/`status_id` lost their FKs this way in V6 and were never restored (tracked as HD-13). A recreated table with missing inbound FKs still passes `validate` (Hibernate doesn't check FKs), so this hides until integrity breaks.
+- **Scoped uniqueness on taxonomy** uses `UNIQUE NULLS NOT DISTINCT (scope_workspace_id, scope_project_id, name)` (so global rows with NULL scopes still collide on duplicate names) plus a `_scope_ck CHECK (scope_workspace_id IS NULL OR scope_project_id IS NULL)` (both-set forbidden). New catalog tables should match this shape and name the constraints explicitly.
+- `scope_workspace_id`/`scope_project_id` both NULL = global for taxonomy tables; `is_system_default` rows.
 - New tables follow package-by-feature conventions and are covered by an entity.
 
 ## How to work

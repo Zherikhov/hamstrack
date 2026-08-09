@@ -45,6 +45,9 @@ export interface IssueType {
   color: string;
   icon?: string;
   position: number;
+  // Hierarchy: higher = higher in the tree (Epic=2, Story/Task/Bug=1, Sub-task=0).
+  // A parent's type level must be STRICTLY GREATER than its child's. Config-driven.
+  hierarchyLevel: number;
 }
 
 export interface Status {
@@ -135,6 +138,13 @@ export interface Issue {
   assignee?: AssigneeInfo;
   reporter: AssigneeInfo;
   parentId?: string;
+  // Parent roll-up summary (null/absent when the issue has no parent)
+  parentKey?: string;
+  parentTitle?: string;
+  parentTypeId?: string;
+  // Direct-children roll-up (0 when the issue has no children)
+  childCount: number;
+  doneChildCount: number;
   dueDate?: string;
   fields: FieldValueEntry[];          // filled custom fields only
   version: number;

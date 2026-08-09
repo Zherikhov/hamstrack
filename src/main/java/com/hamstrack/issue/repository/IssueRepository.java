@@ -13,6 +13,7 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -133,4 +134,40 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("excludeDone") boolean excludeDone,
             @Param("doneCategory") StatusCategory doneCategory,
             Pageable pageable);
+
+    // ---- Issue hierarchy (see issue-hierarchy-proposal §6.3) ----
+
+    // Direct children, fetch-joined like the board list to avoid N+1
+    @Query("SELECT i FROM Issue i " +
+           "LEFT JOIN FETCH i.type " +
+           "LEFT JOIN FETCH i.status " +
+           "LEFT JOIN FETCH i.priority " +
+           "LEFT JOIN FETCH i.assignee " +
+           "LEFT JOIN FETCH i.reporter " +
+           "WHERE i.parent = :parent " +
+           "ORDER BY i.position ASC, i.createdAt DESC")
+    List<Issue> findByParent(@Param("parent") Issue parent);
+
+    // Direct children of a single parent — cheap counts for a single-issue GET.
+    long countByParent(Issue parent);
+
+    @Query("SELECT count(i) FROM Issue i WHERE i.parent = :parent AND i.status.category = :category")
+    long countByParentAndStatusCategory(@Param("parent") Issue parent,
+                                        @Param("category") StatusCategory category);
+
+    // Roll-up counts for a set of parent ids in one grouped query (avoids N+1 on
+    // the board). Rows: (parentId, total, doneCount). Keyed by id so callers only
+    // need the distinct parent ids the lazy proxies already carry.
+    @Query("SELECT i.parent.id, count(i), " +
+           "sum(case when i.status.category = :done then 1 else 0 end) " +
+           "FROM Issue i WHERE i.parent.id IN :parentIds GROUP BY i.parent.id")
+    List<Object[]> rollupByParentIds(@Param("parentIds") Collection<UUID> parentIds,
+                                     @Param("done") StatusCategory done);
+
+    // Parent display summaries for a batch of parent ids: (id, project.key, number,
+    // title, type.id) → IssueResponse.parentKey/parentTitle/parentTypeId without a
+    // Cartesian fetch-join on the hot board query.
+    @Query("SELECT i.id, i.project.key, i.number, i.title, i.type.id " +
+           "FROM Issue i WHERE i.id IN :ids")
+    List<Object[]> parentSummaries(@Param("ids") Collection<UUID> ids);
 }
