@@ -64,6 +64,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   const [typeId, setTypeId] = useState('')
   const [statusId, setStatusId] = useState('')
   const [priorityId, setPriorityId] = useState('')
+  const [assigneeId, setAssigneeId] = useState('') // edit form; '' = unassigned
+  const [dueDate, setDueDate] = useState('')        // edit form; '' = no due date
   const [parentId, setParentId] = useState('')   // edit form; '' = no parent
   const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
   const [saving, setSaving] = useState(false)
@@ -132,6 +134,8 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
       setTypeId(iss.type.id)
       setStatusId(iss.status.id)
       setPriorityId(iss.priority.id)
+      setAssigneeId(iss.assignee?.id ?? '')
+      setDueDate(iss.dueDate ?? '')
       setParentId(iss.parentId ?? '')
       setFieldValues(fieldValuesOf(iss))
       setComments(cmts.content)
@@ -224,10 +228,23 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
         if (parentId) parentPatch.parentId = parentId
         else parentPatch.clearParent = true
       }
+      // Assignee / due-date diffs — set when chosen, clear flag when emptied.
+      const assigneePatch: { assigneeId?: string; clearAssignee?: boolean } = {}
+      if (assigneeId !== (issue?.assignee?.id ?? '')) {
+        if (assigneeId) assigneePatch.assigneeId = assigneeId
+        else assigneePatch.clearAssignee = true
+      }
+      const duePatch: { dueDate?: string; clearDueDate?: boolean } = {}
+      if (dueDate !== (issue?.dueDate ?? '')) {
+        if (dueDate) duePatch.dueDate = dueDate
+        else duePatch.clearDueDate = true
+      }
       const updated = await apiUpdateIssue(wsId, projectId, issueNumber,
-        { title, description, typeId, statusId, priorityId, ...parentPatch, fields: changedFields(), version: issue?.version })
+        { title, description, typeId, statusId, priorityId, ...parentPatch, ...assigneePatch, ...duePatch, fields: changedFields(), version: issue?.version })
       setIssue(updated)
       setParentId(updated.parentId ?? '')
+      setAssigneeId(updated.assignee?.id ?? '')
+      setDueDate(updated.dueDate ?? '')
       setFieldValues(fieldValuesOf(updated))
       // Reload history + children after update (parent/type change shifts the tree)
       apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 }).then(h => setHistory(h.content)).catch(() => {})
@@ -451,6 +468,15 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
                       <option value={issue.priority.id}>{issue.priority.name}</option>
                     )}
                   </Select>
+                  <Select label="Assignee" value={assigneeId} onChange={e => setAssigneeId(e.target.value)}>
+                    <option value="">Unassigned</option>
+                    {members.map(m => <option key={m.userId} value={m.userId}>{m.displayName}</option>)}
+                    {/* Current assignee may have left the workspace — keep selectable */}
+                    {issue?.assignee && !members.some(m => m.userId === issue.assignee!.id) && (
+                      <option value={issue.assignee.id}>{issue.assignee.displayName}</option>
+                    )}
+                  </Select>
+                  <Input label="Due date" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
                 </>
               ) : issue ? (
                 <>
