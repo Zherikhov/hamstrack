@@ -47,6 +47,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const [statusId, setStatusId] = useState('')
   const [priorityId, setPriorityId] = useState('')
   const [parentId, setParentId] = useState(preset?.parentId ?? '')
+  const [assigneeId, setAssigneeId] = useState('')
+  const [dueDate, setDueDate] = useState('')
   const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
@@ -65,11 +67,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const priorities = config?.priorities ?? []
   const createFields = (config?.fields ?? []).filter(f => f.showOnCreate)
 
-  // Only needed as the option list of USER-type fields
+  // Option list for the Assignee picker and for USER-type custom fields
   const { data: members = [] } = useQuery({
     queryKey: ['wsMembers', effectiveWsId],
     queryFn: () => apiListWorkspaceMembers(effectiveWsId),
-    enabled: !!effectiveWsId && createFields.some(f => f.type === 'USER'),
+    enabled: !!effectiveWsId,
   })
 
   // Strict adjacency (Revision 2): a parent→child edge is legal iff the parent's
@@ -161,6 +163,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     setStatusId('')
     setPriorityId('')
     setParentId('')
+    setAssigneeId('')  // members are workspace-scoped
     setFieldValues({})
   }
 
@@ -215,6 +218,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
         statusId: effectiveStatusId,
         priorityId: effectivePriorityId || undefined,
         description: description.trim() || undefined,
+        assigneeId: assigneeId || undefined,
+        dueDate: dueDate || undefined,
         parentId: effectiveParentId || undefined,
         fields: Object.keys(fieldValues).length > 0 ? fieldValues : undefined,
       })
@@ -301,6 +306,14 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             <Select label="Priority" value={effectivePriorityId} onChange={e => setPriorityId(e.target.value)}>
               {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </Select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Select label="Assignee" value={assigneeId} onChange={e => setAssigneeId(e.target.value)}>
+              <option value="">Unassigned</option>
+              {members.map(m => <option key={m.userId} value={m.userId}>{m.displayName}</option>)}
+            </Select>
+            <Input label="Due date" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
           </div>
 
           {/* Parent picker — only for types with a tier exactly one level above.

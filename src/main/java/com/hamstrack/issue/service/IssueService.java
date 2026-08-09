@@ -60,21 +60,21 @@ public class IssueService {
     private final SseRegistry sseRegistry;
     private final ProductMetrics metrics;
     // The MVC Jackson 3 mapper (carries the Jackson2NodeModule bridge). Used to
-    // serialize the create response INSIDE the create transaction so a
+    // serialize the creation response INSIDE the creation transaction, so a
     // serialization failure rolls the insert back rather than committing then
-    // 500ing during MVC's post-commit write — see createSerialized / bug #2.
+    // 500ing during MVC's post-commit writing — see createSerialized / bug #2.
     private final JsonMapper jsonMapper;
 
     /**
-     * Atomic create: assembles AND serializes the {@link IssueResponse} inside the
-     * create transaction, returning the response bytes. This guarantees the
+     * Atomically create: assembles AND serializes the {@link IssueResponse} inside the
+     * creation transaction, returning the response bytes. This guarantees the
      * client-visible outcome is all-or-nothing — either a 201 with a fully
-     * materialized body, or a 4xx/5xx with the insert rolled back. Previously the
+     * materialized body or a 4xx/5xx with the insert rolled back. Previously the
      * DTO was returned and serialized by Spring MVC *after* the transaction
      * committed, so any assembly/serialization failure (e.g. navigating a child
      * issue's parent, or the Jackson 2/3 JSONB boundary on a custom-field value)
      * left the row persisted while the client saw a 500 — a retry then created a
-     * duplicate. Serializing here moves every failure mode ahead of commit.
+     * duplicate. Serializing here moves every failure mode ahead of the commit.
      */
     @Transactional
     public byte[] createSerialized(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
@@ -118,7 +118,7 @@ public class IssueService {
         if (req.parentId() != null) {
             var parent = resolveParent(req.parentId(), project);
             // Adjacency guard: parent.type must be exactly one tier above the child
-            // (Revision 2). Cycle/self guards are trivially N/A on create (the new
+            // (Revision 2). Cycle/self-guards are trivially N/A on creation (the new
             // issue has no descendants yet).
             requireLegalParentLevel(parent.getType(), type);
             issue.setParent(parent);
@@ -415,7 +415,7 @@ public class IssueService {
 
     // Strict adjacency (proposal Revision 2, Variant A): a parent → child edge is
     // legal only when the parent's type sits EXACTLY one tier above the child's.
-    // Expressed as the violation (level gap != 1) because every caller rejects
+    // Expressed as the violation (a level gap != 1) because every caller rejects
     // illegal edges — so e.g. Epic(2) → Sub-task(0) (gap 2) and task-tier →
     // task-tier (gap 0) both violate adjacency and are forbidden.
     private static boolean violatesAdjacency(IssueType parentType, IssueType childType) {

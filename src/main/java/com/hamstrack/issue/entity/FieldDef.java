@@ -48,4 +48,11 @@ public class FieldDef extends CreatedOnlyEntity implements Scoped {
 
     @Column(name = "archived_at")
     private Instant archivedAt;
+
+    /**
+     * System field: shipped by default (seeded), shown in the catalog, and
+     * cannot be deleted — only archived. Set only by migrations, never the API.
+     */
+    @Column(name = "is_system", nullable = false)
+    private boolean system;
 }
