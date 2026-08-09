@@ -1,11 +1,12 @@
 import { useEffect } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArchiveRestore, FolderOpen, Plus, Settings } from 'lucide-react'
+import { ArchiveRestore, FolderOpen, Plus, Settings, Users } from 'lucide-react'
 import { apiGetWorkspace, apiListProjects, apiUnarchiveProject } from '../api'
 import { Button } from '../components/ui'
 import { useState } from 'react'
 import CreateProjectModal from '../components/CreateProjectModal'
+import WorkspaceMembersModal from '../components/WorkspaceMembersModal'
 
 export default function WorkspaceHomePage() {
   const { wsId } = useParams<{ wsId: string }>()
@@ -15,6 +16,7 @@ export default function WorkspaceHomePage() {
   // Set by the switcher's "View all projects" — an explicit request for the list
   const showAll = Boolean((location.state as { showAll?: boolean } | null)?.showAll)
   const [showCreate, setShowCreate] = useState(false)
+  const [showMembers, setShowMembers] = useState(false)
   const [unarchiving, setUnarchiving] = useState<string | null>(null)
 
   // Distinct key from ProjectSwitcher's ['projects', wsId] — this query includes archived
@@ -69,6 +71,10 @@ export default function WorkspaceHomePage() {
             Projects
           </h1>
           <div className="flex items-center gap-2">
+            <Button variant="secondary" size="sm" onClick={() => setShowMembers(true)}>
+              <Users size={14} />
+              Members
+            </Button>
             {canAdminWorkspace && (
               <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}/settings`)}>
                 <Settings size={14} />
@@ -182,6 +188,14 @@ export default function WorkspaceHomePage() {
 
       {showCreate && wsId && (
         <CreateProjectModal wsId={wsId} onClose={() => setShowCreate(false)} />
+      )}
+
+      {showMembers && wsId && (
+        <WorkspaceMembersModal
+          wsId={wsId}
+          canInvite={canAdminWorkspace}
+          onClose={() => setShowMembers(false)}
+        />
       )}
     </div>
   )

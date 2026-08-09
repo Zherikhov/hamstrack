@@ -599,3 +599,16 @@ export async function apiMarkAllNotificationsRead(): Promise<void> {
 export async function apiListWorkspaceMembers(wsId: string): Promise<WorkspaceMember[]> {
   return request(`/workspaces/${wsId}/members`)
 }
+
+// Invite by email. The invite is bound to the address; role is the WorkspaceRole.
+// Returns { message } on success (201). No endpoint exists yet to list pending
+// invites or to change/remove members — that's a backend-dependent follow-up.
+export async function apiInviteWorkspaceMember(
+  wsId: string,
+  payload: { email: string; role: 'MEMBER' | 'ADMIN' }
+): Promise<{ message: string }> {
+  return request(`/workspaces/${wsId}/invites`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
