@@ -75,16 +75,31 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return res.status === 204 ? (undefined as T) : res.json()
 }
 
-async function tryRefresh(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' })
-    if (!res.ok) return false
-    const data = await res.json()
-    useAuthStore.getState().setToken(data.accessToken)
-    return true
-  } catch {
-    return false
+// Single-flight refresh (HD-50). When the 30-min access token expires, several
+// requests typically 401 at once (TanStack Query refetching multiple queries,
+// e.g. on window-focus). The backend ROTATES the refresh token on every
+// /auth/refresh (deletes the old one, issues a new pair), so if each 401 fired
+// its own refresh, the first would rotate the cookie and every other concurrent
+// refresh would arrive with the now-deleted token → 401 → clear() → a spurious
+// logout "every ~30 minutes". Deduping so all concurrent callers await ONE
+// in-flight refresh means a single rotation and one new token for everyone.
+let refreshInFlight: Promise<boolean> | null = null
+
+function tryRefresh(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      try {
+        const res = await fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' })
+        if (!res.ok) return false
+        const data = await res.json()
+        useAuthStore.getState().setToken(data.accessToken)
+        return true
+      } catch {
+        return false
+      }
+    })().finally(() => { refreshInFlight = null })
   }
+  return refreshInFlight
 }
 
 // ── Instance metadata ─────────────────────────────────────────────────────────
