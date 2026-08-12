@@ -1,6 +1,8 @@
 package com.hamstrack.common.exception;
 
 import com.hamstrack.common.ratelimit.RateLimitedException;
+import com.hamstrack.search.HqlSemanticException;
+import com.hamstrack.search.parser.HqlParseException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -30,6 +32,36 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getStatus())
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
                 .body(problem);
+    }
+
+    // HQL parse error (Advanced Search §7.1): 422 with a highlight span. The custom
+    // ProblemDetail properties (position/length/token/errorType) drive the SPA's
+    // inline underline. errorType is always "PARSE_ERROR".
+    @ExceptionHandler(HqlParseException.class)
+    public ResponseEntity<ProblemDetail> handleHqlParse(HqlParseException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("position", ex.getPosition());
+        problem.setProperty("length", ex.getLength());
+        if (ex.getToken() != null) {
+            problem.setProperty("token", ex.getToken());
+        }
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_CONTENT).body(problem);
+    }
+
+    // HQL semantic error (Advanced Search §7.2): 422, field-anchored. errorType is
+    // always "SEMANTIC_ERROR"; field/position are included when known.
+    @ExceptionHandler(HqlSemanticException.class)
+    public ResponseEntity<ProblemDetail> handleHqlSemantic(HqlSemanticException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_CONTENT, ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        if (ex.getField() != null) {
+            problem.setProperty("field", ex.getField());
+        }
+        if (ex.getPosition() >= 0) {
+            problem.setProperty("position", ex.getPosition());
+        }
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_CONTENT).body(problem);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

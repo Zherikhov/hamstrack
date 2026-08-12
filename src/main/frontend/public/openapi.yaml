@@ -63,6 +63,10 @@ tags:
     description: Issue comments
   - name: Attachments
     description: Issue file attachments
+  - name: Search
+    description: Cross-project issue search via HQL (Hamstrack Query Language)
+  - name: Saved Filters
+    description: Reusable, workspace-scoped HQL data sources (own + shared)
   - name: Notifications
     description: The current user's notification feed
   - name: Events
@@ -1747,6 +1751,270 @@ paths:
               schema: { type: string }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /workspaces/{workspaceId}/search:
+    post:
+      tags: [Search]
+      summary: Search issues with HQL
+      description: |
+        Runs an HQL (Hamstrack Query Language) query across the workspace,
+        restricted to the caller's visible (non-archived) projects — the
+        tenancy/visibility scope is ANDed in server-side and no query text can
+        widen it. Workspace members only. Paginated (`size` clamped 1..100).
+
+        **HQL in brief** — a boolean expression of `field OP value` comparisons.
+
+        - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
+          `priority`, `created`, `updated`, `due`, `parent`, `text`.
+        - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=` (which operators a
+          field accepts comes from `GET /search/schema`; `~` is text only,
+          ordered comparisons are for dates and `priority`).
+        - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
+          `NOT` > `AND` > `OR`.
+        - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
+          (`assignee`, `parent`, `due`).
+        - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
+          last).
+        - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
+        - **Values:** status/type/priority by **name**; users by email,
+          display name, `currentUser()`, or UUID fallback; dates as
+          `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
+          and description.
+
+        An empty/blank `query` matches all visible issues (default sort).
+        Examples:
+        `status = "In Progress" AND assignee = currentUser() ORDER BY priority DESC`
+        · `type = Bug AND priority >= High AND due IS NOT EMPTY`.
+      operationId: searchIssues
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SearchRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageResponse'
+                  - type: object
+                    properties:
+                      content:
+                        type: array
+                        items: { $ref: '#/components/schemas/SearchResultRow' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >-
+            Invalid query. A parse error carries `errorType: "PARSE_ERROR"` with
+            a highlight span (`position`, `length`, nullable `token`); a semantic
+            error carries `errorType: "SEMANTIC_ERROR"` with the offending
+            `field` and `position`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+
+  /workspaces/{workspaceId}/search/schema:
+    get:
+      tags: [Search]
+      summary: HQL autocomplete metadata
+      description: >-
+        The static field/operator schema plus the small value picklists
+        (statuses/types/priorities reachable by the caller's visible projects)
+        that drive the search UI's autocomplete. The member list is deliberately
+        NOT embedded — use `/search/suggest` for user-valued fields. Workspace
+        members only.
+      operationId: searchSchema
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SearchSchemaResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/search/suggest:
+    get:
+      tags: [Search]
+      summary: Typeahead for user-valued fields
+      description: >-
+        Bounded server-side prefix typeahead for the user-valued fields
+        (`assignee`/`reporter`), so large workspaces never ship every member.
+        Returns at most 20 matches (member display name / email). Workspace
+        members only.
+      operationId: searchSuggest
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: field
+          in: query
+          required: true
+          description: The HQL field to suggest values for (a user-valued field, e.g. `assignee`)
+          schema: { type: string }
+        - name: q
+          in: query
+          required: false
+          description: Prefix to match (max 100 chars)
+          schema: { type: string, maxLength: 100 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuggestResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/filters:
+    get:
+      tags: [Saved Filters]
+      summary: List saved filters
+      description: >-
+        The caller's own saved filters plus every `shared` filter in the
+        workspace. Workspace members only — a non-member gets `404`, never `403`.
+      operationId: listSavedFilters
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SavedFilterResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Saved Filters]
+      summary: Create a saved filter
+      description: >-
+        Create a saved filter owned by the caller. The stored HQL is validated at
+        save time (parse + structural registry validation) but never executed
+        here; value resolution (`currentUser()`, status-name→id, …) is deferred to
+        run time. `name` is unique per `(workspace, owner)`. Workspace members only.
+      operationId: createSavedFilter
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSavedFilterRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedFilterResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: A filter with that name already exists for this owner in the workspace
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            Invalid HQL. A parse error carries `errorType: "PARSE_ERROR"` with a
+            highlight span (`position`, `length`, nullable `token`); a semantic
+            error carries `errorType: "SEMANTIC_ERROR"` with the offending `field`
+            and `position` (same shape as search).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+
+  /workspaces/{workspaceId}/filters/{filterId}:
+    get:
+      tags: [Saved Filters]
+      summary: Get a saved filter
+      description: >-
+        Fetch one saved filter the caller can see (their own, or a `shared` one).
+        A private filter owned by someone else — or a foreign/non-member request —
+        gets `404`, never `403`.
+      operationId: getSavedFilter
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/filterId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedFilterResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Saved Filters]
+      summary: Update a saved filter
+      description: >-
+        Partial update — only the non-null fields are applied (a `null`/omitted
+        field is a no-op). **Owner only:** a non-owner, even on a `shared` filter,
+        gets `404` (never `403`). Changed HQL is re-validated at save time.
+      operationId: updateSavedFilter
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/filterId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSavedFilterRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedFilterResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: A filter with the new name already exists for this owner in the workspace
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: Invalid HQL (same `HqlProblemDetail` shape as create/search)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+    delete:
+      tags: [Saved Filters]
+      summary: Delete a saved filter
+      description: >-
+        Delete a saved filter. **Owner only** — a non-owner (even on a `shared`
+        filter) gets `404`, never `403`.
+      operationId: deleteSavedFilter
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/filterId'
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/filters/{filterId}/usage:
+    get:
+      tags: [Saved Filters]
+      summary: Where a saved filter is used
+      description: >-
+        Delete-warning hook: the boards/reports that reference this saved filter,
+        so a client can show a "Used by N places — delete anyway?" confirmation.
+        **Owner only** (matches `DELETE`) — a non-owner gets `404`. Forward-looking:
+        no board/report consumes a filter in the current release, so `usages` is
+        **always `[]`**.
+      operationId: savedFilterUsage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/filterId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SavedFilterUsageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1784,6 +2052,11 @@ components:
       schema: { type: string, format: uuid }
     attachmentId:
       name: attachmentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    filterId:
+      name: filterId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1863,6 +2136,23 @@ components:
               type: object
               additionalProperties: { type: string }
               example: { email: must be a well-formed email address }
+
+    HqlProblemDetail:
+      description: >-
+        The `422` body for an invalid HQL query. Beyond the standard problem
+        fields it carries the machine-readable highlight/anchor the search UI
+        uses to underline the offending part of the query.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [PARSE_ERROR, SEMANTIC_ERROR]
+            position: { type: integer, description: '0-based character offset into the query', example: 12 }
+            length: { type: integer, description: 'Length of the highlight span (PARSE_ERROR)', example: 4 }
+            token: { type: string, nullable: true, description: 'The offending token, when known (PARSE_ERROR)' }
+            field: { type: string, description: 'The offending field name (SEMANTIC_ERROR)', example: assignee }
 
     MessageResponse:
       type: object
@@ -2473,6 +2763,168 @@ components:
         changedById: { type: string, format: uuid }
         changedByName: { type: string }
         createdAt: { type: string, format: date-time }
+
+    SearchRequest:
+      type: object
+      description: Body of `POST /workspaces/{workspaceId}/search`
+      properties:
+        query:
+          type: string
+          maxLength: 2000
+          description: >-
+            The HQL query. May be empty/omitted (null treated as empty) → all
+            visible issues, default sort. Over 2000 chars is rejected at binding
+            (`400`).
+          example: status = "In Progress" AND assignee = currentUser() ORDER BY priority DESC
+        page: { type: integer, minimum: 0, default: 0, description: 'Zero-based page index (null/negative → 0)' }
+        size: { type: integer, minimum: 1, maximum: 100, default: 50, description: 'Page size (null → 50, clamped 1..100)' }
+
+    SearchResultRow:
+      type: object
+      description: One search hit — the full issue plus its owning project's identity (results are cross-project).
+      properties:
+        issue: { $ref: '#/components/schemas/IssueResponse' }
+        projectId: { type: string, format: uuid }
+        projectKey: { type: string, example: DEMO }
+        projectName: { type: string, example: Demo Project }
+
+    SearchSchemaResponse:
+      type: object
+      description: Autocomplete metadata for the search UI (`GET /search/schema`).
+      properties:
+        fields:
+          type: array
+          description: One entry per live queryable field
+          items: { $ref: '#/components/schemas/SearchField' }
+        keywords:
+          type: array
+          description: HQL keywords, for keyword autocomplete
+          items: { type: string }
+          example: [AND, OR, NOT, IN, IS, EMPTY, ORDER BY, ASC, DESC]
+        values:
+          type: object
+          description: >-
+            Value picklists keyed by value-source token (`STATUS`, `TYPE`,
+            `PRIORITY`) — the distinct names reachable by the caller's visible
+            projects. `USER` is intentionally absent (use `/search/suggest`).
+          additionalProperties:
+            type: array
+            items: { $ref: '#/components/schemas/SearchValueOption' }
+
+    SearchField:
+      type: object
+      description: A queryable HQL field's public schema
+      properties:
+        name: { type: string, example: assignee }
+        type:
+          type: string
+          description: The field's data-type family
+          enum: [ENUM_REF, USER_REF, ISSUE_REF, TEXT, DATE, TIMESTAMP, NUMBER]
+          example: USER_REF
+        operators:
+          type: array
+          description: The operator tokens legal on this field (comparison ops, then `IN`, then `IS EMPTY` / `IS NOT EMPTY`)
+          items: { type: string }
+          example: ['=', '!=', IN, IS EMPTY, IS NOT EMPTY]
+        nullable: { type: boolean, description: 'Whether `IS [NOT] EMPTY` is allowed' }
+        sortable: { type: boolean, description: 'Whether the field may appear in ORDER BY' }
+        valueSuggest:
+          type: string
+          nullable: true
+          description: 'The value-source token (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`DATE`/…), or null when there is no picklist'
+          example: USER
+        functions:
+          type: array
+          description: Zero-arg functions offered for this field
+          items: { type: string }
+          example: ['currentUser()']
+
+    SearchValueOption:
+      type: object
+      description: A picklist entry — a display label and an optional resolvable value
+      properties:
+        label: { type: string, example: In Progress }
+        value: { type: string, nullable: true, description: 'Resolvable value when applicable (e.g. email for USER); null for name-resolved picklists' }
+
+    SuggestResponse:
+      type: object
+      description: Typeahead result for a user-valued field (`GET /search/suggest`)
+      properties:
+        field: { type: string, description: 'The queried field, echoed back', example: assignee }
+        suggestions:
+          type: array
+          description: Matching workspace members, capped at 20, most relevant first
+          items:
+            type: object
+            properties:
+              label: { type: string, description: 'Display name shown in the dropdown', example: Ada Lovelace }
+              value: { type: string, description: 'The resolvable value the client inserts (the member email)', example: ada@example.com }
+
+    SavedFilterResponse:
+      type: object
+      description: A saved HQL filter. `mine` is caller-relative — `true` when the authenticated actor owns it.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: My open bugs }
+        hql: { type: string, description: 'The stored HQL (may be empty = all issues)', example: type = Bug AND assignee = currentUser() }
+        shared: { type: boolean, description: 'Whether other workspace members can see it (read-only)' }
+        ownerId: { type: string, format: uuid }
+        ownerName: { type: string, example: Ada Lovelace }
+        mine: { type: boolean, description: 'True when the caller is the owner (drives edit/delete affordances)' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CreateSavedFilterRequest:
+      type: object
+      required: [name]
+      description: Body of `POST /workspaces/{workspaceId}/filters`. The owner is always the caller — never taken from the body.
+      properties:
+        name:
+          type: string
+          maxLength: 120
+          description: Required, non-blank; unique per `(workspace, owner)` — `409` on a dup.
+          example: My open bugs
+        hql:
+          type: string
+          maxLength: 2000
+          description: >-
+            The HQL to store (may be empty = all issues). Validated at save time
+            (parse + structural) — a bad query → `422`. Over 2000 chars → `400`.
+          example: type = Bug AND assignee = currentUser()
+        shared:
+          type: boolean
+          default: false
+          description: Whether the filter is visible read-only to other workspace members.
+
+    UpdateSavedFilterRequest:
+      type: object
+      description: >-
+        Body of `PATCH /workspaces/{workspaceId}/filters/{filterId}` — a partial
+        update; every field is optional and `null`/omitted is a no-op. Owner only.
+      properties:
+        name: { type: string, maxLength: 120, description: 'New name if present; re-checked for `(workspace, owner)` uniqueness (`409` on dup, `400` if blank).' }
+        hql: { type: string, maxLength: 2000, description: 'New HQL if present; re-validated at save time (`422` on a bad query).' }
+        shared: { type: boolean, description: 'New sharing flag if present.' }
+
+    SavedFilterUsageResponse:
+      type: object
+      description: >-
+        Delete-warning payload (`GET …/filters/{filterId}/usage`). Forward-looking:
+        no board/report consumes a filter in the current release, so `usages` is
+        always `[]`.
+      properties:
+        usages:
+          type: array
+          description: The places referencing this filter (empty in the current release)
+          items: { $ref: '#/components/schemas/SavedFilterUsage' }
+
+    SavedFilterUsage:
+      type: object
+      description: One consumer of a saved filter (a board or report, when those land)
+      properties:
+        type: { type: string, description: 'Consumer kind — `BOARD` or `REPORT` (open string)', example: BOARD }
+        id: { type: string, format: uuid }
+        name: { type: string, description: 'The consumer''s display name for the confirm dialog' }
 
     CreateCommentRequest:
       type: object

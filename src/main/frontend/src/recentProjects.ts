@@ -34,6 +34,11 @@ export function getLastProject(userId: string): RecentProject | null {
   return getRecentProjects(userId)[0] ?? null
 }
 
+/** The workspace id of the most-recently-visited project, if any. */
+export function getLastWorkspaceId(userId: string): string | null {
+  return getLastProject(userId)?.wsId ?? null
+}
+
 export function recordProjectVisit(userId: string, entry: Omit<RecentProject, 'visitedAt'>) {
   const rest = getRecentProjects(userId).filter(e => e.projectId !== entry.projectId)
   const list = [{ ...entry, visitedAt: Date.now() }, ...rest].slice(0, MAX_RECENTS)

@@ -2,13 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings,
+  Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings, Search,
   Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid, type LucideIcon,
 } from 'lucide-react'
-import { apiGetProject, apiLogout } from '../api'
+import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { getLastWorkspaceId } from '../recentProjects'
 import { Avatar } from './ui'
 import AboutModal from './AboutModal'
 
@@ -38,6 +39,24 @@ export default function NavRail() {
     queryFn: () => apiGetProject(cur!.wsId, cur!.projectId),
     enabled: !!cur,
   })
+
+  // Resolve a workspace for the Search link so it's reachable even before the
+  // user has opened any board (`cur` is null then). Fallback chain: current
+  // project's ws → most-recent workspace from the recency journal → the user's
+  // first workspace (shared ['workspaces'] cache — ProjectSwitcher/CreateIssue
+  // already populate it, so this rarely refetches). Only truly-zero-workspace
+  // users (brand-new) end up with no wsId, and Search hides for them.
+  const { data: workspaces } = useQuery({
+    queryKey: ['workspaces'],
+    queryFn: apiListWorkspaces,
+    enabled: !cur,
+    staleTime: 5 * 60 * 1000,
+  })
+  const searchWsId =
+    cur?.wsId
+    ?? (user ? getLastWorkspaceId(user.id) : null)
+    ?? workspaces?.[0]?.id
+    ?? null
 
   useEffect(() => {
     function handle(e: MouseEvent) {
@@ -89,6 +108,10 @@ export default function NavRail() {
 
       <RailLink to="/home" icon={Home} label="Home" />
       <RailLink to="/my-work" icon={CheckSquare} label="My work" />
+      {/* Search — reachable whenever a workspace is resolvable (absolute path;
+          splat-route rule), not just when a current project exists. Hidden only
+          for brand-new users with zero workspaces. */}
+      {searchWsId && <RailLink to={`/w/${searchWsId}/search`} icon={Search} label="Search" />}
 
       {/* Project section — always visible, bound to the current (last-visited)
           project so the tabs never disappear (e.g. on Home / My work). */}

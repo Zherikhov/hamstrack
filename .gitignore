@@ -28,7 +28,6 @@ target/
 build/
 !**/src/main/**/build/
 !**/src/test/**/build/
-/
 
 ### VS Code ###
 .vscode/
@@ -52,3 +51,8 @@ src/main/resources/static/
 .env
 application-local.properties
 
+### Local Claude Code helper scripts / scratch (task-creation, one-off API scripts) ###
+.local/
+
+###
+qa/

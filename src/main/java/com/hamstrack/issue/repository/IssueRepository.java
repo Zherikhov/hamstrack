@@ -170,4 +170,16 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
     @Query("SELECT i.id, i.project.key, i.number, i.title, i.type.id " +
            "FROM Issue i WHERE i.id IN :ids")
     List<Object[]> parentSummaries(@Param("ids") Collection<UUID> ids);
+
+    // HQL search: resolve a `parent = "KEY-42"` operand to an issue id within the
+    // workspace, scoped to the visible projects (case-insensitive project key). The
+    // caller (HqlParentResolver) always passes the actor's visible project ids, so
+    // this can never resolve a parent outside the tenant boundary.
+    @Query("SELECT i.id FROM Issue i WHERE i.workspace.id = :wsId "
+            + "AND i.project.id IN :projectIds "
+            + "AND upper(i.project.key) = upper(:projectKey) AND i.number = :number")
+    Optional<UUID> findIdByWorkspaceAndKey(@Param("wsId") UUID wsId,
+                                           @Param("projectIds") Collection<UUID> projectIds,
+                                           @Param("projectKey") String projectKey,
+                                           @Param("number") long number);
 }

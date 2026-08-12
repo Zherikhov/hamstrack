@@ -468,6 +468,18 @@ public class IssueService {
                 new IssueResponse.Rollup(childCount, doneCount));
     }
 
+    /**
+     * Map a batch of already-loaded, managed {@link Issue} entities to
+     * {@link IssueResponse}s with roll-up counts and parent summaries batched (no
+     * N+1) — the same assembly the board/backlog use. Exposed for HQL search, whose
+     * compiler fetches the page through Criteria but still needs the identical row
+     * shape. Must be called inside a read transaction (navigates lazy parent ids).
+     */
+    @Transactional(readOnly = true)
+    public List<IssueResponse> toResponsesBatched(List<Issue> issues) {
+        return toResponses(issues);
+    }
+
     // List/board response: roll-up counts via one grouped query keyed by these
     // issue ids, and parent summaries via one batched query keyed by the distinct
     // parent ids (never a fetch-join on the hot board query — §7.3).

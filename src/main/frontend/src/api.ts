@@ -4,14 +4,44 @@ import type {
   AdminStatus, AdminPriority, AdminIssueType, AdminWorkflow, AdminPrioritySet,
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
   ProjectBinding, BindingOptions, TransitionRule, UsageDetail, AdminUser, PendingInvite,
+  SearchResultRow, SearchSchema, SavedFilter,
 } from './types'
 import { useAuthStore } from './auth'
 
 const BASE = '/api'
 
+// The machine-readable extra fields the search backend attaches to a 422
+// HqlProblemDetail — position/length underline the offending span in the HQL
+// input; errorType/token/field describe the failure. Read off ApiResponseError.hql.
+export interface HqlError {
+  errorType: 'PARSE_ERROR' | 'SEMANTIC_ERROR'
+  position?: number
+  length?: number
+  token?: string | null
+  field?: string
+}
+
 export class ApiResponseError extends Error {
-  constructor(public status: number, public detail: string) {
+  // Present only for an HQL 422 (search/saved-filter validation) — lets the UI
+  // underline the bad span and read errorType/field without re-parsing.
+  hql?: HqlError
+  constructor(public status: number, public detail: string, hql?: HqlError) {
     super(detail)
+    this.hql = hql
+  }
+}
+
+// A body carrying errorType is an HqlProblemDetail — pull the highlight fields.
+function hqlErrorOf(body: unknown): HqlError | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const b = body as Record<string, unknown>
+  if (b.errorType !== 'PARSE_ERROR' && b.errorType !== 'SEMANTIC_ERROR') return undefined
+  return {
+    errorType: b.errorType as HqlError['errorType'],
+    position: typeof b.position === 'number' ? b.position : undefined,
+    length: typeof b.length === 'number' ? b.length : undefined,
+    token: typeof b.token === 'string' ? b.token : null,
+    field: typeof b.field === 'string' ? b.field : undefined,
   }
 }
 
@@ -62,14 +92,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     let detail = res.statusText
+    let hql: HqlError | undefined
     try {
       const body = await res.json()
       detail = body.detail ?? body.message ?? body.title ?? detail
+      // Carry through the HQL 422 highlight fields (position/length/token/field/
+      // errorType) so the search UI can underline the offending span.
+      hql = hqlErrorOf(body)
     } catch { /* ignore */ }
     // Never surface an empty message — statusText is blank over HTTP/2, which
     // would render as a silent, invisible error in the UI.
     if (!detail) detail = `Request failed (${res.status})`
-    throw new ApiResponseError(res.status, detail)
+    throw new ApiResponseError(res.status, detail, hql)
   }
 
   return res.status === 204 ? (undefined as T) : res.json()
@@ -626,4 +660,58 @@ export async function apiInviteWorkspaceMember(
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+// ── Advanced search (HQL) — HD-25 ─────────────────────────────────────────────
+// Workspace-scoped; a non-member gets 404. A bad query POST throws an
+// ApiResponseError with .status === 422 and a populated .hql (position/length/
+// token/field/errorType) so the input can underline the offending span.
+
+export async function apiSearch(
+  wsId: string,
+  payload: { query: string; page?: number; size?: number }
+): Promise<Page<SearchResultRow>> {
+  return request(`/workspaces/${wsId}/search`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function apiSearchSchema(wsId: string): Promise<SearchSchema> {
+  return request(`/workspaces/${wsId}/search/schema`)
+}
+
+// Bounded prefix typeahead for user-valued fields (assignee/reporter). `q` ≤ 100.
+export async function apiSearchSuggest(
+  wsId: string, field: string, q: string
+): Promise<{ field: string; suggestions: { label: string; value: string }[] }> {
+  const params = new URLSearchParams({ field })
+  if (q) params.set('q', q)
+  return request(`/workspaces/${wsId}/search/suggest?${params.toString()}`)
+}
+
+// ── Saved filters — HD-26 ─────────────────────────────────────────────────────
+// Own + shared, workspace-scoped. Create/update/delete are owner-only server-side
+// (a non-owner PATCH/DELETE 404s). Create: 422 invalid HQL (.hql set), 409 dup name.
+
+export const savedFilters = {
+  list: (wsId: string) =>
+    request<SavedFilter[]>(`/workspaces/${wsId}/filters`),
+  get: (wsId: string, id: string) =>
+    request<SavedFilter>(`/workspaces/${wsId}/filters/${id}`),
+  create: (wsId: string, payload: { name: string; hql: string; shared?: boolean }) =>
+    request<SavedFilter>(`/workspaces/${wsId}/filters`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  update: (wsId: string, id: string, payload: { name?: string; hql?: string; shared?: boolean }) =>
+    request<SavedFilter>(`/workspaces/${wsId}/filters/${id}`, {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
+  remove: (wsId: string, id: string) =>
+    request<void>(`/workspaces/${wsId}/filters/${id}`, { method: 'DELETE' }),
+  // Delete-warning hook (empty in MVP — no board/report consumes a filter yet).
+  usage: (wsId: string, id: string) =>
+    request<{ usages: { type: string; id: string; name: string }[] }>(
+      `/workspaces/${wsId}/filters/${id}/usage`
+    ),
 }

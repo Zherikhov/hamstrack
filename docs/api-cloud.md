@@ -29,6 +29,8 @@ https://hamstrack.com/api
 - [Issues](#issues)
 - [Comments](#comments)
 - [Attachments](#attachments)
+- [Search (HQL)](#search-hql)
+- [Saved filters](#saved-filters)
 - [Notifications](#notifications)
 - [Real-time events (SSE)](#real-time-events-sse)
 
@@ -453,6 +455,127 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/attachments \
 { "id": "…", "filename": "screenshot.png", "sizeBytes": 48213, "contentType": "image/png",
   "uploadedById": "…", "uploadedByName": "Ada Lovelace", "createdAt": "…" }
 ```
+
+## Search (HQL)
+
+Search issues across a whole workspace with **HQL** (Hamstrack Query Language) — a small, readable query language. Results are cross-project but always restricted to the caller's **visible (non-archived) projects**; this scope is enforced server-side and no query text can widen it. All three endpoints require workspace membership (`404` for a non-member).
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/workspaces/{wsId}/search` | member | Run an HQL query. Paginated ([envelope](#conventions), `size` clamped `1`–`100`) |
+| `GET` | `/workspaces/{wsId}/search/schema` | member | Autocomplete metadata: fields, per-field operators, and value picklists |
+| `GET` | `/workspaces/{wsId}/search/suggest?field=&q=` | member | Typeahead for user-valued fields (`assignee`/`reporter`), capped at 20 |
+
+**Query** — the body is `{"query", "page?", "size?"}`. `query` is the HQL string (max 2000 chars — a longer one is rejected at binding with `400`); an empty or omitted `query` matches all visible issues in the default sort.
+
+```bash
+curl -X POST $BASE/workspaces/$WS/search \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+  "query": "status = \"In Progress\" AND assignee = currentUser() ORDER BY priority DESC",
+  "page": 0, "size": 50
+}'
+```
+
+Each row in the paginated `content` reuses the full [`IssueResponse`](#issues) plus its owning project's identity (results are cross-project):
+
+```json
+{ "issue": { "id": "…", "number": 18, "key": "DEMO-18", … },
+  "projectId": "…", "projectKey": "DEMO", "projectName": "Demo Project" }
+```
+
+**HQL grammar** — a boolean expression of `field OP value` comparisons:
+
+- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`.
+- **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=`. Which operators a field accepts is per-field (see `/search/schema`): `~` is a case-insensitive substring match, only on `text` (title + description); ordered comparisons (`>` `<` `>=` `<=`) apply to the date fields and to `priority`.
+- **Booleans:** combine terms with `AND`, `OR`, `NOT` and parentheses `( )`. Precedence is `NOT` > `AND` > `OR`.
+- **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`).
+- **Sorting:** an optional trailing `ORDER BY field [ASC|DESC], …` clause — it must come last.
+- **Functions:** `currentUser()`, `now()`, `startOfWeek()` (evaluated in server UTC).
+- **Values:** status / type / priority are given by **name** (quote names with spaces, e.g. `"In Progress"`); users by email, display name, `currentUser()`, or UUID; dates as `YYYY-MM-DD`.
+
+More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assignee IS EMPTY AND created >= startOfWeek()` · `text ~ "flux capacitor" OR parent = "DEMO-12"`.
+
+**Invalid queries** return `422` with a machine-readable anchor so a UI can underline the problem:
+
+- a **parse error** carries `"errorType": "PARSE_ERROR"` with `position` (0-based character offset), `length`, and (when known) the offending `token`;
+- a **semantic error** (e.g. unknown field, illegal operator, a non-sortable field in `ORDER BY`) carries `"errorType": "SEMANTIC_ERROR"` with the offending `field` and `position`.
+
+```json
+{ "type": "about:blank", "title": "Unprocessable Content", "status": 422,
+  "detail": "Unknown field 'asignee' — did you mean 'assignee'?",
+  "errorType": "SEMANTIC_ERROR", "field": "asignee", "position": 0 }
+```
+
+**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`), `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects. The member list is deliberately **not** embedded — use `/search/suggest` for it.
+
+```json
+{
+  "fields": [
+    { "name": "status", "type": "ENUM_REF", "operators": ["=", "!=", "IN"],
+      "nullable": false, "sortable": true, "valueSuggest": "STATUS", "functions": [] },
+    { "name": "assignee", "type": "USER_REF", "operators": ["=", "!=", "IN", "IS EMPTY", "IS NOT EMPTY"],
+      "nullable": true, "sortable": true, "valueSuggest": "USER", "functions": ["currentUser()"] }
+  ],
+  "keywords": ["AND", "OR", "NOT", "IN", "IS", "EMPTY", "ORDER BY", "ASC", "DESC"],
+  "values": { "STATUS": [ { "label": "In Progress", "value": null } ], "TYPE": [ … ], "PRIORITY": [ … ] }
+}
+```
+
+**Suggest** — `GET /search/suggest?field=assignee&q=ada` returns up to 20 matching members (`q` is a prefix, max 100 chars); each suggestion's `value` (the member email) is what you drop into the query:
+
+```json
+{ "field": "assignee",
+  "suggestions": [ { "label": "Ada Lovelace", "value": "ada@example.com" } ] }
+```
+
+## Saved filters
+
+Reusable, workspace-scoped [HQL](#search-hql) data sources. Every user can save their own filters and optionally **share** them read-only with the rest of the workspace. All endpoints require workspace membership and return **`404` (never `403`)** for a non-member, for a private filter owned by someone else, or when a non-owner tries to read/edit/delete a filter that isn't theirs — existence is never leaked.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/workspaces/{wsId}/filters` | member | List your own filters plus every shared filter in the workspace |
+| `POST` | `/workspaces/{wsId}/filters` | member | Create a filter (you become the owner) |
+| `GET` | `/workspaces/{wsId}/filters/{filterId}` | member | Get one filter (your own or a shared one) |
+| `PATCH` | `/workspaces/{wsId}/filters/{filterId}` | owner | Partial update — only the fields you send are applied |
+| `GET` | `/workspaces/{wsId}/filters/{filterId}/usage` | owner | Where the filter is used (delete-warning hook) |
+| `DELETE` | `/workspaces/{wsId}/filters/{filterId}` | owner | Delete the filter |
+
+**Owner vs shared** — a filter with `"shared": true` is visible read-only to every other workspace member (it appears in their `GET /filters` list and they can fetch it by id). Only the **owner** may `PATCH`, `DELETE`, or read its `usage` — a non-owner attempting any of those gets `404`, even for a shared filter.
+
+**Create** — the body is `{"name", "hql?", "shared?"}`:
+
+- `name` is required, non-blank, max 120 chars, and **unique per (workspace, owner)** — a duplicate returns `409`. Different owners may reuse a name.
+- `hql` is the HQL string to store (max 2000 chars; may be empty = "all issues"). It is **validated at save time** (parse + structural checks against the field schema) but never executed here — value resolution (`currentUser()`, status-name→id, …) is deferred to run time, so a later-archived catalog row won't permanently break a saved query. An invalid query returns `422` with the same anchor shape as [search](#search-hql) (`errorType` `PARSE_ERROR`/`SEMANTIC_ERROR` plus `position`/`length`/`token`/`field`).
+- `shared` defaults to `false`.
+
+```bash
+curl -X POST $BASE/workspaces/$WS/filters \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+  "name": "My open bugs",
+  "hql": "type = Bug AND assignee = currentUser() AND status != Done",
+  "shared": false
+}'
+```
+
+The response (also returned by `GET` and `PATCH`) is a `SavedFilterResponse`. `mine` is relative to the caller (`true` when you own it) — the UI uses it to show edit/delete only on your own rows:
+
+```json
+{ "id": "…", "name": "My open bugs",
+  "hql": "type = Bug AND assignee = currentUser() AND status != Done",
+  "shared": false, "ownerId": "…", "ownerName": "Ada Lovelace", "mine": true,
+  "createdAt": "2026-08-12T10:00:00Z", "updatedAt": "2026-08-12T10:00:00Z" }
+```
+
+**Update** — `PATCH` takes `{"name?", "hql?", "shared?"}`; every field is optional and a `null`/omitted field is a no-op. A changed `name` is re-checked for `(workspace, owner)` uniqueness (`409` on a dup, `400` if blank); a changed `hql` is re-validated (`422` on a bad query). Only the owner may update — a non-owner gets `404`.
+
+**Usage** — `GET …/usage` is a forward-looking delete-warning hook so clients can show a "Used by N places — delete anyway?" confirmation. In the current release nothing consumes a saved filter yet, so `usages` is **always empty**:
+
+```json
+{ "usages": [] }
+```
+
+When boards/reports start consuming filters, each entry will be `{ "type": "BOARD"|"REPORT", "id": "…", "name": "…" }` with no contract change.
 
 ## Notifications
 

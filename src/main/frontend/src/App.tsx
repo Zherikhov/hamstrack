@@ -15,6 +15,7 @@ import HomePage from './pages/HomePage'
 import MyWorkPage from './pages/MyWorkPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
+import SearchResultsPage from './pages/SearchResultsPage'
 import ProjectSettingsArea from './pages/settings/ProjectSettingsArea'
 import WorkspaceSettingsArea from './pages/settings/WorkspaceSettingsArea'
 import AppShell from './components/AppShell'
@@ -153,6 +154,7 @@ export default function App() {
               <Route path="/workspaces" element={<WorkspacesPage />} />
               <Route path="/w/:wsId">
                 <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />
+                <Route path="search" element={<ParamKeyed><SearchResultsPage /></ParamKeyed>} />
                 <Route path="settings/*" element={<ParamKeyed><WorkspaceSettingsArea /></ParamKeyed>} />
                 <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
                 <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />

@@ -1,10 +1,12 @@
 import { useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { Search } from 'lucide-react'
+import { useNavigate } from 'react-router'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSSE } from '../hooks/useSSE'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { apiSearchSchema } from '../api'
 import NotificationBell from './NotificationBell'
 import ProjectSwitcher from './ProjectSwitcher'
+import HqlInput from './HqlInput'
 import type { Notification } from '../types'
 
 interface Props {
@@ -19,8 +21,28 @@ interface Props {
  */
 export default function TopSearchBar({ wsId }: Props) {
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const cur = useCurrentProject()
   const [incoming, setIncoming] = useState<Notification | null>(null)
+  const [query, setQuery] = useState('')
+
+  // The workspace search is scoped to a workspace; use the route ws or the last
+  // visited project's ws (via useCurrentProject) so search stays available on
+  // global pages. Hidden entirely when there's no workspace context.
+  const searchWsId = wsId ?? cur?.wsId
+
+  const { data: schema } = useQuery({
+    queryKey: ['searchSchema', searchWsId],
+    queryFn: () => apiSearchSchema(searchWsId!),
+    enabled: !!searchWsId,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  function runSearch() {
+    if (!searchWsId) return
+    const qs = query ? `?q=${encodeURIComponent(query)}` : ''
+    navigate(`/w/${searchWsId}/search${qs}`)
+  }
 
   useSSE(wsId, {
     ISSUE_CREATED: (data: unknown) => {
@@ -51,33 +73,21 @@ export default function TopSearchBar({ wsId }: Props) {
       {/* Project switcher — first, then HQL search */}
       <ProjectSwitcher wsId={cur?.wsId} projectId={cur?.projectId} tone="light" />
 
-      <div
-        className="flex items-center gap-2.5"
-        style={{
-          flex: 1, maxWidth: 420,
-          background: 'var(--color-surface)',
-          borderRadius: 'var(--radius-md)',
-          padding: '9px 14px',
-        }}
-      >
-        <Search size={15} style={{ color: 'var(--color-text-muted)', flexShrink: 0 }} />
-        <input
-          placeholder="Search issues, projects, people…"
-          className="flex-1 min-w-0 bg-transparent outline-none"
-          style={{ fontSize: 13.5, color: 'var(--color-text)', border: 'none' }}
-        />
-        <span
-          className="mono flex-shrink-0"
-          style={{
-            fontSize: 10.5, fontWeight: 600,
-            background: 'var(--color-card)',
-            borderRadius: 6, padding: '2px 7px',
-            color: 'var(--color-text-muted)',
-          }}
-        >
-          HQL
-        </span>
-      </div>
+      {/* HQL search — Enter navigates to the workspace results view. Hidden when
+          there's no workspace context (as before). */}
+      {searchWsId && (
+        <div className="flex items-center" style={{ flex: 1, maxWidth: 460 }}>
+          <HqlInput
+            wsId={searchWsId}
+            value={query}
+            onChange={setQuery}
+            onSubmit={runSearch}
+            schema={schema}
+            tone="bar"
+            placeholder="Search with HQL — e.g. status = &quot;In Progress&quot;"
+          />
+        </div>
+      )}
 
       <div className="ml-auto flex items-center gap-2">
         <NotificationBell incoming={incoming} tone="light" />

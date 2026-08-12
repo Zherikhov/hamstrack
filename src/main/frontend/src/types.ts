@@ -337,3 +337,56 @@ export interface ApiError {
   detail?: string;
   status: number;
 }
+
+// ── Advanced search (HQL) — HD-25 ───────────────────────────────────────────
+
+// One search hit: the full issue (same shape as anywhere else) plus its owning
+// project's identity — results are cross-project so each row self-identifies.
+export interface SearchResultRow {
+  issue: Issue;
+  projectId: string;
+  projectKey: string;
+  projectName: string;
+}
+
+// A picklist entry from the schema (STATUS/TYPE/PRIORITY) or /suggest typeahead.
+// `value` is the resolvable literal to insert (email for USER); null = insert the
+// label (name-resolved picklists).
+export interface SearchValueOption {
+  label: string;
+  value: string | null;
+}
+
+// One queryable HQL field's public schema (drives autocomplete).
+export interface SearchField {
+  name: string;
+  // data-type family (serialized as `type`): ENUM_REF/USER_REF/ISSUE_REF/TEXT/DATE/TIMESTAMP/NUMBER
+  type: 'ENUM_REF' | 'USER_REF' | 'ISSUE_REF' | 'TEXT' | 'DATE' | 'TIMESTAMP' | 'NUMBER';
+  operators: string[];
+  nullable: boolean;
+  sortable: boolean;
+  // The value-source token (STATUS/TYPE/PRIORITY/USER/DATE/…) or null when no picklist.
+  valueSuggest: string | null;
+  functions: string[];
+}
+
+export interface SearchSchema {
+  fields: SearchField[];
+  keywords: string[];
+  // Value picklists keyed by value-source token (STATUS/TYPE/PRIORITY); USER absent.
+  values: Record<string, SearchValueOption[]>;
+}
+
+// A saved, workspace-scoped HQL data source (own + shared). `mine` is
+// caller-relative — drives whether rename/share/delete affordances are shown.
+export interface SavedFilter {
+  id: string;
+  name: string;
+  hql: string;
+  shared: boolean;
+  ownerId: string;
+  ownerName: string;
+  mine: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
