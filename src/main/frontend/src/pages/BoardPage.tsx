@@ -114,8 +114,9 @@ export default function BoardPage() {
 
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
-      {/* Main content */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* Main content — minWidth:0 lets the kanban zone shrink (reflow) when the
+          issue panel opens and take horizontal scroll instead of overflowing */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         {/* Page header */}
         <div
           className="flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0"
@@ -189,7 +190,7 @@ export default function BoardPage() {
                     // Columns share the viewport width; below the min they overflow
                     // into the container's horizontal scroll
                     flex: '1 1 280px',
-                    minWidth: 240,
+                    minWidth: 220,
                     maxWidth: 420,
                     background: isOver && allowed ? '#e2efec' : 'var(--color-surface-2)',
                     borderColor: isOver && allowed ? 'var(--color-brand)' : 'var(--color-border)',
