@@ -1,13 +1,23 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
+import { getUiPrefs, setUiPref } from '../uiPrefs'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
 import type { Issue, IssueType, Status } from '../types'
+
+// Board issue-panel sizing (HD-54): user-draggable width, clamped and additionally
+// capped at 55% of the viewport so the board never disappears. Owned by BoardPage
+// so the width survives the panel's key-based remount when switching issues.
+const PANEL_MIN = 360
+const PANEL_MAX = 720
+const PANEL_DEFAULT = 440
+const panelMax = () => Math.min(PANEL_MAX, Math.floor(window.innerWidth * 0.55))
+const clampPanel = (w: number) => Math.max(PANEL_MIN, Math.min(panelMax(), w))
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
@@ -19,6 +29,47 @@ export default function BoardPage() {
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<string>('')
+
+  // Resizable issue panel (HD-54) — width lives here so it persists across the
+  // panel's key-based remount when switching issues.
+  const [panelWidth, setPanelWidth] = useState(PANEL_DEFAULT)
+  const panelWidthRef = useRef(panelWidth)
+  const panelDraggingRef = useRef(false)
+
+  useEffect(() => {
+    if (!user) return
+    const w = getUiPrefs(user.id).boardPanelWidth
+    if (typeof w === 'number') {
+      const c = clampPanel(w)
+      setPanelWidth(c)
+      panelWidthRef.current = c
+    }
+  }, [user?.id])
+
+  // Re-clamp when the viewport shrinks (load also clamps, so no need to persist here)
+  useEffect(() => {
+    function onResize() {
+      setPanelWidth(w => {
+        const c = clampPanel(w)
+        panelWidthRef.current = c
+        return c
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  function handlePanelResize(next: number) {
+    panelWidthRef.current = next
+    setPanelWidth(next)
+    if (!panelDraggingRef.current && user) setUiPref(user.id, 'boardPanelWidth', next)
+  }
+
+  function handlePanelDrag(d: boolean) {
+    panelDraggingRef.current = d
+    // Persist once at drag end, not on every pointer move
+    if (!d && user) setUiPref(user.id, 'boardPanelWidth', panelWidthRef.current)
+  }
 
   // One endpoint since M1: the project's effective workflow statuses (board
   // order), transition rules, offered priorities and issue types
@@ -261,6 +312,11 @@ export default function BoardPage() {
           fields={fields}
           onOpenIssue={setOpenIssueNumber}
           onClose={() => setOpenIssueNumber(undefined)}
+          width={panelWidth}
+          minWidth={PANEL_MIN}
+          maxWidth={panelMax}
+          onResize={handlePanelResize}
+          onResizeDragChange={handlePanelDrag}
         />
       )}
     </div>

@@ -11,6 +11,7 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Button, Input, Textarea, Select, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
 import { FieldInput, FieldValueDisplay } from '../components/fields'
+import ResizeHandle from '../components/ResizeHandle'
 import type { Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, Comment, Attachment, IssueHistoryEntry, WorkspaceMember } from '../types'
 
 type Tab = 'details' | 'comments' | 'files' | 'history'
@@ -42,9 +43,18 @@ interface Props {
   onClose: () => void
   /** Open a different issue in the same panel (parent/child navigation). */
   onOpenIssue?: (number: number) => void
+  /** Controlled panel width in px (default 440). Owned by the parent so it
+   *  survives the key-based remount when switching issues (HD-54). */
+  width?: number
+  /** Resize bounds + callbacks. When onResize is provided the left-edge drag
+   *  handle is rendered (Board); omitted on Backlog → fixed-width, no handle. */
+  minWidth?: number
+  maxWidth?: () => number
+  onResize?: (next: number) => void
+  onResizeDragChange?: (dragging: boolean) => void
 }
 
-export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, priorities, fields, onClose, onOpenIssue }: Props) {
+export default function IssueSidePanel({ wsId, projectId, issueNumber, issueTypes, statuses, priorities, fields, onClose, onOpenIssue, width, minWidth, maxWidth, onResize, onResizeDragChange }: Props) {
   const qc = useQueryClient()
   const { user } = useAuthStore()
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
@@ -315,9 +325,11 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     setAttachments(prev => prev.filter(a => a.id !== attachmentId))
   }
 
+  const panelWidth = width ?? 440
   const panelStyle: React.CSSProperties = {
-    width: 440,
-    minWidth: 440,
+    position: 'relative',
+    width: panelWidth,
+    minWidth: panelWidth,
     height: '100%',
     background: 'white',
     borderLeft: '1px solid var(--color-border)',
@@ -325,6 +337,19 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
     flexDirection: 'column',
     overflow: 'hidden',
   }
+
+  // Left-edge drag handle — only on the Board (parent supplies onResize + bounds)
+  const resizeHandle = onResize && maxWidth && minWidth != null && (
+    <ResizeHandle
+      side="left"
+      size={panelWidth}
+      min={minWidth}
+      max={maxWidth}
+      onResize={onResize}
+      onDragChange={onResizeDragChange}
+      ariaLabel="Resize issue panel"
+    />
+  )
 
   const headerStyle: React.CSSProperties = {
     display: 'flex',
@@ -338,6 +363,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
   if (loading) {
     return (
       <div style={panelStyle}>
+        {resizeHandle}
         <div style={headerStyle}>
           <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
           <button onClick={onClose} className="cursor-pointer hover:opacity-60"><X size={16} /></button>
@@ -357,6 +383,7 @@ export default function IssueSidePanel({ wsId, projectId, issueNumber, issueType
 
   return (
     <div style={panelStyle}>
+      {resizeHandle}
       {/* Header */}
       <div style={headerStyle}>
         <div className="flex items-center gap-2 min-w-0">
