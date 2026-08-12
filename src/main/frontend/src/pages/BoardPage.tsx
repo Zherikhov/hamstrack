@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
+import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
@@ -19,6 +20,10 @@ const PANEL_DEFAULT = 440
 const panelMax = () => Math.min(PANEL_MAX, Math.floor(window.innerWidth * 0.55))
 const clampPanel = (w: number) => Math.max(PANEL_MIN, Math.min(panelMax(), w))
 
+// Drawer open/close animation (HD-56) — DESIGN.md "short" band, drawer easing
+const PANEL_ANIM_MS = 200
+const PANEL_EASE = 'cubic-bezier(.32,.72,0,1)'
+
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
   const navigate = useNavigate()
@@ -30,9 +35,12 @@ export default function BoardPage() {
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<string>('')
 
+  const reducedMotion = useReducedMotion()
+
   // Resizable issue panel (HD-54) — width lives here so it persists across the
   // panel's key-based remount when switching issues.
   const [panelWidth, setPanelWidth] = useState(PANEL_DEFAULT)
+  const [panelDragging, setPanelDragging] = useState(false)
   const panelWidthRef = useRef(panelWidth)
   const panelDraggingRef = useRef(false)
 
@@ -67,6 +75,7 @@ export default function BoardPage() {
 
   function handlePanelDrag(d: boolean) {
     panelDraggingRef.current = d
+    setPanelDragging(d) // suppress the drawer width transition while dragging
     // Persist once at drag end, not on every pointer move
     if (!d && user) setUiPref(user.id, 'boardPanelWidth', panelWidthRef.current)
   }
@@ -146,7 +155,6 @@ export default function BoardPage() {
     moveMutation.mutate({ issue, statusId })
   }
 
-  const panelOpen = openIssueNumber !== undefined
   // config.statuses arrive in workflow (board-column) order — don't re-sort
   const ordered = statuses
 
@@ -299,26 +307,108 @@ export default function BoardPage() {
         </div>
       </div>
 
-      {/* Side panel — keyed so switching issues remounts it with fresh state */}
-      {panelOpen && wsId && projectId && (
-        <IssueSidePanel
-          key={openIssueNumber}
-          wsId={wsId}
-          projectId={projectId}
-          issueNumber={openIssueNumber!}
-          issueTypes={issueTypes}
-          statuses={statuses}
-          priorities={priorities}
-          fields={fields}
-          onOpenIssue={setOpenIssueNumber}
-          onClose={() => setOpenIssueNumber(undefined)}
+      {/* Side panel — drawer-animated open/close; keyed so switching issues
+          remounts content with fresh state without replaying the animation */}
+      {wsId && projectId && (
+        <BoardIssueDrawer
+          issueNumber={openIssueNumber}
           width={panelWidth}
-          minWidth={PANEL_MIN}
-          maxWidth={panelMax}
-          onResize={handlePanelResize}
-          onResizeDragChange={handlePanelDrag}
-        />
+          dragging={panelDragging}
+          reducedMotion={reducedMotion}
+        >
+          {num => (
+            <IssueSidePanel
+              key={num}
+              wsId={wsId}
+              projectId={projectId}
+              issueNumber={num}
+              issueTypes={issueTypes}
+              statuses={statuses}
+              priorities={priorities}
+              fields={fields}
+              onOpenIssue={setOpenIssueNumber}
+              onClose={() => setOpenIssueNumber(undefined)}
+              width={panelWidth}
+              minWidth={PANEL_MIN}
+              maxWidth={panelMax}
+              onResize={handlePanelResize}
+              onResizeDragChange={handlePanelDrag}
+            />
+          )}
+        </BoardIssueDrawer>
       )}
+    </div>
+  )
+}
+
+/**
+ * Drawer wrapper for the board issue panel (HD-56). Animates its own width
+ * 0 ↔ `width` so the panel slides in from the right and the kanban columns
+ * reflow to make room; the inner panel is right-anchored and clipped during the
+ * transition. Stays mounted through the exit (keyed off `issueNumber` going
+ * undefined) so the close can animate, then unmounts. Switching issues (number
+ * changes but stays defined) does not replay the animation. Instant under
+ * reduced motion, and the transition is suppressed while the user is dragging
+ * the resize handle so resizing stays 1:1 with the pointer.
+ */
+function BoardIssueDrawer({
+  issueNumber, width, dragging, reducedMotion, children,
+}: {
+  issueNumber: number | undefined
+  width: number
+  dragging: boolean
+  reducedMotion: boolean
+  children: (issueNumber: number) => React.ReactNode
+}) {
+  // The issue currently rendered — retained through the exit animation.
+  const [rendered, setRendered] = useState(issueNumber)
+  const [expanded, setExpanded] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  const rafA = useRef<number | undefined>(undefined)
+  const rafB = useRef<number | undefined>(undefined)
+
+  useEffect(() => {
+    if (issueNumber !== undefined) {
+      // Open or switch: keep it mounted and expand. Double rAF so the collapsed
+      // (width:0) frame actually paints before we expand — a single rAF lets the
+      // browser coalesce both states and the open snaps instead of animating.
+      clearTimeout(timer.current)
+      setRendered(issueNumber)
+      rafA.current = requestAnimationFrame(() => {
+        rafB.current = requestAnimationFrame(() => setExpanded(true))
+      })
+      return () => { cancelAnimationFrame(rafA.current!); cancelAnimationFrame(rafB.current!) }
+    }
+    // Close: collapse, then unmount once the exit has played.
+    setExpanded(false)
+    timer.current = window.setTimeout(() => setRendered(undefined), reducedMotion ? 0 : PANEL_ANIM_MS)
+    return () => clearTimeout(timer.current)
+  }, [issueNumber, reducedMotion])
+
+  useEffect(() => () => {
+    clearTimeout(timer.current)
+    cancelAnimationFrame(rafA.current!)
+    cancelAnimationFrame(rafB.current!)
+  }, [])
+
+  if (rendered === undefined) return null
+
+  const open = expanded && issueNumber !== undefined
+  return (
+    <div
+      style={{
+        flexShrink: 0,
+        width: reducedMotion ? width : (open ? width : 0),
+        overflow: 'hidden',
+        position: 'relative',
+        willChange: 'width',
+        transition: reducedMotion || dragging ? 'none' : `width ${PANEL_ANIM_MS}ms ${PANEL_EASE}`,
+      }}
+    >
+      {/* Right-anchored so the panel reveals as a slide-in from the right */}
+      <div style={{ position: 'absolute', top: 0, right: 0, bottom: 0, width }}>
+        {children(rendered)}
+      </div>
     </div>
   )
 }
