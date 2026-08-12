@@ -3,14 +3,18 @@ import { NavLink, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings, Search,
-  Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid, type LucideIcon,
+  Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid,
+  PanelLeftClose, PanelLeftOpen, type LucideIcon,
 } from 'lucide-react'
 import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { useReducedMotion } from '../hooks/useReducedMotion'
 import { getLastWorkspaceId } from '../recentProjects'
+import { getUiPrefs, setUiPref } from '../uiPrefs'
 import { Avatar } from './ui'
+import ResizeHandle from './ResizeHandle'
 import AboutModal from './AboutModal'
 
 const RAIL_BG = 'var(--color-ink)'
@@ -20,19 +24,66 @@ const ACTIVE_BG = 'rgba(14,165,164,0.18)'
 const HOVER_BG = 'rgba(255,255,255,0.06)'
 const MUTED = 'var(--color-rail-muted)'
 
+// Rail sizing (HD-53). Width is user-draggable within [MIN, MAX] and additionally
+// capped at 40% of the viewport so it can't swallow the screen; COLLAPSED is the
+// icon-only strip.
+const RAIL_MIN = 180
+const RAIL_MAX = 320
+const RAIL_DEFAULT = 220
+const RAIL_COLLAPSED = 60
+
+const railMax = () => Math.min(RAIL_MAX, Math.floor(window.innerWidth * 0.4))
+const clampRail = (w: number) => Math.max(RAIL_MIN, Math.min(railMax(), w))
+
 /**
  * Dark navigation rail (Beacon). Carries the brand, the primary "New issue"
  * action, global items (Home / My work), the current project's sections, and a
  * user-menu footer. Replaces the old horizontal TopBar + light project Sidebar.
+ *
+ * The rail is user-resizable (drag the right edge, clamped) and collapsible to an
+ * icon-only strip; both are persisted per-user in localStorage (HD-53).
  */
 export default function NavRail() {
   const navigate = useNavigate()
   const cur = useCurrentProject()
   const { user, clear } = useAuthStore()
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
+  const reducedMotion = useReducedMotion()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+
+  // Layout state — hydrated from per-user prefs once the user is known.
+  const [width, setWidth] = useState(RAIL_DEFAULT)
+  const [collapsed, setCollapsed] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const widthRef = useRef(width)
+  const draggingRef = useRef(false)
+
+  useEffect(() => {
+    if (!user) return
+    const prefs = getUiPrefs(user.id)
+    if (typeof prefs.railWidth === 'number') {
+      const w = clampRail(prefs.railWidth)
+      setWidth(w)
+      widthRef.current = w
+    }
+    if (typeof prefs.railCollapsed === 'boolean') setCollapsed(prefs.railCollapsed)
+  }, [user?.id])
+
+  // Re-clamp when the viewport shrinks so the rail never exceeds 40% of a
+  // now-smaller window. Load also clamps, so this need not persist.
+  useEffect(() => {
+    function onResize() {
+      setWidth(w => {
+        const c = clampRail(w)
+        widthRef.current = c
+        return c
+      })
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   const { data: project } = useQuery({
     queryKey: ['project', cur?.wsId, cur?.projectId],
@@ -73,16 +124,47 @@ export default function NavRail() {
     navigate('/login')
   }
 
+  function handleResize(next: number) {
+    widthRef.current = next
+    setWidth(next)
+    if (!draggingRef.current && user) setUiPref(user.id, 'railWidth', next)
+  }
+
+  function handleDragChange(d: boolean) {
+    draggingRef.current = d
+    setDragging(d)
+    // Persist once, at drag end, rather than on every pointer move.
+    if (!d && user) setUiPref(user.id, 'railWidth', widthRef.current)
+  }
+
+  function toggleCollapse() {
+    setCollapsed(c => {
+      const next = !c
+      if (user) setUiPref(user.id, 'railCollapsed', next)
+      return next
+    })
+  }
+
+  const effectiveWidth = collapsed ? RAIL_COLLAPSED : width
+  const railTransition = dragging || reducedMotion ? 'none' : 'width 180ms ease'
+
   return (
     <nav
       className="flex flex-col flex-shrink-0"
-      style={{ width: 214, background: RAIL_BG, color: ITEM, padding: '14px 10px' }}
+      style={{
+        position: 'relative',
+        width: effectiveWidth,
+        background: RAIL_BG,
+        color: ITEM,
+        padding: collapsed ? '14px 8px' : '14px 10px',
+        transition: railTransition,
+      }}
     >
       {/* Brand */}
       <button
         onClick={() => navigate('/home')}
         className="flex items-center gap-2.5 cursor-pointer"
-        style={{ padding: '6px 8px 14px', background: 'none', border: 'none' }}
+        style={{ padding: collapsed ? '6px 0 14px' : '6px 8px 14px', justifyContent: collapsed ? 'center' : 'flex-start', background: 'none', border: 'none' }}
         title="Home"
       >
         <span
@@ -90,7 +172,7 @@ export default function NavRail() {
           style={{ width: 28, height: 28, borderRadius: 9, fontWeight: 800, fontSize: 15, color: '#04211f',
             background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))' }}
         >H</span>
-        <b style={{ fontWeight: 800, fontSize: 16, color: '#fff' }}>Hamstrack</b>
+        {!collapsed && <b style={{ fontWeight: 800, fontSize: 16, color: '#fff', whiteSpace: 'nowrap' }}>Hamstrack</b>}
       </button>
 
       {/* Primary action */}
@@ -98,44 +180,53 @@ export default function NavRail() {
         onClick={() => openCreateIssue()}
         className="flex items-center justify-center gap-2 cursor-pointer"
         style={{
-          margin: '2px 4px 12px', padding: 10, borderRadius: 11, border: 'none',
-          fontWeight: 800, fontSize: 13.5, color: '#04211f',
+          alignSelf: collapsed ? 'center' : 'stretch',
+          width: collapsed ? 26 : undefined, height: collapsed ? 26 : undefined,
+          margin: collapsed ? '2px 0 12px' : '2px 4px 12px', padding: collapsed ? 0 : 10,
+          borderRadius: collapsed ? 8 : 11, border: 'none',
+          fontWeight: 800, fontSize: 13.5, color: '#04211f', whiteSpace: 'nowrap', overflow: 'hidden',
           background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))',
         }}
+        title={collapsed ? 'New issue' : undefined}
       >
-        <Plus size={16} strokeWidth={2.6} />New issue
+        <Plus size={collapsed ? 15 : 16} strokeWidth={2.6} />{!collapsed && 'New issue'}
       </button>
 
-      <RailLink to="/home" icon={Home} label="Home" />
-      <RailLink to="/my-work" icon={CheckSquare} label="My work" />
+      <RailLink to="/home" icon={Home} label="Home" collapsed={collapsed} />
+      <RailLink to="/my-work" icon={CheckSquare} label="My work" collapsed={collapsed} />
       {/* Search — reachable whenever a workspace is resolvable (absolute path;
           splat-route rule), not just when a current project exists. Hidden only
           for brand-new users with zero workspaces. */}
-      {searchWsId && <RailLink to={`/w/${searchWsId}/search`} icon={Search} label="Search" />}
+      {searchWsId && <RailLink to={`/w/${searchWsId}/search`} icon={Search} label="Search" collapsed={collapsed} />}
 
       {/* Project section — always visible, bound to the current (last-visited)
           project so the tabs never disappear (e.g. on Home / My work). */}
       {cur && (
         <>
-          <div
-            className="truncate"
-            style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}
-            title={project?.name ?? cur.name}
-          >
-            {project?.name ?? cur.name ?? 'Project'}
-          </div>
-          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}`} end icon={Columns3} label="Board" />
-          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/backlog`} icon={ListTodo} label="Backlog" />
+          {!collapsed && (
+            <div
+              className="truncate"
+              style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}
+              title={project?.name ?? cur.name}
+            >
+              {project?.name ?? cur.name ?? 'Project'}
+            </div>
+          )}
+          {collapsed && <div style={{ height: 12 }} />}
+          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}`} end icon={Columns3} label="Board" collapsed={collapsed} />
+          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/backlog`} icon={ListTodo} label="Backlog" collapsed={collapsed} />
           {/* Reports — no backend yet */}
           <div
-            style={{ display: 'flex', alignItems: 'center', gap: 11, padding: '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}
-            title="Coming soon"
+            style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11, padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}
+            title={collapsed ? 'Reports — coming soon' : 'Coming soon'}
           >
-            <BarChart3 size={17} />Reports
-            <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em', color: MUTED, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 5, padding: '1px 5px' }}>SOON</span>
+            <BarChart3 size={17} />
+            {!collapsed && <>Reports
+              <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em', color: MUTED, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 5, padding: '1px 5px' }}>SOON</span>
+            </>}
           </div>
           {project?.myRole === 'MANAGER' && (
-            <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/settings`} icon={Settings} label="Settings" />
+            <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/settings`} icon={Settings} label="Settings" collapsed={collapsed} />
           )}
         </>
       )}
@@ -143,50 +234,84 @@ export default function NavRail() {
       {/* No project yet (brand-new user) — get them into one */}
       {!cur && (
         <>
-          <div style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}>Workspace</div>
-          <RailLink to="/workspaces" icon={LayoutGrid} label="All projects" />
+          {!collapsed && <div style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}>Workspace</div>}
+          {collapsed && <div style={{ height: 12 }} />}
+          <RailLink to="/workspaces" icon={LayoutGrid} label="All projects" collapsed={collapsed} />
         </>
       )}
 
-      {/* User footer + menu */}
-      <div ref={menuRef} style={{ marginTop: 'auto', position: 'relative' }}>
-        {menuOpen && (
-          <div
-            style={{
-              position: 'absolute', bottom: 'calc(100% + 6px)', left: 0, right: 0,
-              background: 'var(--color-ink-menu)', border: '1px solid rgba(255,255,255,0.12)',
-              borderRadius: 10, overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', zIndex: 40,
-            }}
-          >
-            {user?.systemRole === 'ADMIN' && (
-              <MenuItem icon={Gear} label="System administration" onClick={() => { setMenuOpen(false); navigate('/admin') }} />
-            )}
-            <MenuItem icon={Info} label="About Hamstrack" onClick={() => { setMenuOpen(false); setShowAbout(true) }} />
-            <MenuItem icon={LogOut} label="Sign out" onClick={handleLogout} />
-          </div>
-        )}
+      {/* Collapse toggle + user footer, pinned to the bottom */}
+      <div style={{ marginTop: 'auto' }}>
         <button
-          onClick={() => setMenuOpen(v => !v)}
+          onClick={toggleCollapse}
           className="w-full flex items-center gap-2.5 cursor-pointer"
-          style={{ padding: '9px 8px', borderRadius: 10, background: 'none', border: '1px solid rgba(255,255,255,0.06)' }}
+          style={{ padding: collapsed ? '9px 0' : '9px 11px', justifyContent: collapsed ? 'center' : 'flex-start', marginBottom: 6, borderRadius: 10, background: 'none', border: 'none', color: MUTED, fontSize: 12.5, fontWeight: 600 }}
           onMouseEnter={e => (e.currentTarget.style.background = HOVER_BG)}
           onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          {user && <Avatar name={user.displayName} avatarUrl={user.avatarUrl} size={30} />}
-          <span className="flex-1 min-w-0 text-left">
-            <span className="block truncate" style={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>{user?.displayName}</span>
-            <span className="block truncate" style={{ fontSize: 11, color: MUTED }}>{user?.systemRole === 'ADMIN' ? 'Admin' : user?.email}</span>
-          </span>
-          <ChevronDown size={14} style={{ color: MUTED, transform: menuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }} />
+          {collapsed ? <PanelLeftOpen size={17} /> : <><PanelLeftClose size={17} />Collapse</>}
         </button>
+
+        <div ref={menuRef} style={{ position: 'relative' }}>
+          {menuOpen && (
+            <div
+              style={{
+                position: 'absolute', bottom: 'calc(100% + 6px)', left: 0,
+                right: collapsed ? 'auto' : 0, minWidth: collapsed ? 200 : undefined,
+                background: 'var(--color-ink-menu)', border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 10, overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', zIndex: 40,
+              }}
+            >
+              {user?.systemRole === 'ADMIN' && (
+                <MenuItem icon={Gear} label="System administration" onClick={() => { setMenuOpen(false); navigate('/admin') }} />
+              )}
+              <MenuItem icon={Info} label="About Hamstrack" onClick={() => { setMenuOpen(false); setShowAbout(true) }} />
+              <MenuItem icon={LogOut} label="Sign out" onClick={handleLogout} />
+            </div>
+          )}
+          <button
+            onClick={() => setMenuOpen(v => !v)}
+            className="w-full flex items-center gap-2.5 cursor-pointer"
+            style={{ padding: collapsed ? '9px 0' : '9px 8px', justifyContent: collapsed ? 'center' : 'flex-start', borderRadius: 10, background: 'none', border: '1px solid rgba(255,255,255,0.06)' }}
+            onMouseEnter={e => (e.currentTarget.style.background = HOVER_BG)}
+            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+            title={collapsed ? user?.displayName : undefined}
+          >
+            {user && <Avatar name={user.displayName} avatarUrl={user.avatarUrl} size={30} />}
+            {!collapsed && (
+              <>
+                <span className="flex-1 min-w-0 text-left">
+                  <span className="block truncate" style={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>{user?.displayName}</span>
+                  <span className="block truncate" style={{ fontSize: 11, color: MUTED }}>{user?.systemRole === 'ADMIN' ? 'Admin' : user?.email}</span>
+                </span>
+                <ChevronDown size={14} style={{ color: MUTED, transform: menuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }} />
+              </>
+            )}
+          </button>
+        </div>
       </div>
+
+      {/* Drag-to-resize handle on the right edge (hidden when collapsed) */}
+      {!collapsed && (
+        <ResizeHandle
+          side="right"
+          size={width}
+          min={RAIL_MIN}
+          max={railMax}
+          onResize={handleResize}
+          onDragChange={handleDragChange}
+          ariaLabel="Resize sidebar"
+        />
+      )}
 
       {showAbout && <AboutModal onClose={() => setShowAbout(false)} />}
     </nav>
   )
 }
 
-function RailLink({ to, end, icon: Icon, label }: { to: string; end?: boolean; icon: LucideIcon; label: string }) {
+function RailLink({ to, end, icon: Icon, label, collapsed }: { to: string; end?: boolean; icon: LucideIcon; label: string; collapsed: boolean }) {
   const [h, setH] = useState(false)
   return (
     <NavLink
@@ -194,15 +319,16 @@ function RailLink({ to, end, icon: Icon, label }: { to: string; end?: boolean; i
       end={end}
       onMouseEnter={() => setH(true)}
       onMouseLeave={() => setH(false)}
+      title={collapsed ? label : undefined}
       style={({ isActive }) => ({
-        display: 'flex', alignItems: 'center', gap: 11,
-        padding: '9px 11px', borderRadius: 10,
-        fontSize: 13.5, fontWeight: 600, textDecoration: 'none',
+        display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11,
+        padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10,
+        fontSize: 13.5, fontWeight: 600, textDecoration: 'none', whiteSpace: 'nowrap',
         color: isActive ? ACTIVE : (h ? '#fff' : ITEM),
         background: isActive ? ACTIVE_BG : (h ? HOVER_BG : 'transparent'),
       })}
     >
-      <Icon size={17} />{label}
+      <Icon size={17} />{!collapsed && label}
     </NavLink>
   )
 }
@@ -212,7 +338,7 @@ function MenuItem({ icon: Icon, label, onClick }: { icon: LucideIcon; label: str
     <button
       onClick={onClick}
       className="w-full flex items-center gap-2 px-3 py-2 text-sm cursor-pointer text-left"
-      style={{ color: 'rgba(255,255,255,0.75)', background: 'transparent' }}
+      style={{ color: 'rgba(255,255,255,0.75)', background: 'transparent', whiteSpace: 'nowrap' }}
       onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
     >
