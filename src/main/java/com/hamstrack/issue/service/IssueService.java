@@ -30,6 +30,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -111,6 +112,9 @@ public class IssueService {
         issue.setPriority(priority);
         issue.setReporter(actor);
         issue.setPosition(seq);
+        if (status.getCategory() == StatusCategory.DONE) {
+            issue.setClosedAt(OffsetDateTime.now());
+        }
 
         if (req.assigneeId() != null) {
             issue.setAssignee(resolveAssignee(workspace, req.assigneeId()));
@@ -215,10 +219,16 @@ public class IssueService {
         var newPriority = req.priorityId() != null
                 ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
                 : null;
-        var newAssignee = req.assigneeId() != null ? resolveAssignee(workspace, req.assigneeId()) : null;
+        var newAssignee = req.assigneeId() != null
+                ? resolveAssignee(workspace, req.assigneeId())
+                : null;
+        var newCategory = req.statusId() != null
+                ? newStatus.getCategory()
+                : null;
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
+        var oldCategory = issue.getStatus().getCategory();
 
         if (req.version() != null && req.version() != issue.getVersion()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -286,6 +296,11 @@ public class IssueService {
             projectConfigService.validateTransition(project, issue.getStatus(), newStatus);
             historyEntries.add(makeHistory(issue, actor, "status", issue.getStatus().getName(), newStatus.getName()));
             issue.setStatus(newStatus);
+
+            if (!Objects.equals(oldCategory, newCategory) && newCategory != null) {
+                boolean isDone = newCategory.equals(StatusCategory.DONE);
+                issue.setClosedAt(isDone ? OffsetDateTime.now() : null);
+            }
         }
         if (newPriority != null && !newPriority.getId().equals(issue.getPriority().getId())) {
             historyEntries.add(makeHistory(issue, actor, "priority",

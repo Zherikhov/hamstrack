@@ -9,6 +9,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 
 @Entity
 @Table(name = "issues")
@@ -66,4 +67,7 @@ public class Issue extends BaseEntity {
     @Version
     @Column(nullable = false)
     private int version = 0;
+
+    @Column(name = "closed_at", columnDefinition = "TIMESTAMP WITH TIME ZONE")
+    private OffsetDateTime closedAt;
 }

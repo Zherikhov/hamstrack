@@ -5,6 +5,7 @@ import com.hamstrack.issue.entity.IssueFieldValue;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
@@ -30,14 +31,21 @@ public record IssueResponse(
         List<FieldValueResponse> fields,
         int version,
         Instant createdAt,
-        Instant updatedAt
+        Instant updatedAt,
+        OffsetDateTime closedAt
 ) {
-    public record AssigneeInfo(UUID id, String displayName, String avatarUrl) {}
+    public record AssigneeInfo(UUID id, String displayName, String avatarUrl) {
+    }
 
-    /** A parent's display summary — the parent key, title and type id for chips/breadcrumbs. */
-    public record ParentRef(UUID id, String key, String title, UUID typeId) {}
+    /**
+     * A parent's display summary — the parent key, title and type id for chips/breadcrumbs.
+     */
+    public record ParentRef(UUID id, String key, String title, UUID typeId) {
+    }
 
-    /** Direct-children roll-up: total and DONE-category counts. */
+    /**
+     * Direct-children roll-up: total and DONE-category counts.
+     */
     public record Rollup(int childCount, int doneChildCount) {
         public static final Rollup EMPTY = new Rollup(0, 0);
     }
@@ -68,6 +76,7 @@ public record IssueResponse(
                 i.getDueDate(),
                 FieldValueResponse.of(fieldValues),
                 i.getVersion(),
-                i.getCreatedAt(), i.getUpdatedAt());
+                i.getCreatedAt(), i.getUpdatedAt(),
+                i.getClosedAt());
     }
 }
