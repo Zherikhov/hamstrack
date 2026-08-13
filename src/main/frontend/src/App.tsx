@@ -15,6 +15,7 @@ import HomePage from './pages/HomePage'
 import MyWorkPage from './pages/MyWorkPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
+import IssueFullPage from './pages/IssueFullPage'
 import SearchResultsPage from './pages/SearchResultsPage'
 import ProjectSettingsArea from './pages/settings/ProjectSettingsArea'
 import WorkspaceSettingsArea from './pages/settings/WorkspaceSettingsArea'
@@ -158,6 +159,7 @@ export default function App() {
                 <Route path="settings/*" element={<ParamKeyed><WorkspaceSettingsArea /></ParamKeyed>} />
                 <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
                 <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
+                <Route path="p/:projectId/issues/:number" element={<ParamKeyed><IssueFullPage /></ParamKeyed>} />
                 <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
               </Route>
             </Route>

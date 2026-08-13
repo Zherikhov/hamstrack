@@ -443,6 +443,7 @@ function ResultDrawer({ wsId, row, onClose }: { wsId: string; row: SearchResultR
       issueNumber={openNumber}
       issueTypes={cfg.issueTypes}
       statuses={cfg.statuses}
+      transitions={cfg.transitions}
       priorities={cfg.priorities}
       fields={cfg.fields}
       onOpenIssue={setOpenNumber}

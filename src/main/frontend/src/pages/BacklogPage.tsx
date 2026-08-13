@@ -30,6 +30,7 @@ export default function BacklogPage() {
     enabled: !!wsId && !!projectId,
   })
   const statuses = config?.statuses ?? []
+  const transitions = config?.transitions ?? []
   const issueTypes = config?.issueTypes ?? []
   const priorities = config?.priorities ?? []
   const fields = config?.fields ?? []
@@ -198,6 +199,7 @@ export default function BacklogPage() {
           issueNumber={openIssueNumber!}
           issueTypes={issueTypes}
           statuses={statuses}
+          transitions={transitions}
           priorities={priorities}
           fields={fields}
           onOpenIssue={setOpenIssueNumber}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router'
+import { useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
@@ -7,9 +7,10 @@ import { useAuthStore } from '../auth'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
+import { isMoveAllowed } from '../lib/transitions'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue, IssueType, Status } from '../types'
+import type { Issue, IssueType } from '../types'
 
 // Board issue-panel sizing (HD-54): user-draggable width, clamped and additionally
 // capped at 55% of the viewport so the board never disappears. Owned by BoardPage
@@ -27,9 +28,14 @@ const PANEL_EASE = 'cubic-bezier(.32,.72,0,1)'
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const { user } = useAuthStore()
   const qc = useQueryClient()
-  const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
+  // Returning from the full-page issue view (HD-67) reopens that issue's drawer:
+  // the "Back to board" button navigates here with { state: { openIssue } }.
+  const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(
+    (location.state as { openIssue?: number } | null)?.openIssue,
+  )
   const [filterPriority, setFilterPriority] = useState<string>('')
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
@@ -135,23 +141,12 @@ export default function BoardPage() {
     },
   })
 
-  // Workflow rules (mirrors backend semantics): a status with no
-  // source-specific rules is open; once it has rules, only its listed targets
-  // plus wildcard ("any → X", fromStatusId null) targets are allowed.
-  function isMoveAllowed(from: Status, toStatusId: string): boolean {
-    if (from.id === toStatusId) return false
-    const restricted = transitions.some(t => t.fromStatusId === from.id)
-    if (!restricted) return true
-    return transitions.some(t =>
-      (t.fromStatusId === from.id || t.fromStatusId === null) && t.toStatusId === toStatusId)
-  }
-
   function handleDrop(statusId: string) {
     setDragOverStatusId(null)
     if (!dragging) return
     const issue = dragging
     setDragging(null)
-    if (!isMoveAllowed(issue.status, statusId)) return
+    if (!isMoveAllowed(issue.status, statusId, transitions)) return
     moveMutation.mutate({ issue, statusId })
   }
 
@@ -225,7 +220,7 @@ export default function BoardPage() {
           ) : (
             ordered.map(status => {
               const columnIssues = issues.filter(i => i.status.id === status.id)
-              const allowed = dragging ? isMoveAllowed(dragging.status, status.id) : false
+              const allowed = dragging ? isMoveAllowed(dragging.status, status.id, transitions) : false
               const isOver = dragOverStatusId === status.id
               return (
                 <div
@@ -324,6 +319,7 @@ export default function BoardPage() {
               issueNumber={num}
               issueTypes={issueTypes}
               statuses={statuses}
+              transitions={transitions}
               priorities={priorities}
               fields={fields}
               onOpenIssue={setOpenIssueNumber}
