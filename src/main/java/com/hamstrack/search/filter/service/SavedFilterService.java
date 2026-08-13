@@ -2,6 +2,7 @@ package com.hamstrack.search.filter.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.search.HqlValidator;
+import com.hamstrack.search.ResolutionContextFactory;
 import com.hamstrack.search.filter.dto.CreateSavedFilterRequest;
 import com.hamstrack.search.filter.dto.SavedFilterResponse;
 import com.hamstrack.search.filter.dto.SavedFilterUsageResponse;
@@ -56,6 +57,7 @@ public class SavedFilterService {
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final SavedFilterRepository savedFilterRepository;
     private final HqlValidator validator;
+    private final ResolutionContextFactory resolutionContextFactory;
 
     @Transactional(readOnly = true)
     public List<SavedFilterResponse> list(User actor, UUID workspaceId) {
@@ -78,7 +80,7 @@ public class SavedFilterService {
 
         // Save-time validation: parse + structural (no value resolution) — 422 on a
         // bad query, same ProblemDetail shape as search.
-        validateHql(req.hqlOrEmpty());
+        validateHql(actor, ws, req.hqlOrEmpty());
 
         if (savedFilterRepository.existsByWorkspaceAndOwnerAndName(ws, actor, req.name())) {
             throw new SavedFilterNameConflictException(req.name());
@@ -102,7 +104,7 @@ public class SavedFilterService {
 
         // Re-validate HQL only when it's being changed.
         if (req.hql() != null) {
-            validateHql(req.hql());
+            validateHql(actor, ws, req.hql());
         }
 
         // Name change → re-check (workspace, owner) uniqueness (present, non-blank, changed).
@@ -156,9 +158,14 @@ public class SavedFilterService {
 
     // ---- helpers ----
 
-    /** Parse + structural validate the stored HQL; throws the search 422 exceptions. */
-    private void validateHql(String hql) {
-        validator.validate(HqlParser.parse(hql));
+    /**
+     * Parse + structural validate the stored HQL; throws the search 422 exceptions.
+     * Builds the caller's per-request context so custom fields (HD-52) validate at
+     * save time exactly as they would at run time. Value resolution stays deferred.
+     */
+    private void validateHql(User actor, Workspace ws, String hql) {
+        var ctx = resolutionContextFactory.build(actor, ws);
+        validator.validate(HqlParser.parse(hql), ctx);
     }
 
     /** Own-or-shared visibility (read paths): 404 for a private filter of another owner. */

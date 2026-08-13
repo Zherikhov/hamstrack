@@ -1,10 +1,13 @@
 package com.hamstrack.search;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.PrioritySetItem;
 import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.IssueType;
+import com.hamstrack.issue.service.FieldValueService;
 import com.hamstrack.issue.service.ProjectConfigService;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.repository.ProjectRepository;
@@ -36,6 +39,7 @@ public class ResolutionContextFactory {
     private final ProjectRepository projectRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectConfigService projectConfigService;
+    private final FieldValueService fieldValueService;
     private final SearchScope searchScope;
 
     @Transactional(readOnly = true)
@@ -57,6 +61,9 @@ public class ResolutionContextFactory {
         Map<String, String> statusNames = new LinkedHashMap<>();
         Map<String, String> typeNames = new LinkedHashMap<>();
         Map<String, String> priorityNames = new LinkedHashMap<>();
+        // Custom fields (HD-52): union of non-archived field_defs reachable by any
+        // visible project via its effective field set — the same source /schema uses.
+        Map<String, CustomFieldMeta> customFields = new LinkedHashMap<>();
 
         for (var project : visibleProjects) {
             for (Status s : projectConfigService.statuses(project)) {
@@ -76,6 +83,11 @@ public class ResolutionContextFactory {
                 addPriority(prioritiesByName, p);
                 priorityNames.putIfAbsent(p.getName().toLowerCase(Locale.ROOT), p.getName());
             }
+            for (var setItem : fieldValueService.fields(project)) {
+                FieldDef field = setItem.getField();
+                if (field.getArchivedAt() != null) continue;
+                addCustomField(customFields, field);
+            }
         }
 
         var members = new ArrayList<ResolutionContext.Member>();
@@ -88,7 +100,8 @@ public class ResolutionContextFactory {
                 statusIds, typeIds, priorityIds, prioritiesByName, members,
                 List.copyOf(statusNames.values()),
                 List.copyOf(typeNames.values()),
-                List.copyOf(priorityNames.values()));
+                List.copyOf(priorityNames.values()),
+                customFields);
     }
 
     private void addId(Map<String, List<UUID>> map, String name, UUID id) {
@@ -99,5 +112,37 @@ public class ResolutionContextFactory {
     private void addPriority(Map<String, List<Priority>> map, Priority p) {
         var list = map.computeIfAbsent(p.getName().toLowerCase(Locale.ROOT), k -> new ArrayList<>());
         if (list.stream().noneMatch(e -> e.getId().equals(p.getId()))) list.add(p);
+    }
+
+    /**
+     * Register a custom field by its {@code key}. The same field can be reached by
+     * several projects — first-wins is fine (a global {@code field_def} id is the
+     * same everywhere). SELECT/MULTI_SELECT option maps are read from {@code config}.
+     */
+    private void addCustomField(Map<String, CustomFieldMeta> map, FieldDef field) {
+        String key = field.getKey().toLowerCase(Locale.ROOT);
+        if (map.containsKey(key)) return;
+
+        Map<String, String> optionsById = new LinkedHashMap<>();   // id → label
+        Map<String, String> optionIdByLabel = new LinkedHashMap<>(); // lower(label|id) → id
+        switch (field.getType()) {
+            case SELECT, MULTI_SELECT -> {
+                JsonNode cfg = field.getConfig();
+                if (cfg != null && cfg.has("options")) {
+                    for (JsonNode opt : cfg.get("options")) {
+                        if (!opt.hasNonNull("id")) continue;
+                        String id = opt.get("id").asText();
+                        String label = opt.path("label").asText(id);
+                        optionsById.putIfAbsent(id, label);
+                        // Accept both the human label and the raw id when writing a value.
+                        optionIdByLabel.putIfAbsent(label.toLowerCase(Locale.ROOT), id);
+                        optionIdByLabel.putIfAbsent(id.toLowerCase(Locale.ROOT), id);
+                    }
+                }
+            }
+            default -> { /* no options */ }
+        }
+        map.put(key, new CustomFieldMeta(field.getId(), field.getKey(), field.getName(),
+                field.getType(), optionsById, optionIdByLabel));
     }
 }

@@ -1764,21 +1764,31 @@ paths:
         **HQL in brief** — a boolean expression of `field OP value` comparisons.
 
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
-          `priority`, `created`, `updated`, `due`, `parent`, `text`.
+          `priority`, `created`, `updated`, `due`, `parent`, `text`, plus any
+          **custom field** (M2) by its `key` (e.g. `story_points`, `severity`) —
+          the exact list a caller may query comes from `GET /search/schema`.
         - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=` (which operators a
           field accepts comes from `GET /search/schema`; `~` is text only,
           ordered comparisons are for dates and `priority`).
         - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
-          (`assignee`, `parent`, `due`).
+          (`assignee`, `parent`, `due`, and every custom field except CHECKBOX).
         - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
-          last).
+          last). Custom fields are **not sortable** (yet).
         - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
         - **Values:** status/type/priority by **name**; users by email,
           display name, `currentUser()`, or UUID fallback; dates as
           `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
           and description.
+        - **Custom fields** are queried by `key`, operators per type — TEXT /
+          TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT:
+          `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER:
+          `= != IN` + `currentUser()`; CHECKBOX: `=`; all support
+          `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given
+          by option **label or id**, USER values by email / display name /
+          `currentUser()` / UUID, DATE as `YYYY-MM-DD`. Example:
+          `story_points >= 5 AND severity = "High"`.
 
         An empty/blank `query` matches all visible issues (default sort).
         Examples:
@@ -1822,11 +1832,16 @@ paths:
       tags: [Search]
       summary: HQL autocomplete metadata
       description: >-
-        The static field/operator schema plus the small value picklists
+        The field/operator schema plus the small value picklists
         (statuses/types/priorities reachable by the caller's visible projects)
-        that drive the search UI's autocomplete. The member list is deliberately
-        NOT embedded — use `/search/suggest` for user-valued fields. Workspace
-        members only.
+        that drive the search UI's autocomplete. `fields[]` lists the system
+        fields first, then the caller's visible **custom fields** (M2) — each
+        with `name` = the field `key`, `type` = its custom `FieldType`, and the
+        operators legal for that type. SELECT/MULTI_SELECT custom fields publish
+        their options in `values` under a `CUSTOM:<key>` key; USER custom fields
+        use the `USER` value-source (served via `/search/suggest`). The member
+        list is deliberately NOT embedded — use `/search/suggest` for
+        user-valued fields (system or custom). Workspace members only.
       operationId: searchSchema
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1843,10 +1858,10 @@ paths:
       tags: [Search]
       summary: Typeahead for user-valued fields
       description: >-
-        Bounded server-side prefix typeahead for the user-valued fields
-        (`assignee`/`reporter`), so large workspaces never ship every member.
-        Returns at most 20 matches (member display name / email). Workspace
-        members only.
+        Bounded server-side prefix typeahead for user-valued fields — the system
+        `assignee`/`reporter` fields and any USER-typed **custom field** (M2, by
+        its `key`) — so large workspaces never ship every member. Returns at most
+        20 matches (member display name / email). Workspace members only.
       operationId: searchSuggest
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2794,7 +2809,9 @@ components:
       properties:
         fields:
           type: array
-          description: One entry per live queryable field
+          description: >-
+            One entry per live queryable field — system fields first, then the
+            caller's visible custom fields (M2; `name` = the field `key`).
           items: { $ref: '#/components/schemas/SearchField' }
         keywords:
           type: array
@@ -2806,7 +2823,9 @@ components:
           description: >-
             Value picklists keyed by value-source token (`STATUS`, `TYPE`,
             `PRIORITY`) — the distinct names reachable by the caller's visible
-            projects. `USER` is intentionally absent (use `/search/suggest`).
+            projects — plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom
+            field, whose options are `{label, value=optionId}` pairs. `USER`
+            (system or custom) is intentionally absent (use `/search/suggest`).
           additionalProperties:
             type: array
             items: { $ref: '#/components/schemas/SearchValueOption' }
@@ -2815,11 +2834,15 @@ components:
       type: object
       description: A queryable HQL field's public schema
       properties:
-        name: { type: string, example: assignee }
+        name: { type: string, description: 'HQL field name — a system field name or a custom field `key`', example: assignee }
         type:
           type: string
-          description: The field's data-type family
-          enum: [ENUM_REF, USER_REF, ISSUE_REF, TEXT, DATE, TIMESTAMP, NUMBER]
+          description: >-
+            The field's data-type family. System fields use the internal family
+            (`ENUM_REF`/`USER_REF`/…); custom fields (M2) report their
+            `FieldType` (`TEXT`/`TEXTAREA`/`NUMBER`/`DATE`/`SELECT`/
+            `MULTI_SELECT`/`USER`/`CHECKBOX`/`URL`).
+          enum: [ENUM_REF, USER_REF, ISSUE_REF, TEXT, TEXTAREA, DATE, TIMESTAMP, NUMBER, SELECT, MULTI_SELECT, USER, CHECKBOX, URL]
           example: USER_REF
         operators:
           type: array
@@ -2831,7 +2854,10 @@ components:
         valueSuggest:
           type: string
           nullable: true
-          description: 'The value-source token (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`DATE`/…), or null when there is no picklist'
+          description: >-
+            The value-source token (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`DATE`/…),
+            `CUSTOM:<key>` for a SELECT/MULTI_SELECT custom field, or null when
+            there is no picklist.
           example: USER
         functions:
           type: array
@@ -2848,7 +2874,9 @@ components:
 
     SuggestResponse:
       type: object
-      description: Typeahead result for a user-valued field (`GET /search/suggest`)
+      description: >-
+        Typeahead result for a user-valued field (`GET /search/suggest`) —
+        `assignee`/`reporter` or a USER-typed custom field (M2).
       properties:
         field: { type: string, description: 'The queried field, echoed back', example: assignee }
         suggestions:

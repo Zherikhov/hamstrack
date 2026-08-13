@@ -1,7 +1,9 @@
 package com.hamstrack.search;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.entity.Issue;
+import com.hamstrack.issue.entity.IssueFieldValue;
 import com.hamstrack.search.parser.ast.ComparisonOp;
 import com.hamstrack.search.parser.ast.Expr;
 import com.hamstrack.search.parser.ast.OrderBy;
@@ -9,15 +11,19 @@ import com.hamstrack.search.parser.ast.Query;
 import com.hamstrack.search.parser.ast.Value;
 import com.hamstrack.workspace.entity.Workspace;
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.criteria.CommonAbstractCriteria;
 import jakarta.persistence.criteria.CriteriaBuilder;
 import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Expression;
 import jakarta.persistence.criteria.Order;
 import jakarta.persistence.criteria.Path;
 import jakarta.persistence.criteria.Predicate;
 import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.Subquery;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -73,7 +79,7 @@ public class HqlCompiler {
         // No distinct: only ToOne assocs are fetch-joined (they never multiply rows),
         // and DISTINCT would forbid ORDER BY on a joined column (priority.position).
         cq.select(root);
-        cq.where(fullPredicate(query, root, cb, actor, ws, ctx));
+        cq.where(fullPredicate(query, cq, root, cb, actor, ws, ctx));
         cq.orderBy(orderBy(query, root, cb));
         return cq;
     }
@@ -84,29 +90,34 @@ public class HqlCompiler {
         CriteriaQuery<Long> cq = cb.createQuery(Long.class);
         Root<Issue> root = cq.from(Issue.class);
         cq.select(cb.count(root));
-        cq.where(fullPredicate(query, root, cb, actor, ws, ctx));
+        cq.where(fullPredicate(query, cq, root, cb, actor, ws, ctx));
         return cq;
     }
 
     // ---- predicate assembly ----
 
-    /** Scope predicate ANDed OUTERMOST with the (optional) parsed filter. */
-    private Predicate fullPredicate(Query query, Root<Issue> root, CriteriaBuilder cb,
-                                    User actor, Workspace ws, ResolutionContext ctx) {
+    /**
+     * Scope predicate ANDed OUTERMOST with the (optional) parsed filter. {@code outer}
+     * is the enclosing query (page or count), threaded through so custom-field
+     * comparisons can create correlated {@code EXISTS} subqueries (HD-52).
+     */
+    private Predicate fullPredicate(Query query, CommonAbstractCriteria outer, Root<Issue> root,
+                                    CriteriaBuilder cb, User actor, Workspace ws, ResolutionContext ctx) {
         Predicate scope = searchScope.scopePredicate(actor, ws, root, cb);
         return query.filter()
-                .map(f -> cb.and(scope, compile(f, root, cb, ctx)))
+                .map(f -> cb.and(scope, compile(f, outer, root, cb, ctx)))
                 .orElse(scope);
     }
 
-    private Predicate compile(Expr expr, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
+    private Predicate compile(Expr expr, CommonAbstractCriteria outer, Root<Issue> root,
+                              CriteriaBuilder cb, ResolutionContext ctx) {
         return switch (expr) {
-            case Expr.And a -> cb.and(compile(a.left(), root, cb, ctx), compile(a.right(), root, cb, ctx));
-            case Expr.Or o -> cb.or(compile(o.left(), root, cb, ctx), compile(o.right(), root, cb, ctx));
-            case Expr.Not n -> cb.not(compile(n.operand(), root, cb, ctx));
-            case Expr.Comparison c -> comparison(c, root, cb, ctx);
-            case Expr.InList in -> inList(in, root, cb, ctx);
-            case Expr.IsEmpty e -> isEmpty(e, root, cb);
+            case Expr.And a -> cb.and(compile(a.left(), outer, root, cb, ctx), compile(a.right(), outer, root, cb, ctx));
+            case Expr.Or o -> cb.or(compile(o.left(), outer, root, cb, ctx), compile(o.right(), outer, root, cb, ctx));
+            case Expr.Not n -> cb.not(compile(n.operand(), outer, root, cb, ctx));
+            case Expr.Comparison c -> comparison(c, outer, root, cb, ctx);
+            case Expr.InList in -> inList(in, outer, root, cb, ctx);
+            case Expr.IsEmpty e -> isEmpty(e, outer, root, cb, ctx);
         };
     }
 
@@ -117,9 +128,19 @@ public class HqlCompiler {
                 .orElseThrow(() -> new HqlSemanticException("Unknown field '" + name + "'", name));
     }
 
+    /** True when the name is a custom field (not a system field) — routes to the JSONB path. */
+    private boolean isCustom(String name, ResolutionContext ctx) {
+        return registry.find(name).filter(FieldDescriptor::available).isEmpty()
+                && ctx.customField(name).isPresent();
+    }
+
     // ---- comparison ----
 
-    private Predicate comparison(Expr.Comparison c, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
+    private Predicate comparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
+                                 CriteriaBuilder cb, ResolutionContext ctx) {
+        if (isCustom(c.field(), ctx)) {
+            return customComparison(c, outer, root, cb, ctx);
+        }
         FieldDescriptor f = field(c.field());
         ComparisonOp op = c.op();
 
@@ -168,7 +189,11 @@ public class HqlCompiler {
 
     // ---- IN list ----
 
-    private Predicate inList(Expr.InList in, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
+    private Predicate inList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
+                             CriteriaBuilder cb, ResolutionContext ctx) {
+        if (isCustom(in.field(), ctx)) {
+            return customInList(in, outer, root, cb, ctx);
+        }
         FieldDescriptor f = field(in.field());
         // priority IN (...) always uses id equality (§5.3: >/< use position, IN uses id)
         var ids = new ArrayList<UUID>();
@@ -183,7 +208,14 @@ public class HqlCompiler {
 
     // ---- IS [NOT] EMPTY ----
 
-    private Predicate isEmpty(Expr.IsEmpty e, Root<Issue> root, CriteriaBuilder cb) {
+    private Predicate isEmpty(Expr.IsEmpty e, CommonAbstractCriteria outer, Root<Issue> root,
+                              CriteriaBuilder cb, ResolutionContext ctx) {
+        if (isCustom(e.field(), ctx)) {
+            // Empty = no issue_field_values row for this field at all (HD-52).
+            var meta = ctx.customField(e.field()).orElseThrow();
+            Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
+            return e.negated() ? anyRow : cb.not(anyRow);
+        }
         FieldDescriptor f = field(e.field());
         Path<?> path = path(root, f.entityPath());
         return e.negated() ? cb.isNotNull(path) : cb.isNull(path);
@@ -237,6 +269,270 @@ public class HqlCompiler {
     // Escape LIKE metacharacters so a term containing % or _ matches literally (§5.2).
     private String escapeLike(String s) {
         return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    }
+
+    // ============================================================ custom fields (HD-52)
+    //
+    // Every custom-field predicate is a correlated EXISTS subquery over
+    // issue_field_values, Criteria-only with BOUND parameters — never string SQL:
+    //
+    //   EXISTS (SELECT 1 FROM IssueFieldValue v
+    //           WHERE v.issue = <outer issue> AND v.field.id = :fid AND <valuePred>)
+    //
+    // The subquery correlates to the already-scoped outer Issue root and filters by
+    // field_id, so it can NEVER reach outside the workspace/visible-project boundary
+    // (SearchScope stays outermost). JSONB access uses cb.function(...) exclusively.
+
+    private Predicate customComparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
+                                       CriteriaBuilder cb, ResolutionContext ctx) {
+        var meta = ctx.customField(c.field()).orElseThrow();
+        ComparisonOp op = c.op();
+
+        // != on a scalar custom field: match issues whose field is absent OR differs.
+        // Implemented as NOT EXISTS(EXISTS with =) — an absent row naturally satisfies
+        // "not equal", which is the intuitive result (HD-52 §4).
+        if (op == ComparisonOp.NEQ) {
+            Predicate existsEq = cb.exists(
+                    valueSubquery(outer, root, cb, meta, valuePred(meta, ComparisonOp.EQ, c.value(), ctx)));
+            return cb.not(existsEq);
+        }
+
+        return cb.exists(valueSubquery(outer, root, cb, meta, valuePred(meta, op, c.value(), ctx)));
+    }
+
+    private Predicate customInList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
+                                   CriteriaBuilder cb, ResolutionContext ctx) {
+        var meta = ctx.customField(in.field()).orElseThrow();
+        // IN = "any of": one EXISTS whose value predicate is an OR of per-element preds.
+        var perElement = new ArrayList<Predicate>();
+        var sq = valueSubqueryOpen(outer, root, cb, meta);
+        Root<IssueFieldValue> v = subqueryRoot(sq);
+        for (Value value : in.values()) {
+            perElement.add(valuePredOn(meta, ComparisonOp.EQ, value, ctx, v, cb));
+        }
+        sq.where(cb.and(correlate(cb, v, root, meta), cb.or(perElement.toArray(new Predicate[0]))));
+        return cb.exists(sq);
+    }
+
+    /**
+     * A ready-to-EXISTS subquery correlated to the outer issue + filtered by field_id,
+     * ANDed with a value predicate built against the subquery's own IssueFieldValue root.
+     */
+    private Subquery<Integer> valueSubquery(CommonAbstractCriteria outer, Root<Issue> root,
+                                            CriteriaBuilder cb, CustomFieldMeta meta,
+                                            ValuePredBuilder valuePred) {
+        Subquery<Integer> sq = valueSubqueryOpen(outer, root, cb, meta);
+        Root<IssueFieldValue> v = subqueryRoot(sq);
+        Predicate where = correlate(cb, v, root, meta);
+        Predicate val = valuePred == null ? null : valuePred.build(v);
+        sq.where(val == null ? where : cb.and(where, val));
+        return sq;
+    }
+
+    /** Bare EXISTS-checking subquery (any row for the field) — used by IS EMPTY. */
+    private Subquery<Integer> fieldExists(CommonAbstractCriteria outer, Root<Issue> root,
+                                          CriteriaBuilder cb, UUID fieldId, ValuePredBuilder valuePred) {
+        var meta = new CustomFieldMeta(fieldId, "", "", FieldType.TEXT, null, null);
+        return valueSubquery(outer, root, cb, meta, valuePred);
+    }
+
+    private Subquery<Integer> valueSubqueryOpen(CommonAbstractCriteria outer, Root<Issue> root,
+                                                CriteriaBuilder cb, CustomFieldMeta meta) {
+        Subquery<Integer> sq = outer.subquery(Integer.class);
+        sq.from(IssueFieldValue.class);
+        sq.select(cb.literal(1));
+        return sq;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Root<IssueFieldValue> subqueryRoot(Subquery<Integer> sq) {
+        return (Root<IssueFieldValue>) sq.getRoots().iterator().next();
+    }
+
+    /** v.issue = <outer issue> AND v.field.id = :fid — the correlation + field filter. */
+    private Predicate correlate(CriteriaBuilder cb, Root<IssueFieldValue> v, Root<Issue> outerRoot,
+                                CustomFieldMeta meta) {
+        return cb.and(
+                cb.equal(v.get("issue"), outerRoot),
+                cb.equal(v.get("field").get("id"), meta.fieldId()));
+    }
+
+    /** Build the value predicate against the subquery's IssueFieldValue root (deferred). */
+    @FunctionalInterface
+    private interface ValuePredBuilder {
+        Predicate build(Root<IssueFieldValue> v);
+    }
+
+    private ValuePredBuilder valuePred(CustomFieldMeta meta, ComparisonOp op, Value value, ResolutionContext ctx) {
+        return v -> valuePredOn(meta, op, value, ctx, v, em.getCriteriaBuilder());
+    }
+
+    /**
+     * The per-type JSONB value predicate on a single {@code issue_field_values} row.
+     * Scalar values are extracted as text via {@code jsonb_scalar_text(value)}
+     * (the {@code #>> '{}'} empty-path operator returns the scalar). MULTI_SELECT uses
+     * {@code jsonb_exists} (the {@code ?} array-contains operator). All operands are bound parameters.
+     */
+    private Predicate valuePredOn(CustomFieldMeta meta, ComparisonOp op, Value value,
+                                  ResolutionContext ctx, Root<IssueFieldValue> v, CriteriaBuilder cb) {
+        Path<?> valueColumn = v.get("value");
+        return switch (meta.type()) {
+            case TEXT, TEXTAREA, URL -> {
+                Expression<String> text = scalarText(cb, valueColumn);
+                String s = requireString(meta, value);
+                yield switch (op) {
+                    case EQ -> cb.equal(text, s);
+                    case MATCH -> {
+                        String pattern = "%" + escapeLike(s.toLowerCase()) + "%";
+                        yield cb.like(cb.lower(text), pattern, '\\');
+                    }
+                    default -> illegalOp(meta, op);
+                };
+            }
+            case NUMBER -> {
+                Expression<BigDecimal> num = cb.function("jsonb_scalar_numeric", BigDecimal.class, valueColumn);
+                BigDecimal n = requireNumber(meta, value);
+                yield switch (op) {
+                    case EQ -> cb.equal(num, n);
+                    case GT -> cb.greaterThan(num, n);
+                    case GTE -> cb.greaterThanOrEqualTo(num, n);
+                    case LT -> cb.lessThan(num, n);
+                    case LTE -> cb.lessThanOrEqualTo(num, n);
+                    default -> illegalOp(meta, op);
+                };
+            }
+            case DATE -> {
+                Expression<LocalDate> date = cb.function("jsonb_scalar_date", LocalDate.class, valueColumn);
+                LocalDate d = requireDate(meta, value);
+                yield switch (op) {
+                    case EQ -> cb.equal(date, d);
+                    case GT -> cb.greaterThan(date, d);
+                    case GTE -> cb.greaterThanOrEqualTo(date, d);
+                    case LT -> cb.lessThan(date, d);
+                    case LTE -> cb.lessThanOrEqualTo(date, d);
+                    default -> illegalOp(meta, op);
+                };
+            }
+            case SELECT -> {
+                String optionId = requireOption(meta, value);
+                yield cb.equal(scalarText(cb, valueColumn), optionId);   // EQ only reaches here
+            }
+            case USER -> {
+                UUID userId = requireUser(meta, value, ctx);
+                yield cb.equal(scalarText(cb, valueColumn), userId.toString());
+            }
+            case CHECKBOX -> {
+                boolean b = requireBoolean(meta, value);
+                yield cb.equal(scalarText(cb, valueColumn), Boolean.toString(b));
+            }
+            case MULTI_SELECT -> {
+                // value is a JSON array of option ids: membership via jsonb_exists (?).
+                String optionId = requireOption(meta, value);
+                Expression<Boolean> has = cb.function("jsonb_exists", Boolean.class,
+                        valueColumn, cb.literal(optionId));
+                yield cb.isTrue(has);   // EQ (= contains) only reaches here
+            }
+        };
+    }
+
+    /**
+     * The scalar JSONB value as text — {@code jsonb_scalar_text(value)} renders
+     * {@code (value #>> '{}')} (see {@code JsonbFunctionContributor}). Used for the
+     * scalar custom-field types; numeric/date comparisons instead use the dedicated
+     * {@code jsonb_scalar_numeric} / {@code jsonb_scalar_date} casting functions.
+     */
+    private Expression<String> scalarText(CriteriaBuilder cb, Path<?> valueColumn) {
+        return cb.function("jsonb_scalar_text", String.class, valueColumn);
+    }
+
+    private Predicate illegalOp(CustomFieldMeta meta, ComparisonOp op) {
+        throw new HqlSemanticException(
+                "Operator '" + op.symbol() + "' is not allowed on field '" + meta.key() + "'", meta.key());
+    }
+
+    // ---- custom-field value coercion (all → bound params) ----
+
+    private String requireString(CustomFieldMeta meta, Value value) {
+        if (value instanceof Value.StringLiteral s) return s.value();
+        throw new HqlSemanticException("Field '" + meta.key() + "' expects a quoted value", meta.key());
+    }
+
+    private BigDecimal requireNumber(CustomFieldMeta meta, Value value) {
+        if (value instanceof Value.NumberLiteral n) {
+            try {
+                return new BigDecimal(n.raw());
+            } catch (NumberFormatException e) {
+                throw new HqlSemanticException(
+                        "Invalid number '" + n.raw() + "' for field '" + meta.key() + "'", meta.key());
+            }
+        }
+        if (value instanceof Value.StringLiteral s) {
+            try {
+                return new BigDecimal(s.value());
+            } catch (NumberFormatException e) {
+                throw new HqlSemanticException(
+                        "Field '" + meta.key() + "' expects a number", meta.key());
+            }
+        }
+        throw new HqlSemanticException("Field '" + meta.key() + "' expects a number", meta.key());
+    }
+
+    private LocalDate requireDate(CustomFieldMeta meta, Value value) {
+        String raw = requireString(meta, value);
+        try {
+            return LocalDate.parse(raw);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new HqlSemanticException(
+                    "Invalid date '" + raw + "'; expected YYYY-MM-DD", meta.key());
+        }
+    }
+
+    private boolean requireBoolean(CustomFieldMeta meta, Value value) {
+        String raw = requireString(meta, value);
+        if (raw.equalsIgnoreCase("true")) return true;
+        if (raw.equalsIgnoreCase("false")) return false;
+        throw new HqlSemanticException(
+                "Field '" + meta.key() + "' expects \"true\" or \"false\"", meta.key());
+    }
+
+    /** Resolve a SELECT/MULTI_SELECT operand (option label OR id) to its option id, or 422. */
+    private String requireOption(CustomFieldMeta meta, Value value) {
+        String raw = requireString(meta, value);
+        String id = meta.resolveOption(raw);
+        if (id == null) {
+            throw new HqlSemanticException(
+                    "No option '" + raw + "' on field '" + meta.key() + "'", meta.key());
+        }
+        return id;
+    }
+
+    /** Resolve a USER custom-field operand via the same rules as assignee/reporter. */
+    private UUID requireUser(CustomFieldMeta meta, Value value, ResolutionContext ctx) {
+        if (value instanceof Value.FunctionCall fn) {
+            if (fn.name().equalsIgnoreCase("currentUser")) return ctx.actor().getId();
+            throw new HqlSemanticException(
+                    "Function '" + fn.name() + "()' is not valid for field '" + meta.key() + "'", meta.key());
+        }
+        String raw = requireString(meta, value);
+        // email → member
+        var byEmail = ctx.members().stream()
+                .filter(m -> m.email() != null && m.email().equalsIgnoreCase(raw))
+                .map(ResolutionContext.Member::id).findFirst();
+        if (byEmail.isPresent()) return byEmail.get();
+        // displayName → member (first match; USER stores a single id)
+        var byName = ctx.members().stream()
+                .filter(m -> m.displayName() != null && m.displayName().equalsIgnoreCase(raw))
+                .map(ResolutionContext.Member::id).findFirst();
+        if (byName.isPresent()) return byName.get();
+        // raw UUID fallback, only if a workspace member
+        try {
+            UUID id = UUID.fromString(raw);
+            if (ctx.members().stream().anyMatch(m -> m.id().equals(id))) return id;
+        } catch (IllegalArgumentException ignored) {
+            // fall through to the not-found error
+        }
+        throw new HqlSemanticException(
+                "No member matching '" + raw + "' in this workspace", meta.key());
     }
 
     // ---- ordered scalar comparison (priority position) ----

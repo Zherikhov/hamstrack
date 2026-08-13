@@ -464,7 +464,7 @@ Search issues across a whole workspace with **HQL** (Hamstrack Query Language) �
 |---|---|---|---|
 | `POST` | `/workspaces/{wsId}/search` | member | Run an HQL query. Paginated ([envelope](#conventions), `size` clamped `1`–`100`) |
 | `GET` | `/workspaces/{wsId}/search/schema` | member | Autocomplete metadata: fields, per-field operators, and value picklists |
-| `GET` | `/workspaces/{wsId}/search/suggest?field=&q=` | member | Typeahead for user-valued fields (`assignee`/`reporter`), capped at 20 |
+| `GET` | `/workspaces/{wsId}/search/suggest?field=&q=` | member | Typeahead for user-valued fields (`assignee`/`reporter` or a USER custom field), capped at 20 |
 
 **Query** — the body is `{"query", "page?", "size?"}`. `query` is the HQL string (max 2000 chars — a longer one is rejected at binding with `400`); an empty or omitted `query` matches all visible issues in the default sort.
 
@@ -485,13 +485,14 @@ Each row in the paginated `content` reuses the full [`IssueResponse`](#issues) p
 
 **HQL grammar** — a boolean expression of `field OP value` comparisons:
 
-- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`.
+- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`, plus any **custom field** by its `key` (e.g. `story_points`, `severity`). The exact list you may query comes from `/search/schema`.
 - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=`. Which operators a field accepts is per-field (see `/search/schema`): `~` is a case-insensitive substring match, only on `text` (title + description); ordered comparisons (`>` `<` `>=` `<=`) apply to the date fields and to `priority`.
 - **Booleans:** combine terms with `AND`, `OR`, `NOT` and parentheses `( )`. Precedence is `NOT` > `AND` > `OR`.
-- **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`).
-- **Sorting:** an optional trailing `ORDER BY field [ASC|DESC], …` clause — it must come last.
+- **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`, and every custom field except CHECKBOX).
+- **Sorting:** an optional trailing `ORDER BY field [ASC|DESC], …` clause — it must come last. Custom fields are **not sortable** (yet).
 - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (evaluated in server UTC).
 - **Values:** status / type / priority are given by **name** (quote names with spaces, e.g. `"In Progress"`); users by email, display name, `currentUser()`, or UUID; dates as `YYYY-MM-DD`.
+- **Custom fields:** queried by `key`, with operators per type — TEXT / TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT: `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER: `= != IN` + `currentUser()`; CHECKBOX: `=`. All support `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given by option **label or id**; USER values by email / display name / `currentUser()` / UUID; DATE as `YYYY-MM-DD`. Example: `story_points >= 5 AND severity = "High"`.
 
 More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assignee IS EMPTY AND created >= startOfWeek()` · `text ~ "flux capacitor" OR parent = "DEMO-12"`.
 
@@ -506,7 +507,7 @@ More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assign
   "errorType": "SEMANTIC_ERROR", "field": "asignee", "position": 0 }
 ```
 
-**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`), `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects. The member list is deliberately **not** embedded — use `/search/suggest` for it.
+**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it.
 
 ```json
 {
@@ -514,14 +515,19 @@ More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assign
     { "name": "status", "type": "ENUM_REF", "operators": ["=", "!=", "IN"],
       "nullable": false, "sortable": true, "valueSuggest": "STATUS", "functions": [] },
     { "name": "assignee", "type": "USER_REF", "operators": ["=", "!=", "IN", "IS EMPTY", "IS NOT EMPTY"],
-      "nullable": true, "sortable": true, "valueSuggest": "USER", "functions": ["currentUser()"] }
+      "nullable": true, "sortable": true, "valueSuggest": "USER", "functions": ["currentUser()"] },
+    { "name": "severity", "type": "SELECT", "operators": ["=", "!=", "IN", "IS EMPTY", "IS NOT EMPTY"],
+      "nullable": true, "sortable": false, "valueSuggest": "CUSTOM:severity", "functions": [] }
   ],
   "keywords": ["AND", "OR", "NOT", "IN", "IS", "EMPTY", "ORDER BY", "ASC", "DESC"],
-  "values": { "STATUS": [ { "label": "In Progress", "value": null } ], "TYPE": [ … ], "PRIORITY": [ … ] }
+  "values": {
+    "STATUS": [ { "label": "In Progress", "value": null } ], "TYPE": [ … ], "PRIORITY": [ … ],
+    "CUSTOM:severity": [ { "label": "High", "value": "opt-1" } ]
+  }
 }
 ```
 
-**Suggest** — `GET /search/suggest?field=assignee&q=ada` returns up to 20 matching members (`q` is a prefix, max 100 chars); each suggestion's `value` (the member email) is what you drop into the query:
+**Suggest** — `GET /search/suggest?field=assignee&q=ada` returns up to 20 matching members (`q` is a prefix, max 100 chars); `field` may be `assignee`, `reporter`, or a USER-typed custom field. Each suggestion's `value` (the member email) is what you drop into the query:
 
 ```json
 { "field": "assignee",

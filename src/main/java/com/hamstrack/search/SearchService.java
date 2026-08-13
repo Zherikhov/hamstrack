@@ -61,10 +61,12 @@ public class SearchService {
 
         // Parse (422 PARSE_ERROR on failure — mapped by GlobalExceptionHandler).
         Query query = HqlParser.parse(req.queryOrEmpty());
-        // Semantic validation (unknown field / illegal op / non-sortable order-by / …).
-        validator.validate(query);
 
+        // Build the per-request context first (it carries the caller's visible custom
+        // fields), then validate against it — a custom field is only known here (HD-52).
         var ctx = resolutionContextFactory.build(actor, ws);
+        // Semantic validation (unknown field / illegal op / non-sortable order-by / …).
+        validator.validate(query, ctx);
 
         int page = (req.page() == null || req.page() < 0) ? 0 : req.page();
         int size = Math.min(Math.max(req.size() == null ? Paging.DEFAULT_SIZE : req.size(), 1), Paging.MAX_SIZE);
@@ -98,11 +100,10 @@ public class SearchService {
         var ws = resolveWorkspace(actor, workspaceId);
         var ctx = resolutionContextFactory.build(actor, ws);
 
-        var fields = registry.availableFields().stream()
-                .map(f -> new SearchSchemaResponse.Field(
-                        f.name(), f.dataType().name(), operatorTokens(f),
-                        f.nullable(), f.sortable(), f.valueSuggest(), f.functions()))
-                .toList();
+        var fields = new ArrayList<SearchSchemaResponse.Field>();
+        registry.availableFields().forEach(f -> fields.add(new SearchSchemaResponse.Field(
+                f.name(), f.dataType().name(), operatorTokens(f),
+                f.nullable(), f.sortable(), f.valueSuggest(), f.functions())));
 
         // Small, embeddable value picklists — distinct names reachable by visible
         // projects (deduped), so the picklist matches what name-resolution accepts.
@@ -111,19 +112,44 @@ public class SearchService {
         values.put("TYPE", labels(ctx.typeNames()));
         values.put("PRIORITY", labels(ctx.priorityNames()));
 
+        // Custom fields (HD-52): append after the system fields, hidden system-name
+        // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field
+        // value key so autocomplete offers the labels; USER fields reuse /suggest.
+        for (CustomFieldMeta meta : ctx.customFieldsByKey().values()) {
+            // A key that shadows a system field is not queryable (system wins) — skip it.
+            if (registry.find(meta.key()).filter(FieldDescriptor::available).isPresent()) continue;
+            String valueSuggest = customValueSuggest(meta);
+            fields.add(new SearchSchemaResponse.Field(
+                    meta.key(), meta.type().name(), customOperatorTokens(meta),
+                    CustomFieldOps.nullable(meta.type()), false,
+                    valueSuggest, CustomFieldOps.functions(meta.type())));
+            if (valueSuggest != null && !meta.optionsById().isEmpty()) {
+                values.put(valueSuggest, optionOptions(meta));
+            }
+        }
+
         return new SearchSchemaResponse(fields, keywords(), values);
     }
 
     @Transactional(readOnly = true)
     public SuggestResponse suggest(User actor, UUID workspaceId, String fieldName, String q) {
         var ws = resolveWorkspace(actor, workspaceId);
-        var descriptor = registry.find(fieldName)
+        var ctx = resolutionContextFactory.build(actor, ws);
+
+        // A user-valued field: a system USER_REF (assignee/reporter) OR a visible USER
+        // custom field (HD-52). Both resolve via the same member typeahead.
+        boolean systemUser = registry.find(fieldName)
                 .filter(FieldDescriptor::available)
                 .filter(f -> f.dataType() == FieldDataType.USER_REF)
-                .orElseThrow(() -> new HqlSemanticException(
-                        "Field '" + fieldName + "' has no value suggestions", fieldName));
+                .isPresent();
+        boolean customUser = !systemUser && ctx.customField(fieldName)
+                .filter(m -> m.type() == com.hamstrack.issue.entity.FieldType.USER)
+                .isPresent();
+        if (!systemUser && !customUser) {
+            throw new HqlSemanticException(
+                    "Field '" + fieldName + "' has no value suggestions", fieldName);
+        }
 
-        var ctx = resolutionContextFactory.build(actor, ws);
         String prefix = q == null ? "" : q.trim().toLowerCase(Locale.ROOT);
 
         var suggestions = ctx.members().stream()
@@ -136,7 +162,7 @@ public class SearchService {
                 .map(m -> new SuggestResponse.Suggestion(m.displayName(), m.email()))
                 .toList();
 
-        return new SuggestResponse(descriptor.name(), suggestions);
+        return new SuggestResponse(fieldName, suggestions);
     }
 
     // ---- helpers ----
@@ -153,6 +179,37 @@ public class SearchService {
             tokens.add("IS NOT EMPTY");
         }
         return tokens;
+    }
+
+    private List<String> customOperatorTokens(CustomFieldMeta meta) {
+        var ops = CustomFieldOps.comparisonOps(meta.type());
+        var tokens = new ArrayList<String>();
+        for (var op : List.of("=", "!=", ">", "<", ">=", "<=", "~")) {
+            if (ops.stream().anyMatch(o -> o.symbol().equals(op))) tokens.add(op);
+        }
+        if (CustomFieldOps.supportsIn(meta.type())) tokens.add("IN");
+        if (CustomFieldOps.nullable(meta.type())) {
+            tokens.add("IS EMPTY");
+            tokens.add("IS NOT EMPTY");
+        }
+        return tokens;
+    }
+
+    /** The value-source token for a custom field: a per-field key for selects, USER, or null. */
+    private String customValueSuggest(CustomFieldMeta meta) {
+        return switch (meta.type()) {
+            case SELECT, MULTI_SELECT -> "CUSTOM:" + meta.key();
+            case USER -> "USER";
+            default -> null;
+        };
+    }
+
+    /** SELECT/MULTI_SELECT options as {label, value=optionId} picklist entries. */
+    private List<SearchSchemaResponse.ValueOption> optionOptions(CustomFieldMeta meta) {
+        var list = new ArrayList<SearchSchemaResponse.ValueOption>();
+        meta.optionsById().forEach((id, label) ->
+                list.add(new SearchSchemaResponse.ValueOption(label, id)));
+        return list;
     }
 
     private List<SearchSchemaResponse.ValueOption> labels(Iterable<String> names) {

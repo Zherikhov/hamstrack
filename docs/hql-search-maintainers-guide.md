@@ -44,16 +44,18 @@ The two invariants that make the whole thing safe:
 | **`FieldRegistry.java`** | **The extension hub.** Maps HQL field name → `FieldDescriptor`. Drives validation, resolution, compilation, and `/schema`. Add a field here. |
 | `FieldDescriptor.java`, `FieldDataType.java` | One field's declarative metadata (operators, nullable, sortable, `entityPath`, value source, functions, `available`). |
 | `HqlValidator.java` | Semantic walk over the AST: unknown field, illegal operator for field, `IS EMPTY` on a non-nullable field, non-sortable `ORDER BY`, not-available field. Throws `HqlSemanticException`. |
-| `ResolutionContext.java`, `ResolutionContextFactory.java` | Per-request state built **once** inside the tx: visible projects (from `SearchScope.visibleProjectIds`), status/type/priority name→id maps (via `ProjectConfigService`), member roster. |
+| `ResolutionContext.java`, `ResolutionContextFactory.java` | Per-request state built **once** inside the tx: visible projects (from `SearchScope.visibleProjectIds`), status/type/priority name→id maps (via `ProjectConfigService`), member roster, and the **custom fields** reachable by visible projects (`customFieldsByKey`, HD-52). |
 | `HqlValueResolver.java`, `HqlParentResolver.java`, `ResolvedValue.java` | Turn value tokens into bound values: names→id-set, `currentUser()`→caller, `now()`/`startOfWeek()`→UTC instants, `"KEY-42"`→issue id. Unresolvable → `HqlSemanticException` (422). |
 | **`HqlCompiler.java`** | **The pipeline heart.** Walks the validated AST → `CriteriaQuery`. Special-cases priority ranking, dates, text `~`. Always ANDs the scope predicate. |
 | **`SearchScope.java`** | **The tenant boundary.** `scopePredicate(actor, ws, root, cb)` — a Criteria *predicate builder*, not an id list. Change visibility rules **here only**. |
 | `SearchService.java` | Orchestrates: `resolveWorkspace` (membership → 404), parse→validate→compile→execute→map to `SearchResultRow` (reuses `IssueService.toResponsesBatched` for the ToOne/rollup batching), plus `schema()` and `suggest()`. |
 | `SearchController.java` | `POST /search`, `GET /search/schema`, `GET /search/suggest`. `@Valid` request; `@Size` on params. |
 | `dto/{SearchRequest,SearchResultRow,SearchSchemaResponse,SuggestResponse}.java` | Wire shapes. |
+| `CustomFieldMeta.java`, `CustomFieldOps.java` | (HD-52) Per-request metadata for one queryable custom field (id, `FieldType`, SELECT/MULTI_SELECT option maps) + the allowed-operators-per-`FieldType` matrix (single source for validator + `/schema`). |
+| `common/hibernate/JsonbFunctionContributor.java` | (HD-52) Registers Criteria-callable `jsonb_scalar_text`/`jsonb_scalar_numeric`/`jsonb_scalar_date` + uses `jsonb_exists`, so custom-field JSONB predicates stay bound-param Criteria — never string SQL. The numeric/date functions are **total** (NULL on non-castable input) — see §10. |
 | `filter/**` | Saved filters (HD-26) — see §7. |
 
-Migrations: `db/migration/V4__search_indexes.sql` (composite indexes leading with `workspace_id`), `V5__saved_filters.sql` (the `saved_filters` table). Error mapping lives in `common/exception/GlobalExceptionHandler.java` (`handleHqlParse`, `handleHqlSemantic`).
+Migrations: `db/migration/V4__search_indexes.sql` (composite indexes leading with `workspace_id`), `V5__saved_filters.sql` (the `saved_filters` table), `V6__custom_field_search_indexes.sql` (GIN index on `issue_field_values(value)` for custom-field predicates). Error mapping lives in `common/exception/GlobalExceptionHandler.java` (`handleHqlParse`, `handleHqlSemantic`).
 
 ---
 
@@ -109,8 +111,14 @@ Binding validation (query > 2000 chars, blank/oversized names) → **400** via `
 5. Add the column index if you'll filter on it a lot (a new `V#__*.sql` migration; lead with `workspace_id`).
 6. Update `openapi.yaml` + `docs/api-*.md` (run `api-docs-sync`) and add a test in `SearchApiTest`.
 
-### Turn on a reserved field (`label`, custom fields)
-Flip `available` to `true` in its `FieldRegistry` entry and wire its resolution (steps 3–4 above). Until then it parses but 422s with "not yet queryable" — by design.
+### Custom fields (HD-52 — **implemented**)
+Custom fields (M2, stored in `issue_field_values` JSONB) are queryable by their `field_defs.key` (e.g. `story_points`, `severity`). They are **not** in `FieldRegistry` (that's system fields only); instead:
+- **Discovery:** `ResolutionContextFactory` builds `ResolutionContext.customFieldsByKey` per request from the caller's **visible projects'** effective field sets (`CustomFieldMeta` per field: id, `FieldType`, SELECT/MULTI_SELECT option label→id map). System fields win on a name clash. A key not in ctx → 422 "unknown field" (so a field the caller can't see is never queryable — the tenancy boundary).
+- **Allowed operators** per `FieldType` live in `CustomFieldOps` (one source for the validator and `/schema`). Custom fields are **not sortable** (422 in `ORDER BY`) in the MVP.
+- **Compilation** (`HqlCompiler`): a custom-field comparison becomes a correlated `EXISTS (SELECT 1 FROM IssueFieldValue v WHERE v.issue = <outer root> AND v.field.id = :fid AND <valuePred>)`, Criteria-only, bound params. `<valuePred>` uses the registered JSONB functions (`jsonb_scalar_text/numeric/date`, `jsonb_exists` for MULTI_SELECT contains). `!=` = `NOT EXISTS(= X)` (absent rows count as "not equal"); `IS [NOT] EMPTY` = NOT EXISTS / EXISTS of any row.
+- **To add a new custom `FieldType`'s query support:** extend `CustomFieldOps` (operators) + the per-type branch in `HqlCompiler` + (if a new JSONB extraction is needed) `JsonbFunctionContributor`. See §10 for the total-cast gotcha.
+
+`label` (HD-30) is still a reserved not-available `FieldRegistry` stub — flip its `available` and wire resolution when HD-30 lands, or fold label search into HD-30.
 
 ### Add an operator (e.g. `STARTS WITH`)
 Touch, in order: `parser/ast/ComparisonOp` (enum + `symbol()`), `parser/Lexer` (tokenize it), `parser/HqlParser` (accept it), the operator sets in `FieldRegistry` (which fields allow it), and the `HqlCompiler.comparison` switch (how it compiles). Add parser unit tests + a `SearchApiTest`.
@@ -189,6 +197,7 @@ JWT_SECRET=dev-only-jwt-secret-hamstrack-0123456789abcdef \
 - **Scope must stay a predicate builder** (not an id list) — that's what makes the future access model a one-method change.
 - **Save-time validation is structural only** — don't add value-resolution at save (breaks `currentUser()` in shared filters and bricks filters when a catalog row is archived).
 - **An empty-`hql` saved filter** ("all issues") clicked from the start view calls `runQuery("")`, which drops the `q` param and returns to the start view rather than showing all issues. Minor known edge; fix in `runQuery`/`loadFilter` if it ever matters.
+- **The custom-field JSONB casts MUST stay total** (`JsonbFunctionContributor`). `jsonb_scalar_numeric`/`jsonb_scalar_date` wrap the `::numeric`/`::date` cast in a `CASE` guard (`jsonb_typeof = 'number'` / ISO-date regex) that returns NULL on non-castable input. This is not cosmetic: the `field_id = :fid` filter and the cast are same-level ANDs in the EXISTS subquery, so Postgres may apply the cast to a *sibling* field's value (e.g. a TEXT field holding "prod") on the same issue — a raw `(value #>> '{}')::numeric` there throws `invalid input syntax` and 500s a normal query (planner-order-dependent, so it can pass in tests and fail at scale). NULL-on-non-castable makes the row simply not match. Keep any new custom-type cast total the same way. Regression: `CustomFieldSearchApiTest.{number,date}ComparisonWithNonNumericSiblingDoesNotError`.
 
 ---
 

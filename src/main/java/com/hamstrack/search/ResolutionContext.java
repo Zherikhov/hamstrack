@@ -29,6 +29,11 @@ import java.util.UUID;
  * @param statusNames       distinct status display names reachable by visible
  *                          projects, original casing (for the {@code /schema}
  *                          picklist); {@code typeNames}/{@code priorityNames} likewise
+ * @param customFieldsByKey non-archived custom fields (M2) reachable by any visible
+ *                          project, keyed by their machine {@code key} (== HQL field
+ *                          name). System field names always win — a key here is only
+ *                          consulted when it is NOT a system field (HD-52). A custom
+ *                          field a caller can't see simply isn't in this map (no leak).
  */
 public record ResolutionContext(
         User actor,
@@ -41,8 +46,16 @@ public record ResolutionContext(
         List<Member> members,
         List<String> statusNames,
         List<String> typeNames,
-        List<String> priorityNames
+        List<String> priorityNames,
+        Map<String, CustomFieldMeta> customFieldsByKey
 ) {
     /** A workspace member's identity for USER_REF resolution. */
     public record Member(UUID id, String email, String displayName) {}
+
+    /** A visible custom field by its HQL name (its {@code key}), case-insensitively. */
+    public java.util.Optional<CustomFieldMeta> customField(String key) {
+        if (key == null) return java.util.Optional.empty();
+        return java.util.Optional.ofNullable(
+                customFieldsByKey.get(key.toLowerCase(java.util.Locale.ROOT)));
+    }
 }
