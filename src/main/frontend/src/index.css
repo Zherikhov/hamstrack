@@ -101,6 +101,153 @@ body {
   to   { opacity: 1; transform: translateY(0); }
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Public landing page (/) — "Ink / trust machine" (HD-58). Dark ink hero
+   echoing the nav rail + safety-state band + a Home-dashboard product visual
+   that peeks up from behind the first light content panel. All colours come
+   from Beacon tokens (brand-alpha tints match the rail's own literals).
+   ───────────────────────────────────────────────────────────────────────── */
+.lp { background: var(--color-ink); }
+.lp-wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+.lp-btn { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; border-radius: var(--radius-md); padding: 9px 16px; cursor: pointer; border: 1px solid transparent; transition: .12s; text-decoration: none; }
+.lp-btn-lg { padding: 13px 24px; font-size: 15px; border-radius: 11px; }
+.lp-btn-primary { background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: #04211f; font-weight: 700; }
+.lp-btn-primary:hover { filter: brightness(1.05); }
+.lp-btn-ghost-dark { border-color: rgba(255,255,255,.18); color: #fff; background: rgba(255,255,255,.04); }
+.lp-btn-ghost { border-color: var(--color-border-2); color: var(--color-text); background: var(--color-card); }
+.lp-btn-ghost:hover { background: var(--color-surface-2); }
+
+/* Dark hero stage */
+.lp-stage { position: relative; overflow: hidden; background: var(--color-ink); }
+.lp-stage::before { content: ""; position: absolute; top: -140px; right: -120px; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(14,165,164,.26), transparent 62%); pointer-events: none; }
+.lp-stage::after { content: ""; position: absolute; top: 280px; left: 50%; transform: translateX(-50%); width: 900px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(94,234,212,.10), transparent 64%); pointer-events: none; }
+.lp-stage .lp-wrap { position: relative; z-index: 2; }
+
+.lp-nav { display: flex; align-items: center; justify-content: space-between; height: 66px; }
+.lp-brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 17px; color: #fff; }
+.lp-logo { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; color: #04211f; font-weight: 800; font-size: 15px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
+.lp-navlinks { display: flex; align-items: center; gap: 22px; font-size: 14px; font-weight: 500; color: var(--color-rail-text); }
+.lp-navlinks a { text-decoration: none; }
+/* :not(.lp-btn) so a button's own colour (e.g. Sign up = dark ink on teal) is
+   not clobbered — an element-qualified `.lp-navlinks a` would out-specify the
+   .lp-btn-primary colour otherwise. */
+.lp-navlinks a:not(.lp-btn) { color: inherit; }
+.lp-navlinks a.lp-signin { color: #fff; }
+
+.lp-hero { text-align: center; padding: 74px 0 30px; color: #fff; }
+.lp-eyebrow { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 12px; font-weight: 500; letter-spacing: .03em; color: var(--color-rail-active); background: rgba(94,234,212,.08); border: 1px solid rgba(94,234,212,.22); padding: 6px 14px; border-radius: 999px; }
+.lp-h1 { font-size: 56px; line-height: 1.05; letter-spacing: -.03em; font-weight: 800; margin: 22px auto 0; max-width: 760px; }
+.lp-lead { font-size: 18px; line-height: 1.6; color: #B7C0CE; margin: 20px auto 0; max-width: 560px; }
+.lp-cta { display: flex; gap: 12px; justify-content: center; margin-top: 32px; flex-wrap: wrap; }
+
+/* Safety-state band (Sandbox → Pending → Production) */
+.lp-states { display: flex; justify-content: center; gap: 0; margin: 44px auto 0; max-width: 640px; }
+.lp-state { flex: 1; text-align: center; padding: 0 12px; position: relative; }
+.lp-chip { font-family: var(--font-mono); font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; }
+.lp-state .lp-statelbl { display: block; font-size: 12px; color: #8592A3; margin-top: 8px; }
+.lp-state:not(:last-child)::after { content: "→"; position: absolute; right: -8px; top: 5px; color: #3A465A; }
+.lp-cdot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* Home-dashboard window peeking from behind the panel below */
+.lp-stagewin { position: relative; z-index: 2; margin-top: 52px; }
+.lp-win { background: var(--color-card); border: 1px solid rgba(255,255,255,.16); border-radius: 16px 16px 0 0; box-shadow: 0 -2px 0 rgba(255,255,255,.06) inset, 0 40px 90px rgba(4,9,20,.6); overflow: hidden; }
+.lp-wintop { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid var(--color-border); background: var(--color-surface-2); }
+.lp-tdot { width: 10px; height: 10px; border-radius: 50%; }
+.lp-winurl { margin-left: 10px; font-size: 11px; color: var(--color-text-muted); }
+.lp-winbody { display: flex; }
+
+.lp-rail { width: 158px; background: var(--color-ink); padding: 13px 10px; flex-shrink: 0; }
+.lp-rbrand { display: flex; align-items: center; gap: 8px; color: #fff; font-weight: 800; font-size: 13px; padding: 2px 6px 12px; }
+.lp-rlogo { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: #04211f; font-weight: 800; font-size: 11px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
+.lp-rnew { display: flex; align-items: center; justify-content: center; gap: 6px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: #04211f; font-weight: 800; font-size: 11px; border-radius: 9px; padding: 8px; margin-bottom: 12px; }
+.lp-ritem { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--color-rail-text); padding: 7px 8px; border-radius: 8px; margin-bottom: 2px; }
+.lp-ritem.on { background: rgba(14,165,164,.18); color: var(--color-rail-active); }
+.lp-ric { width: 12px; height: 12px; border-radius: 3px; background: currentColor; opacity: .7; }
+.lp-rsec { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--color-rail-muted); font-weight: 700; padding: 13px 8px 5px; }
+
+.lp-dash { flex: 1; padding: 20px 22px 28px; background: var(--color-surface); min-width: 0; }
+.lp-greet { font-size: 20px; font-weight: 800; letter-spacing: -.02em; color: var(--color-text); }
+.lp-greetsub { font-size: 12.5px; color: var(--color-text-muted); font-weight: 500; margin-top: 2px; }
+.lp-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0; }
+.lp-stat { background: var(--color-card); border: 1px solid var(--color-border); border-radius: 12px; padding: 14px; box-shadow: var(--shadow-card); position: relative; }
+.lp-stat .n { font-size: 24px; font-weight: 800; letter-spacing: -.02em; color: var(--color-text); }
+.lp-stat .l { font-size: 11px; color: var(--color-text-muted); font-weight: 600; margin-top: 2px; }
+.lp-sic { position: absolute; top: 13px; right: 13px; width: 16px; height: 16px; border-radius: 5px; opacity: .85; }
+.lp-cols { display: grid; grid-template-columns: 1.5fr 1fr; gap: 12px; align-items: start; }
+.lp-rcol { display: flex; flex-direction: column; gap: 12px; }
+.lp-wid { background: var(--color-card); border: 1px solid var(--color-border); border-radius: 12px; padding: 15px 16px; box-shadow: var(--shadow-card); }
+.lp-wid h4 { font-size: 13px; font-weight: 800; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; color: var(--color-text); }
+.lp-wid h4 .lp-hint { margin-left: auto; font-size: 10.5px; color: var(--color-text-muted); font-weight: 600; }
+.lp-trow { display: flex; align-items: center; gap: 11px; padding: 9px 0; border-top: 1px solid var(--color-border); }
+.lp-trow:first-of-type { border-top: none; padding-top: 0; }
+.lp-tbadge { width: 19px; height: 19px; border-radius: 5px; display: grid; place-items: center; font-size: 9.5px; color: #fff; font-weight: 800; flex: 0 0 19px; }
+.lp-tmain { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.lp-ttitle { display: block; font-size: 12.5px; font-weight: 600; line-height: 1.35; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-tmeta { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lp-pri { width: 13px; height: 13px; border-radius: 4px; flex: 0 0 13px; }
+.lp-av { width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg, #7C6CF5, #3B5BFD); flex: 0 0 20px; }
+.lp-due { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 8px; flex: 0 0 auto; white-space: nowrap; }
+.lp-due.now { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, white); }
+.lp-due.soon { color: var(--color-text-secondary); background: var(--color-surface); }
+.lp-pbar { height: 11px; border-radius: 6px; overflow: hidden; display: flex; margin: 2px 0 14px; }
+.lp-prow { display: flex; align-items: center; gap: 9px; font-size: 12.5px; margin-top: 9px; color: var(--color-text); }
+.lp-prow .sw { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 10px; }
+.lp-prow .pn { margin-left: auto; font-weight: 700; color: var(--color-text-secondary); }
+
+/* Light content panel that rises over the window (the peek) */
+.lp-below { position: relative; z-index: 3; background: var(--color-surface); border-radius: 26px 26px 0 0; margin-top: -190px; padding-top: 30px; box-shadow: 0 -26px 60px rgba(8,14,28,.28); }
+.lp-grab { width: 44px; height: 5px; border-radius: 999px; background: var(--color-border-2); margin: 0 auto 8px; }
+
+.lp-section { padding: 34px 0 64px; }
+.lp-sechead { text-align: center; max-width: 640px; margin: 0 auto 40px; }
+.lp-sechead h2 { font-size: 32px; letter-spacing: -.02em; font-weight: 800; margin: 0; color: var(--color-text); }
+.lp-sechead p { font-size: 16px; color: var(--color-text-secondary); margin: 12px 0 0; line-height: 1.6; }
+.lp-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.lp-fcard { display: flex; gap: 16px; background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 22px 24px; box-shadow: var(--shadow-card); transition: .15s; }
+.lp-fcard:hover { box-shadow: var(--shadow-pop); }
+.lp-fic { width: 42px; height: 42px; flex-shrink: 0; border-radius: 12px; display: grid; place-items: center; background: rgba(14,165,164,.10); }
+.lp-fic svg { width: 21px; height: 21px; color: var(--color-brand); }
+.lp-fcard h3 { font-size: 16px; font-weight: 700; margin: 2px 0 6px; color: var(--color-text); }
+.lp-fcard p { font-size: 14px; line-height: 1.55; color: var(--color-text-secondary); margin: 0; }
+
+.lp-deploy { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.lp-dcard { border: 1px solid var(--color-border); border-radius: var(--radius-xl); padding: 28px; background: var(--color-card); box-shadow: var(--shadow-card); }
+.lp-dcard.brand { border-color: rgba(14,165,164,.3); box-shadow: 0 6px 24px rgba(14,165,164,.10); }
+.lp-tag { font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 7px; display: inline-block; }
+.lp-dcard h3 { font-size: 20px; margin: 14px 0 8px; letter-spacing: -.01em; color: var(--color-text); }
+.lp-dcard p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 16px; }
+.lp-dcard ul { margin: 0; padding: 0; list-style: none; }
+.lp-dcard li { font-size: 13.5px; color: var(--color-text-secondary); padding: 6px 0 6px 24px; position: relative; }
+.lp-dcard li::before { content: "✓"; position: absolute; left: 0; color: var(--color-brand); font-weight: 700; }
+
+.lp-final { text-align: center; padding: 24px 0 0; }
+.lp-finalbox { background: var(--color-ink); border-radius: 20px; padding: 56px 24px; color: #fff; position: relative; overflow: hidden; }
+.lp-finalbox::before { content: ""; position: absolute; inset: 0; background: radial-gradient(circle at 70% 20%, rgba(14,165,164,.25), transparent 55%); }
+.lp-finalbox h2 { font-size: 34px; letter-spacing: -.02em; margin: 0; position: relative; }
+.lp-finalbox p { font-size: 16px; color: #B7C0CE; margin: 12px 0 26px; position: relative; }
+.lp-finalbox .lp-btn { position: relative; }
+
+/* Motion — entrance rise/fade + gentle idle float (DESIGN.md: functional, restrained) */
+@keyframes lp-fadeup { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes lp-rise { from { opacity: 0; transform: translateY(120px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes lp-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+.lp-anim-in { opacity: 0; animation: lp-fadeup .6s ease-out both; }
+.lp-anim-rise { opacity: 0; animation: lp-rise .9s cubic-bezier(.32,.72,0,1) .5s both; }
+.lp-anim-float { animation: lp-float 7s ease-in-out 1.6s infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .lp-anim-in, .lp-anim-rise, .lp-anim-float { animation: none !important; opacity: 1 !important; transform: none !important; }
+}
+
+/* Responsive: stack the hero split and collapse the dashboard rail */
+@media (max-width: 720px) {
+  .lp-h1 { font-size: 40px; }
+  .lp-navlinks { gap: 14px; }
+  .lp-navlinks .lp-hide-sm { display: none; }
+  .lp-states { max-width: none; }
+  .lp-grid, .lp-deploy { grid-template-columns: 1fr; }
+  .lp-below { margin-top: -150px; }
+}
+
 /* Prose for public legal pages (/terms, /privacy, /cookies) */
 .legal-prose {
   font-size: 17px;
