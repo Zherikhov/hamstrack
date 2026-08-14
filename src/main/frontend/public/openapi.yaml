@@ -815,7 +815,9 @@ paths:
         `/{id}/unarchive` hide a field from forms without touching values.
         DELETE `/{id}` refuses (409) while issues hold values for the field
         unless `?dropValues=true` is passed — the values are then dropped;
-        there is no remap across arbitrary value shapes.
+        there is no remap across arbitrary value shapes. DELETE also refuses
+        (409) for a built-in system field (`isSystem: true`) — those can only
+        be archived, not deleted.
       operationId: adminListFields
       responses:
         '200':
@@ -2511,6 +2513,7 @@ components:
         config: { $ref: '#/components/schemas/FieldConfig' }
         description: { type: string, nullable: true }
         archived: { type: boolean }
+        isSystem: { type: boolean, description: "Built-in system field — can only be archived, not deleted" }
         usage: { $ref: '#/components/schemas/UsageInfo' }
         scope: { $ref: '#/components/schemas/AdminScope' }
 

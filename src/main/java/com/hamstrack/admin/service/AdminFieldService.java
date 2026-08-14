@@ -101,6 +101,10 @@ public class AdminFieldService {
     @Transactional
     public void deleteField(ScopeContext scope, UUID id, boolean dropValues) {
         var f = requireField(scope, id);
+        if (f.isSystem()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "System fields can only be archived, not deleted.");
+        }
         long values = valueRepository.countByField(f);
         if (values > 0 && !dropValues) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
