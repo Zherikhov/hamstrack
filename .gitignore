@@ -1,5 +1,9 @@
 HELP.md
 target/
+
+### Dev pipeline transient run state (see docs/design/dev-team-pipeline.md) ###
+.claude/pipeline/run.json
+
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/

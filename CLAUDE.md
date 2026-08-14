@@ -129,6 +129,10 @@ Note: the DB credentials in `application-local.properties` (user `hamstrack`) ar
 
 Project subagents live in `.claude/agents/*.md` (all `model: inherit`). They encode this project's recurring rules so the work can be delegated. Reviewers are read-only (`Read/Grep/Glob/Bash`); builders and the doc/test agents can edit. Invoke explicitly (e.g. "use migration-reviewer for V11") or let them trigger on their `description`.
 
+**Two families of agents (routing rule at the bottom):** the **project-native** agents encode Hamstrack's exact rules and are the default for anything touching this codebase; the **general-purpose** set (imported 2026-08-13 from [`piomin/claude-ai-spring-boot`](https://github.com/piomin/claude-ai-spring-boot), Apache-2.0) gives broad Spring/DevOps/Docker/security guidance for generic or infra work.
+
+### Project-native agents (prefer these)
+
 - **`systems-analyst`** — turns fuzzy feature requests into a precise spec (scope, actors/permissions, rules, edge cases, data-model/API/frontend impact, DC/Cloud implications, acceptance criteria) written to `docs/design/`. Run it BEFORE building; it does not touch code.
 - **`tenancy-reviewer`** — reviews backend diffs for cross-tenant leaks (unscoped queries, missing membership checks, 403-instead-of-404, parent re-verification in nested paths). Run it after touching any workspace-scoped repository/service/controller — this is the project's top bug class.
 - **`security-officer`** — app-sec review of everything EXCEPT cross-tenant isolation (that's `tenancy-reviewer`): authn/JWT, authz/roles, account & reset flows, rate limiting, file upload/download, injection/SSRF, input validation, secrets/config leaks, dependencies. Run it after touching auth, admin, uploads, or config.
@@ -138,6 +142,37 @@ Project subagents live in `.claude/agents/*.md` (all `model: inherit`). They enc
 - **`backend-builder`** — implements Spring Boot 4 features by package-by-feature convention with the mandatory Hibernate/Jackson/`@Version`/`@Modifying` patterns baked in.
 - **`frontend-builder`** — implements SPA features (React 19 / Tailwind v4) with the `max-w-*` shadow trap, splat-route absolute paths, and config-driven rendering baked in; reads `DESIGN.md` first.
 - **`test-runner`** — runs/writes the suite with the correct env (creds `hamstrack`/`hamstrack`, port 15432, `-Dfrontend.skip=true`) and Boot 4 test-import quirks.
+
+### General-purpose agents (imported from `piomin/claude-ai-spring-boot`)
+
+Generic best-practice guides, adapted only to `model: inherit`. They do **not** know Hamstrack's tenancy/migration/DC-Cloud rules, so they are a fallback for broad or infra questions — not a substitute for the project-native agents above. Their bodies still reference microservices/reactive/Cloud/k8s patterns this monolith doesn't use; treat those parts as general reference, not project direction. Note: this project is a **single Spring MVC monolith (Boot 4 / Java 21)**, deployed via **Docker Compose on EC2 (SSM) — there is no Kubernetes**, so `kubernetes-specialist` is aspirational only.
+
+- **`code-reviewer`** — general multi-language code-quality/security review (can edit). For this repo prefer **`tenancy-reviewer`** (cross-tenant leaks) + **`security-officer`** (app-sec) + **`migration-reviewer`** first; this is a generalist supplement.
+- **`security-engineer`** — DevSecOps / infra / cloud / secrets / compliance security. App-level security is still **`security-officer`**; tenant isolation is still **`tenancy-reviewer`**.
+- **`docker-expert`** — Dockerfile / image / Compose optimization and hardening (relevant: the multi-stage `Dockerfile` + `docker-compose.prod.yml`).
+- **`devops-engineer`** — CI/CD, IaC, deployment, monitoring (relevant: the GitHub Actions `build.yml`/`deploy.yml` + EC2/SSM/Caddy setup).
+- **`kubernetes-specialist`** — Kubernetes design/ops. **Not used by this project today** — keep only for a possible future k8s migration.
+
+### Specialist agents (curated from `VoltAgent/awesome-claude-code-subagents`)
+
+A stack-relevant subset imported 2026-08-13 from [`VoltAgent/awesome-claude-code-subagents`](https://github.com/VoltAgent/awesome-claude-code-subagents) (MIT), normalized to `model: inherit`. Same caveat as the general-purpose set: **generic guides that do not know Hamstrack's tenancy/migration/DC-Cloud rules** — supplements for deep single-topic help, never a substitute for the project-native agents. The irrelevant domains (mobile, blockchain, game/fintech/iot/healthcare, business/marketing, 26 other languages, k8s/terraform-heavy infra) were deliberately **not** installed; the 6 that collide with the piomin set were skipped (not overwritten). **Autopilot prune (2026-08-14):** when the dev pipeline moved to auto-dispatch, the 7 generic *implementers* (`java-architect`, `backend-developer`, `frontend-developer`, `react-specialist`, `typescript-pro`, `javascript-pro`, and piomin's `spring-boot-engineer`) were **deleted** — on auto-routing they could hijack code work and skip the tenancy/Boot 4 rules. Only `backend-builder`/`frontend-builder` write code (routing invariant). Remaining specialists, grouped by focus:
+
+- **Backend / DB:** `api-designer`, `sql-pro`, `postgres-pro`, `database-administrator`, `database-optimizer` — for API design and Postgres/SQL depth. For actual Hamstrack implementation use **`backend-builder`**; for schema changes **`migration-reviewer`** runs first.
+- **Frontend:** `ui-designer`, `accessibility-tester` — visual/design and a11y passes. For Hamstrack SPA work use **`frontend-builder`** (knows the Tailwind-v4 trap + `DESIGN.md`); read `DESIGN.md` before visual changes.
+- **Quality / security:** `code-reviewer` (piomin's is already present — VoltAgent's was skipped), `security-auditor`, `architect-reviewer`, `qa-expert`, `test-automator`, `performance-engineer`, `debugger`, `error-detective`. **App-sec is still `security-officer`; tenant isolation is still `tenancy-reviewer`; the test suite is still `test-runner`** — these VoltAgent ones are generic supplements.
+- **Infra / DX:** `cloud-architect`, `deployment-engineer`, `sre-engineer`, `build-engineer`, `dependency-manager`, `git-workflow-manager`, `documentation-engineer`, `refactoring-specialist`. Deployment specifics live in **`dc-cloud-guard`** + the CI/CD section; API-doc sync is **`api-docs-sync`**.
+
+**Routing rule:** for any task that touches Hamstrack code, config, schema, or its API, use a **project-native** agent. The general-purpose (piomin) and specialist (VoltAgent) sets are fallbacks for broad, greenfield, or deep single-topic questions where no native agent fits. When more than one could apply, the project-native one wins (it knows the top bug class — cross-tenant data leaks) — the imported agents don't scope by workspace/membership or know the Boot 4 / Hibernate 7 / Jackson gotchas.
+
+## Dev pipeline (orchestration, 2026-08-14)
+
+The subagents run as a **dev team on autopilot**: the main session is the **orchestrator** (a subagent can't spawn subagents — star topology, not a tree) and delegates a task through mandatory + conditional review gates. Full spec: `docs/design/dev-team-pipeline.md`.
+
+- **Skill `feature-pipeline`** (`.claude/skills/feature-pipeline/SKILL.md`) — the orchestrator playbook: classify (feature / light / trivial), delegate, run gates, maintain the gate file. Invoke it for any non-trivial change; it's the soft layer (routing + phases).
+- **Mandatory gates:** `systems-analyst` (spec, before code) · `tenancy-reviewer` (any backend diff) · `security-officer` (features) · `test-runner` (features/light). **Conditional:** `migration-reviewer` (migration/`@Entity`) · `dc-cloud-guard` (`*.properties`/profile/compose/env) · `api-docs-sync` (REST surface). **Routing invariant:** only `backend-builder`/`frontend-builder` write code.
+- **Hard layer — Stop hook.** `.claude/pipeline/check-gates.mjs` reads the per-task gate file `.claude/pipeline/run.json` (gitignored transient state) and **blocks the session from finishing** until every required gate is `pass`/`n/a`. It **recomputes touched areas from the real `git diff`** (so under-declaring scope can't skip tenancy), and forces reclassification if a `trivial` run actually touches code. A hook can only block+remind, never dispatch — the orchestrator's next turn dispatches the missing agent.
+- **Manual bootstrap (once):** `settings.json`/`settings.local.json` are agent-write-denied, so the `Stop` hook registration must be pasted in by the user (see the snippet handed over when the pipeline was built). Without it, gates degrade from enforced to convention.
+- **Autopilot policy:** spec proceeds without an approval pause (user vetoes after); fix loop capped at 3 rounds per gate then escalates.
 
 ## CI/CD
 
