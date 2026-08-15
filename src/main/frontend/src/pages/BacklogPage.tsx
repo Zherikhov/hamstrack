@@ -8,6 +8,7 @@ import { forgetProject } from '../recentProjects'
 import { Button, StatusBadge, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import { Pager } from '../components/Pager'
 import { FieldValueDisplay } from '../components/fields'
+import { backlogIssuesKeyPrefix } from '../lib/queryKeys'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
 import type { Issue, IssueType, ProjectField, WorkspaceMember } from '../types'
@@ -45,7 +46,9 @@ export default function BacklogPage() {
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority, page, size],
+    // Own key namespace: the value here is a `Page<Issue>`, not the board's
+    // `BoardIssues` wrapper — see lib/queryKeys.ts for the shape-per-key rule.
+    queryKey: [...backlogIssuesKeyPrefix(wsId, projectId), filterStatusId, filterPriority, page, size],
     // Backlog = non-DONE issues only; excludeDone filters them out server-side so pages are correct
     queryFn: () => apiListIssuesPaged(wsId!, projectId!, {
       page, size, excludeDone: true,

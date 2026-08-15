@@ -1,5 +1,5 @@
 import { clsx } from 'clsx'
-import { forwardRef, useState, useRef, useEffect, useMemo, Children, isValidElement } from 'react'
+import { forwardRef, useState, useRef, useEffect, useMemo, Children, isValidElement, Fragment } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
 import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, Check, type LucideIcon } from 'lucide-react'
 import type { Priority } from '../types'
@@ -160,7 +160,34 @@ interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, 'onC
 
 interface SelectOption { value: string; label: ReactNode; disabled: boolean }
 
-export function Select({ label, className, id, children, value, onChange, disabled, style, compact }: SelectProps) {
+/**
+ * Collect <option> children, descending into fragments. A caller that wraps its
+ * options in a `<>…</>` (e.g. the create dialog's Parent picker, which switches
+ * between a fixed option and "No parent" + a list) would otherwise render an
+ * empty dropdown, since `Children.toArray` keeps the fragment as a single node.
+ */
+function collectOptions(nodes: ReactNode): SelectOption[] {
+  return Children.toArray(nodes)
+    .filter(isValidElement)
+    .flatMap(c => {
+      const el = c as { type?: unknown; props: { value?: unknown; children?: ReactNode; disabled?: boolean } }
+      if (el.type === Fragment) return collectOptions(el.props.children)
+      if (el.type !== 'option') return []
+      const p = el.props
+      return [{
+        value: String(p.value ?? p.children ?? ''),
+        label: (p.children ?? p.value ?? '') as ReactNode,
+        disabled: !!p.disabled,
+      }]
+    })
+}
+
+export function Select({
+  label, className, id, children, value, onChange, disabled, style, compact,
+  // Filter-bar selects render without a visible <label>; an explicit aria-label
+  // keeps them named for screen readers (and findable by role+name).
+  'aria-label': ariaLabel, title,
+}: SelectProps) {
   const inputId = id ?? label?.toLowerCase().replace(/\s+/g, '-')
   const wrapRef = useRef<HTMLDivElement>(null)
   const btnRef = useRef<HTMLButtonElement>(null)
@@ -169,15 +196,7 @@ export function Select({ label, className, id, children, value, onChange, disabl
   const [hi, setHi] = useState(0)
   const [pos, setPos] = useState<{ left: number; top: number; width: number } | null>(null)
 
-  const options: SelectOption[] = useMemo(() =>
-    Children.toArray(children)
-      .filter(isValidElement)
-      .filter(c => (c as { type?: unknown }).type === 'option')
-      .map(c => {
-        const p = (c as { props: { value?: unknown; children?: ReactNode; disabled?: boolean } }).props
-        return { value: String(p.value ?? p.children ?? ''), label: (p.children ?? p.value ?? '') as ReactNode, disabled: !!p.disabled }
-      }),
-  [children])
+  const options: SelectOption[] = useMemo(() => collectOptions(children), [children])
 
   const current = options.find(o => o.value === String(value ?? '')) ?? options[0]
 
@@ -245,6 +264,8 @@ export function Select({ label, className, id, children, value, onChange, disabl
         onKeyDown={onKey}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-label={ariaLabel}
+        title={title}
         className={clsx(
           'rounded-md border outline-none cursor-pointer flex items-center gap-2 text-left transition-colors',
           compact ? 'px-2.5 py-1.5 text-xs' : 'w-full px-3 py-2 text-sm',
