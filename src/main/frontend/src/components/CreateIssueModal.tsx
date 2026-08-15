@@ -100,7 +100,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   )
   const { data: projectIssues = [] } = useQuery({
     queryKey: ['issues', effectiveWsId, effectiveProjectId, 'board', ''],
-    queryFn: () => apiListIssues(effectiveWsId, effectiveProjectId),
+    // HD-79: the board list endpoint now returns a capped wrapper; the parent
+    // picker only needs the (capped) issue array.
+    queryFn: () => apiListIssues(effectiveWsId, effectiveProjectId).then(r => r.issues),
     enabled: !!effectiveWsId && !!effectiveProjectId && (anyParentableEdge || preset?.parentId !== undefined),
   })
 

@@ -152,6 +152,15 @@ export interface Issue {
   updatedAt: string;
 }
 
+// Board issue-list response (HD-79). The no-`size` board fetch returns the first
+// `cap` issues (server-enforced) plus truncation metadata, instead of a bare array.
+export interface BoardIssues {
+  issues: Issue[];
+  truncated: boolean;
+  totalAvailable: number;
+  cap: number;
+}
+
 export interface Comment {
   id: string;
   authorId: string;

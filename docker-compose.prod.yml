@@ -10,6 +10,10 @@ services:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-cloud}
       # DB host is the compose service name; never overridable from .env.
       DB_URL: jdbc:postgresql://postgres:5432/hamstrack
+      # Prod always sits behind Caddy, which strips client-supplied X-Forwarded-For,
+      # so the rightmost XFF entry is the real peer — trust it for per-IP rate-limit
+      # keying. Set explicitly (not from .env) so this security posture always wins.
+      RATE_LIMIT_TRUST_FORWARDED_FOR: "true"
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local
     healthcheck:

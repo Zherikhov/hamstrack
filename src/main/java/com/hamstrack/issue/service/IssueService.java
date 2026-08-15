@@ -2,9 +2,14 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.config.BoardProperties;
 import com.hamstrack.common.dto.PageResponse;
+import com.hamstrack.common.event.FieldChange;
+import com.hamstrack.common.event.IssueCreated;
+import com.hamstrack.common.event.IssueDeleted;
+import com.hamstrack.common.event.IssueUpdated;
 import com.hamstrack.common.observability.ProductMetrics;
-import com.hamstrack.common.sse.SseRegistry;
+import com.hamstrack.issue.dto.BoardIssuesResponse;
 import com.hamstrack.issue.dto.CreateIssueRequest;
 import com.hamstrack.issue.dto.IssueHistoryResponse;
 import com.hamstrack.issue.dto.IssueResponse;
@@ -15,14 +20,14 @@ import com.hamstrack.issue.repository.*;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -35,7 +40,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -45,7 +49,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class IssueService {
 
-    private final WorkspaceRepository workspaceRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
@@ -58,8 +62,9 @@ public class IssueService {
     private final ProjectConfigService projectConfigService;
     private final FieldValueService fieldValueService;
     private final AttachmentService attachmentService;
-    private final SseRegistry sseRegistry;
+    private final ApplicationEventPublisher eventPublisher;
     private final ProductMetrics metrics;
+    private final BoardProperties boardProperties;
     // The MVC Jackson 3 mapper (carries the Jackson2NodeModule bridge). Used to
     // serialize the creation response INSIDE the creation transaction, so a
     // serialization failure rolls the insert back rather than committing then
@@ -86,9 +91,9 @@ public class IssueService {
 
     @Transactional
     public IssueResponse create(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var workspace = ctx.workspace();
+        var project = ctx.project();
         requireNotArchived(project);
 
         var type = projectConfigService.requireTypeInSet(project, resolveType(req.typeId()));
@@ -137,19 +142,34 @@ public class IssueService {
         // required-on-create); no history entries for initial values
         fieldValueService.applyValues(issue, req.fields(), true, (f, o, n) -> {});
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_CREATED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issue.getNumber()));
+        eventPublisher.publishEvent(new IssueCreated(workspaceId, projectId, issue.getNumber()));
         return toResponse(issue);
     }
 
+    /**
+     * Capped board issue list (HD-79). The no-{@code size} board path used to return
+     * EVERY issue in the project (OOM/latency risk); this bounds it to
+     * {@code app.board.max-issues}, enforced server-side (never client-overridable).
+     * Fetches {@code cap+1} in one query to detect truncation, trims to {@code cap},
+     * and reports {@code totalAvailable} via a cheap filtered count so the SPA can
+     * render a truncation banner. Tenant scoping + filters are identical to before.
+     */
     @Transactional(readOnly = true)
-    public List<IssueResponse> list(User actor, UUID workspaceId, UUID projectId,
-                                    UUID statusId, UUID assigneeId, UUID priorityId) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issues = issueRepository.findByProjectFiltered(project, statusId, assigneeId, priorityId);
-        return toResponses(issues);
+    public BoardIssuesResponse listCapped(User actor, UUID workspaceId, UUID projectId,
+                                          UUID statusId, UUID assigneeId, UUID priorityId) {
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+
+        int cap = boardProperties.maxIssues();
+        // Fetch cap+1 (in board order) so a single query tells us whether more exist.
+        var fetched = issueRepository.findByProjectFilteredCapped(
+                project, statusId, assigneeId, priorityId, PageRequest.of(0, cap + 1));
+        boolean truncated = fetched.size() > cap;
+        var capped = truncated ? fetched.subList(0, cap) : fetched;
+        // Only pay for the full count when truncated; otherwise it equals the size.
+        long totalAvailable = truncated
+                ? issueRepository.countByProjectFiltered(project, statusId, assigneeId, priorityId)
+                : capped.size();
+        return new BoardIssuesResponse(toResponses(capped), truncated, totalAvailable, cap);
     }
 
     /**
@@ -161,9 +181,7 @@ public class IssueService {
     public PageResponse<IssueResponse> listPaged(User actor, UUID workspaceId, UUID projectId,
                                                  UUID statusId, UUID assigneeId, UUID priorityId,
                                                  boolean excludeDone, Pageable pageable) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         var page = issueRepository.findByProjectFilteredPaged(
                 project, statusId, assigneeId, priorityId, excludeDone, StatusCategory.DONE, pageable);
         var responses = toResponses(page.getContent());
@@ -173,40 +191,28 @@ public class IssueService {
 
     @Transactional(readOnly = true)
     public IssueResponse get(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return toResponse(issue);
     }
 
     @Transactional(readOnly = true)
     public List<IssueResponse> children(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return toResponses(issueRepository.findByParent(issue));
     }
 
     @Transactional(readOnly = true)
     public PageResponse<IssueHistoryResponse> getHistory(User actor, UUID workspaceId, UUID projectId,
                                                          long number, Pageable pageable) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return PageResponse.of(historyRepository.findByIssue(issue, pageable).map(IssueHistoryResponse::of));
     }
 
     @Transactional
     public IssueResponse update(User actor, UUID workspaceId, UUID projectId, long number, UpdateIssueRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var workspace = ctx.workspace();
+        var project = ctx.project();
         requireNotArchived(project);
 
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
@@ -349,16 +355,18 @@ public class IssueService {
         issueRepository.save(issue);
         historyRepository.saveAll(historyEntries);
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_UPDATED",
-                Map.of("projectId", projectId.toString(), "issueNumber", number));
+        // changeSet mirrors the history diff for future consumers (Phase-5 triggers);
+        // the SSE payload is unchanged (the listener ignores it).
+        var changeSet = historyEntries.stream()
+                .map(h -> new FieldChange(h.getField(), h.getOldValue(), h.getNewValue()))
+                .toList();
+        eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
         return toResponse(issue);
     }
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         requireNotArchived(project);
         requireProjectRole(actor, project, ProjectRole.MANAGER);
         var issue = issueRepository.findByProjectAndNumber(project, number)
@@ -391,8 +399,7 @@ public class IssueService {
         attachmentService.removeStoredFilesForIssue(issue);
         issueRepository.delete(issue);
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_DELETED",
-                Map.of("projectId", projectId.toString(), "issueNumber", number));
+        eventPublisher.publishEvent(new IssueDeleted(workspaceId, projectId, number));
     }
 
     // ---- catalog resolution ----
@@ -553,14 +560,6 @@ public class IssueService {
         return userRepository.findById(assigneeId)
                 .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee"));
-    }
-
-    private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
     }
 
     private void requireProjectRole(User actor, Project project, ProjectRole required) {

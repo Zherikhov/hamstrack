@@ -1,9 +1,7 @@
 package com.hamstrack.common.sse;
 
 import com.hamstrack.auth.entity.User;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
@@ -24,16 +22,12 @@ import java.util.UUID;
 public class SseController {
 
     private final SseRegistry sseRegistry;
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
+    private final WorkspaceAccessService workspaceAccess;
 
     @GetMapping(produces = "text/event-stream")
     public SseEmitter subscribe(@AuthenticationPrincipal User actor,
                                 @PathVariable UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
+        workspaceAccess.requireMember(actor, workspaceId);
         return sseRegistry.subscribe(workspaceId, actor.getId());
     }
 }

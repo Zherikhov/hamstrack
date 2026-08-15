@@ -105,6 +105,40 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("assigneeId") UUID assigneeId,
             @Param("priorityId") UUID priorityId);
 
+    // Capped board fetch (HD-79): same filter/order as findByProjectFiltered, but
+    // bounded by the Pageable (the service passes size = cap+1 to detect truncation
+    // in one query). ToOne fetch joins → LIMIT in SQL; ordering from the Pageable is
+    // overridden below to keep the board's canonical (position ASC, createdAt DESC).
+    @Query("SELECT i FROM Issue i " +
+           "LEFT JOIN FETCH i.type " +
+           "LEFT JOIN FETCH i.status " +
+           "LEFT JOIN FETCH i.priority " +
+           "LEFT JOIN FETCH i.assignee " +
+           "LEFT JOIN FETCH i.reporter " +
+           "WHERE i.project = :project " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
+           "ORDER BY i.position ASC, i.createdAt DESC")
+    List<Issue> findByProjectFilteredCapped(
+            @Param("project") Project project,
+            @Param("statusId") UUID statusId,
+            @Param("assigneeId") UUID assigneeId,
+            @Param("priorityId") UUID priorityId,
+            Pageable pageable);
+
+    // Filtered count for the board's totalAvailable (same predicate, no fetch/order).
+    @Query("SELECT count(i) FROM Issue i " +
+           "WHERE i.project = :project " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId)")
+    long countByProjectFiltered(
+            @Param("project") Project project,
+            @Param("statusId") UUID statusId,
+            @Param("assigneeId") UUID assigneeId,
+            @Param("priorityId") UUID priorityId);
+
     // Paged variant for the backlog (the board uses the full-list method above).
     // excludeDone applies the backlog's "not in a DONE-category status" filter
     // server-side so page counts are correct. ToOne fetch joins → LIMIT/OFFSET in

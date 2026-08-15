@@ -14,9 +14,7 @@ import com.hamstrack.search.filter.exception.SavedFilterNotFoundException;
 import com.hamstrack.search.filter.repository.SavedFilterRepository;
 import com.hamstrack.search.parser.HqlParser;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -53,8 +51,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class SavedFilterService {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final SavedFilterRepository savedFilterRepository;
     private final HqlValidator validator;
     private final ResolutionContextFactory resolutionContextFactory;
@@ -191,10 +188,6 @@ public class SavedFilterService {
 
     /** Membership gate — 404 (not 403) whether the ws is missing or the caller isn't a member. */
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
+        return workspaceAccess.requireMember(actor, workspaceId).workspace();
     }
 }

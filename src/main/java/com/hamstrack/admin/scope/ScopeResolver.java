@@ -7,14 +7,10 @@ import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.exception.InsufficientProjectRoleException;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
-import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,22 +33,19 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ScopeResolver {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
-    private final ProjectRepository projectRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ProjectMemberRepository projectMemberRepository;
 
     /** Workspace whose config the actor may administer (OWNER or ADMIN). */
     @Transactional(readOnly = true)
     public Workspace requireWorkspaceAdmin(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var member = workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        if (!member.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
+        // Delegate the resolve+membership half (404 for missing/non-member) to the
+        // tenancy primitive; keep the delegated-admin 403-on-insufficient-role rule.
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        if (!ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
             throw new InsufficientWorkspaceRoleException();
         }
-        return workspace;
+        return ctx.workspace();
     }
 
     /**
@@ -62,13 +55,9 @@ public class ScopeResolver {
      */
     @Transactional(readOnly = true)
     public Project requireProjectAdmin(User actor, UUID workspaceId, UUID projectId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        if (!workspaceMemberRepository.existsByWorkspaceAndUser(workspace, actor)) {
-            throw new WorkspaceNotFoundException();
-        }
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        // Delegate the resolve workspace+membership+project half (404s) to the
+        // primitive; keep the delegated-admin 403-on-insufficient-role rule.
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         var member = projectMemberRepository.findByProjectAndUser(project, actor)
                 .orElseThrow(ProjectNotFoundException::new);
         if (!member.getRole().isAtLeast(ProjectRole.MANAGER)) {

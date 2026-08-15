@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { useLocation, useNavigate, useParams } from 'react-router'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Filter } from 'lucide-react'
+import { AlertTriangle, Filter } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { useReducedMotion } from '../hooks/useReducedMotion'
@@ -10,7 +10,7 @@ import { getUiPrefs, setUiPref } from '../uiPrefs'
 import { isMoveAllowed } from '../lib/transitions'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
-import type { Issue, IssueType } from '../types'
+import type { BoardIssues, Issue, IssueType } from '../types'
 
 // Board issue-panel sizing (HD-54): user-draggable width, clamped and additionally
 // capped at 55% of the viewport so the board never disappears. Owned by BoardPage
@@ -100,11 +100,12 @@ export default function BoardPage() {
   const fields = config?.fields ?? []
 
   const issuesKey = ['issues', wsId, projectId, 'board', filterPriority]
-  const { data: issues = [], isLoading, isError } = useQuery({
+  const { data: board, isLoading, isError } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, { priorityId: filterPriority || undefined }),
     enabled: !!wsId && !!projectId,
   })
+  const issues = board?.issues ?? []
 
   // Project gone or access revoked — drop it from the recency journal so the
   // "/" redirect stops pointing here
@@ -118,11 +119,11 @@ export default function BoardPage() {
     onMutate: async ({ issue, statusId }) => {
       // Optimistic move: the card lands in the target column immediately
       await qc.cancelQueries({ queryKey: issuesKey })
-      const previous = qc.getQueryData<Issue[]>(issuesKey)
+      const previous = qc.getQueryData<BoardIssues>(issuesKey)
       const target = statuses.find(s => s.id === statusId)
       if (target) {
-        qc.setQueryData<Issue[]>(issuesKey, old =>
-          old?.map(i => (i.id === issue.id ? { ...i, status: target } : i)) ?? [])
+        qc.setQueryData<BoardIssues>(issuesKey, old =>
+          old && { ...old, issues: old.issues.map(i => (i.id === issue.id ? { ...i, status: target } : i)) })
       }
       return { previous }
     },
@@ -133,8 +134,8 @@ export default function BoardPage() {
     onSuccess: updated => {
       setMoveError('')
       // Replace with the server copy so the next drag carries a fresh version
-      qc.setQueryData<Issue[]>(issuesKey, old =>
-        old?.map(i => (i.id === updated.id ? updated : i)) ?? [])
+      qc.setQueryData<BoardIssues>(issuesKey, old =>
+        old && { ...old, issues: old.issues.map(i => (i.id === updated.id ? updated : i)) })
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['issue', wsId, projectId] })
@@ -207,6 +208,44 @@ export default function BoardPage() {
             {issues.length} issue{issues.length !== 1 ? 's' : ''}
           </span>
         </div>
+
+        {/* Truncation banner (HD-79) — the board is server-capped; when the project
+            (under the current filter) has more than `cap` issues, only the first
+            `cap` are shown. Nudge to the paginated Backlog / Search for the full set. */}
+        {board?.truncated && (
+          <div
+            className="flex items-center gap-2 px-5 py-2 border-b flex-shrink-0 text-xs"
+            style={{
+              background: 'var(--color-warning-soft, rgba(247,144,9,0.10))',
+              borderColor: 'var(--color-border)',
+              color: 'var(--color-text-secondary)',
+            }}
+          >
+            <AlertTriangle size={13} style={{ color: 'var(--color-warning)', flexShrink: 0 }} />
+            <span>
+              Showing the first{' '}
+              <span className="mono font-semibold">{board.cap}</span> of{' '}
+              <span className="mono font-semibold">{board.totalAvailable}</span> issues.
+              Refine with filters, or use the{' '}
+              <Link
+                to={`/w/${wsId}/p/${projectId}/backlog`}
+                className="font-semibold hover:underline"
+                style={{ color: 'var(--color-brand)' }}
+              >
+                Backlog
+              </Link>{' '}
+              or{' '}
+              <Link
+                to={`/w/${wsId}/search`}
+                className="font-semibold hover:underline"
+                style={{ color: 'var(--color-brand)' }}
+              >
+                Search
+              </Link>{' '}
+              to see them all.
+            </span>
+          </div>
+        )}
 
         {/* Kanban columns */}
         <div

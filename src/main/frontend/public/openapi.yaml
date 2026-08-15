@@ -24,8 +24,9 @@ info:
     and `size` (default 50, clamped server-side to a maximum of 100) and return
     a uniform `PageResponse` envelope (`content` plus `page`/`size`/
     `totalElements`/`totalPages`/`hasNext`). The issue list is the deliberate
-    exception: without `size` it returns the full unpaginated array (the board
-    needs every card), and only switches to the envelope when `size` is passed.
+    exception: without `size` it returns a `BoardIssuesResponse` (a server-capped
+    board list, `cap` = `app.board.max-issues`, default 500), and only switches to
+    the `PageResponse` envelope when `size` is passed.
 
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
@@ -1335,12 +1336,16 @@ paths:
       tags: [Issues]
       summary: List issues
       description: |
-        Dual-shape by design. **Without** `size` the response is the full
-        unpaginated `IssueResponse` array — the board/kanban needs every card.
-        **With** `size` the response is a paginated `PageResponse` envelope (the
-        backlog path), and the optional `excludeDone` flag drops issues whose
-        status is in the DONE category server-side. The `statusId`/`assigneeId`/
-        `priorityId` filters apply in both modes.
+        Dual-shape by design. **Without** `size` the response is a
+        `BoardIssuesResponse` — the board/kanban path. The issue list is bounded
+        server-side to `cap` (`app.board.max-issues`, default 500, never
+        client-overridable); when the project after the same filters exceeds it,
+        `truncated` is true and `totalAvailable` reports the full count so the UI
+        can render a truncation banner. **With** `size` the response is a
+        paginated `PageResponse` envelope (the backlog path), and the optional
+        `excludeDone` flag drops issues whose status is in the DONE category
+        server-side. The `statusId`/`assigneeId`/`priorityId` filters apply in
+        both modes.
       operationId: listIssues
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1363,14 +1368,13 @@ paths:
       responses:
         '200':
           description: |
-            Full array when `size` is omitted; a `PageResponse` envelope when
-            `size` is present.
+            A `BoardIssuesResponse` when `size` is omitted; a `PageResponse`
+            envelope when `size` is present.
           content:
             application/json:
               schema:
                 oneOf:
-                  - type: array
-                    items: { $ref: '#/components/schemas/IssueResponse' }
+                  - $ref: '#/components/schemas/BoardIssuesResponse'
                   - allOf:
                       - $ref: '#/components/schemas/PageResponse'
                       - type: object
@@ -2742,6 +2746,21 @@ components:
         version:
           type: integer
           description: Optimistic lock — the `version` you last read; `409` when stale. Omit to skip the check.
+
+    BoardIssuesResponse:
+      type: object
+      description: |
+        Capped board issue list — the no-`size` variant of `GET .../issues`
+        (HD-79). `issues` is bounded to `cap`; when the project (after the same
+        filters) exceeds it, `truncated` is true and `totalAvailable` reports the
+        full count so the UI can show "Showing first {cap} of {totalAvailable}".
+      properties:
+        issues:
+          type: array
+          items: { $ref: '#/components/schemas/IssueResponse' }
+        truncated: { type: boolean, description: True when the project exceeds `cap` after filters }
+        totalAvailable: { type: integer, format: int64, description: Full filtered count (equals issues length when not truncated) }
+        cap: { type: integer, description: 'Server-side maximum (app.board.max-issues, default 500)' }
 
     IssueResponse:
       type: object

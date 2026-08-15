@@ -61,9 +61,11 @@ public class IssueController {
     }
 
     /**
-     * Issue list. Without {@code size} → the full list (the board needs every
-     * card; this is the documented exception to pagination). With {@code size} →
-     * a {@link PageResponse} (backlog); {@code excludeDone} drops DONE-category
+     * Issue list. Without {@code size} → the board view: a capped
+     * {@link BoardIssuesResponse} ({@code { issues, truncated, totalAvailable, cap }})
+     * bounded server-side by {@code app.board.max-issues} (HD-79 — the board needs
+     * every card, but not an unbounded list). With {@code size} → a
+     * {@link PageResponse} (backlog); {@code excludeDone} drops DONE-category
      * statuses server-side.
      */
     @GetMapping
@@ -78,7 +80,7 @@ public class IssueController {
                                   @RequestParam(defaultValue = "false") boolean excludeDone) {
         if (size == null) {
             return ResponseEntity.ok(
-                    issueService.list(actor, workspaceId, projectId, statusId, assigneeId, priorityId));
+                    issueService.listCapped(actor, workspaceId, projectId, statusId, assigneeId, priorityId));
         }
         var pageable = Paging.of(page, size,
                 Sort.by(Sort.Order.asc("position"), Sort.Order.desc("createdAt")));

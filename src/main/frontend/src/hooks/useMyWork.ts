@@ -23,8 +23,9 @@ export async function fetchMyWork(userId: string): Promise<MyIssue[]> {
         const projects = (await apiListProjects(ws.id)).filter(p => !p.archived)
         const lists = await Promise.all(
           projects.map(p =>
+            // HD-79: board list endpoint returns a capped wrapper — take `.issues`.
             apiListIssues(ws.id, p.id, { assigneeId: userId })
-              .then(issues => issues.map(i => ({ ...i, _wsId: ws.id, _wsName: ws.name, _project: p } as MyIssue)))
+              .then(r => r.issues.map(i => ({ ...i, _wsId: ws.id, _wsName: ws.name, _project: p } as MyIssue)))
               .catch(() => [] as MyIssue[]),
           ),
         )

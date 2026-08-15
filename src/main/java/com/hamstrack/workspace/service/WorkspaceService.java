@@ -22,6 +22,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class WorkspaceService {
 
+    private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceRepository workspaceRepository;
     private final WorkspaceMemberRepository memberRepository;
     private final WorkspaceInviteRepository inviteRepository;
@@ -85,17 +86,13 @@ public class WorkspaceService {
 
     @Transactional(readOnly = true)
     public WorkspaceResponse get(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var member = requireMembership(actor, workspace);
-        return WorkspaceResponse.of(workspace, member.getRole());
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        return WorkspaceResponse.of(ctx.workspace(), ctx.role());
     }
 
     @Transactional(readOnly = true)
     public List<WorkspaceMemberResponse> listMembers(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        requireMembership(actor, workspace);
+        var workspace = workspaceAccess.requireMember(actor, workspaceId).workspace();
         return memberRepository.findAllByWorkspaceWithUser(workspace).stream()
                 .map(WorkspaceMemberResponse::of)
                 .toList();
@@ -103,9 +100,9 @@ public class WorkspaceService {
 
     @Transactional
     public void inviteMember(User actor, UUID workspaceId, InviteMemberRequest req) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var actorMember = requireMembership(actor, workspace);
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        var workspace = ctx.workspace();
+        var actorMember = ctx.membership();
         if (!actorMember.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
             throw new InsufficientWorkspaceRoleException();
         }
@@ -212,12 +209,6 @@ public class WorkspaceService {
     @Transactional
     public void completeOnboarding(User actor) {
         userRepository.markOnboarded(actor.getId(), Instant.now());
-    }
-
-    // Returns membership or throws 404 — never reveals workspace existence to non-members
-    private WorkspaceMember requireMembership(User actor, Workspace workspace) {
-        return memberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
     }
 
     private String generateSlug(String name) {

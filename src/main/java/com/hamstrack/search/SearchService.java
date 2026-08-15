@@ -13,9 +13,7 @@ import com.hamstrack.search.dto.SuggestResponse;
 import com.hamstrack.search.parser.HqlParser;
 import com.hamstrack.search.parser.ast.Query;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -43,8 +41,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class SearchService {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ResolutionContextFactory resolutionContextFactory;
     private final HqlValidator validator;
     private final HqlCompiler compiler;
@@ -225,10 +222,6 @@ public class SearchService {
 
     /** Membership gate — 404 (not 403) whether the ws is missing or the caller isn't a member. */
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
+        return workspaceAccess.requireMember(actor, workspaceId).workspace();
     }
 }

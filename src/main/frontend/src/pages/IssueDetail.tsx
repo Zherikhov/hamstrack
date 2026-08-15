@@ -406,7 +406,8 @@ export default function IssueDetail({
   function ensureParents() {
     if (parentsLoaded.current || !canHaveParent) return
     parentsLoaded.current = true
-    apiListIssues(wsId, projectId).then(setCandidateParents).catch(() => {})
+    // HD-79: board list endpoint returns a capped wrapper — take the issue array.
+    apiListIssues(wsId, projectId).then(r => setCandidateParents(r.issues)).catch(() => {})
   }
 
   // Changing type can strand the current parent (adjacency breaks) — mirror the

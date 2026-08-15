@@ -1,5 +1,5 @@
 import type {
-  User, Workspace, Project, Issue, Comment, Attachment, IssueHistoryEntry,
+  User, Workspace, Project, Issue, BoardIssues, Comment, Attachment, IssueHistoryEntry,
   Notification, WorkspaceMember, ProjectConfig,
   AdminStatus, AdminPriority, AdminIssueType, AdminWorkflow, AdminPrioritySet,
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
@@ -278,12 +278,14 @@ export interface Page<T> {
   hasNext: boolean
 }
 
-// Board: the full list (no pagination — the kanban needs every card).
+// Board: the capped list (no `size` — the kanban loads the whole board, but the
+// server bounds it to `cap` issues and reports truncation, HD-79). Returns the
+// wrapper object `{ issues, truncated, totalAvailable, cap }`, not a bare array.
 export async function apiListIssues(
   wsId: string,
   projectId: string,
   filters?: { statusId?: string; assigneeId?: string; priorityId?: string }
-): Promise<Issue[]> {
+): Promise<BoardIssues> {
   const params = new URLSearchParams()
   if (filters?.statusId) params.set('statusId', filters.statusId)
   if (filters?.assigneeId) params.set('assigneeId', filters.assigneeId)
