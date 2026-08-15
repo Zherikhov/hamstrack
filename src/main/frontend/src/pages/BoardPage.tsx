@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Filter, Plus } from 'lucide-react'
@@ -7,6 +7,7 @@ import { useAuthStore } from '../auth'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
+import type { BoardQuickFilters } from '../uiPrefs'
 import { useUiStore } from '../uiStore'
 import { isMoveAllowed } from '../lib/transitions'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
@@ -26,6 +27,11 @@ const clampPanel = (w: number) => Math.max(PANEL_MIN, Math.min(panelMax(), w))
 const PANEL_ANIM_MS = 200
 const PANEL_EASE = 'cubic-bezier(.32,.72,0,1)'
 
+// Quick filters (HD-43): stable "nothing selected" value so the initial state
+// identity doesn't change between renders.
+const EMPTY_QUICK: BoardQuickFilters = {}
+const isQuickEmpty = (q: BoardQuickFilters) => !q.mine && !q.unassigned && !q.typeIds?.length
+
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
   const navigate = useNavigate()
@@ -41,6 +47,9 @@ export default function BoardPage() {
     (location.state as { openIssue?: number } | null)?.openIssue,
   )
   const [filterPriority, setFilterPriority] = useState<string>('')
+  // Quick filters (HD-43) — client-side chips over the already-loaded board data,
+  // persisted per user + per project. Never sent to the API.
+  const [quick, setQuick] = useState<BoardQuickFilters>(EMPTY_QUICK)
   const [dragging, setDragging] = useState<Issue | null>(null)
   const [dragOverStatusId, setDragOverStatusId] = useState<string | null>(null)
   const [moveError, setMoveError] = useState<string>('')
@@ -63,6 +72,39 @@ export default function BoardPage() {
       panelWidthRef.current = c
     }
   }, [user?.id])
+
+  // Restore this board's saved chips (HD-43). Sanitised on read — a malformed or
+  // hand-edited entry degrades to "no quick filters" instead of throwing.
+  useEffect(() => {
+    if (!user || !projectId) return
+    const saved = getUiPrefs(user.id).boardQuickFilters?.[projectId]
+    if (!saved || typeof saved !== 'object') return
+    setQuick({
+      mine: saved.mine === true,
+      unassigned: saved.unassigned === true,
+      typeIds: Array.isArray(saved.typeIds) ? saved.typeIds.filter(id => typeof id === 'string') : [],
+    })
+  }, [user?.id, projectId])
+
+  /**
+   * Apply + persist a quick-filter change (per user, per project). Type ids that
+   * no longer exist in the project config are dropped here too, so a stale id
+   * can't be written back (and can't resurrect if the id ever reappears).
+   */
+  function applyQuick(next: BoardQuickFilters) {
+    const types = next.typeIds ?? []
+    const cleaned: BoardQuickFilters = {
+      mine: !!next.mine,
+      unassigned: !!next.unassigned,
+      typeIds: issueTypes.length > 0 ? types.filter(id => issueTypes.some(t => t.id === id)) : types,
+    }
+    setQuick(cleaned)
+    if (!user || !projectId) return
+    const all = { ...(getUiPrefs(user.id).boardQuickFilters ?? {}) }
+    if (isQuickEmpty(cleaned)) delete all[projectId]
+    else all[projectId] = cleaned
+    setUiPref(user.id, 'boardQuickFilters', all)
+  }
 
   // Re-clamp when the viewport shrinks (load also clamps, so no need to persist here)
   useEffect(() => {
@@ -110,6 +152,60 @@ export default function BoardPage() {
     enabled: !!wsId && !!projectId,
   })
   const issues = board?.issues ?? []
+
+  // ── Quick filters (HD-43) ───────────────────────────────────────────────────
+  // Composition semantics:
+  //   • Assignee dimension — "My issues" and "Unassigned" OR together
+  //     (both on = mine OR unassigned); neither on = no assignee constraint.
+  //   • Type dimension — the type chips OR together; none on = all types.
+  //   • The two dimensions AND together, and the result ANDs with the existing
+  //     server-side priority filter (which stays a query param, untouched here).
+  // Applied purely client-side over the already-loaded (server-capped) board data.
+
+  // Stale type ids (a type removed from the project) are ignored — but only once
+  // the config has actually loaded, so the chips don't blink off while it fetches.
+  const activeTypeIds = useMemo(() => {
+    const saved = quick.typeIds ?? []
+    if (saved.length === 0) return []
+    if (issueTypes.length === 0) return saved
+    return saved.filter(id => issueTypes.some(t => t.id === id))
+  }, [quick.typeIds, issueTypes])
+
+  // "My issues" needs a signed-in user; without one the chip is hidden and a
+  // persisted `mine` is inert rather than filtering everything away.
+  const mineActive = !!quick.mine && !!user
+  const unassignedActive = !!quick.unassigned
+  const quickActive = mineActive || unassignedActive || activeTypeIds.length > 0
+
+  const visibleIssues = useMemo(() => {
+    if (!quickActive) return issues
+    const userId = user?.id
+    return issues.filter(i => {
+      if (mineActive || unassignedActive) {
+        const mineHit = mineActive && !!i.assignee && i.assignee.id === userId
+        const unassignedHit = unassignedActive && !i.assignee
+        if (!mineHit && !unassignedHit) return false
+      }
+      if (activeTypeIds.length > 0 && !activeTypeIds.includes(i.type.id)) return false
+      return true
+    })
+  }, [issues, quickActive, mineActive, unassignedActive, activeTypeIds, user?.id])
+
+  function toggleType(typeId: string) {
+    const current = activeTypeIds
+    const next = current.includes(typeId) ? current.filter(id => id !== typeId) : [...current, typeId]
+    applyQuick({ ...quick, typeIds: next })
+  }
+
+  /** Reset the chips only (the priority select is cleared alongside by "Clear filters"). */
+  function resetQuick() { applyQuick(EMPTY_QUICK) }
+
+  function clearAllFilters() {
+    setFilterPriority('')
+    resetQuick()
+  }
+
+  const anyFilterActive = quickActive || !!filterPriority
 
   // Project gone or access revoked — drop it from the recency journal so the
   // "/" redirect stops pointing here
@@ -190,9 +286,9 @@ export default function BoardPage() {
           </Button>
         </div>
 
-        {/* Filter bar */}
+        {/* Filter bar — server-side priority select + client-side quick chips (HD-43) */}
         <div
-          className="flex items-center gap-2 px-5 py-2 border-b flex-shrink-0"
+          className="flex items-center gap-2 px-5 py-2 border-b flex-shrink-0 flex-wrap"
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <Filter size={13} style={{ color: 'var(--color-text-muted)' }} />
@@ -200,20 +296,56 @@ export default function BoardPage() {
             <option value="">All priorities</option>
             {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </Select>
-          {filterPriority && (
-            <button
-              className="text-xs cursor-pointer hover:underline"
-              style={{ color: 'var(--color-text-muted)' }}
-              onClick={() => setFilterPriority('')}
+
+          <span className="flex-shrink-0" style={{ width: 1, height: 18, background: 'var(--color-border)' }} />
+
+          <div className="flex items-center gap-1.5 flex-wrap" role="group" aria-label="Quick filters">
+            {user && (
+              <Chip
+                active={!!quick.mine}
+                onClick={() => applyQuick({ ...quick, mine: !quick.mine })}
+                title="Only issues assigned to me"
+              >
+                My issues
+              </Chip>
+            )}
+            <Chip
+              active={!!quick.unassigned}
+              onClick={() => applyQuick({ ...quick, unassigned: !quick.unassigned })}
+              title="Only issues with no assignee"
             >
-              Clear
+              Unassigned
+            </Chip>
+            {issueTypes.map(t => (
+              <Chip
+                key={t.id}
+                active={activeTypeIds.includes(t.id)}
+                color={t.color}
+                onClick={() => toggleType(t.id)}
+                title={`Only ${t.name} issues`}
+              >
+                {t.name}
+              </Chip>
+            ))}
+          </div>
+
+          {anyFilterActive && (
+            <button
+              type="button"
+              className="text-xs cursor-pointer hover:underline rounded"
+              style={{ color: 'var(--color-text-muted)' }}
+              onClick={clearAllFilters}
+            >
+              Clear filters
             </button>
           )}
           {moveError && (
             <span className="text-xs" style={{ color: 'var(--color-error)' }}>{moveError}</span>
           )}
           <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
-            {issues.length} issue{issues.length !== 1 ? 's' : ''}
+            {quickActive
+              ? `${visibleIssues.length} of ${issues.length} issues`
+              : `${issues.length} issue${issues.length !== 1 ? 's' : ''}`}
           </span>
         </div>
 
@@ -250,7 +382,7 @@ export default function BoardPage() {
               >
                 Search
               </Link>{' '}
-              to see them all.
+              to see them all. Quick filters only narrow the issues loaded here.
             </span>
           </div>
         )}
@@ -264,9 +396,20 @@ export default function BoardPage() {
             <div className="flex-1 flex items-center justify-center">
               <span className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
             </div>
+          ) : quickActive && issues.length > 0 && visibleIssues.length === 0 ? (
+            // Every loaded issue is hidden by the chips — say so instead of
+            // rendering a board of empty columns (HD-43)
+            <div className="flex-1 flex flex-col items-center justify-center gap-3">
+              <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+                No issues match the current filters.
+              </p>
+              <Button variant="secondary" size="sm" onClick={resetQuick}>
+                Reset quick filters
+              </Button>
+            </div>
           ) : (
             ordered.map(status => {
-              const columnIssues = issues.filter(i => i.status.id === status.id)
+              const columnIssues = visibleIssues.filter(i => i.status.id === status.id)
               const allowed = dragging ? isMoveAllowed(dragging.status, status.id, transitions) : false
               const isOver = dragOverStatusId === status.id
               return (
@@ -395,6 +538,42 @@ export default function BoardPage() {
         </BoardIssueDrawer>
       )}
     </div>
+  )
+}
+
+/**
+ * Toggleable filter chip (HD-43). A real button with `aria-pressed`, so it is
+ * keyboard-focusable and announced as a toggle. `color` tints the active state
+ * (issue-type chips pass the config-driven type color); brand teal by default.
+ */
+function Chip({
+  active, color, title, onClick, children,
+}: {
+  active: boolean
+  color?: string
+  title?: string
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  const c = color || 'var(--color-brand)'
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      title={title}
+      onClick={onClick}
+      className="inline-flex items-center text-xs font-semibold border cursor-pointer transition-colors select-none focus-visible:outline-2 focus-visible:outline-offset-2"
+      style={{
+        padding: '3px 9px',
+        borderRadius: 'var(--radius-sm)',
+        background: active ? `color-mix(in srgb, ${c} 14%, white)` : 'white',
+        borderColor: active ? c : 'var(--color-border-2)',
+        color: active ? c : 'var(--color-text-secondary)',
+        outlineColor: 'var(--color-brand)',
+      }}
+    >
+      {children}
+    </button>
   )
 }
 

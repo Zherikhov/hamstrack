@@ -6,9 +6,20 @@
  * across browsers).
  *
  * Holds chrome sizing the user can adjust: the nav rail width + collapsed flag
- * (HD-53) and the board issue-panel width (HD-54). All fields optional — a
- * missing value means "use the component default".
+ * (HD-53), the board issue-panel width (HD-54) and the board quick filters
+ * (HD-43). All fields optional — a missing value means "use the component
+ * default".
  */
+
+/** Board quick-filter selection for one project (HD-43). */
+export interface BoardQuickFilters {
+  /** Only issues assigned to the current user. */
+  mine?: boolean
+  /** Only issues with no assignee. */
+  unassigned?: boolean
+  /** Issue-type ids to keep (empty/absent = all types). May contain stale ids. */
+  typeIds?: string[]
+}
 
 export interface UiPrefs {
   /** Expanded nav-rail width in px (the remembered width, ignored while collapsed). */
@@ -17,6 +28,11 @@ export interface UiPrefs {
   railCollapsed?: boolean
   /** Board issue side-panel width in px. */
   boardPanelWidth?: number
+  /**
+   * Board quick filters, keyed by projectId — so each board keeps its own chips
+   * (HD-43). Ids of types that no longer exist are ignored when applying.
+   */
+  boardQuickFilters?: Record<string, BoardQuickFilters>
 }
 
 const storageKey = (userId: string) => `hamstrack.ui-prefs.${userId}`
