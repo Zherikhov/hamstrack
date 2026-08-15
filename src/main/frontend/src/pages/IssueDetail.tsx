@@ -36,6 +36,43 @@ function numberFromKey(key: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+/**
+ * The single source of truth for Activity timestamps (HD-69) — comment rows and
+ * history rows must never drift apart again. `label` is the compact, locale-aware
+ * date + hh:mm (no seconds) shown in the feed; `title` is the full precise value
+ * surfaced on hover.
+ */
+function formatActivityTime(iso: string): { label: string; title: string } {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return { label: iso, title: iso }
+  return {
+    label: d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }),
+    title: d.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'long' }),
+  }
+}
+
+/**
+ * Right-aligned timestamp cell for an activity row. `ml-auto` pushes it to the
+ * row's right edge and `flex-shrink-0` keeps it whole while the text before it
+ * truncates (the drawer can be as narrow as 360px).
+ */
+function ActivityTime({ at }: { at: string }) {
+  const { label, title } = formatActivityTime(at)
+  return (
+    <span
+      className="mono text-xs ml-auto flex-shrink-0 whitespace-nowrap"
+      style={{ color: 'var(--color-text-muted)' }}
+      title={title}
+    >
+      {label}
+    </span>
+  )
+}
+
+/** Width reserved on every activity row for the hover delete button, so the
+ *  timestamps of comment and history rows land on the same right edge. */
+const ACTIVITY_ACTION_W = 13
+
 function historyLabel(field: string) {
   const labels: Record<string, string> = {
     title: 'Title', description: 'Description', status: 'Status',
@@ -136,7 +173,8 @@ export default function IssueDetail({
   const commentRef = useRef<HTMLTextAreaElement>(null)
 
   // Merged activity feed (comments + history) — newest first (HD-64)
-  const [activityFilter, setActivityFilter] = useState<'all' | 'comments' | 'history'>('all')
+  // Defaults to Comments (HD-69) — the discussion is what people open an issue for.
+  const [activityFilter, setActivityFilter] = useState<'all' | 'comments' | 'history'>('comments')
   const [commentPreview, setCommentPreview] = useState(false)
   const activityHeadingRef = useRef<HTMLDivElement>(null)
 
@@ -1167,21 +1205,22 @@ export default function IssueDetail({
                   <Avatar name={item.comment.authorName} size={22} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2 mb-0.5">
-                      <span className="text-xs font-medium">{item.comment.authorName}</span>
-                      <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                        {new Date(item.comment.createdAt).toLocaleDateString()}
-                      </span>
+                      <span className="text-xs font-medium truncate min-w-0">{item.comment.authorName}</span>
+                      <ActivityTime at={item.comment.createdAt} />
                     </div>
                     <Markdown>{item.comment.body}</Markdown>
                   </div>
-                  {user?.id === item.comment.authorId && (
+                  {user?.id === item.comment.authorId ? (
                     <button
                       onClick={() => handleDeleteComment(item.comment.id)}
                       className="opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
                       style={{ color: 'var(--color-text-muted)' }}
+                      title="Delete comment"
                     >
                       <Trash2 size={13} />
                     </button>
+                  ) : (
+                    <span className="flex-shrink-0" style={{ width: ACTIVITY_ACTION_W }} aria-hidden />
                   )}
                 </div>
               ) : (
@@ -1191,14 +1230,12 @@ export default function IssueDetail({
                     style={{ width: 6, height: 6, background: 'var(--color-brand)' }}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-1.5 flex-wrap">
-                      <span className="text-xs font-medium">{item.entry.changedByName}</span>
-                      <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                        changed <strong>{historyLabel(item.entry.field)}</strong>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-xs truncate min-w-0" style={{ color: 'var(--color-text-muted)' }}>
+                        <span className="font-medium" style={{ color: 'var(--color-text)' }}>{item.entry.changedByName}</span>
+                        {' '}changed <strong>{historyLabel(item.entry.field)}</strong>
                       </span>
-                      <span className="mono text-xs ml-auto" style={{ color: 'var(--color-text-muted)' }}>
-                        {new Date(item.entry.createdAt).toLocaleDateString()}
-                      </span>
+                      <ActivityTime at={item.entry.createdAt} />
                     </div>
                     {(item.entry.oldValue !== undefined || item.entry.newValue !== undefined) && item.entry.field !== 'description' && (
                       <div className="text-xs mt-0.5 flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
@@ -1219,6 +1256,9 @@ export default function IssueDetail({
                       </div>
                     )}
                   </div>
+                  {/* Mirrors the comment row's delete-button gutter so both kinds
+                      of timestamp share one right edge. */}
+                  <span className="flex-shrink-0" style={{ width: ACTIVITY_ACTION_W }} aria-hidden />
                 </div>
               ))}
             </div>
