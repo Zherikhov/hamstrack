@@ -17,8 +17,13 @@ export interface BoardQuickFilters {
   mine?: boolean
   /** Only issues with no assignee. */
   unassigned?: boolean
-  /** Issue-type ids to keep (empty/absent = all types). May contain stale ids. */
-  typeIds?: string[]
+  /**
+   * The single selected issue-type id (absent = all types). May be stale — the
+   * board ignores an id that is no longer in the project config and never writes
+   * it back. Superseded the earlier multi-select `typeIds`; a legacy `typeIds`
+   * entry left in localStorage is ignored on read and dropped on the next write.
+   */
+  typeId?: string
 }
 
 export interface UiPrefs {

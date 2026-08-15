@@ -10,6 +10,7 @@ import { getUiPrefs, setUiPref } from '../uiPrefs'
 import type { BoardQuickFilters } from '../uiPrefs'
 import { useUiStore } from '../uiStore'
 import { isMoveAllowed } from '../lib/transitions'
+import { boardIssuesKey } from '../lib/queryKeys'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
 import type { BoardIssues, Issue, IssueType } from '../types'
@@ -30,7 +31,7 @@ const PANEL_EASE = 'cubic-bezier(.32,.72,0,1)'
 // Quick filters (HD-43): stable "nothing selected" value so the initial state
 // identity doesn't change between renders.
 const EMPTY_QUICK: BoardQuickFilters = {}
-const isQuickEmpty = (q: BoardQuickFilters) => !q.mine && !q.unassigned && !q.typeIds?.length
+const isQuickEmpty = (q: BoardQuickFilters) => !q.mine && !q.unassigned && !q.typeId
 
 export default function BoardPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
@@ -73,8 +74,11 @@ export default function BoardPage() {
     }
   }, [user?.id])
 
-  // Restore this board's saved chips (HD-43). Sanitised on read — a malformed or
-  // hand-edited entry degrades to "no quick filters" instead of throwing.
+  // Restore this board's saved filters (HD-43). Sanitised on read — a malformed,
+  // hand-edited or legacy entry degrades to "no quick filters" instead of
+  // throwing. A pre-revision `typeIds` array is simply not read: the type filter
+  // is a single selection now, so the legacy value is dropped (and the next
+  // write-back persists the new shape without it).
   useEffect(() => {
     if (!user || !projectId) return
     const saved = getUiPrefs(user.id).boardQuickFilters?.[projectId]
@@ -82,21 +86,21 @@ export default function BoardPage() {
     setQuick({
       mine: saved.mine === true,
       unassigned: saved.unassigned === true,
-      typeIds: Array.isArray(saved.typeIds) ? saved.typeIds.filter(id => typeof id === 'string') : [],
+      typeId: typeof saved.typeId === 'string' && saved.typeId ? saved.typeId : undefined,
     })
   }, [user?.id, projectId])
 
   /**
-   * Apply + persist a quick-filter change (per user, per project). Type ids that
-   * no longer exist in the project config are dropped here too, so a stale id
+   * Apply + persist a quick-filter change (per user, per project). A type id that
+   * no longer exists in the project config is dropped here too, so a stale id
    * can't be written back (and can't resurrect if the id ever reappears).
    */
   function applyQuick(next: BoardQuickFilters) {
-    const types = next.typeIds ?? []
+    const type = next.typeId
     const cleaned: BoardQuickFilters = {
       mine: !!next.mine,
       unassigned: !!next.unassigned,
-      typeIds: issueTypes.length > 0 ? types.filter(id => issueTypes.some(t => t.id === id)) : types,
+      typeId: type && (issueTypes.length === 0 || issueTypes.some(t => t.id === type)) ? type : undefined,
     }
     setQuick(cleaned)
     if (!user || !projectId) return
@@ -145,7 +149,10 @@ export default function BoardPage() {
   const priorities = config?.priorities ?? []
   const fields = config?.fields ?? []
 
-  const issuesKey = ['issues', wsId, projectId, 'board', filterPriority]
+  // Shared key (lib/queryKeys.ts) — the create-issue dialog reads the same cache
+  // entry for its parent picker, so the cached value must stay the `BoardIssues`
+  // wrapper for both.
+  const issuesKey = boardIssuesKey(wsId, projectId, filterPriority)
   const { data: board, isLoading, isError } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, { priorityId: filterPriority || undefined }),
@@ -155,27 +162,28 @@ export default function BoardPage() {
 
   // ── Quick filters (HD-43) ───────────────────────────────────────────────────
   // Composition semantics:
-  //   • Assignee dimension — "My issues" and "Unassigned" OR together
+  //   • Assignee dimension — the "My issues" and "Unassigned" chips OR together
   //     (both on = mine OR unassigned); neither on = no assignee constraint.
-  //   • Type dimension — the type chips OR together; none on = all types.
+  //   • Type dimension — a single selected issue type (the "All types" select);
+  //     nothing selected = all types.
   //   • The two dimensions AND together, and the result ANDs with the existing
   //     server-side priority filter (which stays a query param, untouched here).
   // Applied purely client-side over the already-loaded (server-capped) board data.
 
-  // Stale type ids (a type removed from the project) are ignored — but only once
-  // the config has actually loaded, so the chips don't blink off while it fetches.
-  const activeTypeIds = useMemo(() => {
-    const saved = quick.typeIds ?? []
-    if (saved.length === 0) return []
+  // A stale type id (a type removed from the project) is ignored — but only once
+  // the config has actually loaded, so the selection doesn't blink off while it fetches.
+  const activeTypeId = useMemo(() => {
+    const saved = quick.typeId
+    if (!saved) return undefined
     if (issueTypes.length === 0) return saved
-    return saved.filter(id => issueTypes.some(t => t.id === id))
-  }, [quick.typeIds, issueTypes])
+    return issueTypes.some(t => t.id === saved) ? saved : undefined
+  }, [quick.typeId, issueTypes])
 
   // "My issues" needs a signed-in user; without one the chip is hidden and a
   // persisted `mine` is inert rather than filtering everything away.
   const mineActive = !!quick.mine && !!user
   const unassignedActive = !!quick.unassigned
-  const quickActive = mineActive || unassignedActive || activeTypeIds.length > 0
+  const quickActive = mineActive || unassignedActive || !!activeTypeId
 
   const visibleIssues = useMemo(() => {
     if (!quickActive) return issues
@@ -186,18 +194,12 @@ export default function BoardPage() {
         const unassignedHit = unassignedActive && !i.assignee
         if (!mineHit && !unassignedHit) return false
       }
-      if (activeTypeIds.length > 0 && !activeTypeIds.includes(i.type.id)) return false
+      if (activeTypeId && i.type.id !== activeTypeId) return false
       return true
     })
-  }, [issues, quickActive, mineActive, unassignedActive, activeTypeIds, user?.id])
+  }, [issues, quickActive, mineActive, unassignedActive, activeTypeId, user?.id])
 
-  function toggleType(typeId: string) {
-    const current = activeTypeIds
-    const next = current.includes(typeId) ? current.filter(id => id !== typeId) : [...current, typeId]
-    applyQuick({ ...quick, typeIds: next })
-  }
-
-  /** Reset the chips only (the priority select is cleared alongside by "Clear filters"). */
+  /** Reset the chips + type select (the priority select is cleared alongside by "Clear filters"). */
   function resetQuick() { applyQuick(EMPTY_QUICK) }
 
   function clearAllFilters() {
@@ -272,7 +274,8 @@ export default function BoardPage() {
       {/* Main content — minWidth:0 lets the kanban zone shrink (reflow) when the
           issue panel opens and take horizontal scroll instead of overflowing */}
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-        {/* Page header */}
+        {/* Page header — creation lives in the nav rail ("New issue") and in each
+            column's quiet "+" (HD-70); no duplicate primary button here. */}
         <div
           className="flex items-center justify-between px-5 py-2.5 border-b flex-shrink-0"
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
@@ -280,21 +283,36 @@ export default function BoardPage() {
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>Board</span>
           </div>
-          <Button variant="primary" size="sm" onClick={() => openCreateIssue({ projectId })}>
-            <Plus size={14} />
-            New issue
-          </Button>
         </div>
 
-        {/* Filter bar — server-side priority select + client-side quick chips (HD-43) */}
+        {/* Filter bar — server-side priority select, client-side type select and
+            assignee chips (HD-43) */}
         <div
           className="flex items-center gap-2 px-5 py-2 border-b flex-shrink-0 flex-wrap"
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <Filter size={13} style={{ color: 'var(--color-text-muted)' }} />
-          <Select compact value={filterPriority} onChange={e => setFilterPriority(e.target.value)}>
+          <Select
+            compact
+            aria-label="Filter by priority"
+            value={filterPriority}
+            onChange={e => setFilterPriority(e.target.value)}
+          >
             <option value="">All priorities</option>
             {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </Select>
+
+          {/* Type filter — one selection, shaped like the priority select above.
+              Client-side (never sent to the API); `activeTypeId` (not the raw
+              persisted value) drives it so a stale id shows as "All types". */}
+          <Select
+            compact
+            aria-label="Filter by type"
+            value={activeTypeId ?? ''}
+            onChange={e => applyQuick({ ...quick, typeId: e.target.value || undefined })}
+          >
+            <option value="">All types</option>
+            {issueTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </Select>
 
           <span className="flex-shrink-0" style={{ width: 1, height: 18, background: 'var(--color-border)' }} />
@@ -316,17 +334,6 @@ export default function BoardPage() {
             >
               Unassigned
             </Chip>
-            {issueTypes.map(t => (
-              <Chip
-                key={t.id}
-                active={activeTypeIds.includes(t.id)}
-                color={t.color}
-                onClick={() => toggleType(t.id)}
-                title={`Only ${t.name} issues`}
-              >
-                {t.name}
-              </Chip>
-            ))}
           </div>
 
           {anyFilterActive && (
@@ -454,17 +461,32 @@ export default function BoardPage() {
                     <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
                       {columnIssues.length}
                     </span>
-                    {/* Quick add (HD-70) — subtle until the column is hovered, but
-                        always in the tab order and visible while focused */}
+                    {/* Quick add (HD-70) — a permanent, quiet affordance in every
+                        column: muted at rest, stronger (ink + tinted fill) on
+                        hover/focus. Every workflow status can receive a new
+                        issue, so no column is excluded. */}
                     <button
                       type="button"
                       aria-label={`Create issue in ${status.name}`}
                       title={`Create issue in ${status.name}`}
                       onClick={() => openCreateIssue({ projectId, statusId: status.id })}
-                      className="ml-auto flex items-center justify-center flex-shrink-0 rounded-md cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
-                      style={{ width: 22, height: 22, color: 'var(--color-text-secondary)' }}
-                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--color-border)' }}
-                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                      className="ml-auto flex items-center justify-center flex-shrink-0 rounded-md cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-1"
+                      style={{
+                        width: 22, height: 22,
+                        color: 'var(--color-text-muted)',
+                        background: 'transparent',
+                        outlineColor: 'var(--color-brand)',
+                      }}
+                      onMouseEnter={e => {
+                        e.currentTarget.style.background = 'var(--color-border)'
+                        e.currentTarget.style.color = 'var(--color-text)'
+                      }}
+                      onMouseLeave={e => {
+                        e.currentTarget.style.background = 'transparent'
+                        e.currentTarget.style.color = 'var(--color-text-muted)'
+                      }}
+                      onFocus={e => { e.currentTarget.style.color = 'var(--color-text)' }}
+                      onBlur={e => { e.currentTarget.style.color = 'var(--color-text-muted)' }}
                     >
                       <Plus size={14} />
                     </button>
@@ -542,20 +564,20 @@ export default function BoardPage() {
 }
 
 /**
- * Toggleable filter chip (HD-43). A real button with `aria-pressed`, so it is
- * keyboard-focusable and announced as a toggle. `color` tints the active state
- * (issue-type chips pass the config-driven type color); brand teal by default.
+ * Toggleable assignee filter chip (HD-43). A real button with `aria-pressed`, so
+ * it is keyboard-focusable and announced as a toggle. The active state is tinted
+ * brand teal (the issue-type dimension is a select, not a chip, since the HD-43
+ * revision).
  */
 function Chip({
-  active, color, title, onClick, children,
+  active, title, onClick, children,
 }: {
   active: boolean
-  color?: string
   title?: string
   onClick: () => void
   children: React.ReactNode
 }) {
-  const c = color || 'var(--color-brand)'
+  const c = 'var(--color-brand)'
   return (
     <button
       type="button"

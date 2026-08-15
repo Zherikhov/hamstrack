@@ -15,6 +15,7 @@ import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, Ch
 import { FieldInput, FieldValueDisplay } from '../components/fields'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
+import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import type {
   Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, FieldType, TransitionRule,
   Comment, Attachment, IssueHistoryEntry, WorkspaceMember,
@@ -259,7 +260,7 @@ export default function IssueDetail({
       // Any field change writes a history entry; keep the feed fresh.
       apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 })
         .then(h => setHistory(h.content)).catch(() => {})
-      await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+      await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, projectId) })
       await qc.invalidateQueries({ queryKey: ['issue', wsId, projectId] })
       return updated
     } catch (err: unknown) {
@@ -303,7 +304,7 @@ export default function IssueDetail({
     setMenuOpen(false)
     if (!window.confirm(`Delete ${issue.key}? This cannot be undone.`)) return
     await apiDeleteIssue(wsId, projectId, issueNumber)
-    await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+    await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, projectId) })
     onClose?.()
   }
 

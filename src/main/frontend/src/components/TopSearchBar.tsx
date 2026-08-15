@@ -5,6 +5,7 @@ import { useSSE } from '../hooks/useSSE'
 import { useCurrentProject } from '../hooks/useCurrentProject'
 import { useUiStore } from '../uiStore'
 import { apiSearchSchema } from '../api'
+import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import NotificationBell from './NotificationBell'
 import ProjectSwitcher from './ProjectSwitcher'
 import HqlInput from './HqlInput'
@@ -50,16 +51,16 @@ export default function TopSearchBar({ wsId }: Props) {
   useSSE(wsId, {
     ISSUE_CREATED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
     },
     ISSUE_UPDATED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
       qc.invalidateQueries({ queryKey: ['issue', wsId, d.projectId, d.issueNumber] })
     },
     ISSUE_DELETED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
     },
     COMMENT_ADDED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }

@@ -3,7 +3,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { apiCreateIssue, apiGetProjectConfig, apiListIssues, apiListProjects, apiListWorkspaceMembers, apiListWorkspaces } from '../api'
 import type { CreateIssuePreset } from '../uiStore'
-import type { FieldValue } from '../types'
+import type { BoardIssues, FieldValue } from '../types'
+import { boardIssuesKey, projectIssuesKeyPrefix } from '../lib/queryKeys'
 import { FieldInput } from './fields'
 import { Button, Input, Select, Textarea } from './ui'
 
@@ -103,10 +104,16 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     [issueTypes],
   )
   const { data: projectIssues = [] } = useQuery({
-    queryKey: ['issues', effectiveWsId, effectiveProjectId, 'board', ''],
-    // HD-79: the board list endpoint now returns a capped wrapper; the parent
-    // picker only needs the (capped) issue array.
-    queryFn: () => apiListIssues(effectiveWsId, effectiveProjectId).then(r => r.issues),
+    // Same cache entry as the board's unfiltered list (`boardIssuesKey`) — so the
+    // dialog reuses whatever the board already fetched. HD-79: the endpoint
+    // returns a capped wrapper; the cached value under a board key is ALWAYS that
+    // wrapper and the parent picker projects the array out with `select` rather
+    // than caching a different shape under the same key (a mismatch here used to
+    // crash the SPA with "projectIssues.filter is not a function" whenever the
+    // dialog was opened over a board).
+    queryKey: boardIssuesKey(effectiveWsId, effectiveProjectId),
+    queryFn: () => apiListIssues(effectiveWsId, effectiveProjectId),
+    select: (board: BoardIssues) => board.issues,
     enabled: !!effectiveWsId && !!effectiveProjectId && (anyParentableEdge || preset?.parentId !== undefined),
   })
 
@@ -233,7 +240,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
         parentId: effectiveParentId || undefined,
         fields: Object.keys(fieldValues).length > 0 ? fieldValues : undefined,
       })
-      await qc.invalidateQueries({ queryKey: ['issues', effectiveWsId, effectiveProjectId] })
+      await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(effectiveWsId, effectiveProjectId) })
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create issue')
