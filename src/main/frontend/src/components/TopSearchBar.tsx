@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSSE } from '../hooks/useSSE'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { useUiStore } from '../uiStore'
 import { apiSearchSchema } from '../api'
 import NotificationBell from './NotificationBell'
 import ProjectSwitcher from './ProjectSwitcher'
@@ -25,6 +26,8 @@ export default function TopSearchBar({ wsId }: Props) {
   const cur = useCurrentProject()
   const [incoming, setIncoming] = useState<Notification | null>(null)
   const [query, setQuery] = useState('')
+  // Bumped by the `/` global shortcut (HD-39) — hand focus to the HQL box.
+  const searchFocusNonce = useUiStore(s => s.searchFocusNonce)
 
   // The workspace search is scoped to a workspace; use the route ws or the last
   // visited project's ws (via useCurrentProject) so search stays available on
@@ -84,6 +87,7 @@ export default function TopSearchBar({ wsId }: Props) {
             onSubmit={runSearch}
             schema={schema}
             tone="bar"
+            focusNonce={searchFocusNonce}
             placeholder="Search with HQL — e.g. status = &quot;In Progress&quot;"
           />
         </div>

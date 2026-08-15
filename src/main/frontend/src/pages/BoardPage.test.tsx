@@ -317,7 +317,8 @@ describe('BoardPage quick filters (HD-43)', () => {
 
     // Both of "my" issues live in To Do, so In Progress empties out.
     await waitFor(() => expect(visibleTitles()).toEqual([MINE_BUG.title, MINE_TASK.title].sort()))
-    const column = (name: string) => screen.getByText(name).closest('div.group')!
+    // `closest` is typed as Element; `within` wants an HTMLElement.
+    const column = (name: string) => screen.getByText(name).closest('div.group') as HTMLElement
     expect(within(column('To Do')).getByText('2')).toBeInTheDocument()
     expect(within(column('In Progress')).getByText('No issues')).toBeInTheDocument()
     expect(screen.getAllByText('No issues')).toHaveLength(1)

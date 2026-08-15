@@ -266,7 +266,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   }
 
   return (
-    <div style={overlayStyle} onClick={onClose}>
+    <div data-modal-open="true" style={overlayStyle} onClick={onClose}>
       <div style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
           className="flex items-center justify-between px-5 py-4 border-b flex-shrink-0"

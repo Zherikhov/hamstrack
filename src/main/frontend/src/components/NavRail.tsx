@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import {
   Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings, Search,
   Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid,
-  PanelLeftClose, PanelLeftOpen, type LucideIcon,
+  PanelLeftClose, PanelLeftOpen, Keyboard, type LucideIcon,
 } from 'lucide-react'
 import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
 import { useAuthStore } from '../auth'
@@ -48,6 +48,7 @@ export default function NavRail() {
   const cur = useCurrentProject()
   const { user, clear } = useAuthStore()
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
+  const openHelp = useUiStore(s => s.openHelp)
   const reducedMotion = useReducedMotion()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
@@ -267,6 +268,9 @@ export default function NavRail() {
               {user?.systemRole === 'ADMIN' && (
                 <MenuItem icon={Gear} label="System administration" onClick={() => { setMenuOpen(false); navigate('/admin') }} />
               )}
+              {/* Keyboard map — the `?` overlay needs a mouse-reachable entry
+                  point too, or it is only discoverable by accident (HD-39 §9). */}
+              <MenuItem icon={Keyboard} label="Keyboard shortcuts" onClick={() => { setMenuOpen(false); openHelp() }} />
               <MenuItem icon={Info} label="About Hamstrack" onClick={() => { setMenuOpen(false); setShowAbout(true) }} />
               <MenuItem icon={LogOut} label="Sign out" onClick={handleLogout} />
             </div>
