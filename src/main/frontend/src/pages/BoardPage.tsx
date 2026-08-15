@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, Filter } from 'lucide-react'
+import { AlertTriangle, Filter, Plus } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
+import { useUiStore } from '../uiStore'
 import { isMoveAllowed } from '../lib/transitions'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import IssueSidePanel from './IssueSidePanel'
@@ -31,6 +32,9 @@ export default function BoardPage() {
   const location = useLocation()
   const { user } = useAuthStore()
   const qc = useQueryClient()
+  // Create-issue dialog lives in AppShell — the board just opens it with this
+  // project (and, from a column, that column's status) pre-selected (HD-70).
+  const openCreateIssue = useUiStore(s => s.openCreateIssue)
   // Returning from the full-page issue view (HD-67) reopens that issue's drawer:
   // the "Back to board" button navigates here with { state: { openIssue } }.
   const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(
@@ -180,6 +184,10 @@ export default function BoardPage() {
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>Board</span>
           </div>
+          <Button variant="primary" size="sm" onClick={() => openCreateIssue({ projectId })}>
+            <Plus size={14} />
+            New issue
+          </Button>
         </div>
 
         {/* Filter bar */}
@@ -278,7 +286,7 @@ export default function BoardPage() {
                     }
                   }}
                   onDrop={e => { e.preventDefault(); handleDrop(status.id) }}
-                  className="flex flex-col rounded-xl border transition-colors"
+                  className="group flex flex-col rounded-xl border transition-colors"
                   style={{
                     // Columns share the viewport width; below the min they overflow
                     // into the container's horizontal scroll
@@ -303,6 +311,20 @@ export default function BoardPage() {
                     <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
                       {columnIssues.length}
                     </span>
+                    {/* Quick add (HD-70) — subtle until the column is hovered, but
+                        always in the tab order and visible while focused */}
+                    <button
+                      type="button"
+                      aria-label={`Create issue in ${status.name}`}
+                      title={`Create issue in ${status.name}`}
+                      onClick={() => openCreateIssue({ projectId, statusId: status.id })}
+                      className="ml-auto flex items-center justify-center flex-shrink-0 rounded-md cursor-pointer opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                      style={{ width: 22, height: 22, color: 'var(--color-text-secondary)' }}
+                      onMouseEnter={e => { e.currentTarget.style.background = 'var(--color-border)' }}
+                      onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
+                    >
+                      <Plus size={14} />
+                    </button>
                   </div>
 
                   {/* Cards */}

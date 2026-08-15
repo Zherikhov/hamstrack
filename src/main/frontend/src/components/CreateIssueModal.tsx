@@ -44,7 +44,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [typeId, setTypeId] = useState('')
-  const [statusId, setStatusId] = useState('')
+  // Board column quick-add pre-selects a status. It's only a default (the Status
+  // select stays editable) and only valid for the preset's project — switching
+  // project runs resetTaxonomySelections() and drops it, since statuses are
+  // per-project taxonomy.
+  const [statusId, setStatusId] = useState(preset?.projectId ? preset.statusId ?? '' : '')
   const [priorityId, setPriorityId] = useState('')
   const [parentId, setParentId] = useState(preset?.parentId ?? '')
   const [assigneeId, setAssigneeId] = useState('')
@@ -126,7 +130,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     (typeId && typeOptions.some(t => t.id === typeId) ? typeId : '')
     || (presetParentLevel !== undefined ? presetDefaultTypeId : '')
     || typeOptions[0]?.id || ''
-  const effectiveStatusId = statusId || statuses[0]?.id || ''
+  // Guard against a status that isn't offered by the selected project's workflow
+  // (e.g. a stale preset) — fall back to the workflow's first column.
+  const effectiveStatusId =
+    (statusId && statuses.some(s => s.id === statusId) ? statusId : '')
+    || statuses[0]?.id || ''
   const effectivePriorityId = priorityId
     || priorities.find(p => p.isDefault)?.id || priorities[0]?.id || ''
 

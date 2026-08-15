@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 
-/** Pre-fill for the create-issue dialog when opened as "create sub-task" from a parent. */
+/**
+ * Pre-fill for the create-issue dialog — e.g. "create sub-task" from a parent, or the
+ * board's per-column quick add. Every field is a default the user can still change.
+ */
 export interface CreateIssuePreset {
   /** Pre-select this issue as the new issue's parent. */
   parentId?: string
@@ -8,6 +11,12 @@ export interface CreateIssuePreset {
   projectId?: string
   /** The parent's type hierarchy level — the child type defaults to the highest legal level below it. */
   parentLevel?: number
+  /**
+   * Pre-select this status (board column quick-add). Only meaningful together with
+   * `projectId` — statuses are per-project taxonomy, so the modal drops it as soon
+   * as the user switches project.
+   */
+  statusId?: string
 }
 
 interface UiState {
