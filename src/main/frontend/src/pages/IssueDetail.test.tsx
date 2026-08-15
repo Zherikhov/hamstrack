@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import IssueDetail from './IssueDetail'
-import type { Issue, IssueType, PriorityOption, Status } from '../types'
+import type { Issue, IssueType, PriorityOption, ProjectField, Status } from '../types'
 
 // HD-69: refinements to the merged Activity feed (HD-64).
 //  1. the filter defaults to Comments — history entries stay hidden until the
@@ -33,9 +33,27 @@ const ISSUE: Issue = {
   createdAt: '2026-08-10T09:00:00Z', updatedAt: '2026-08-10T09:00:00Z',
 }
 
+// HD-68 fixtures: two project custom fields; the issue below fills only the
+// first, so the "+ Add field" affordance and a filled value both render.
+const FIELD_TEAM: ProjectField = {
+  id: 'f1', key: 'team', name: 'Team', type: 'SELECT',
+  config: { options: [{ id: 'o1', label: 'Platform' }, { id: 'o2', label: 'Growth' }] },
+  required: false, showOnCreate: false,
+}
+const FIELD_NOTES: ProjectField = {
+  id: 'f2', key: 'release_notes', name: 'Release notes', type: 'TEXT',
+  required: false, showOnCreate: false,
+}
+const PROJECT_FIELDS = [FIELD_TEAM, FIELD_NOTES]
+
+const ISSUE_WITH_FIELDS: Issue = { ...ISSUE, fields: [{ fieldId: FIELD_TEAM.id, value: 'o1' }] }
+
+/** What the mocked `apiGetIssue` resolves with — swappable per test. */
+let issueResponse: Issue = ISSUE
+
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
-  apiGetIssue: vi.fn(async () => ISSUE),
+  apiGetIssue: vi.fn(async () => issueResponse),
   apiUpdateIssue: vi.fn(),
   apiDeleteIssue: vi.fn(),
   apiListIssues: vi.fn(async () => ({ issues: [], truncated: false })),
@@ -80,7 +98,7 @@ function wrapper({ children }: { children: ReactNode }) {
 
 /** `enableExpand` is omitted on purpose: the key would then render a <Link>,
  *  which needs a router the rest of this component doesn't. */
-function renderDetail() {
+function renderDetail(fields: ProjectField[] = []) {
   render(
     <IssueDetail
       wsId="w1"
@@ -90,11 +108,13 @@ function renderDetail() {
       statuses={[STATUS_TODO, STATUS_DOING]}
       transitions={[]}
       priorities={[PRIORITY]}
-      fields={[]}
+      fields={fields}
     />,
     { wrapper },
   )
 }
+
+afterEach(() => { issueResponse = ISSUE })
 
 /** The activity filter is a segmented control of buttons labelled "<filter> <count>". */
 function filterButton(name: 'all' | 'comments' | 'history') {
@@ -151,5 +171,60 @@ describe('IssueDetail activity feed (HD-69)', () => {
     })
     // The regression this guards: history rows used to print a bare date.
     expect(historyRow.textContent).toMatch(HAS_TIME)
+  })
+})
+
+// HD-68: the custom-fields ("Fields") block moved out of the description flow
+// and up into the details area, directly under the built-in metadata grid.
+// Guarded here as DOM order, not pixels.
+describe('IssueDetail custom fields placement (HD-68)', () => {
+  /** The section headings are <span>s; the jump nav renders the same labels as
+   *  <button>s, so filter by tag to always get the heading. */
+  function heading(label: string) {
+    const el = screen.getAllByText(label).find(e => e.tagName === 'SPAN')
+    expect(el, `no <span> section heading "${label}"`).toBeTruthy()
+    return el!
+  }
+
+  it('renders the custom field label and value', async () => {
+    issueResponse = ISSUE_WITH_FIELDS
+    renderDetail(PROJECT_FIELDS)
+
+    expect(await screen.findByText('Fields')).toBeInTheDocument()
+    expect(screen.getByText(FIELD_TEAM.name)).toBeInTheDocument()
+    // SELECT values render as the option label, not the stored option id.
+    expect(screen.getByText('Platform')).toBeInTheDocument()
+    expect(screen.queryByText('o1')).not.toBeInTheDocument()
+    // The unfilled field is hidden behind "+ Add field" rather than shown empty.
+    expect(screen.queryByText(FIELD_NOTES.name)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /add field/i })).toBeInTheDocument()
+  })
+
+  it('places the Fields block BEFORE the Description section in the DOM', async () => {
+    issueResponse = ISSUE_WITH_FIELDS
+    renderDetail(PROJECT_FIELDS)
+
+    await screen.findByText('Fields')
+    const fieldsHeading = heading('Fields')
+    const descHeading = heading('Description')
+
+    // Under the old layout Description came first — this is the regression.
+    expect(fieldsHeading.compareDocumentPosition(descHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+
+    // …and Fields still sits inside the details area, i.e. after the built-in
+    // metadata grid (Status is the first built-in label).
+    const statusLabel = screen.getByText('Status')
+    expect(statusLabel.compareDocumentPosition(fieldsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+  })
+
+  it('keeps the empty state when the project has fields but the issue has no values', async () => {
+    renderDetail(PROJECT_FIELDS)   // issueResponse = ISSUE, whose fields are []
+
+    expect(await screen.findByText('Fields')).toBeInTheDocument()
+    expect(screen.getByText('No field values set.')).toBeInTheDocument()
+    expect(heading('Fields').compareDocumentPosition(heading('Description')) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
   })
 })

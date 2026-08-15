@@ -804,10 +804,14 @@ export default function IssueDetail({
           </h2>
         )}
 
-        {/* Metadata grid — inline click-to-edit (HD-61). Each control commits its
-            own field; Reporter is read-only. */}
+        {/* ── Details (HD-68): built-in metadata + custom fields ────────────────
+            One continuous details area that sits ABOVE the Description: custom
+            fields are metadata, so they belong next to Status/Priority/… on the
+            same grid + label rhythm rather than interrupting the flow from the
+            Description into the discussion sections. Inline click-to-edit
+            throughout (HD-61 built-ins / HD-62 custom); Reporter is read-only. */}
         {issue && (
-          <>
+          <div className="flex flex-col gap-3">
             <div className={`grid ${gridCols} gap-3`}>
               {/* Status — only legal workflow transitions are offered */}
               <div>
@@ -908,13 +912,115 @@ export default function IssueDetail({
               </div>
             </div>
             {metaError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{metaError}</p>}
-          </>
+
+            {/* Custom fields (HD-62) — same `gridCols` and the same
+                muted-label-above-value typography as the built-ins, set off by a
+                hairline only (no card), so the two halves read as one details
+                area. Filled fields show by default; "+ Add field" reveals an
+                unfilled one. */}
+            {fields.length > 0 && (
+              <div
+                className="flex flex-col gap-3 pt-3 border-t"
+                style={{ borderColor: 'var(--color-border)' }}
+              >
+                <div className="flex items-center justify-between">
+                  <SectionHeading>Fields</SectionHeading>
+                  {fields.some(f => fieldValues[f.id] === undefined) && (
+                    <div className="relative" ref={addMenuRef}>
+                      <button
+                        onClick={() => setAddFieldOpen(o => !o)}
+                        className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
+                        style={{ color: 'var(--color-brand)' }}
+                      >
+                        <Plus size={12} /> Add field
+                      </button>
+                      {addFieldOpen && (
+                        <div
+                          className="absolute right-0 mt-1 border rounded-md py-1 z-30"
+                          style={{ minWidth: 180, background: 'var(--color-card)', borderColor: 'var(--color-border-2)', boxShadow: 'var(--shadow-lg)' }}
+                        >
+                          {fields.filter(f => fieldValues[f.id] === undefined).map(f => (
+                            <button
+                              key={f.id}
+                              onClick={() => startEditField(f)}
+                              className="w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
+                              style={{ color: 'var(--color-text)' }}
+                            >
+                              {f.name}{f.required ? ' *' : ''}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {fields.some(f => fieldValues[f.id] !== undefined || editingFieldId === f.id) ? (
+                  <div className={`grid ${gridCols} gap-3`}>
+                    {fields.filter(f => fieldValues[f.id] !== undefined || editingFieldId === f.id).map(f => {
+                      // Long-value types keep the full width — but only when the
+                      // grid actually has two columns (a `col-span-2` in the
+                      // narrow one-column layout would spawn a phantom column).
+                      const fullWidth = !narrow && (f.type === 'TEXTAREA' || f.type === 'MULTI_SELECT')
+                      return (
+                        <div key={f.id} className={fullWidth ? 'col-span-2' : ''}>
+                          {editingFieldId === f.id ? (
+                            <div
+                              ref={fieldEditorRef}
+                              onBlur={isDiscreteField(f.type) ? undefined : (e => {
+                                if (!e.currentTarget.contains(e.relatedTarget as Node)) commitFieldDraft(f, fieldDraft)
+                              })}
+                              onKeyDown={e => {
+                                if (e.key === 'Escape') { e.preventDefault(); cancelEditField() }
+                                else if (e.key === 'Enter' && (f.type === 'TEXT' || f.type === 'URL' || f.type === 'NUMBER')) { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
+                                else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && f.type === 'TEXTAREA') { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
+                              }}
+                            >
+                              <FieldInput
+                                field={f}
+                                value={fieldDraft}
+                                members={members}
+                                onChange={v => { setFieldDraft(v); if (isDiscreteField(f.type)) commitFieldDraft(f, v) }}
+                              />
+                              <div className="flex gap-3 mt-1.5">
+                                {!isDiscreteField(f.type) && (
+                                  <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                                )}
+                                <button onMouseDown={e => { e.preventDefault(); cancelEditField() }} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              onClick={() => startEditField(f)}
+                              className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+                              title="Click to edit"
+                            >
+                              <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
+                              <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No field values set.</p>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
-        {/* Description — inline edit (HD-62). Plain text for now; Markdown is HD-66. */}
+        {/* Description — inline edit (HD-62), Markdown (HD-66). First of the
+            content sections: now that the details area ends above it, it carries
+            the same hairline + heading rhythm as Sub-issues/Files/Activity. */}
         {issue && (
-          <div ref={descSectionRef} style={{ scrollMarginTop: 8 }}>
-            <div className="mb-1.5"><SectionHeading>Description</SectionHeading></div>
+          <div
+            ref={descSectionRef}
+            className="flex flex-col gap-2 pt-1 border-t"
+            style={{ borderColor: 'var(--color-border)', scrollMarginTop: 8 }}
+          >
+            <div className="pt-2"><SectionHeading>Description</SectionHeading></div>
             {descEditing ? (
               <div>
                 <div className="flex items-center gap-2 mb-1">
@@ -974,93 +1080,6 @@ export default function IssueDetail({
               >
                 Add a description…
               </button>
-            )}
-          </div>
-        )}
-
-        {/* Custom fields — inline click-to-edit (HD-62). Filled fields show by
-            default; "+ Add field" reveals an unfilled one. */}
-        {issue && fields.length > 0 && (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <SectionHeading>Fields</SectionHeading>
-              {fields.some(f => fieldValues[f.id] === undefined) && (
-                <div className="relative" ref={addMenuRef}>
-                  <button
-                    onClick={() => setAddFieldOpen(o => !o)}
-                    className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
-                    style={{ color: 'var(--color-brand)' }}
-                  >
-                    <Plus size={12} /> Add field
-                  </button>
-                  {addFieldOpen && (
-                    <div
-                      className="absolute right-0 mt-1 border rounded-md py-1 z-30"
-                      style={{ minWidth: 180, background: 'var(--color-card)', borderColor: 'var(--color-border-2)', boxShadow: 'var(--shadow-lg)' }}
-                    >
-                      {fields.filter(f => fieldValues[f.id] === undefined).map(f => (
-                        <button
-                          key={f.id}
-                          onClick={() => startEditField(f)}
-                          className="w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
-                          style={{ color: 'var(--color-text)' }}
-                        >
-                          {f.name}{f.required ? ' *' : ''}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {fields.some(f => fieldValues[f.id] !== undefined || editingFieldId === f.id) ? (
-              <div className={`grid ${gridCols} gap-3`}>
-                {fields.filter(f => fieldValues[f.id] !== undefined || editingFieldId === f.id).map(f => {
-                  const fullWidth = f.type === 'TEXTAREA' || f.type === 'MULTI_SELECT'
-                  return (
-                    <div key={f.id} className={fullWidth ? 'col-span-2' : ''}>
-                      {editingFieldId === f.id ? (
-                        <div
-                          ref={fieldEditorRef}
-                          onBlur={isDiscreteField(f.type) ? undefined : (e => {
-                            if (!e.currentTarget.contains(e.relatedTarget as Node)) commitFieldDraft(f, fieldDraft)
-                          })}
-                          onKeyDown={e => {
-                            if (e.key === 'Escape') { e.preventDefault(); cancelEditField() }
-                            else if (e.key === 'Enter' && (f.type === 'TEXT' || f.type === 'URL' || f.type === 'NUMBER')) { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
-                            else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && f.type === 'TEXTAREA') { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
-                          }}
-                        >
-                          <FieldInput
-                            field={f}
-                            value={fieldDraft}
-                            members={members}
-                            onChange={v => { setFieldDraft(v); if (isDiscreteField(f.type)) commitFieldDraft(f, v) }}
-                          />
-                          <div className="flex gap-3 mt-1.5">
-                            {!isDiscreteField(f.type) && (
-                              <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
-                            )}
-                            <button onMouseDown={e => { e.preventDefault(); cancelEditField() }} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div
-                          onClick={() => startEditField(f)}
-                          className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
-                          title="Click to edit"
-                        >
-                          <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
-                          <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No field values set.</p>
             )}
           </div>
         )}
