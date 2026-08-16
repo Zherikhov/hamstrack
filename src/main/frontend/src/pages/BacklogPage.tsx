@@ -8,13 +8,8 @@ import { forgetProject } from '../recentProjects'
 import { Button, StatusBadge, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
 import { Pager } from '../components/Pager'
 import { FieldValueDisplay } from '../components/fields'
-import { LabelChips, LabelFilter } from '../components/labels'
-import { ComponentFilter, ComponentName } from '../components/projectComponents'
-import { FixVersionFilter, VersionBadges } from '../components/versions'
-import { backlogIssuesKeyPrefix, serializeIssueFilters } from '../lib/queryKeys'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
-import type { LabelMatch } from '../api'
 import type { Issue, IssueType, ProjectField, WorkspaceMember } from '../types'
 
 /** Backlog — every issue that is not in a DONE-category status, as a flat list. */
@@ -26,15 +21,6 @@ export default function BacklogPage() {
   const [openIssueNumber, setOpenIssueNumber] = useState<number | undefined>(undefined)
   const [filterStatusId, setFilterStatusId] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
-  // Server-side label filter (HD-30) — same params as the board's, so both views
-  // narrow over the WHOLE project rather than the loaded page.
-  const [filterLabelIds, setFilterLabelIds] = useState<string[]>([])
-  const [labelMatch, setLabelMatch] = useState<LabelMatch>('any')
-  // Component filter (HD-31) — server-side, same param as the board's.
-  const [filterComponentId, setFilterComponentId] = useState<string>('')
-  // Fix-version filter (HD-32) — server-side, same param as the board's. FIX
-  // links only; an AFFECTS link deliberately does not match.
-  const [filterFixVersionId, setFilterFixVersionId] = useState<string>('')
   const [page, setPage] = useState(0)
   const [size, setSize] = useState(50)
 
@@ -59,26 +45,12 @@ export default function BacklogPage() {
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
   const { data, isLoading, isError } = useQuery({
-    // Own key namespace: the value here is a `Page<Issue>`, not the board's
-    // `BoardIssues` wrapper — see lib/queryKeys.ts for the shape-per-key rule.
-    queryKey: [
-      ...backlogIssuesKeyPrefix(wsId, projectId), filterStatusId, filterPriority,
-      // Deterministic (labels sorted) so {a,b} and {b,a} share one entry.
-      serializeIssueFilters({
-        labelIds: filterLabelIds, labelMatch, componentId: filterComponentId || undefined,
-        fixVersionId: filterFixVersionId || undefined,
-      }),
-      page, size,
-    ],
+    queryKey: ['issues', wsId, projectId, 'backlog', filterStatusId, filterPriority, page, size],
     // Backlog = non-DONE issues only; excludeDone filters them out server-side so pages are correct
     queryFn: () => apiListIssuesPaged(wsId!, projectId!, {
       page, size, excludeDone: true,
       statusId: filterStatusId || undefined,
       priorityId: filterPriority || undefined,
-      labelIds: filterLabelIds,
-      labelMatch,
-      componentId: filterComponentId || undefined,
-      fixVersionId: filterFixVersionId || undefined,
     }),
     enabled: !!wsId && !!projectId,
   })
@@ -93,15 +65,9 @@ export default function BacklogPage() {
   const totalElements = data?.totalElements ?? 0
 
   // Filter/size changes reset to the first page
-  const labelFilterKey = filterLabelIds.join(',')
-  useEffect(() => {
-    setPage(0)
-  }, [filterStatusId, filterPriority, labelFilterKey, labelMatch, filterComponentId, filterFixVersionId, size])
+  useEffect(() => { setPage(0) }, [filterStatusId, filterPriority, size])
 
   const panelOpen = openIssueNumber !== undefined
-  const anyFilterActive =
-    !!filterStatusId || !!filterPriority || filterLabelIds.length > 0 || !!filterComponentId
-    || !!filterFixVersionId
 
   if (isError) {
     return (
@@ -145,34 +111,11 @@ export default function BacklogPage() {
             <option value="">All priorities</option>
             {priorities.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
           </Select>
-          <ComponentFilter
-            wsId={wsId}
-            projectId={projectId}
-            value={filterComponentId}
-            onChange={setFilterComponentId}
-          />
-          <FixVersionFilter
-            wsId={wsId}
-            projectId={projectId}
-            value={filterFixVersionId}
-            onChange={setFilterFixVersionId}
-          />
-          <LabelFilter
-            wsId={wsId}
-            value={filterLabelIds}
-            onChange={setFilterLabelIds}
-            match={labelMatch}
-            onMatchChange={setLabelMatch}
-          />
-          {anyFilterActive && (
+          {(filterStatusId || filterPriority) && (
             <button
               className="text-xs cursor-pointer hover:underline"
               style={{ color: 'var(--color-text-muted)' }}
-              onClick={() => {
-                setFilterStatusId(''); setFilterPriority('')
-                setFilterLabelIds([]); setLabelMatch('any')
-                setFilterComponentId(''); setFilterFixVersionId('')
-              }}
+              onClick={() => { setFilterStatusId(''); setFilterPriority('') }}
             >
               Clear
             </button>
@@ -191,9 +134,9 @@ export default function BacklogPage() {
           ) : issues.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
               <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-                {anyFilterActive ? 'No issues match the filter' : 'Backlog is empty'}
+                {filterStatusId || filterPriority ? 'No issues match the filter' : 'Backlog is empty'}
               </span>
-              {!anyFilterActive && (
+              {!filterStatusId && !filterPriority && (
                 <Button variant="secondary" size="sm" onClick={() => openCreateIssue()}>
                   <Plus size={14} />
                   Create issue
@@ -204,7 +147,7 @@ export default function BacklogPage() {
             <table className="w-full border-collapse">
               <thead>
                 <tr style={{ borderBottom: '1px solid var(--color-border)' }}>
-                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Parent', 'Assignee', 'Component', 'Fix version', 'Labels', ...fields.map(f => f.name)].map(h => (
+                  {['Key', 'Title', 'Status', 'Priority', 'Type', 'Parent', 'Assignee', ...fields.map(f => f.name)].map(h => (
                     <th
                       key={h}
                       className="text-left px-4 py-2 text-xs font-medium"
@@ -330,33 +273,6 @@ function IssueRow({ issue, fields, issueTypes, members, active, onClick, onOpenN
               {issue.assignee.displayName}
             </span>
           </div>
-        ) : (
-          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
-        )}
-      </td>
-      {/* Component (HD-31) — one per issue; archived ones render dimmed */}
-      <td className="px-4 py-2.5" style={{ maxWidth: 160 }}>
-        {issue.component ? (
-          <ComponentName component={issue.component} />
-        ) : (
-          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
-        )}
-      </td>
-      {/* Fix version(s) (HD-32) — many per issue, so capped with a "+k" like the
-          labels cell; archived ones render dimmed. Affects versions stay off the
-          backlog: they are a triage detail, not backlog-planning data. */}
-      <td className="px-4 py-2.5" style={{ maxWidth: 180 }}>
-        {issue.fixVersions && issue.fixVersions.length > 0 ? (
-          <VersionBadges versions={issue.fixVersions} max={2} compact />
-        ) : (
-          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
-        )}
-      </td>
-      {/* Labels (HD-30) — chips, capped with a "+k" so a heavily-tagged issue
-          can't blow the row height out */}
-      <td className="px-4 py-2.5" style={{ maxWidth: 220 }}>
-        {issue.labels && issue.labels.length > 0 ? (
-          <LabelChips labels={issue.labels} max={3} compact />
         ) : (
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
         )}
