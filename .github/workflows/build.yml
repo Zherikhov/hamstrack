@@ -9,12 +9,27 @@ name: Build
 # both conventions, and a tag matching no filter publishes NOTHING silently
 # (exactly what happened to 0.5.0 … 0.12.5: no image, no release). Everything
 # downstream strips the leading `v`, so the two forms are interchangeable.
+#
+# `push` is deliberately NOT `branches: ["**"]`. It used to be, and every commit
+# on a branch with an open PR was validated TWICE — measured on 2026-08-16:
+# runs 40/41 both ran the full suite on 9ae88a5, runs 43/44 both on 6cab999,
+# ~6 minutes each, identical work. Feature branches are covered by the
+# `pull_request` trigger instead. Consequence to know about: a branch with NO
+# open PR gets no CI until one is opened.
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v[0-9]*", "[0-9]*"]
   pull_request:
     branches: [main]
+
+# Supersede a run when its ref gets another push (typical during a PR review
+# loop). NEVER on main or a tag: cancelling there would also cut the deploy
+# chain (deploy.yml runs on `workflow_run` of a successful Build on main) and
+# could abort a half-published image.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build-and-test:
@@ -48,11 +63,16 @@ jobs:
           distribution: 'temurin'
           cache: maven          # caches ~/.m2 between runs — much faster
 
-      - name: Build (compile check)
-        run: ./mvnw clean package -DskipTests -B
-
-      - name: Run tests
-        run: ./mvnw test -B
+      # ONE Maven invocation, not `package -DskipTests` followed by `test`.
+      # frontend-maven-plugin is bound to `generate-resources` (pom.xml), which
+      # every lifecycle run passes through — so two invocations downloaded Node
+      # and ran `npm install` + `vite build` TWICE per job (~40-60s of pure
+      # waste; `-Dfrontend.skip=true` cannot prevent it, the plugin has no
+      # <skip> binding). `verify` covers both: compile → test → package, with
+      # the frontend built once. A compile error still fails before any test
+      # runs, so the old "compile check first" fast-fail is preserved.
+      - name: Build and test
+        run: ./mvnw -B verify
         env:
           DB_URL: jdbc:postgresql://localhost:5432/hamstrack_test
           DB_USERNAME: hamstrack
@@ -91,6 +111,12 @@ jobs:
             echo "version=${V#v}" >> "$GITHUB_OUTPUT"   # strip leading v for a clean dev version
           fi
 
+      # Required for the GitHub Actions cache below: the default `docker` driver
+      # cannot export build cache, only the docker-container driver buildx sets
+      # up here can. Without this step `cache-to: type=gha` silently does nothing.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -119,6 +145,14 @@ jobs:
             APP_VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The image rebuilds everything from scratch — `dependency:go-offline`,
+          # npm install, vite build — a THIRD time per pipeline (~105s measured).
+          # The Dockerfile is already layered so deps sit above `COPY src/`, but
+          # a fresh runner has no local layer store to hit. `type=gha` gives it
+          # one that survives between runs; mode=max also caches the discarded
+          # build-stage layers, which is where all the slow work lives.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # Cut the GitHub Release for a tag — gated on the image actually being
   # published, so a Release never advertises a version nobody can pull.
