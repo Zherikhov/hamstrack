@@ -122,9 +122,14 @@ export default function ReleasesPage() {
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', background: 'var(--color-surface)' }}>
-      <div style={{ maxWidth: 900, padding: '20px 26px 40px' }}>
-        {/* Header. Inline maxWidth: our @theme --spacing-* scale shadows
-            Tailwind's max-w-{xs..3xl} (max-w-xl would be 32px) — see CLAUDE.md */}
+      {/* 1180 matches HomePage — the other nav-rail work surface built out of
+          cards. The old 900 left roughly a third of the content area empty on a
+          normal laptop, because this column does NOT centre itself (no
+          `margin: 0 auto`), so the slack all piled up on the right.
+          Inline maxWidth rather than a Tailwind class: our @theme --spacing-*
+          scale shadows max-w-{xs..3xl} (max-w-xl would resolve to 32px) — see
+          CLAUDE.md. */}
+      <div style={{ maxWidth: 1180, padding: '20px 26px 40px' }}>
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>
             <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em' }}>Releases</h1>

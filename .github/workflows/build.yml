@@ -1,12 +1,18 @@
 name: Build
 
 # Build + test on every push / PR. Publish the image on main (rolling `latest`)
-# and on release tags `vX.Y.Z` (semver tags self-hosters pin to).
-# Deploying the owner's prod lives in a separate workflow (deploy.yml).
+# and on release tags (the semver tags self-hosters pin to), then cut the
+# matching GitHub Release. Deploying the owner's prod lives in a separate
+# workflow (deploy.yml).
+#
+# Tag forms: BOTH `v0.12.6` and bare `0.12.6` are accepted — the repo carries
+# both conventions, and a tag matching no filter publishes NOTHING silently
+# (exactly what happened to 0.5.0 … 0.12.5: no image, no release). Everything
+# downstream strips the leading `v`, so the two forms are interchangeable.
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
+    tags: ["v[0-9]*", "[0-9]*"]
   pull_request:
     branches: [main]
 
@@ -58,7 +64,7 @@ jobs:
   # Gated on green tests; runs on main pushes and on release tags — never on PRs.
   build-and-push:
     needs: build-and-test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,11 +78,14 @@ jobs:
 
       # Version source of truth is the git tag (pom.xml is a 0.0.0-DEV placeholder).
       # Tag build → the tag; any other build → nearest tag + commits since (or a sha).
+      # The leading `v` is stripped in both branches, so `v0.12.6` and `0.12.6`
+      # produce the identical APP_VERSION / image tags.
       - name: Determine app version
         id: ver
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            T="${GITHUB_REF#refs/tags/}"
+            echo "version=${T#v}" >> "$GITHUB_OUTPUT"
           else
             V=$(git describe --tags --always 2>/dev/null || echo 0.0.0-dev)
             echo "version=${V#v}" >> "$GITHUB_OUTPUT"   # strip leading v for a clean dev version
@@ -110,3 +119,27 @@ jobs:
             APP_VERSION=${{ steps.ver.outputs.version }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Cut the GitHub Release for a tag — gated on the image actually being
+  # published, so a Release never advertises a version nobody can pull.
+  # Re-running the workflow on the same tag updates the existing Release
+  # instead of failing (the action is upsert-shaped).
+  github-release:
+    needs: build-and-push
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write           # creating a Release writes to the repo
+
+    steps:
+      - name: Create / update the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          # Auto-generated notes = merged PRs + new contributors since the
+          # previous tag. Hand-written notes can be added in the UI afterwards;
+          # a later re-run does NOT overwrite the body of an existing Release.
+          generate_release_notes: true
+          # `v1.0.0-rc1` / `0.13.0-beta` → pre-release, so `latest` on the
+          # Releases page keeps pointing at the last stable tag.
+          prerelease: ${{ contains(github.ref_name, '-') }}
