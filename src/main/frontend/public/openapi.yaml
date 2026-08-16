@@ -24,8 +24,9 @@ info:
     and `size` (default 50, clamped server-side to a maximum of 100) and return
     a uniform `PageResponse` envelope (`content` plus `page`/`size`/
     `totalElements`/`totalPages`/`hasNext`). The issue list is the deliberate
-    exception: without `size` it returns the full unpaginated array (the board
-    needs every card), and only switches to the envelope when `size` is passed.
+    exception: without `size` it returns a `BoardIssuesResponse` (a server-capped
+    board list, `cap` = `app.board.max-issues`, default 500), and only switches to
+    the `PageResponse` envelope when `size` is passed.
 
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
@@ -63,6 +64,24 @@ tags:
     description: Issue comments
   - name: Attachments
     description: Issue file attachments
+  - name: Labels
+    description: >-
+      The workspace's label catalog — free-form colored tags reusable across
+      every project of the workspace (content, not bound taxonomy: labels never
+      appear in a project's config)
+  - name: Components
+    description: >-
+      A project's component catalog — curated modules of one project with an
+      optional lead and an optional create-time auto-assign (content, not bound
+      taxonomy: components never appear in a project's config). Reads are open
+      to project members; writes need project MANAGER or workspace OWNER/ADMIN.
+  - name: Versions
+    description: >-
+      A project's release plan — versions with a fully reversible
+      release/un-release lifecycle, linked to issues as **fix** ("ships in") and
+      **affects** ("broken in") versions (content, not bound taxonomy: versions
+      never appear in a project's config). Reads are open to project members;
+      writes need project MANAGER or workspace OWNER/ADMIN.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -1307,7 +1326,17 @@ paths:
         `assigneeId` must be a workspace member; `parentId` links a sub-task
         to a parent issue in the same project (rejected with `422` if unknown,
         in another project, or a hierarchy-level violation). The issue gets the
-        next sequential project-scoped `number`.
+        next sequential project-scoped `number`. `labelIds` attaches workspace
+        labels — an unknown, foreign-workspace or archived label id, or more
+        than `app.classification.max-labels-per-issue` distinct ids, is a `422`.
+        `componentId` files the issue under a component of **this** project (an
+        unknown, foreign-project or archived component is a `422`); when that
+        component has `autoAssign` and a lead and the request carries no
+        `assigneeId`, the lead becomes the assignee. `fixVersionIds` and
+        `affectsVersionIds` link versions of **this** project in the two
+        independent roles — an unknown, foreign-project or archived version, or
+        more than `app.classification.max-version-links-per-issue` distinct ids
+        **per link type**, is a `422`.
       operationId: createIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1335,12 +1364,25 @@ paths:
       tags: [Issues]
       summary: List issues
       description: |
-        Dual-shape by design. **Without** `size` the response is the full
-        unpaginated `IssueResponse` array — the board/kanban needs every card.
-        **With** `size` the response is a paginated `PageResponse` envelope (the
-        backlog path), and the optional `excludeDone` flag drops issues whose
-        status is in the DONE category server-side. The `statusId`/`assigneeId`/
-        `priorityId` filters apply in both modes.
+        Dual-shape by design. **Without** `size` the response is a
+        `BoardIssuesResponse` — the board/kanban path. The issue list is bounded
+        server-side to `cap` (`app.board.max-issues`, default 500, never
+        client-overridable); when the project after the same filters exceeds it,
+        `truncated` is true and `totalAvailable` reports the full count so the UI
+        can render a truncation banner. **With** `size` the response is a
+        paginated `PageResponse` envelope (the backlog path), and the optional
+        `excludeDone` flag drops issues whose status is in the DONE category
+        server-side. The `statusId`/`assigneeId`/`priorityId`/`componentId`/
+        `labelId`/`fixVersionId` filters apply in both modes and are ANDed
+        together.
+
+        The **label, component and fix-version filters are applied server-side**
+        (they must search the whole project, not just the capped page on
+        screen): repeat `labelId` once per label and pick the combining mode
+        with `labelMatch`; `componentId` and `fixVersionId` are single optional
+        uuids. `fixVersionId` matches the **fix** role only — an affects link to
+        the same version does not match it. A `componentId`/`fixVersionId`
+        belonging to another project simply matches nothing — never an error.
       operationId: listIssues
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1354,6 +1396,40 @@ paths:
         - name: priorityId
           in: query
           schema: { type: string, format: uuid }
+        - name: componentId
+          in: query
+          description: >-
+            Filter to issues filed under this project component, ANDed with the
+            other filters. An id from another project matches nothing rather
+            than erroring.
+          schema: { type: string, format: uuid }
+        - name: labelId
+          in: query
+          description: >-
+            Repeatable — filter to issues carrying these labels
+            (`?labelId=…&labelId=…`). Combined per `labelMatch`, ANDed with the
+            other filters. More than `app.classification.max-labels-per-issue`
+            (default 20) distinct values is a `400`.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+        - name: labelMatch
+          in: query
+          description: >-
+            How `labelId` values combine — `any` = carries at least one (OR),
+            `all` = carries every one (AND). Lowercase, closed set: anything
+            else is a `400` (never a silent fall-through to `any`).
+          schema: { type: string, enum: [any, all], default: any }
+        - name: fixVersionId
+          in: query
+          description: >-
+            Filter to issues that ship in this version, ANDed with the other
+            filters. Matches the **fix** link role only — an affects link to the
+            same version does not match. An id from another project matches
+            nothing rather than erroring.
+          schema: { type: string, format: uuid }
         - name: excludeDone
           in: query
           description: Paginated mode only — drop issues in a DONE-category status
@@ -1363,14 +1439,13 @@ paths:
       responses:
         '200':
           description: |
-            Full array when `size` is omitted; a `PageResponse` envelope when
-            `size` is present.
+            A `BoardIssuesResponse` when `size` is omitted; a `PageResponse`
+            envelope when `size` is present.
           content:
             application/json:
               schema:
                 oneOf:
-                  - type: array
-                    items: { $ref: '#/components/schemas/IssueResponse' }
+                  - $ref: '#/components/schemas/BoardIssuesResponse'
                   - allOf:
                       - $ref: '#/components/schemas/PageResponse'
                       - type: object
@@ -1378,6 +1453,13 @@ paths:
                           content:
                             type: array
                             items: { $ref: '#/components/schemas/IssueResponse' }
+        '400':
+          description: >-
+            Unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}:
@@ -1406,7 +1488,17 @@ paths:
         when forbidden). `parentId` sets/changes the parent and `clearParent`
         detaches it; an illegal parent (unknown/foreign-project, self, cycle,
         hierarchy-level violation, or a type change that conflicts with an
-        existing parent/child edge) returns `422`.
+        existing parent/child edge) returns `422`. `labelIds` is a
+        **full-replacement** set: present → the issue ends up with exactly those
+        labels (`[]` clears them all), absent → unchanged. `componentId`
+        sets/changes the component and `clearComponent` unsets it; attaching an
+        unknown, foreign-project or archived component is a `422` (an
+        already-attached archived one may stay). Component auto-assign never
+        fires on update. `fixVersionIds` and `affectsVersionIds` are
+        full-replacement sets **per role** — sending one never touches the
+        other, `[]` clears that role, absent leaves it unchanged; the same `422`
+        rules as create apply, with the per-issue cap counted separately per
+        link type.
       operationId: updateIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1674,6 +1766,848 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /workspaces/{workspaceId}/labels:
+    get:
+      tags: [Labels]
+      summary: List the workspace's labels
+      description: >-
+        The workspace's label catalog, ordered by name (case-insensitive). Any
+        workspace member may read it; a non-member — or an unknown workspace —
+        gets `404`, never `403`. Archived labels are hidden unless
+        `includeArchived=true`. With `withUsage=true` every row carries its
+        `issueCount` (one grouped query for the whole list); otherwise
+        `issueCount` is `null`.
+      operationId: listLabels
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: includeArchived
+          in: query
+          description: Include archived labels (hidden by default)
+          schema: { type: boolean, default: false }
+        - name: withUsage
+          in: query
+          description: Fill `issueCount` on every row (null when omitted)
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK, ordered by name (case-insensitive)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/LabelResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Labels]
+      summary: Create a label
+      description: >-
+        **Any workspace member** may create a label — tagging is self-serve. The
+        `name` is normalized server-side (NFC, invisible control/format
+        characters stripped, whitespace collapsed, max 60 chars after
+        normalization) and is unique per workspace **case-insensitively**,
+        archived labels included: a collision returns `409` with the winning
+        label's id in the `existingId` extension. An omitted `color` gets a
+        deterministic swatch derived from the name.
+      operationId: createLabel
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLabelRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LabelResponse' }
+        '400':
+          description: >-
+            Failed validation — blank name, a name longer than 60 characters
+            after normalization, or a `color` that is not `#RRGGBB`/`#RRGGBBAA`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/LabelNameConflict' }
+        '422':
+          description: >-
+            The workspace already holds the maximum number of labels
+            (`app.classification.max-labels-per-workspace`, default 1000) —
+            archive or delete some first. Archived labels count toward that
+            ceiling: they keep their unique name slot.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/labels/{labelId}:
+    patch:
+      tags: [Labels]
+      summary: Rename / recolor / describe a label
+      description: >-
+        Partial update — `null`/omitted fields are left unchanged. Allowed to a
+        workspace `OWNER`/`ADMIN` **or the label's own creator**; any other
+        member gets `403` (a non-member still gets `404`). A pure casing change
+        keeps the label's unique slot; any other rename into an existing name
+        (archived rows included) returns `409` with `existingId`.
+      operationId: updateLabel
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateLabelRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LabelResponse' }
+        '400':
+          description: Blank/too-long name, or a `color` that is not `#RRGGBB`/`#RRGGBBAA`
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/LabelNameConflict' }
+    delete:
+      tags: [Labels]
+      summary: Delete a label
+      description: >-
+        Workspace `OWNER`/`ADMIN` only. A label still attached to issues returns
+        `409` unless `force=true`, which detaches it everywhere first (including
+        issues in archived projects — the catalog row disappears either way).
+        There is no remap-on-delete: use `POST …/merge` for that. Archiving is
+        the recommended non-destructive alternative.
+      operationId: deleteLabel
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+        - name: force
+          in: query
+          description: Detach the label from every issue and delete it anyway
+          schema: { type: boolean, default: false }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The label is used on at least one issue and `force` was not set
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/labels/{labelId}/archive:
+    post:
+      tags: [Labels]
+      summary: Archive a label
+      description: >-
+        Workspace `OWNER`/`ADMIN` only. Always allowed, even while the label is
+        in use: it leaves every picker and the default catalog listing, existing
+        attachments are preserved (and reported with `archived: true` on the
+        issue), and it can no longer be added to an issue (`422`). The name slot
+        stays reserved.
+      operationId: archiveLabel
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LabelResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/labels/{labelId}/unarchive:
+    post:
+      tags: [Labels]
+      summary: Restore an archived label
+      description: >-
+        Workspace `OWNER`/`ADMIN` only. The row already owns its unique name
+        slot, so this can never conflict.
+      operationId: unarchiveLabel
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LabelResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/labels/{labelId}/merge:
+    post:
+      tags: [Labels]
+      summary: Merge labels into this one
+      description: >-
+        Workspace `OWNER`/`ADMIN` only. Every issue carrying one of `sourceIds`
+        ends up carrying the label in the path, duplicates collapse, and the
+        source labels are **deleted**. The cure for tag soup. No per-issue
+        history rows are written (a merge can touch thousands of issues) — this
+        response plus the target's bumped `updatedAt` are the record. Issues in
+        archived projects are re-pointed too.
+      operationId: mergeLabels
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeLabelsRequest' }
+      responses:
+        '200':
+          description: Merged
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MergeLabelsResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >-
+            A source id equals the target, or one of them does not resolve
+            inside this workspace (a foreign-tenant id leaks nothing — it is
+            simply "not in this workspace").
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/labels/{labelId}/usage:
+    get:
+      tags: [Labels]
+      summary: How many issues carry a label
+      description: >-
+        Backs the settings usage chip and the delete-confirm dialog. Any
+        workspace member.
+      operationId: labelUsage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/labelId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LabelUsageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/components:
+    get:
+      tags: [Components]
+      summary: List the project's components
+      description: >-
+        The project's component catalog, ordered by name (case-insensitive).
+        Any project member may read it; a missing workspace, a missing project
+        or a non-member all give `404`, never `403`. Archived components are
+        hidden unless `includeArchived=true`. With `withUsage=true` every row
+        carries its `issueCount` (one grouped query for the whole list);
+        otherwise `issueCount` is `null`.
+      operationId: listComponents
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: includeArchived
+          in: query
+          description: Include archived components (hidden by default)
+          schema: { type: boolean, default: false }
+        - name: withUsage
+          in: query
+          description: Fill `issueCount` on every row (null when omitted)
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK, ordered by name (case-insensitive)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ComponentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Components]
+      summary: Create a component
+      description: >-
+        Requires the **project curator** role — project `MANAGER`, or an
+        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
+        member); any other member gets `403`. The `name` is normalized
+        server-side (NFC, invisible control/format characters stripped,
+        whitespace collapsed, max 80 chars after normalization) and is unique
+        per **project** case-insensitively, archived components included — a
+        collision is a `409` (no `existingId` extension: components have no
+        on-the-fly create to recover from). The same name in a different project
+        is fine. `leadId` must be a workspace member and `autoAssign: true`
+        requires a lead (`422` otherwise).
+      operationId: createComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateComponentRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentResponse' }
+        '400':
+          description: >-
+            Failed validation — blank name, a name longer than 80 characters
+            after normalization, or a description over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ComponentConflict' }
+        '422':
+          description: >-
+            `leadId` does not resolve to a member of this workspace ("Unknown
+            lead" — a foreign-tenant id leaks nothing), `autoAssign` is true with
+            no lead, **or** the project already holds the maximum number of
+            components (`app.classification.max-components-per-project`, default
+            500) — archive or delete some first. **Archived components count
+            toward that ceiling**: they keep their unique name slot and are still
+            returned by `includeArchived=true`, so excluding them would let
+            create → archive → repeat bypass the cap.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/components/{componentId}:
+    get:
+      tags: [Components]
+      summary: Get a component
+      description: >-
+        Any project member. `issueCount` is always `null` here — use
+        `GET …/components/{componentId}/usage` or the list's `withUsage=true`.
+      operationId: getComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Components]
+      summary: Rename / re-lead / describe a component
+      description: >-
+        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Partial — `null`/omitted fields are left unchanged. A pure casing change
+        keeps the component's unique slot; any other rename onto a taken name
+        (archived rows included) is a `409`. `leadId` sets the lead and
+        `clearLead: true` unsets it (the `assigneeId`/`clearAssignee`
+        convention); the resulting state must still satisfy "auto-assign needs a
+        lead" (`422` otherwise).
+      operationId: updateComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateComponentRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentResponse' }
+        '400':
+          description: >-
+            Blank name, a name longer than 80 characters after normalization, or
+            a description over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ComponentConflict' }
+        '422': { $ref: '#/components/responses/ComponentLeadUnprocessable' }
+    delete:
+      tags: [Components]
+      summary: Delete a component
+      description: >-
+        Project curator only. A component still carried by issues returns `409`
+        unless `force=true`, which **nulls the component on every issue that
+        carried it** and then deletes the row. There is no
+        remap-to-another-component, and no per-issue history is written (a
+        forced delete can touch thousands of issues). Archiving is the
+        recommended non-destructive alternative.
+      operationId: deleteComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+        - name: force
+          in: query
+          description: Clear the component from every issue and delete it anyway
+          schema: { type: boolean, default: false }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The component is used on at least one issue and `force` was not set
+            (the message states the count), or the project is archived.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/components/{componentId}/archive:
+    post:
+      tags: [Components]
+      summary: Archive a component
+      description: >-
+        Project curator only. Always allowed, even while the component is in
+        use — this is the recommended alternative to delete: it leaves every
+        picker and the default settings list, existing assignments are kept (and
+        reported with `archived: true` on the issue), and it can no longer be
+        attached to an issue (`422`). Reversible, and the name slot stays
+        reserved.
+      operationId: archiveComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/components/{componentId}/unarchive:
+    post:
+      tags: [Components]
+      summary: Restore an archived component
+      description: >-
+        Project curator only. The row already owns its unique name slot, so this
+        can never conflict on the name.
+      operationId: unarchiveComponent
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/components/{componentId}/usage:
+    get:
+      tags: [Components]
+      summary: How many issues carry a component
+      description: >-
+        Backs the settings usage chip and the delete-confirm dialog. Any project
+        member.
+      operationId: componentUsage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/componentId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ComponentUsageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions:
+    get:
+      tags: [Versions]
+      summary: List the project's versions
+      description: >-
+        The project's release plan — the Releases page's data source. Any
+        project member may read it; a missing workspace, a missing project or a
+        non-member all give `404`, never `403`. Ordered **unreleased first**,
+        then by `releaseDate` ascending with undated versions last, then by name
+        (case-insensitive). Archived versions are hidden unless
+        `includeArchived=true`; released ones are **included by default**
+        (`includeReleased=true` — a release page without its shipped releases is
+        useless). `issueCount`, `doneIssueCount` and `affectsIssueCount` are
+        always present: they cost one grouped query for the whole list, so there
+        is nothing to opt out of.
+      operationId: listVersions
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: includeArchived
+          in: query
+          description: Include archived versions (hidden by default)
+          schema: { type: boolean, default: false }
+        - name: includeReleased
+          in: query
+          description: >-
+            Include already-released versions. Defaults to **true**, unlike
+            `includeArchived` — set it to false for a "what is still open"
+            picker.
+          schema: { type: boolean, default: true }
+      responses:
+        '200':
+          description: >-
+            OK — unreleased first, then by planned date (undated last), then by
+            name.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/VersionResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Versions]
+      summary: Create a version
+      description: >-
+        Requires the **project curator** role — project `MANAGER`, or an
+        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
+        member); any other member gets `403`. The `name` is normalized
+        server-side (NFC, invisible control/format characters stripped,
+        whitespace collapsed, max 60 chars after normalization) and is unique
+        per **project** case-insensitively, archived versions included — a
+        collision is a `409`. The same name in a different project is fine. A
+        version is always born **unreleased**: `releaseDate` is only the plan,
+        and shipping it is the separate `POST …/release` call.
+      operationId: createVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateVersionRequest' }
+      responses:
+        '201':
+          description: 'Created — always `released: false`, `archived: false`, all counts 0'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '400':
+          description: >-
+            Failed validation — blank name, a name longer than 60 characters
+            after normalization, or a description over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422':
+          description: >-
+            The project already holds the maximum number of versions
+            (`app.classification.max-versions-per-project`, default 500) —
+            delete some first. **Archived (and released) versions count toward
+            that ceiling**: they keep their unique name slot and are still
+            loaded by `includeArchived=true`, so excluding them would let
+            create → archive → repeat bypass the cap. Also returned for a
+            `releaseDate` outside `1000-01-01`…`9999-12-31` (see
+            `CreateVersionRequest.releaseDate`).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}:
+    get:
+      tags: [Versions]
+      summary: Get a version
+      description: >-
+        Any project member. The progress counters are filled here too (the same
+        grouped query as the list); `GET …/versions/{versionId}/usage` adds the
+        unresolved-issue count the release/delete dialogs need.
+      operationId: getVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Versions]
+      summary: Rename / describe / re-plan a version
+      description: >-
+        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Partial — `null`/omitted fields are left unchanged. A pure casing change
+        keeps the version's unique slot; any other rename onto a taken name
+        (archived rows included) is a `409`. `releaseDate` is a nullable scalar:
+        a date sets it and `clearReleaseDate: true` unsets it (the
+        `assigneeId`/`clearAssignee` convention). The release lifecycle
+        deliberately does **not** move through here — use `POST …/release` /
+        `POST …/unrelease`.
+      operationId: updateVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateVersionRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '400':
+          description: >-
+            Blank name, a name longer than 60 characters after normalization, or
+            a description over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/VersionConflict' }
+        '422': { $ref: '#/components/responses/ReleaseDateOutOfRange' }
+    delete:
+      tags: [Versions]
+      summary: Delete a version
+      description: >-
+        Project curator only. A version still linked to issues (in **either**
+        role) returns `409` unless you pass one of the two escape hatches:
+        `force=true` deletes every one of its links, or `remapToId` re-points
+        every link — **both** the fix and the affects ones — to another version
+        of the same project. **When both are supplied `remapToId` wins**: it is
+        the strictly more specific, non-destructive intent. A **released**
+        version may be deleted, and `remapToId` may point at a released version
+        (back-porting is legitimate bookkeeping) — unlike
+        `moveUnresolvedToVersionId` on release, which insists on an unreleased
+        target. No per-issue history is written (a delete can touch thousands of
+        issues). Archiving is the recommended non-destructive alternative.
+      operationId: deleteVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+        - name: force
+          in: query
+          description: >-
+            Delete every fix/affects link to this version and then delete it.
+            Ignored when `remapToId` is also given.
+          schema: { type: boolean, default: false }
+        - name: remapToId
+          in: query
+          description: >-
+            Re-point every link of both roles to this version of the same
+            project, then delete. Takes precedence over `force`.
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The version is linked to at least one issue and neither `force` nor
+            `remapToId` was given (the message states the count), the project is
+            archived, **or** a concurrent issue edit added the target version to
+            one of the very issues being re-pointed, re-creating a link
+            collision mid-remap. That last one is a retryable race, not a fault,
+            and the delete is rolled back with it — the version is still there
+            and its links are untouched.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `remapToId` is the version being deleted, is unknown / belongs to
+            another project ("Unknown version"), or is **archived**. A released
+            target is allowed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}/release:
+    post:
+      tags: [Versions]
+      summary: Release a version
+      description: >-
+        Project curator only. The request body is **optional** — a bare `POST`
+        means "release it now, keeping the planned date". When neither the body
+        nor the stored version carries a `releaseDate`, the server stamps
+        **today** (server UTC date). Releasing a version that still has
+        unresolved issues is **allowed on purpose**: a release with open work is
+        a real, common state, and blocking it would only push teams to falsify
+        the tracker. Optionally pass `moveUnresolvedToVersionId` to re-point the
+        **fix** links of every issue in a non-DONE status to another version of
+        the same project first; DONE issues stay on the released version. The
+        flip is a conditional update, so releasing an already-released version
+        is a `409` rather than a silent success — an idempotent-looking response
+        would hide a double-click that runs the destructive move twice.
+      operationId: releaseVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ReleaseVersionRequest' }
+      responses:
+        '200':
+          description: 'Released — `released: true` and `releasedAt` stamped'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The version is already released, the project is archived, **or** a
+            concurrent issue edit added the target version to one of the very
+            issues being re-pointed, re-creating a link collision mid-remap.
+            That last one is a retryable race, not a fault, and the release is
+            rolled back with it — "nothing happened, try again", never a
+            half-applied move.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `moveUnresolvedToVersionId` is the version being released, is
+            unknown / belongs to another project ("Unknown version"), is
+            archived, or is **already released** — open work must never be moved
+            onto a shipped release. Also returned for a `releaseDate` outside
+            `1000-01-01`…`9999-12-31`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}/unrelease:
+    post:
+      tags: [Versions]
+      summary: Un-release a version
+      description: >-
+        Project curator only. Clears `released` and `releasedAt` but
+        **preserves `releaseDate`** (it goes back to being the plan), so the
+        release → un-release round-trip loses nothing. Issues moved away by a
+        `moveUnresolvedToVersionId` are **not** moved back — that was a separate,
+        explicit action. Conditional like release: un-releasing something that
+        is not released is a `409`, not a silent no-op.
+      operationId: unreleaseVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      responses:
+        '200':
+          description: 'Un-released — `released: false`, `releasedAt: null`, `releaseDate` kept'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The version is not released, or the project is archived
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}/archive:
+    post:
+      tags: [Versions]
+      summary: Archive a version
+      description: >-
+        Project curator only. Always allowed, even while the version is in use,
+        and orthogonal to `released` — archiving old shipped releases is how the
+        Releases list stays short. The version leaves every picker and the
+        default listing, existing links are kept (and reported with
+        `archived: true` on the issue), it can no longer be linked to an issue
+        (`422`), and it is reversible. The name slot stays reserved.
+      operationId: archiveVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      responses:
+        '200':
+          description: Archived
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}/unarchive:
+    post:
+      tags: [Versions]
+      summary: Restore an archived version
+      description: >-
+        Project curator only. The row already owns its unique name slot, so this
+        can never conflict on the name.
+      operationId: unarchiveVersion
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      responses:
+        '200':
+          description: Restored
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/versions/{versionId}/usage:
+    get:
+      tags: [Versions]
+      summary: How many issues a version is linked to
+      description: >-
+        Backs the delete-confirmation dialog and the "move N unresolved issues
+        to →" prompt in the release dialog. Any project member.
+        `unresolvedFixIssueCount` is exactly what `moveUnresolvedToVersionId`
+        would move.
+      operationId: versionUsage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/versionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VersionUsageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /notifications:
     get:
       tags: [Notifications]
@@ -1766,16 +2700,22 @@ paths:
         **HQL in brief** — a boolean expression of `field OP value` comparisons.
 
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
-          `priority`, `created`, `updated`, `due`, `parent`, `text`, plus any
-          **custom field** (M2) by its `key` (e.g. `story_points`, `severity`) —
-          the exact list a caller may query comes from `GET /search/schema`.
+          `priority`, `created`, `updated`, `due`, `parent`, `text`, `label`
+          (alias `labels`), `component` (alias `components`), `fixVersion`,
+          `affectsVersion`, plus any **custom field** (M2) by its `key` (e.g.
+          `story_points`, `severity`) — the exact list a caller may query comes
+          from `GET /search/schema`. Field names are matched
+          case-insensitively, so the all-lowercase `fixversion` /
+          `affectsversion` spellings work too (`/schema` always advertises the
+          camelCase name, exactly once per field).
         - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=` (which operators a
           field accepts comes from `GET /search/schema`; `~` is text only,
           ordered comparisons are for dates and `priority`).
         - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
-          (`assignee`, `parent`, `due`, and every custom field except CHECKBOX).
+          (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`,
+          `affectsVersion`, and every custom field except CHECKBOX).
         - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
           last). Custom fields are **not sortable** (yet).
         - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
@@ -1783,6 +2723,29 @@ paths:
           display name, `currentUser()`, or UUID fallback; dates as
           `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
           and description.
+        - **Labels** (`label`, alias `labels`) are many-valued and given by
+          **name** (`= != IN` and `IS [NOT] EMPTY`; not sortable). `label = "x"`
+          means "carries x", `label != "x"` means "does not carry x" (issues
+          with no labels at all included), `label IS EMPTY` means "carries no
+          label". Archived labels are excluded from name resolution, so a name
+          that no longer exists in the workspace is a `422` at run time.
+        - **Components** (`component`, alias `components`) are single-valued and
+          given by **name** (`= != IN` and `IS [NOT] EMPTY`) and — unlike
+          `label` — **sortable** (`ORDER BY component` sorts by component name,
+          issues without one included). Names resolve across the caller's
+          visible **projects**, so two projects may each own a "Billing" and
+          both match. Archived components are excluded from name resolution
+          (a `422` at run time), though issues keep carrying them.
+        - **Versions** — `fixVersion` ("ships in") and `affectsVersion`
+          ("broken in") are two fields over the same link table, told apart by
+          the role, both many-valued and given by **name** (`= != IN` and
+          `IS [NOT] EMPTY`; **not sortable**, so `ORDER BY fixVersion` is a
+          `422`). `fixVersion = "2.4.0"` means "ships in 2.4.0",
+          `fixVersion IS EMPTY` means "not scheduled for any release" — the
+          unassigned-work query. Names resolve across the caller's visible
+          **projects** (two projects may each ship a "2.4.0"), and archived
+          versions are excluded from name resolution (a `422` at run time),
+          though issues keep carrying them.
         - **Custom fields** are queried by `key`, operators per type — TEXT /
           TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT:
           `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER:
@@ -1843,7 +2806,17 @@ paths:
         their options in `values` under a `CUSTOM:<key>` key; USER custom fields
         use the `USER` value-source (served via `/search/suggest`). The member
         list is deliberately NOT embedded — use `/search/suggest` for
-        user-valued fields (system or custom). Workspace members only.
+        user-valued fields (system or custom). The `LABEL` picklist holds the
+        workspace's non-archived label names but is **capped at 200 entries** —
+        beyond that, fall back to `/search/suggest?field=label`. The `COMPONENT`
+        picklist holds the non-archived component names of the caller's visible
+        projects and is capped the same way (fall back to
+        `/search/suggest?field=component`), and the `VERSION` picklist does the
+        same for version names — **one** picklist backs both `fixVersion` and
+        `affectsVersion` (both declare `valueSuggest: "VERSION"`), since the two
+        roles draw from the same catalog. Field names are matched
+        case-insensitively internally, but each field is advertised here exactly
+        **once**, under its canonical camelCase name. Workspace members only.
       operationId: searchSchema
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1858,24 +2831,37 @@ paths:
   /workspaces/{workspaceId}/search/suggest:
     get:
       tags: [Search]
-      summary: Typeahead for user-valued fields
+      summary: Typeahead for user-, label-, component- and version-valued fields
       description: >-
-        Bounded server-side prefix typeahead for user-valued fields — the system
-        `assignee`/`reporter` fields and any USER-typed **custom field** (M2, by
-        its `key`) — so large workspaces never ship every member. Returns at most
-        20 matches (member display name / email). Workspace members only.
+        Bounded server-side typeahead — the system `assignee`/`reporter` fields
+        and any USER-typed **custom field** (M2, by its `key`), plus `label`
+        (alias `labels`), `component` (alias `components`) and
+        `fixVersion`/`affectsVersion` — so large workspaces never ship every
+        member, label, component or version. Returns at most 20 matches. For
+        `label`, `component` and the two version fields the match is a
+        case-insensitive **substring** (over the workspace's non-archived label
+        names, resp. the non-archived component/version names of the caller's
+        visible projects), and `%`/`_` in `q` are literal characters, not
+        wildcards. Both version roles share one catalog, so `fixVersion` and
+        `affectsVersion` return identical suggestions (names de-duplicated
+        case-insensitively, so a "2.4.0" shipped by two projects is offered
+        once). Workspace members only.
       operationId: searchSuggest
       parameters:
         - $ref: '#/components/parameters/workspaceId'
         - name: field
           in: query
           required: true
-          description: The HQL field to suggest values for (a user-valued field, e.g. `assignee`)
+          description: >-
+            The HQL field to suggest values for — a user-valued field (e.g.
+            `assignee`), `label`/`labels`, `component`/`components`, or
+            `fixVersion`/`affectsVersion`
           schema: { type: string }
         - name: q
           in: query
           required: false
-          description: Prefix to match (max 100 chars)
+          description: >-
+            Text to match (max 100 chars). `%` and `_` are treated literally.
           schema: { type: string, maxLength: 100 }
       responses:
         '200':
@@ -2077,6 +3063,21 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    labelId:
+      name: labelId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    componentId:
+      name: componentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    versionId:
+      name: versionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     adminId:
       name: id
       in: path
@@ -2121,6 +3122,65 @@ components:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
     UnprocessableReference:
       description: Unknown status/type/assignee/parent, or a workflow-forbidden transition
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    LabelNameConflict:
+      description: >-
+        A label with this name already exists in the workspace
+        (case-insensitively; an archived label keeps its name slot). The body
+        carries the winning label's id in `existingId` so a client can reuse it
+        in one round-trip instead of re-listing the catalog.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/LabelConflictProblemDetail' }
+    ComponentConflict:
+      description: >-
+        Either a component with this name already exists **in this project**
+        (case-insensitively; an archived component keeps its name slot, so
+        unarchive or rename it instead of creating a twin) — the same name in
+        another project is fine, components are project-owned — or the project
+        itself is archived and its catalog is frozen. Unlike a label conflict
+        this body carries **no** `existingId` extension: there is no on-the-fly
+        component creation to recover from.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ComponentLeadUnprocessable:
+      description: >-
+        `leadId` does not resolve to a member of this workspace ("Unknown
+        lead" — a foreign-tenant id leaks nothing), or `autoAssign` would end up
+        true with no lead.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ReleaseDateOutOfRange:
+      description: >-
+        `releaseDate` is outside `1000-01-01`…`9999-12-31`. A `LocalDate`
+        happily parses values PostgreSQL's `date` column cannot hold, so the
+        bound is enforced in the service on every path that accepts the field
+        (create, update, release). It is a **`422`**, not a `400`, unlike the
+        neighbouring name/length failures: the field is well-formed, its value
+        is simply not storable.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    VersionConflict:
+      description: >-
+        Either a version with this name already exists **in this project**
+        (case-insensitively; an archived version keeps its name slot, so
+        unarchive or rename it instead of creating a twin) — the same name in
+        another project is fine, versions are project-owned — or the project
+        itself is archived and its release plan is frozen. Like a component
+        conflict, and unlike a label one, this body carries **no** `existingId`
+        extension.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ProjectArchived:
+      description: >-
+        The project is archived — its component catalog and release plan are
+        frozen (every management call returns this; reads keep working)
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -2170,6 +3230,25 @@ components:
             length: { type: integer, description: 'Length of the highlight span (PARSE_ERROR)', example: 4 }
             token: { type: string, nullable: true, description: 'The offending token, when known (PARSE_ERROR)' }
             field: { type: string, description: 'The offending field name (SEMANTIC_ERROR)', example: assignee }
+
+    LabelConflictProblemDetail:
+      description: >-
+        The `409` body for a duplicate label name (create, or a rename that
+        races another one). Beyond the standard problem fields it carries the id
+        of the label that already owns the name, so a picker can attach the
+        existing label without a second round-trip.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            existingId:
+              type: string
+              format: uuid
+              nullable: true
+              description: >-
+                The label that already uses this name. Null only in the rare
+                case where the winner could not be re-read (e.g. it was deleted
+                between the failed insert and the lookup).
 
     MessageResponse:
       type: object
@@ -2707,6 +3786,52 @@ components:
         assigneeId: { type: string, format: uuid, nullable: true, description: Must be a workspace member }
         parentId: { type: string, format: uuid, nullable: true, description: 'Parent issue in the same project. Rejected with 422 if unknown/foreign-project, or if the parent type''s hierarchy level is not strictly greater than this issue''s type level.' }
         dueDate: { type: string, format: date, nullable: true }
+        labelIds:
+          type: array
+          nullable: true
+          maxItems: 100
+          description: >-
+            Workspace labels to attach. Absent/null = none; duplicates are
+            de-duped. Every id is resolved inside the issue's own workspace — an
+            unknown, foreign-workspace or archived label, or more than
+            `app.classification.max-labels-per-issue` (default 20) distinct ids,
+            is a `422`. Over 100 entries is rejected at binding (`400`).
+          items: { type: string, format: uuid }
+        componentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The project component to file this issue under. Resolved inside the
+            issue's own project — an unknown, foreign-project or archived
+            component is a `422`. When the component has `autoAssign` and a lead
+            and no `assigneeId` was given, the lead is assigned automatically
+            (an explicit `assigneeId` always wins; a lead who has left the
+            workspace is skipped silently and the issue stays unassigned).
+        fixVersionIds:
+          type: array
+          nullable: true
+          maxItems: 100
+          description: >-
+            Versions this change **ships in**. Absent/null = none; duplicates
+            are de-duped. Every id is resolved inside the issue's own project —
+            an unknown, foreign-project or archived version, or more than
+            `app.classification.max-version-links-per-issue` (default 20)
+            distinct ids, is a `422`. The cap is **per link type**, so
+            `fixVersionIds` and `affectsVersionIds` have independent budgets.
+            Linking an already-**released** version is allowed on purpose
+            (back-porting and post-release bookkeeping are legitimate). Over 100
+            entries is rejected at binding (`400`).
+          items: { type: string, format: uuid }
+        affectsVersionIds:
+          type: array
+          nullable: true
+          maxItems: 100
+          description: >-
+            Versions this defect **exists in** — same rules and the same
+            independent budget as `fixVersionIds`. The same version may
+            legitimately be both fix and affects on one issue.
+          items: { type: string, format: uuid }
         fields:
           type: object
           nullable: true
@@ -2732,6 +3857,50 @@ components:
         clearDueDate: { type: boolean, default: false, description: Unset the due date; ignored when dueDate is also given }
         parentId: { type: string, format: uuid, nullable: true, description: 'Set/change the parent issue. Rejected with 422 for an unknown/foreign-project parent, self-parenting, a cycle, a hierarchy-level violation, or a type change that conflicts with an existing parent or child edge.' }
         clearParent: { type: boolean, default: false, description: 'Detach the parent (mirrors clearAssignee/clearDueDate); ignored when parentId is also given' }
+        labelIds:
+          type: array
+          maxItems: 100
+          description: >-
+            **Full-replacement** label set — present: the issue ends up carrying
+            exactly these labels; `[]`: all labels removed; absent/null:
+            unchanged (no clear-flag needed, `[]` is unambiguous). Same `422`
+            rules as create (unknown/foreign/archived id, or more than
+            `app.classification.max-labels-per-issue` distinct ids); an
+            already-attached archived label may stay, it just cannot be added.
+            A change writes one `labels` history entry and bumps `version`.
+          items: { type: string, format: uuid }
+        componentId:
+          type: string
+          format: uuid
+          description: >-
+            Set/change the project component. Resolved inside the issue's own
+            project — an unknown or foreign-project id is a `422`, and so is
+            attaching an **archived** component (one already attached may stay).
+            A change writes one `component` history entry; auto-assign does NOT
+            fire on update.
+        clearComponent: { type: boolean, default: false, description: 'Unset the component (mirrors clearAssignee/clearDueDate); ignored when componentId is also given' }
+        fixVersionIds:
+          type: array
+          maxItems: 100
+          description: >-
+            **Full-replacement** fix-version set, exactly like `labelIds` —
+            present: the issue ends up linked to exactly these versions in the
+            fix role; `[]`: all fix links removed; absent/null: unchanged (no
+            clear-flag needed). The two roles are independent, so sending only
+            this one never touches the affects set. Same `422` rules as create
+            (unknown/foreign/archived id, or more than
+            `app.classification.max-version-links-per-issue` distinct ids **per
+            link type**); an already-linked archived version may stay, it just
+            cannot be added. A change writes one `fixVersions` history entry and
+            bumps `version`.
+          items: { type: string, format: uuid }
+        affectsVersionIds:
+          type: array
+          maxItems: 100
+          description: >-
+            **Full-replacement** affects-version set — same rules, independent
+            budget, and a change writes one `affectsVersions` history entry.
+          items: { type: string, format: uuid }
         fields:
           type: object
           additionalProperties: true
@@ -2742,6 +3911,21 @@ components:
         version:
           type: integer
           description: Optimistic lock — the `version` you last read; `409` when stale. Omit to skip the check.
+
+    BoardIssuesResponse:
+      type: object
+      description: |
+        Capped board issue list — the no-`size` variant of `GET .../issues`
+        (HD-79). `issues` is bounded to `cap`; when the project (after the same
+        filters) exceeds it, `truncated` is true and `totalAvailable` reports the
+        full count so the UI can show "Showing first {cap} of {totalAvailable}".
+      properties:
+        issues:
+          type: array
+          items: { $ref: '#/components/schemas/IssueResponse' }
+        truncated: { type: boolean, description: True when the project exceeds `cap` after filters }
+        totalAvailable: { type: integer, format: int64, description: Full filtered count (equals issues length when not truncated) }
+        cap: { type: integer, description: 'Server-side maximum (app.board.max-issues, default 500)' }
 
     IssueResponse:
       type: object
@@ -2763,6 +3947,34 @@ components:
         childCount: { type: integer, description: Number of direct children }
         doneChildCount: { type: integer, description: Direct children in a DONE-category status }
         dueDate: { type: string, format: date, nullable: true }
+        labels:
+          type: array
+          description: >-
+            The issue's workspace labels, ordered by name (case-insensitive);
+            `[]` when none. An archived label already attached is still listed
+            (with `archived: true`) so it can be rendered dimmed.
+          items: { $ref: '#/components/schemas/LabelRef' }
+        component:
+          allOf:
+            - $ref: '#/components/schemas/ComponentRef'
+          description: >-
+            The issue's project component, or `null`. An archived component
+            already attached is still reported (with `archived: true`) so it can
+            be rendered dimmed.
+        fixVersions:
+          type: array
+          description: >-
+            The versions this issue **ships in**, ordered by name
+            (case-insensitive); `[]` when none. An archived version already
+            linked is still listed (with `archived: true`) so it can be rendered
+            dimmed.
+          items: { $ref: '#/components/schemas/VersionRef' }
+        affectsVersions:
+          type: array
+          description: >-
+            The versions this issue is **broken in**, same shape and ordering;
+            `[]` when none. A version may appear in both lists.
+          items: { $ref: '#/components/schemas/VersionRef' }
         fields:
           type: array
           description: Filled custom fields only
@@ -2826,9 +4038,16 @@ components:
           description: >-
             Value picklists keyed by value-source token (`STATUS`, `TYPE`,
             `PRIORITY`) — the distinct names reachable by the caller's visible
-            projects — plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom
-            field, whose options are `{label, value=optionId}` pairs. `USER`
-            (system or custom) is intentionally absent (use `/search/suggest`).
+            projects — plus `LABEL` (the workspace's non-archived label names,
+            capped at 200 entries; fall back to `/search/suggest?field=label`
+            beyond that), `COMPONENT` (the non-archived component names of those
+            visible projects, capped at 200 the same way), `VERSION` (the
+            non-archived version names of those visible projects, capped at 200
+            — one picklist serves both `fixVersion` and `affectsVersion`) and a
+            `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field, whose
+            options are `{label, value=optionId}` pairs.
+            `USER` (system or custom) is intentionally absent (use
+            `/search/suggest`).
           additionalProperties:
             type: array
             items: { $ref: '#/components/schemas/SearchValueOption' }
@@ -2842,10 +4061,10 @@ components:
           type: string
           description: >-
             The field's data-type family. System fields use the internal family
-            (`ENUM_REF`/`USER_REF`/…); custom fields (M2) report their
-            `FieldType` (`TEXT`/`TEXTAREA`/`NUMBER`/`DATE`/`SELECT`/
-            `MULTI_SELECT`/`USER`/`CHECKBOX`/`URL`).
-          enum: [ENUM_REF, USER_REF, ISSUE_REF, TEXT, TEXTAREA, DATE, TIMESTAMP, NUMBER, SELECT, MULTI_SELECT, USER, CHECKBOX, URL]
+            (`ENUM_REF`/`USER_REF`/`LABEL_REF`/`VERSION_REF`/…); custom fields
+            (M2) report their `FieldType` (`TEXT`/`TEXTAREA`/`NUMBER`/`DATE`/
+            `SELECT`/`MULTI_SELECT`/`USER`/`CHECKBOX`/`URL`).
+          enum: [ENUM_REF, USER_REF, ISSUE_REF, LABEL_REF, VERSION_REF, TEXT, TEXTAREA, DATE, TIMESTAMP, NUMBER, SELECT, MULTI_SELECT, USER, CHECKBOX, URL]
           example: USER_REF
         operators:
           type: array
@@ -2878,18 +4097,23 @@ components:
     SuggestResponse:
       type: object
       description: >-
-        Typeahead result for a user-valued field (`GET /search/suggest`) —
-        `assignee`/`reporter` or a USER-typed custom field (M2).
+        Typeahead result (`GET /search/suggest`) — for a user-valued field
+        (`assignee`/`reporter` or a USER-typed custom field, M2), for
+        `label`/`labels`, `component`/`components`, or
+        `fixVersion`/`affectsVersion`.
       properties:
         field: { type: string, description: 'The queried field, echoed back', example: assignee }
         suggestions:
           type: array
-          description: Matching workspace members, capped at 20, most relevant first
+          description: >-
+            Matching workspace members — or non-archived label names for
+            `label`, component names for `component`, version names for
+            `fixVersion`/`affectsVersion` — capped at 20, most relevant first
           items:
             type: object
             properties:
               label: { type: string, description: 'Display name shown in the dropdown', example: Ada Lovelace }
-              value: { type: string, description: 'The resolvable value the client inserts (the member email)', example: ada@example.com }
+              value: { type: string, description: 'The resolvable value the client inserts — the member email, or the label/component name for `label`/`component`', example: ada@example.com }
 
     SavedFilterResponse:
       type: object
@@ -2983,6 +4207,305 @@ components:
         uploadedById: { type: string, format: uuid }
         uploadedByName: { type: string }
         createdAt: { type: string, format: date-time }
+
+    LabelResponse:
+      type: object
+      description: A workspace label — a free-form colored tag reusable across every project of the workspace.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 60, example: needs-design, description: 'Display name (casing preserved); unique per workspace case-insensitively' }
+        color: { type: string, example: '#0EA5A4', description: '`#RRGGBB` or `#RRGGBBAA`; auto-derived from the name when none was given' }
+        description: { type: string, nullable: true, maxLength: 200 }
+        archived: { type: boolean, description: 'Archived labels stay attached to their issues but can no longer be added' }
+        createdById: { type: string, format: uuid, nullable: true }
+        createdByName: { type: string, nullable: true, example: Ada Lovelace }
+        issueCount:
+          type: integer
+          nullable: true
+          description: >-
+            Issues currently carrying this label — only filled by
+            `GET …/labels?withUsage=true`; `null` otherwise.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    LabelRef:
+      type: object
+      description: A label's display summary as embedded in an issue — deliberately minimal.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: needs-design }
+        color: { type: string, example: '#0EA5A4' }
+        archived: { type: boolean, description: 'True when the label is archived (render it dimmed)' }
+
+    CreateLabelRequest:
+      type: object
+      required: [name]
+      description: Body of `POST /workspaces/{workspaceId}/labels`. Any workspace member may create a label.
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          description: >-
+            Required, non-blank. Normalized server-side (NFC, invisible
+            control/format characters stripped, whitespace collapsed; spaces are
+            allowed) and then limited to 60 characters — a longer or blank
+            result is a `400`. Unique per workspace, case-insensitively,
+            archived labels included (`409` + `existingId`).
+          example: needs-design
+        color:
+          type: string
+          nullable: true
+          pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$'
+          description: '`#RRGGBB` or `#RRGGBBAA`. Omitted → a deterministic swatch derived from the name.'
+          example: '#0EA5A4'
+        description: { type: string, nullable: true, maxLength: 200, description: 'Optional note; blank is stored as null.' }
+
+    UpdateLabelRequest:
+      type: object
+      description: >-
+        Body of `PATCH /workspaces/{workspaceId}/labels/{labelId}` — partial;
+        `null`/omitted means "leave unchanged". Workspace `OWNER`/`ADMIN` or the
+        label's creator.
+      properties:
+        name: { type: string, maxLength: 200, description: 'New name if present — same normalization, 60-char limit and case-insensitive uniqueness as create (`409` + `existingId`; a pure casing change is allowed).' }
+        color: { type: string, pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$', description: 'New color if present (`#RRGGBB`/`#RRGGBBAA`).' }
+        description: { type: string, maxLength: 200, description: 'New description if present; a blank string clears it.' }
+
+    MergeLabelsRequest:
+      type: object
+      required: [sourceIds]
+      description: Body of `POST /workspaces/{workspaceId}/labels/{labelId}/merge` — the labels to absorb into the path label.
+      properties:
+        sourceIds:
+          type: array
+          minItems: 1
+          maxItems: 50
+          description: >-
+            The labels to merge into the target and then delete. Must be
+            non-empty (`400`), at most 50 (`400`), all inside this workspace and
+            none equal to the target (`422`).
+          items: { type: string, format: uuid }
+
+    MergeLabelsResponse:
+      type: object
+      description: Outcome of a merge. No per-issue history is written — this response plus the target's bumped `updatedAt` are the record.
+      properties:
+        targetId: { type: string, format: uuid, description: The surviving label }
+        mergedLabelCount: { type: integer, description: How many source labels were absorbed and deleted }
+        reassignedIssueCount: { type: integer, description: 'How many issue attachments now point at the target (collapsed duplicates are not counted twice)' }
+
+    LabelUsageResponse:
+      type: object
+      description: How many issues currently carry a label.
+      properties:
+        issueCount: { type: integer, example: 12 }
+
+    ComponentResponse:
+      type: object
+      description: >-
+        A project component — a curated module of one project, with an optional
+        lead and an optional create-time auto-assign.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 80, example: Billing, description: 'Display name (casing preserved); unique per project case-insensitively' }
+        description: { type: string, nullable: true, maxLength: 500 }
+        leadId: { type: string, format: uuid, nullable: true, description: 'The component lead, or null' }
+        leadName: { type: string, nullable: true, example: Ada Lovelace }
+        leadAvatarUrl: { type: string, nullable: true }
+        autoAssign:
+          type: boolean
+          description: >-
+            When true, an issue created with this component and no explicit
+            `assigneeId` is assigned to the lead. Cannot be true without a lead.
+        archived: { type: boolean, description: 'Archived components stay on their issues but can no longer be attached' }
+        issueCount:
+          type: integer
+          nullable: true
+          description: >-
+            Issues currently carrying this component — only filled by
+            `GET …/components?withUsage=true` and `GET …/components/{id}/usage`;
+            `null` otherwise.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ComponentRef:
+      type: object
+      nullable: true
+      description: A component's display summary as embedded in an issue — deliberately minimal.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Billing }
+        archived: { type: boolean, description: 'True when the component is archived (render it dimmed)' }
+
+    CreateComponentRequest:
+      type: object
+      required: [name]
+      description: >-
+        Body of `POST /workspaces/{workspaceId}/projects/{projectId}/components`.
+        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          description: >-
+            Required, non-blank. Normalized server-side (NFC, invisible
+            control/format characters stripped, whitespace collapsed; spaces are
+            allowed) and then limited to 80 characters — a longer or blank
+            result is a `400`. The 200-char schema limit is only a payload
+            guard. Unique per project, case-insensitively, archived components
+            included (`409`).
+          example: Billing
+        description: { type: string, nullable: true, maxLength: 500, description: 'Optional note; blank is stored as null.' }
+        leadId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 'The component lead. Must be a member of this workspace — anything else is a `422` "Unknown lead".'
+        autoAssign:
+          type: boolean
+          default: false
+          description: >-
+            Assign new issues filed under this component to its lead. Requires
+            `leadId` (a `422` otherwise).
+
+    UpdateComponentRequest:
+      type: object
+      description: >-
+        Body of `PATCH …/components/{componentId}` — partial; `null`/omitted
+        means "leave unchanged". Project curator only.
+      properties:
+        name: { type: string, maxLength: 200, description: 'New name if present — same normalization, 80-char limit and per-project case-insensitive uniqueness as create (`409`; a pure casing change is allowed).' }
+        description: { type: string, maxLength: 500, description: 'New description if present; a blank string clears it.' }
+        leadId: { type: string, format: uuid, description: 'New lead if present; must be a workspace member (`422` otherwise).' }
+        clearLead: { type: boolean, default: false, description: 'Unset the lead (a null leadId cannot be distinguished from "not sent"); ignored when leadId is also given.' }
+        autoAssign: { type: boolean, description: 'Toggle create-time auto-assign. Turning it on while the component ends up with no lead is a `422`.' }
+
+    ComponentUsageResponse:
+      type: object
+      description: How many issues currently carry a component.
+      properties:
+        issueCount: { type: integer, example: 12 }
+
+    VersionResponse:
+      type: object
+      description: >-
+        A project version — one entry of the release plan, with a fully
+        reversible release lifecycle. The three counters are **always** present
+        (unlike `ComponentResponse.issueCount`/`LabelResponse.issueCount`, which
+        are opt-in): they cost one grouped query for the whole list, so this is
+        the Releases page's data source without a second round-trip.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 60, example: 2.4.0, description: 'Display name (casing preserved); unique per project case-insensitively' }
+        description: { type: string, nullable: true, maxLength: 500 }
+        releaseDate:
+          type: string
+          format: date
+          nullable: true
+          description: >-
+            The planned (or, once released, the effective) release date. Kept
+            across an un-release — it simply goes back to being the plan.
+          example: '2026-09-01'
+        released: { type: boolean, description: 'Moved only by POST …/release and POST …/unrelease, never by PATCH' }
+        releasedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the release was actually performed; `null` while unreleased.
+        archived: { type: boolean, description: 'Archived versions stay linked to their issues but can no longer be linked' }
+        issueCount: { type: integer, description: 'Issues with a **fix** link to this version (affects links are not counted)' }
+        doneIssueCount: { type: integer, description: 'Of those fix-linked issues, the ones in a DONE-category status — the progress bar numerator' }
+        affectsIssueCount: { type: integer, description: 'Issues with an **affects** link (triage, not progress)' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    VersionRef:
+      type: object
+      description: A version's display summary as embedded in an issue — deliberately minimal.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: 2.4.0 }
+        released: { type: boolean, description: 'True once shipped (pickers mark released options)' }
+        archived: { type: boolean, description: 'True when the version is archived (render it dimmed)' }
+
+    CreateVersionRequest:
+      type: object
+      required: [name]
+      description: >-
+        Body of `POST /workspaces/{workspaceId}/projects/{projectId}/versions`.
+        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          description: >-
+            Required, non-blank. Normalized server-side (NFC, invisible
+            control/format characters stripped, whitespace collapsed; spaces are
+            allowed) and then limited to 60 characters — a longer or blank
+            result is a `400`. The 200-char schema limit is only a payload
+            guard. Unique per project, case-insensitively, archived versions
+            included (`409`).
+          example: 2.4.0
+        description: { type: string, nullable: true, maxLength: 500, description: 'Optional note; blank is stored as null.' }
+        releaseDate:
+          type: string
+          format: date
+          nullable: true
+          description: >-
+            The **planned** release date. It does not release anything — a new
+            version is always created unreleased. Must fall within
+            `1000-01-01`…`9999-12-31` (a `422`, not a `400`, beyond that).
+          example: '2026-09-01'
+
+    UpdateVersionRequest:
+      type: object
+      description: >-
+        Body of `PATCH …/versions/{versionId}` — partial; `null`/omitted means
+        "leave unchanged". Project curator only. There is deliberately no
+        `released` field: the lifecycle moves only through `POST …/release` and
+        `POST …/unrelease`.
+      properties:
+        name: { type: string, maxLength: 200, description: 'New name if present — same normalization, 60-char limit and per-project case-insensitive uniqueness as create (`409`; a pure casing change is allowed).' }
+        description: { type: string, maxLength: 500, description: 'New description if present; a blank string clears it.' }
+        releaseDate: { type: string, format: date, description: 'New planned date if present. Must fall within `1000-01-01`…`9999-12-31` (`422` beyond that).' }
+        clearReleaseDate: { type: boolean, default: false, description: 'Unset the planned date (a null releaseDate cannot be distinguished from "not sent"); ignored when releaseDate is also given.' }
+
+    ReleaseVersionRequest:
+      type: object
+      description: >-
+        Body of `POST …/versions/{versionId}/release` — **entirely optional**,
+        both fields included, so `{}` (or no body at all) is a valid "just
+        release it".
+      properties:
+        releaseDate:
+          type: string
+          format: date
+          nullable: true
+          description: >-
+            Overrides the stored plan date. When neither this nor the stored
+            `releaseDate` is set, the server stamps today's UTC date. Must fall
+            within `1000-01-01`…`9999-12-31` (`422` beyond that).
+          example: '2026-09-01'
+        moveUnresolvedToVersionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Re-point the **fix** links of every issue in a non-DONE status to
+            this version instead. It must be another version of the same
+            project, **unreleased** and non-archived (`422` otherwise). Omit it
+            and unresolved issues simply keep the released version — releasing
+            with open work is allowed on purpose.
+
+    VersionUsageResponse:
+      type: object
+      description: >-
+        What a version is used for — backs the delete-confirmation dialog and
+        the release dialog's "move N unresolved issues to →" prompt.
+      properties:
+        fixIssueCount: { type: integer, example: 24, description: 'Issues with a fix link' }
+        affectsIssueCount: { type: integer, example: 3, description: 'Issues with an affects link' }
+        unresolvedFixIssueCount: { type: integer, example: 6, description: 'Fix-linked issues NOT in a DONE-category status — what `moveUnresolvedToVersionId` would move' }
 
     NotificationResponse:
       type: object

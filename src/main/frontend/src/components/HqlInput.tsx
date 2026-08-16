@@ -91,6 +91,13 @@ export interface HqlInputProps {
   autoFocus?: boolean
   // Visual density: 'bar' for the top search bar, 'panel' for the results page input.
   tone?: 'bar' | 'panel'
+  /**
+   * Bumped by an outside caller (the `/` global shortcut, HD-39 §8.1) to ask the
+   * input to take focus and select its contents. A nonce rather than a boolean
+   * so repeated presses always re-focus without a reset handshake; the initial
+   * value (0) is ignored so it never steals focus on mount.
+   */
+  focusNonce?: number
 }
 
 /**
@@ -101,6 +108,7 @@ export interface HqlInputProps {
  */
 export default function HqlInput({
   wsId, value, onChange, onSubmit, schema, error, placeholder, autoFocus, tone = 'panel',
+  focusNonce,
 }: HqlInputProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [caret, setCaret] = useState(0)
@@ -210,6 +218,16 @@ export default function HqlInput({
   }, [fields, fieldNames, keywords, values, fieldCtx, opPresent, prevWord, token.value, userSuggest])
 
   useEffect(() => { setHi(0) }, [suggestions.length, token.start])
+
+  // External focus request (`/`). Selecting the existing text means the next
+  // keystroke replaces a stale query instead of appending to it.
+  useEffect(() => {
+    if (!focusNonce) return
+    const el = inputRef.current
+    if (!el) return
+    el.focus()
+    el.select?.()
+  }, [focusNonce])
 
   const applySuggestion = useCallback((s: Suggestion) => {
     // A function insert (currentUser()) leaves the caret before the closing paren.

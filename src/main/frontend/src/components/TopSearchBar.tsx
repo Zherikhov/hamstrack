@@ -3,7 +3,9 @@ import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSSE } from '../hooks/useSSE'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { useUiStore } from '../uiStore'
 import { apiSearchSchema } from '../api'
+import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import NotificationBell from './NotificationBell'
 import ProjectSwitcher from './ProjectSwitcher'
 import HqlInput from './HqlInput'
@@ -25,6 +27,8 @@ export default function TopSearchBar({ wsId }: Props) {
   const cur = useCurrentProject()
   const [incoming, setIncoming] = useState<Notification | null>(null)
   const [query, setQuery] = useState('')
+  // Bumped by the `/` global shortcut (HD-39) — hand focus to the HQL box.
+  const searchFocusNonce = useUiStore(s => s.searchFocusNonce)
 
   // The workspace search is scoped to a workspace; use the route ws or the last
   // visited project's ws (via useCurrentProject) so search stays available on
@@ -47,16 +51,16 @@ export default function TopSearchBar({ wsId }: Props) {
   useSSE(wsId, {
     ISSUE_CREATED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
     },
     ISSUE_UPDATED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
       qc.invalidateQueries({ queryKey: ['issue', wsId, d.projectId, d.issueNumber] })
     },
     ISSUE_DELETED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: ['issues', wsId, d.projectId] })
+      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
     },
     COMMENT_ADDED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }
@@ -84,6 +88,7 @@ export default function TopSearchBar({ wsId }: Props) {
             onSubmit={runSearch}
             schema={schema}
             tone="bar"
+            focusNonce={searchFocusNonce}
             placeholder="Search with HQL — e.g. status = &quot;In Progress&quot;"
           />
         </div>

@@ -32,6 +32,8 @@ public class HqlValueResolver {
         return switch (field.dataType()) {
             case ENUM_REF -> resolveEnum(field, value, ctx);
             case USER_REF -> resolveUser(field, value, ctx);
+            case LABEL_REF -> resolveLabel(field, value, ctx);
+            case VERSION_REF -> resolveVersion(field, value, ctx);
             // ISSUE_REF (parent) needs an issue lookup — the compiler routes it to
             // HqlParentResolver, so it never reaches this resolver.
             case ISSUE_REF -> throw new IllegalStateException(
@@ -69,6 +71,10 @@ public class HqlValueResolver {
             case "status" -> ctx.statusIdsByName();
             case "type" -> ctx.typeIdsByName();
             case "priority" -> ctx.priorityIdsByName();
+            // component (HD-31): built from the VISIBLE PROJECT set, so a name never
+            // resolves through a project the actor cannot see — and a name owned by two
+            // visible projects maps to BOTH ids, matching issues in either.
+            case "component" -> ctx.componentIdsByName();
             default -> throw new HqlSemanticException(
                     "Field '" + field.name() + "' is not yet queryable", field.name());
         };
@@ -76,6 +82,54 @@ public class HqlValueResolver {
         if (ids == null || ids.isEmpty()) {
             throw new HqlSemanticException(
                     "No " + field.name() + " named '" + name + "' in this workspace", field.name());
+        }
+        return new ResolvedValue.Ids(ids);
+    }
+
+    // ---- LABEL_REF (label name → the workspace's label ids) ----
+
+    /**
+     * Resolve a {@code label} operand (HD-30, §3.5). Labels are workspace-scoped, so
+     * the lookup map IS the tenant boundary — a name from another workspace simply
+     * isn't there and yields the standard 422. Archived labels are excluded from name
+     * resolution; a deleted label named in a saved filter therefore surfaces as
+     * "No label named '…' in this workspace" at RUN time, which is the documented,
+     * intended behavior (save-time validation is structural only).
+     */
+    private ResolvedValue resolveLabel(FieldDescriptor field, Value value, ResolutionContext ctx) {
+        String name = requireString(field, value);
+        var ids = ctx.labelIdsByName().get(name.toLowerCase(Locale.ROOT));
+        if (ids == null || ids.isEmpty()) {
+            throw new HqlSemanticException(
+                    "No label named '" + name + "' in this workspace", field.name());
+        }
+        return new ResolvedValue.Ids(ids);
+    }
+
+    // ---- VERSION_REF (version name → the visible projects' version ids) ----
+
+    /**
+     * Resolve a {@code fixVersion} / {@code affectsVersion} operand (HD-32, §3.5).
+     * Versions are project-scoped, so the lookup map is built from the caller's
+     * <em>visible projects</em> only — a name never resolves through a project the
+     * search scope would hide, and a name shipped by two visible projects maps to BOTH
+     * ids so issues in either match.
+     *
+     * <p>ONE map serves both roles: the fix/affects distinction is applied by the
+     * compiler's {@code link_type} filter, not here — a version can legitimately be
+     * named in either role.
+     *
+     * <p>Archived versions are excluded from name resolution, so a deleted or archived
+     * version named in a saved filter surfaces as "No version named '…' in this
+     * workspace" at RUN time — the documented, intended behavior (save-time validation
+     * is structural only).
+     */
+    private ResolvedValue resolveVersion(FieldDescriptor field, Value value, ResolutionContext ctx) {
+        String name = requireString(field, value);
+        var ids = ctx.versionIdsByName().get(name.toLowerCase(Locale.ROOT));
+        if (ids == null || ids.isEmpty()) {
+            throw new HqlSemanticException(
+                    "No version named '" + name + "' in this workspace", field.name());
         }
         return new ResolvedValue.Ids(ids);
     }

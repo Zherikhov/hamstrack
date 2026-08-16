@@ -58,13 +58,37 @@ public class Issue extends BaseEntity {
     @JoinColumn(name = "parent_id")
     private Issue parent;
 
+    /**
+     * The project module this issue belongs to (HD-31), or null. Backed by the
+     * COMPOSITE FK {@code (component_id, workspace_id) → components (id, workspace_id)}
+     * with {@code ON DELETE SET NULL (component_id)}, so a cross-tenant assignment is
+     * unrepresentable and deleting a component nulls it here (§3.8, §5.2). Mapped as a
+     * plain ToOne — it joins into the board/backlog/search fetch blocks and needs no
+     * batch loader.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "component_id")
+    private Component component;
+
     @Column(nullable = false)
     private long position = 0;
 
     @Column(name = "due_date")
     private LocalDate dueDate;
 
-    @Version
+    /**
+     * Optimistic lock counter (409 on a stale {@code version} in a PATCH).
+     *
+     * <p>The annotation is <strong>fully qualified on purpose</strong>: HD-32 added a
+     * {@link Version} <em>entity</em> (a project release target) to this very package,
+     * and a same-package type always shadows an on-demand import — so a bare
+     * {@code @Version} here resolves to that entity and fails to compile with
+     * "incompatible types: Version cannot be converted to Annotation". Any future
+     * entity in {@code com.hamstrack.issue.entity} that needs optimistic locking must
+     * qualify it the same way (or import {@code jakarta.persistence.Version}
+     * explicitly, which would then shadow the entity instead).
+     */
+    @jakarta.persistence.Version
     @Column(nullable = false)
     private int version = 0;
 

@@ -4,6 +4,9 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueFieldValue;
+import com.hamstrack.issue.entity.IssueLabel;
+import com.hamstrack.issue.entity.IssueVersionLink;
+import com.hamstrack.issue.entity.VersionLinkType;
 import com.hamstrack.search.parser.ast.ComparisonOp;
 import com.hamstrack.search.parser.ast.Expr;
 import com.hamstrack.search.parser.ast.OrderBy;
@@ -45,7 +48,7 @@ import java.util.UUID;
  *
  * <p>The page query fetch-joins the five ToOne associations
  * (type/status/priority/assignee/reporter) like {@code IssueRepository
- * .findByProjectFiltered} to avoid N+1; parent summaries and roll-ups are batched
+ * .findByProjectFilteredCapped} to avoid N+1; parent summaries and roll-ups are batched
  * by the service after the page is fetched (never fetch-joined — Cartesian). The
  * count query carries the same predicate with no fetches or sort.
  */
@@ -75,6 +78,9 @@ public class HqlCompiler {
         root.fetch("priority", jakarta.persistence.criteria.JoinType.LEFT);
         root.fetch("assignee", jakarta.persistence.criteria.JoinType.LEFT);
         root.fetch("reporter", jakarta.persistence.criteria.JoinType.LEFT);
+        // HD-31: component is a ToOne, so it rides the same fetch block — IssueResponse
+        // renders it and it needs no batch loader.
+        root.fetch("component", jakarta.persistence.criteria.JoinType.LEFT);
 
         // No distinct: only ToOne assocs are fetch-joined (they never multiply rows),
         // and DISTINCT would forbid ORDER BY on a joined column (priority.position).
@@ -167,6 +173,37 @@ public class HqlCompiler {
             return dateComparison(f, op, bounds, root, cb);
         }
 
+        // label (HD-30): many-valued, so it compiles to a correlated EXISTS over the
+        // join entity rather than a column comparison — `label != "x"` means "does NOT
+        // carry x", which naturally includes issues with no labels at all.
+        if (f.dataType() == FieldDataType.LABEL_REF) {
+            var resolved = resolveIdSet(f, c.value(), ctx);
+            Predicate carries = cb.exists(labelSubquery(outer, root, cb, resolved.ids()));
+            return switch (op) {
+                case EQ -> carries;
+                case NEQ -> cb.not(carries);
+                default -> throw new HqlSemanticException(
+                        "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
+            };
+        }
+
+        // fixVersion / affectsVersion (HD-32): many-valued like label, and both roles
+        // share ONE join table — so the EXISTS additionally filters by link_type.
+        // `fixVersion != "2.4.0"` means "does NOT ship in 2.4.0", which naturally
+        // includes issues with no fix version at all (and issues that merely *affect*
+        // 2.4.0 — a different role is a different statement).
+        if (f.dataType() == FieldDataType.VERSION_REF) {
+            var resolvedVersions = resolveIdSet(f, c.value(), ctx);
+            Predicate carries = cb.exists(
+                    versionSubquery(outer, root, cb, resolvedVersions.ids(), linkTypeOf(f)));
+            return switch (op) {
+                case EQ -> carries;
+                case NEQ -> cb.not(carries);
+                default -> throw new HqlSemanticException(
+                        "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
+            };
+        }
+
         // id-set membership fields: status/type/priority(=,!=), assignee/reporter, parent
         var resolved = resolveIdSet(f, c.value(), ctx);
         Path<UUID> idPath = path(root, f.entityPath());
@@ -203,6 +240,15 @@ public class HqlCompiler {
         if (ids.isEmpty()) {
             return cb.disjunction();
         }
+        // label IN (a, b) = "carries a OR b" — one EXISTS over the union of ids.
+        if (f.dataType() == FieldDataType.LABEL_REF) {
+            return cb.exists(labelSubquery(outer, root, cb, ids));
+        }
+        // fixVersion IN (a, b) = "ships in a OR b", in THAT role — same shape, plus the
+        // link_type filter.
+        if (f.dataType() == FieldDataType.VERSION_REF) {
+            return cb.exists(versionSubquery(outer, root, cb, ids, linkTypeOf(f)));
+        }
         return path(root, f.entityPath()).in(ids);
     }
 
@@ -217,8 +263,80 @@ public class HqlCompiler {
             return e.negated() ? anyRow : cb.not(anyRow);
         }
         FieldDescriptor f = field(e.field());
+        // label IS EMPTY = "carries no label at all" (no id filter on the subquery).
+        if (f.dataType() == FieldDataType.LABEL_REF) {
+            Predicate anyLabel = cb.exists(labelSubquery(outer, root, cb, null));
+            return e.negated() ? anyLabel : cb.not(anyLabel);
+        }
+        // fixVersion IS EMPTY = "has no fix version at all" — the "unassigned work"
+        // query of §6.6. Scoped to the ROLE: an issue that only has affects versions is
+        // still `fixVersion IS EMPTY`.
+        if (f.dataType() == FieldDataType.VERSION_REF) {
+            Predicate anyLink = cb.exists(versionSubquery(outer, root, cb, null, linkTypeOf(f)));
+            return e.negated() ? anyLink : cb.not(anyLink);
+        }
         Path<?> path = path(root, f.entityPath());
         return e.negated() ? cb.isNotNull(path) : cb.isNull(path);
+    }
+
+    /**
+     * {@code EXISTS (SELECT 1 FROM IssueLabel il WHERE il.issue = <outer issue>
+     * [AND il.label.id IN :ids])} — the many-valued label predicate (HD-30 §3.5),
+     * mirroring the HD-52 custom-field EXISTS path.
+     *
+     * <p>The subquery correlates to the already-scoped outer {@code Issue} root, and
+     * {@link SearchScope#scopePredicate} stays the OUTERMOST conjunction — so this
+     * path cannot widen the workspace/visible-project boundary. Ids are bound Criteria
+     * parameters; {@code null} means "any label row" (used by {@code IS EMPTY}).
+     */
+    private Subquery<Integer> labelSubquery(CommonAbstractCriteria outer, Root<Issue> root,
+                                            CriteriaBuilder cb, List<UUID> labelIds) {
+        Subquery<Integer> sq = outer.subquery(Integer.class);
+        Root<IssueLabel> il = sq.from(IssueLabel.class);
+        sq.select(cb.literal(1));
+        Predicate correlate = cb.equal(il.get("issue"), root);
+        sq.where(labelIds == null
+                ? correlate
+                : cb.and(correlate, il.get("label").get("id").in(labelIds)));
+        return sq;
+    }
+
+    /**
+     * {@code EXISTS (SELECT 1 FROM IssueVersionLink vl WHERE vl.issue = <outer issue>
+     * AND vl.linkType = :role [AND vl.version.id IN :ids])} — the many-valued
+     * fix/affects predicate (HD-32 §3.5).
+     *
+     * <p>Same shape as {@link #labelSubquery}, plus the {@code link_type} filter that
+     * tells the two roles apart inside their shared join table: without it
+     * {@code fixVersion = "2.4.0"} would also match issues that merely <em>affect</em>
+     * 2.4.0. The subquery correlates to the already-scoped outer {@code Issue} root,
+     * and {@link SearchScope#scopePredicate} stays the OUTERMOST conjunction — so this
+     * path cannot widen the workspace/visible-project boundary. Ids and the role are
+     * bound Criteria parameters; {@code null} ids mean "any link in that role" (used
+     * by {@code IS EMPTY}).
+     */
+    private Subquery<Integer> versionSubquery(CommonAbstractCriteria outer, Root<Issue> root,
+                                              CriteriaBuilder cb, List<UUID> versionIds,
+                                              VersionLinkType linkType) {
+        Subquery<Integer> sq = outer.subquery(Integer.class);
+        Root<IssueVersionLink> vl = sq.from(IssueVersionLink.class);
+        sq.select(cb.literal(1));
+        Predicate correlate = cb.and(
+                cb.equal(vl.get("issue"), root),
+                cb.equal(vl.get("linkType"), linkType));
+        sq.where(versionIds == null
+                ? correlate
+                : cb.and(correlate, vl.get("version").get("id").in(versionIds)));
+        return sq;
+    }
+
+    /**
+     * Which role a VERSION_REF descriptor stands for. Keyed off the descriptor's
+     * canonical name, so the registry stays the single place the two fields are
+     * declared.
+     */
+    private VersionLinkType linkTypeOf(FieldDescriptor f) {
+        return "affectsVersion".equals(f.name()) ? VersionLinkType.AFFECTS : VersionLinkType.FIX;
     }
 
     // ---- date comparison ----
@@ -599,8 +717,32 @@ public class HqlCompiler {
             case "assignee" -> root.get("assignee").get("displayName");
             case "reporter" -> root.get("reporter").get("displayName");
             case "parent" -> root.get("parent").get("id");
+            // HD-31: sort by the component's NAME, through an explicit LEFT join.
+            // `root.get("component").get("name")` would imply an INNER join and
+            // silently drop every component-less issue from `ORDER BY component`.
+            case "component" -> componentJoin(root).get("name");
             default -> root.get(f.entityPath());
         };
+    }
+
+    /**
+     * The page query's existing {@code LEFT JOIN FETCH component} as a plain
+     * {@link jakarta.persistence.criteria.Join}, so ordering reuses it instead of
+     * adding a second join to the same table. Falls back to a fresh LEFT join (the
+     * count query has no fetches, and a provider whose {@code Fetch} is not a
+     * {@code Join} still gets correct SQL).
+     */
+    private jakarta.persistence.criteria.From<?, ?> componentJoin(Root<Issue> root) {
+        for (var fetch : root.getFetches()) {
+            if ("component".equals(fetch.getAttribute().getName())
+                    && fetch instanceof jakarta.persistence.criteria.Join<?, ?> join) {
+                return join;
+            }
+        }
+        for (var join : root.getJoins()) {
+            if ("component".equals(join.getAttribute().getName())) return join;
+        }
+        return root.join("component", jakarta.persistence.criteria.JoinType.LEFT);
     }
 
     private <T> Path<T> path(Root<Issue> root, String dotted) {

@@ -6,11 +6,7 @@ import com.hamstrack.issue.dto.ProjectConfigResponse;
 import com.hamstrack.issue.dto.StatusResponse;
 import com.hamstrack.issue.service.FieldValueService;
 import com.hamstrack.issue.service.ProjectConfigService;
-import com.hamstrack.project.exception.ProjectNotFoundException;
-import com.hamstrack.project.repository.ProjectRepository;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.transaction.annotation.Transactional;
@@ -30,9 +26,7 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ProjectConfigController {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
-    private final ProjectRepository projectRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ProjectConfigService projectConfigService;
     private final FieldValueService fieldValueService;
 
@@ -41,12 +35,7 @@ public class ProjectConfigController {
     public ProjectConfigResponse get(@AuthenticationPrincipal User actor,
                                      @PathVariable UUID workspaceId,
                                      @PathVariable UUID projectId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
 
         var statuses = projectConfigService.statuses(project).stream()
                 .map(StatusResponse::of).toList();

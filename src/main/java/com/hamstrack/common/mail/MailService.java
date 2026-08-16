@@ -1,11 +1,13 @@
 package com.hamstrack.common.mail;
 
 import com.hamstrack.common.config.AppProperties;
+import com.hamstrack.common.config.MailAsyncProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailOutcome;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import jakarta.mail.MessagingException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.mail.MailPreparationException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
@@ -13,6 +15,7 @@ import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class MailService {
@@ -23,8 +26,17 @@ public class MailService {
     private final JavaMailSender mailSender;
     private final AppProperties appProperties;
     private final ProductMetrics metrics;
+    private final MailAsyncProperties mailAsyncProperties;
+    private final FailedEmailRepository failedEmailRepository;
 
-    @Async
+    // Account-critical mail (verification + reset): a lost one leaves a user unable
+    // to complete signup/recovery, so these retry then dead-letter. INVITE is
+    // best-effort (log-only) by design.
+    private static boolean isCritical(EmailType type) {
+        return type == EmailType.VERIFICATION || type == EmailType.PASSWORD_RESET;
+    }
+
+    @Async("mailExecutor")
     public void sendVerificationEmail(String to, String token) {
         // Links to the SPA page (not the API): mail scanners prefetch GET links,
         // which would consume the one-time token before the user clicks
@@ -35,7 +47,7 @@ public class MailService {
         sendHtml(EmailType.VERIFICATION, to, "Confirm your Hamstrack email", text, verificationHtml(link));
     }
 
-    @Async
+    @Async("mailExecutor")
     public void sendPasswordResetEmail(String to, String token) {
         var link = appProperties.baseUrl() + "/reset-password?token=" + token;
         send(EmailType.PASSWORD_RESET, to, "Reset your Hamstrack password",
@@ -43,7 +55,7 @@ public class MailService {
                 + "\n\nThis link expires in 1 hour.");
     }
 
-    @Async
+    @Async("mailExecutor")
     public void sendWorkspaceInviteEmail(String to, String workspaceName, String token) {
         var link = appProperties.baseUrl() + "/accept-invite?token=" + token;
         send(EmailType.INVITE, to, "You've been invited to " + workspaceName + " on Hamstrack",
@@ -97,41 +109,107 @@ public class MailService {
                 """.formatted(FONT, link);
     }
 
-    // These run on the @Async executor and may throw (SMTP failure); the metric
-    // records success/failure but MUST NOT swallow the exception — behavior is
-    // unchanged, we only observe it, so record failure then rethrow.
+    // A single SMTP send attempt. Throws on failure — the retry wrapper decides
+    // whether to retry / dead-letter (critical) or drop (best-effort).
     private void send(EmailType type, String to, String subject, String text) {
-        try {
+        sendWithDurability(type, to, subject, () -> {
             var message = new SimpleMailMessage();
             message.setTo(to);
             message.setSubject(subject);
             message.setText(text);
             message.setFrom(appProperties.mailFrom());
             mailSender.send(message);
-            metrics.emailSent(type, EmailOutcome.SUCCESS);
-        } catch (RuntimeException e) {
-            metrics.emailSent(type, EmailOutcome.FAILURE);
-            throw e;
-        }
+        });
     }
 
     private void sendHtml(EmailType type, String to, String subject, String plainText, String html) {
-        try {
+        sendWithDurability(type, to, subject, () -> {
             var message = mailSender.createMimeMessage();
-            // multipart/alternative: HTML for normal clients, plain text as fallback
-            var helper = new MimeMessageHelper(message, true, "UTF-8");
-            helper.setTo(to);
-            helper.setSubject(subject);
-            helper.setFrom(appProperties.mailFrom());
-            helper.setText(plainText, html);
+            try {
+                // multipart/alternative: HTML for normal clients, plain text as fallback
+                var helper = new MimeMessageHelper(message, true, "UTF-8");
+                helper.setTo(to);
+                helper.setSubject(subject);
+                helper.setFrom(appProperties.mailFrom());
+                helper.setText(plainText, html);
+            } catch (MessagingException e) {
+                throw new MailPreparationException("Failed to build email", e);
+            }
             mailSender.send(message);
-            metrics.emailSent(type, EmailOutcome.SUCCESS);
-        } catch (MessagingException e) {
-            metrics.emailSent(type, EmailOutcome.FAILURE);
-            throw new MailPreparationException("Failed to build email", e);
-        } catch (RuntimeException e) {
-            metrics.emailSent(type, EmailOutcome.FAILURE);
-            throw e;
+        });
+    }
+
+    @FunctionalInterface
+    private interface SendAttempt {
+        void run();
+    }
+
+    /**
+     * Runs a send with criticality-aware durability. CRITICAL mail (verification +
+     * reset) retries up to {@code app.mail.critical.max-attempts} with a fixed
+     * backoff; on final failure it writes a {@code failed_email} dead-letter row (no
+     * raw token) + ERROR log so the {@code EmailFailures} alert fires. Best-effort
+     * mail (invite) records the FAILURE metric and logs — no retry, no dead-letter,
+     * unchanged behaviour. Runs on the {@code mailExecutor}; the exception is
+     * observed and swallowed at the end (nothing awaits the async result).
+     */
+    private void sendWithDurability(EmailType type, String to, String subject, SendAttempt attempt) {
+        boolean critical = isCritical(type);
+        int maxAttempts = critical ? Math.max(1, mailAsyncProperties.critical().maxAttempts()) : 1;
+        long backoffMs = mailAsyncProperties.critical().retryBackoffMs();
+
+        RuntimeException last = null;
+        for (int i = 1; i <= maxAttempts; i++) {
+            try {
+                attempt.run();
+                metrics.emailSent(type, EmailOutcome.SUCCESS);
+                return;
+            } catch (RuntimeException e) {
+                last = e;
+                metrics.emailSent(type, EmailOutcome.FAILURE);
+                if (i < maxAttempts) {
+                    sleepQuietly(backoffMs);
+                }
+            }
+        }
+
+        // All attempts exhausted.
+        if (critical) {
+            log.error("Critical {} email to {} failed after {} attempt(s) — dead-lettering",
+                    type, to, maxAttempts, last);
+            deadLetter(type, to, subject, maxAttempts, last);
+        } else {
+            log.warn("Best-effort {} email to {} failed", type, to, last);
+        }
+    }
+
+    private void deadLetter(EmailType type, String to, String subject, int attempts, RuntimeException error) {
+        try {
+            var row = new FailedEmail();
+            row.setEmailType(type.name());
+            row.setRecipient(truncate(to, 320));
+            row.setSubject(truncate(subject, 255));
+            row.setLastError(error == null ? null : truncate(String.valueOf(error.getMessage()), 1000));
+            row.setAttempts(attempts);
+            failedEmailRepository.save(row);
+        } catch (RuntimeException persistError) {
+            // A dead-letter write failure must not propagate onto the async executor
+            // (nothing awaits it); the ERROR log above + metric already captured it.
+            log.error("Failed to persist dead-letter row for {} email to {}", type, to, persistError);
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max);
+    }
+
+    private static void sleepQuietly(long millis) {
+        if (millis <= 0) return;
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 }

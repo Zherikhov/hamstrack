@@ -10,7 +10,17 @@
 import { readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 
-const ROOT = process.cwd();
+// Resolve the repo root independently of the shell's current directory — a `cd`
+// into a subdir (e.g. src/main/frontend) must not change which run.json/diff we read.
+function repoRoot() {
+  if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR.replace(/\\/g, "/");
+  try {
+    return execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim();
+  } catch {
+    return process.cwd().replace(/\\/g, "/");
+  }
+}
+const ROOT = repoRoot();
 const RUN = `${ROOT}/.claude/pipeline/run.json`;
 
 function allow() { process.exit(0); }                 // let the session finish

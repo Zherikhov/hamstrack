@@ -7,14 +7,10 @@ import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.exception.InsufficientProjectRoleException;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
-import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,22 +33,19 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ScopeResolver {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
-    private final ProjectRepository projectRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ProjectMemberRepository projectMemberRepository;
 
     /** Workspace whose config the actor may administer (OWNER or ADMIN). */
     @Transactional(readOnly = true)
     public Workspace requireWorkspaceAdmin(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var member = workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        if (!member.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
+        // Delegate the resolve+membership half (404 for missing/non-member) to the
+        // tenancy primitive; keep the delegated-admin 403-on-insufficient-role rule.
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        if (!ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
             throw new InsufficientWorkspaceRoleException();
         }
-        return workspace;
+        return ctx.workspace();
     }
 
     /**
@@ -62,18 +55,55 @@ public class ScopeResolver {
      */
     @Transactional(readOnly = true)
     public Project requireProjectAdmin(User actor, UUID workspaceId, UUID projectId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        if (!workspaceMemberRepository.existsByWorkspaceAndUser(workspace, actor)) {
-            throw new WorkspaceNotFoundException();
-        }
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        // Delegate the resolve workspace+membership+project half (404s) to the
+        // primitive; keep the delegated-admin 403-on-insufficient-role rule.
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         var member = projectMemberRepository.findByProjectAndUser(project, actor)
                 .orElseThrow(ProjectNotFoundException::new);
         if (!member.getRole().isAtLeast(ProjectRole.MANAGER)) {
             throw new InsufficientProjectRoleException();
         }
         return project;
+    }
+
+    /**
+     * Project whose <em>content catalog</em> (components, versions — HD-6 §3.3) the
+     * actor may curate: a project <strong>MANAGER</strong>, <em>or</em> an
+     * OWNER/ADMIN of the enclosing workspace who may not be a project member at all.
+     *
+     * <p>Semantics, in order:
+     * <ol>
+     *   <li>{@code requireProjectMember} — a missing workspace, a missing project or a
+     *       non-member of the workspace all yield <strong>404</strong>, never 403 (no
+     *       existence leak across tenants);</li>
+     *   <li>workspace role ≥ ADMIN → pass;</li>
+     *   <li>else project role ≥ MANAGER → pass;</li>
+     *   <li>else <strong>403</strong> {@link InsufficientProjectRoleException} — the
+     *       caller already knows the project exists, so a role failure is honest.</li>
+     * </ol>
+     *
+     * <p>Rationale for the workspace-admin bypass: a workspace admin already edits
+     * that project's <em>bindings</em> through
+     * {@code PATCH /workspaces/{ws}/admin/projects/{p}/bindings} without being a
+     * project member, so refusing them the component list would be arbitrary.
+     * Differs from {@link #requireProjectAdmin} (which is MANAGER-only and 404s a
+     * non-project-member) exactly in that bypass. {@code SystemRole.ADMIN} gets
+     * nothing extra — instance admins act through their workspace membership, as they
+     * do for every workspace-scoped resource.
+     */
+    @Transactional(readOnly = true)
+    public Project requireProjectCurator(User actor, UUID workspaceId, UUID projectId) {
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        if (ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
+            return ctx.project();
+        }
+        boolean manager = projectMemberRepository.findByProjectAndUser(ctx.project(), actor)
+                .map(ProjectMember::getRole)
+                .filter(r -> r.isAtLeast(ProjectRole.MANAGER))
+                .isPresent();
+        if (!manager) {
+            throw new InsufficientProjectRoleException();
+        }
+        return ctx.project();
     }
 }

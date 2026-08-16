@@ -46,3 +46,50 @@ export function nextSortDir(current: ParsedOrder, field: string): SortDir {
   }
   return 'ASC'
 }
+
+// ── Emitting HQL from user-typed text (HD-39 §6.6) ───────────────────────────
+// MANDATORY for anything that interpolates free text into a query (the command
+// palette's `text ~ …` search and its `assignee = …` People rows). The server
+// lexer accepts ONLY the `\"`, `\'` and `\\` escapes — every other backslash
+// sequence is a parse error (422), so raw interpolation of a title containing a
+// quote or a Windows path would break the query. Never build an HQL string
+// literal by hand; always go through sanitizeForHql() + hqlQuote().
+
+/** Wrap a value in double quotes, escaping `\` and `"` per the lexer grammar. */
+export function hqlQuote(s: string): string {
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+}
+
+/** Longest free-text fragment we ever send — matches the /suggest endpoint's cap. */
+export const HQL_TEXT_MAX = 100
+
+// ASCII control characters: anything below 0x20, plus DEL (0x7F). Tested by
+// code point rather than a character-class regex so no raw control byte ever
+// has to appear in this source file.
+function isControlChar(code: number): boolean {
+  return code < 0x20 || code === 0x7f
+}
+
+/**
+ * Normalise user-typed text before it becomes an HQL string literal:
+ * trim -> replace control characters with a space -> collapse whitespace runs ->
+ * truncate. Run this BEFORE hqlQuote(); the pair together makes a title
+ * containing quotes or a trailing backslash a valid query instead of a 422.
+ */
+export function sanitizeForHql(s: string): string {
+  let out = ''
+  for (const ch of s.trim()) {
+    out += isControlChar(ch.charCodeAt(0)) ? ' ' : ch
+  }
+  return out.replace(/\s+/g, ' ').slice(0, HQL_TEXT_MAX)
+}
+
+/** `text ~ "…"` for a user-typed fragment — the palette's issue-search query. */
+export function hqlTextContains(text: string): string {
+  return `text ~ ${hqlQuote(sanitizeForHql(text))}`
+}
+
+/** `assignee = "…"` for a member's email — the palette's People rows. */
+export function hqlAssigneeIs(email: string): string {
+  return `assignee = ${hqlQuote(sanitizeForHql(email))}`
+}

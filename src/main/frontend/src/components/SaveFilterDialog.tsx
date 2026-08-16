@@ -66,6 +66,9 @@ export default function SaveFilterDialog({ wsId, hql, editing, onClose, onSaved,
 
   return (
     <div
+      // Tells the global-shortcut hook that this locally-owned modal owns the
+      // keyboard, so `c` / `/` / `?` / g-chords stay inert while it is up (HD-39 §8.3).
+      data-modal-open="true"
       className="fixed inset-0 flex items-center justify-center"
       style={{ background: 'rgba(16,24,40,0.45)', zIndex: 100 }}
       onMouseDown={onClose}

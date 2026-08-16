@@ -19,5 +19,10 @@ public record RateLimitProperties(
         @DefaultValue("5") int loginFailureThreshold,
         // First backoff delay; doubles with each further failure
         @DefaultValue("30") long loginBackoffBaseSeconds,
-        @DefaultValue("900") long loginBackoffMaxSeconds
+        @DefaultValue("900") long loginBackoffMaxSeconds,
+        // Whether to key the per-IP budget on the rightmost X-Forwarded-For entry.
+        // Default false (DC-safe): a directly-reachable app port lets a client spoof
+        // XFF and dodge the per-IP limit. Enable ONLY behind a trusted proxy that
+        // strips client-supplied XFF (prod Caddy does).
+        @DefaultValue("false") boolean trustForwardedFor
 ) {}

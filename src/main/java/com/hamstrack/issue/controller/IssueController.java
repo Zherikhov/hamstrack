@@ -32,6 +32,15 @@ import java.util.UUID;
  * are author-only; attachment deletion is allowed to the uploader or a
  * project MANAGER. Deleting an issue requires MANAGER and removes stored
  * attachment blobs.
+ *
+ * <p>Beyond its taxonomy an issue also carries <em>classification content</em>:
+ * workspace {@code labels} (HD-30), one project {@code component} (HD-31) and the
+ * fix/affects {@code versions} (HD-32). The collection-valued ones
+ * ({@code labelIds}, {@code fixVersionIds}, {@code affectsVersionIds}) are
+ * FULL-REPLACEMENT sets on create/update — {@code []} clears, absent leaves
+ * unchanged — while the single-valued {@code componentId} follows the
+ * {@code assigneeId}/{@code clearAssignee} convention. An unknown, foreign-tenant
+ * or archived id in any of them is a <strong>422</strong>, never a 404.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/issues")
@@ -61,10 +70,33 @@ public class IssueController {
     }
 
     /**
-     * Issue list. Without {@code size} → the full list (the board needs every
-     * card; this is the documented exception to pagination). With {@code size} →
-     * a {@link PageResponse} (backlog); {@code excludeDone} drops DONE-category
+     * Issue list. Without {@code size} → the board view: a capped
+     * {@link BoardIssuesResponse} ({@code { issues, truncated, totalAvailable, cap }})
+     * bounded server-side by {@code app.board.max-issues} (HD-79 — the board needs
+     * every card, but not an unbounded list). With {@code size} → a
+     * {@link PageResponse} (backlog); {@code excludeDone} drops DONE-category
      * statuses server-side.
+     *
+     * <p><strong>Label filter (HD-30 §3.6) is server-side</strong>, unlike the HD-43
+     * quick-filter chips: repeat {@code ?labelId=} per label and set
+     * {@code labelMatch=any|all} (default {@code any}). It must search the whole
+     * project, not just the capped page already on screen — so it is a query
+     * parameter, ANDed with {@code statusId}/{@code assigneeId}/{@code priorityId}.
+     * {@code labelMatch} is a closed set ({@link LabelMatch}) — an unknown value is a
+     * 400, never a silent fall-through to the broader "any"; the number of distinct
+     * {@code labelId} values is capped at
+     * {@code app.classification.max-labels-per-issue} (400 beyond it).
+     *
+     * <p><strong>Component filter (HD-31 §3.6)</strong> is server-side for the same
+     * reason: {@code ?componentId=} is a single optional uuid ANDed with everything
+     * above. It is a plain ToOne column, so it needs no sub-select. An id from another
+     * project simply matches nothing — never an error, never a leak.
+     *
+     * <p><strong>Fix-version filter (HD-32 §3.6)</strong>, likewise server-side:
+     * {@code ?fixVersionId=} is a single optional uuid ANDed with everything above,
+     * compiled as a correlated EXISTS restricted to the <strong>FIX</strong> link
+     * type — an affects link to the same version must not match a "fix version"
+     * filter. An id from another project simply matches nothing.
      */
     @GetMapping
     public ResponseEntity<?> list(@AuthenticationPrincipal User actor,
@@ -73,17 +105,26 @@ public class IssueController {
                                   @RequestParam(required = false) UUID statusId,
                                   @RequestParam(required = false) UUID assigneeId,
                                   @RequestParam(required = false) UUID priorityId,
+                                  @RequestParam(required = false) UUID componentId,
+                                  @RequestParam(required = false) List<UUID> labelId,
+                                  @RequestParam(defaultValue = "any") String labelMatch,
+                                  @RequestParam(required = false) UUID fixVersionId,
                                   @RequestParam(required = false) Integer page,
                                   @RequestParam(required = false) Integer size,
                                   @RequestParam(defaultValue = "false") boolean excludeDone) {
+        // Parsed here (not bound as an enum @RequestParam): Spring's String→enum
+        // conversion is case-sensitive, and the wire contract is lowercase any/all.
+        var match = LabelMatch.parse(labelMatch);
         if (size == null) {
-            return ResponseEntity.ok(
-                    issueService.list(actor, workspaceId, projectId, statusId, assigneeId, priorityId));
+            return ResponseEntity.ok(issueService.listCapped(
+                    actor, workspaceId, projectId, statusId, assigneeId, priorityId,
+                    componentId, labelId, match, fixVersionId));
         }
         var pageable = Paging.of(page, size,
                 Sort.by(Sort.Order.asc("position"), Sort.Order.desc("createdAt")));
         return ResponseEntity.ok(issueService.listPaged(
-                actor, workspaceId, projectId, statusId, assigneeId, priorityId, excludeDone, pageable));
+                actor, workspaceId, projectId, statusId, assigneeId, priorityId,
+                componentId, labelId, match, fixVersionId, excludeDone, pageable));
     }
 
     @GetMapping("/{number}")

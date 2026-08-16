@@ -2,12 +2,19 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.config.BoardProperties;
+import com.hamstrack.common.config.ClassificationProperties;
 import com.hamstrack.common.dto.PageResponse;
+import com.hamstrack.common.event.FieldChange;
+import com.hamstrack.common.event.IssueCreated;
+import com.hamstrack.common.event.IssueDeleted;
+import com.hamstrack.common.event.IssueUpdated;
 import com.hamstrack.common.observability.ProductMetrics;
-import com.hamstrack.common.sse.SseRegistry;
+import com.hamstrack.issue.dto.BoardIssuesResponse;
 import com.hamstrack.issue.dto.CreateIssueRequest;
 import com.hamstrack.issue.dto.IssueHistoryResponse;
 import com.hamstrack.issue.dto.IssueResponse;
+import com.hamstrack.issue.dto.LabelMatch;
 import com.hamstrack.issue.dto.UpdateIssueRequest;
 import com.hamstrack.issue.entity.*;
 import com.hamstrack.issue.exception.IssueNotFoundException;
@@ -15,14 +22,14 @@ import com.hamstrack.issue.repository.*;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -35,7 +42,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -45,7 +51,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class IssueService {
 
-    private final WorkspaceRepository workspaceRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
@@ -57,14 +63,64 @@ public class IssueService {
     private final IssueHistoryRepository historyRepository;
     private final ProjectConfigService projectConfigService;
     private final FieldValueService fieldValueService;
+    private final LabelService labelService;
+    private final ComponentService componentService;
+    private final VersionService versionService;
     private final AttachmentService attachmentService;
-    private final SseRegistry sseRegistry;
+    private final ApplicationEventPublisher eventPublisher;
     private final ProductMetrics metrics;
+    private final BoardProperties boardProperties;
+    private final ClassificationProperties classificationProperties;
     // The MVC Jackson 3 mapper (carries the Jackson2NodeModule bridge). Used to
     // serialize the creation response INSIDE the creation transaction, so a
     // serialization failure rolls the insert back rather than committing then
     // 500ing during MVC's post-commit writing — see createSerialized / bug #2.
     private final JsonMapper jsonMapper;
+
+    /**
+     * The board/backlog label filter parameters (HD-30 §3.6), normalized once so every
+     * repository call binds the same triple.
+     *
+     * <p><strong>Empty-{@code IN}-list sentinel:</strong> JPQL/Hibernate reject an empty
+     * {@code IN} list, so with no labels selected we bind
+     * {@code ids = [00000000-0000-0000-0000-000000000000]} (a UUID no row can carry)
+     * together with {@code count = 0} — and {@code :labelCount = 0} short-circuits the
+     * whole predicate before the sub-select is ever evaluated. Never bind an empty list.
+     *
+     * <p><strong>Bounded:</strong> the repeatable {@code ?labelId=} parameter is
+     * capped at {@code app.classification.max-labels-per-issue} distinct ids (an issue
+     * can't carry more than that anyway, so a longer list can only be noise or abuse).
+     * Beyond it → 400. Two reasons: a large {@code IN} inside a correlated per-row
+     * sub-select is real work on every board load, and each distinct list length
+     * compiles to a distinct SQL string — an uncapped parameter churns the query-plan
+     * cache.
+     *
+     * @param ids             label ids to match, or the sentinel when the filter is off
+     * @param count           number of distinct selected labels (0 = filter off)
+     * @param requiredMatches 1 for {@code any} (OR), {@code count} for {@code all} (AND)
+     */
+    record LabelFilter(List<UUID> ids, int count, long requiredMatches) {
+
+        private static final List<UUID> NO_MATCH_SENTINEL = List.of(new UUID(0, 0));
+
+        static LabelFilter of(List<UUID> labelIds, LabelMatch labelMatch, int maxLabels) {
+            if (labelIds == null || labelIds.isEmpty()) {
+                return new LabelFilter(NO_MATCH_SENTINEL, 0, 1L);
+            }
+            var distinct = new java.util.LinkedHashSet<>(labelIds);
+            distinct.remove(null);
+            if (distinct.isEmpty()) {
+                return new LabelFilter(NO_MATCH_SENTINEL, 0, 1L);
+            }
+            if (distinct.size() > maxLabels) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "At most " + maxLabels + " labelId filter values");
+            }
+            // Default is "any" (OR) — matches tag-filter intuition (open question 2).
+            return new LabelFilter(List.copyOf(distinct), distinct.size(),
+                    labelMatch == LabelMatch.ALL ? distinct.size() : 1L);
+        }
+    }
 
     /**
      * Atomically create: assembles AND serializes the {@link IssueResponse} inside the
@@ -86,9 +142,9 @@ public class IssueService {
 
     @Transactional
     public IssueResponse create(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var workspace = ctx.workspace();
+        var project = ctx.project();
         requireNotArchived(project);
 
         var type = projectConfigService.requireTypeInSet(project, resolveType(req.typeId()));
@@ -97,6 +153,28 @@ public class IssueService {
                 ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
                 // re-resolve the default id to a managed entity (the config cache hands back detached ones)
                 : resolvePriority(projectConfigService.defaultPriorityId(project));
+        // HD-30: resolve labels BEFORE the issue is built/saved — a foreign, unknown
+        // or over-cap id must 422 before anything is written (and resolving after a
+        // mutation is the documented @Version double-bump trap).
+        var labels = labelService.resolveForIssue(workspace, req.labelIds());
+        // HD-31: same ordering rule. A component of another project is a 422 "Unknown
+        // component"; assigning an ARCHIVED one is a 422 too (every create-time value
+        // is a new assignment).
+        var component = componentService.resolveForIssue(project, req.componentId());
+        componentService.requireAssignable(component);
+        // HD-32: same ordering rule again. Each role is resolved against the issue's OWN
+        // project and carries its own cap — a foreign/unknown id or an over-cap set is a
+        // 422 before anything is written.
+        var fixVersions = versionService.resolveForIssue(project, req.fixVersionIds(), VersionLinkType.FIX);
+        var affectsVersions = versionService.resolveForIssue(
+                project, req.affectsVersionIds(), VersionLinkType.AFFECTS);
+        // Auto-assign (§5.1): an explicit assigneeId ALWAYS wins; otherwise a component
+        // with auto-assign + a lead who is still a workspace member supplies one. A
+        // stale lead is skipped silently — it must never fail issue creation. Resolved
+        // here, with the other reads, for the same @Version ordering reason.
+        var assignee = req.assigneeId() != null
+                ? resolveAssignee(workspace, req.assigneeId())
+                : componentService.autoAssignee(workspace, component);
 
         // Atomic seq increment
         long seq = projectRepository.incrementAndGetIssueSeq(project.getId());
@@ -116,9 +194,8 @@ public class IssueService {
             issue.setClosedAt(OffsetDateTime.now());
         }
 
-        if (req.assigneeId() != null) {
-            issue.setAssignee(resolveAssignee(workspace, req.assigneeId()));
-        }
+        issue.setAssignee(assignee);
+        issue.setComponent(component);
         if (req.parentId() != null) {
             var parent = resolveParent(req.parentId(), project);
             // Adjacency guard: parent.type must be exactly one tier above the child
@@ -129,6 +206,13 @@ public class IssueService {
         }
         issue.setDueDate(req.dueDate());
         issueRepository.save(issue);
+        // Labels attach after the insert (the join rows need a persisted issue id).
+        // No history entries for create-time values (consistent with custom fields).
+        labelService.attachAll(issue, labels);
+        // Same for the version links (HD-32) — the join rows need a persisted issue id,
+        // and create-time values write no history.
+        versionService.attachAll(issue, fixVersions, VersionLinkType.FIX);
+        versionService.attachAll(issue, affectsVersions, VersionLinkType.AFFECTS);
         // Only system (global) type names are label-safe; scoped types → "custom"
         metrics.issueCreated(type.getName(),
                 type.getScopeWorkspaceId() == null && type.getScopeProjectId() == null);
@@ -137,19 +221,43 @@ public class IssueService {
         // required-on-create); no history entries for initial values
         fieldValueService.applyValues(issue, req.fields(), true, (f, o, n) -> {});
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_CREATED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issue.getNumber()));
+        eventPublisher.publishEvent(new IssueCreated(workspaceId, projectId, issue.getNumber()));
         return toResponse(issue);
     }
 
+    /**
+     * Capped board issue list (HD-79). The no-{@code size} board path used to return
+     * EVERY issue in the project (OOM/latency risk); this bounds it to
+     * {@code app.board.max-issues}, enforced server-side (never client-overridable).
+     * Fetches {@code cap+1} in one query to detect truncation, trims to {@code cap},
+     * and reports {@code totalAvailable} via a cheap filtered count so the SPA can
+     * render a truncation banner. Tenant scoping + filters are identical to before.
+     */
     @Transactional(readOnly = true)
-    public List<IssueResponse> list(User actor, UUID workspaceId, UUID projectId,
-                                    UUID statusId, UUID assigneeId, UUID priorityId) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issues = issueRepository.findByProjectFiltered(project, statusId, assigneeId, priorityId);
-        return toResponses(issues);
+    public BoardIssuesResponse listCapped(User actor, UUID workspaceId, UUID projectId,
+                                          UUID statusId, UUID assigneeId, UUID priorityId,
+                                          UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
+                                          UUID fixVersionId) {
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var labelFilter = LabelFilter.of(labelIds, labelMatch,
+                classificationProperties.maxLabelsPerIssue());
+
+        int cap = boardProperties.maxIssues();
+        // Fetch cap+1 (in board order) so a single query tells us whether more exist.
+        var fetched = issueRepository.findByProjectFilteredCapped(
+                project, statusId, assigneeId, priorityId, componentId,
+                labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
+                fixVersionId, VersionLinkType.FIX,
+                PageRequest.of(0, cap + 1));
+        boolean truncated = fetched.size() > cap;
+        var capped = truncated ? fetched.subList(0, cap) : fetched;
+        // Only pay for the full count when truncated; otherwise it equals the size.
+        long totalAvailable = truncated
+                ? issueRepository.countByProjectFiltered(project, statusId, assigneeId, priorityId,
+                        componentId, labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
+                        fixVersionId, VersionLinkType.FIX)
+                : capped.size();
+        return new BoardIssuesResponse(toResponses(capped), truncated, totalAvailable, cap);
     }
 
     /**
@@ -160,12 +268,16 @@ public class IssueService {
     @Transactional(readOnly = true)
     public PageResponse<IssueResponse> listPaged(User actor, UUID workspaceId, UUID projectId,
                                                  UUID statusId, UUID assigneeId, UUID priorityId,
-                                                 boolean excludeDone, Pageable pageable) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+                                                 UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
+                                                 UUID fixVersionId, boolean excludeDone, Pageable pageable) {
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var labelFilter = LabelFilter.of(labelIds, labelMatch,
+                classificationProperties.maxLabelsPerIssue());
         var page = issueRepository.findByProjectFilteredPaged(
-                project, statusId, assigneeId, priorityId, excludeDone, StatusCategory.DONE, pageable);
+                project, statusId, assigneeId, priorityId, componentId,
+                labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
+                fixVersionId, VersionLinkType.FIX,
+                excludeDone, StatusCategory.DONE, pageable);
         var responses = toResponses(page.getContent());
         var byId = responses.stream().collect(Collectors.toMap(IssueResponse::id, r -> r));
         return PageResponse.of(page.map(i -> byId.get(i.getId())));
@@ -173,40 +285,28 @@ public class IssueService {
 
     @Transactional(readOnly = true)
     public IssueResponse get(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return toResponse(issue);
     }
 
     @Transactional(readOnly = true)
     public List<IssueResponse> children(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return toResponses(issueRepository.findByParent(issue));
     }
 
     @Transactional(readOnly = true)
     public PageResponse<IssueHistoryResponse> getHistory(User actor, UUID workspaceId, UUID projectId,
                                                          long number, Pageable pageable) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        var issue = issueRepository.findByProjectAndNumber(project, number)
-                .orElseThrow(IssueNotFoundException::new);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, number).issue();
         return PageResponse.of(historyRepository.findByIssue(issue, pageable).map(IssueHistoryResponse::of));
     }
 
     @Transactional
     public IssueResponse update(User actor, UUID workspaceId, UUID projectId, long number, UpdateIssueRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var workspace = ctx.workspace();
+        var project = ctx.project();
         requireNotArchived(project);
 
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
@@ -225,10 +325,28 @@ public class IssueService {
         var newCategory = req.statusId() != null
                 ? newStatus.getCategory()
                 : null;
+        // HD-30: null when `labelIds` is absent (leave the set alone); otherwise the
+        // fully-resolved replacement set. Resolved with the other READS, before any
+        // mutation, so nothing can trigger an early auto-flush.
+        var newLabels = labelService.resolveForIssue(workspace, req.labelIds());
+        // HD-31: null when `componentId` is absent (leave it alone, unless
+        // clearComponent asks for null). Resolved with the other READS.
+        var newComponent = componentService.resolveForIssue(project, req.componentId());
+        // HD-32: null per role when that role's array is absent (leave it alone);
+        // otherwise the fully-resolved replacement set. Resolved with the other READS.
+        var newFixVersions = versionService.resolveForIssue(
+                project, req.fixVersionIds(), VersionLinkType.FIX);
+        var newAffectsVersions = versionService.resolveForIssue(
+                project, req.affectsVersionIds(), VersionLinkType.AFFECTS);
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
         var oldCategory = issue.getStatus().getCategory();
+        // Still a read: the issue's current attachments, needed for the diff below.
+        var currentLabelRows = newLabels == null ? List.<IssueLabel>of() : labelService.attachmentsOf(issue);
+        // One load serves BOTH version roles — the diff filters it per link type.
+        var currentVersionRows = newFixVersions == null && newAffectsVersions == null
+                ? List.<IssueVersionLink>of() : versionService.linksOf(issue);
 
         if (req.version() != null && req.version() != issue.getVersion()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
@@ -328,6 +446,23 @@ public class IssueService {
             issue.setDueDate(null);
         }
 
+        // Component (HD-31): a non-null componentId sets/changes it; clearComponent (no
+        // id) unsets it — the assigneeId/clearAssignee convention. Auto-assign does NOT
+        // fire here: changing a component later must never silently reassign someone's
+        // work (§5.1). An ARCHIVED component is only rejected when it is an actual
+        // change — an issue already carrying one stays editable (§5.4).
+        if (newComponent != null || req.clearComponent()) {
+            var oldId = issue.getComponent() != null ? issue.getComponent().getId() : null;
+            var newId = newComponent != null ? newComponent.getId() : null;
+            if (!Objects.equals(oldId, newId)) {
+                componentService.requireAssignable(newComponent);
+                String oldName = issue.getComponent() != null ? issue.getComponent().getName() : null;
+                String newName = newComponent != null ? newComponent.getName() : null;
+                historyEntries.add(makeHistory(issue, actor, "component", oldName, newName));
+                issue.setComponent(newComponent);
+            }
+        }
+
         // Parent: a non-null parentId sets/changes it; clearParent (no id) detaches.
         // History records the old → new parent key.
         if (newParent != null || req.clearParent()) {
@@ -341,24 +476,71 @@ public class IssueService {
             }
         }
 
+        // Labels (HD-30): full replacement when present. The diff is PURE (no query),
+        // so it runs here with the other mutations; a set equal to the current one is
+        // a no-op — no history row (the PATCH still bumps @Version, as documented).
+        LabelService.LabelChange labelChange = null;
+        if (newLabels != null) {
+            labelChange = labelService.diffLabels(currentLabelRows, newLabels);
+            if (labelChange.changed()) {
+                historyEntries.add(makeHistory(issue, actor, "labels",
+                        labelChange.oldNames(), labelChange.newNames()));
+                // Labels live in a side table, so the Issue row would otherwise stay
+                // clean and Hibernate would emit no UPDATE — leaving @Version and
+                // updatedAt stale on a label-only PATCH. Touching updatedAt makes the
+                // entity dirty, so the row is written exactly once: version +1 (§4.4)
+                // and @LastModifiedDate re-stamps the audit time at pre-update.
+                issue.setUpdatedAt(java.time.Instant.now());
+            }
+        }
+
+        // Fix / affects versions (HD-32): full replacement PER ROLE, independently —
+        // sending only `fixVersionIds` never touches the affects set. Same shape as
+        // labels: the diff is PURE (no query), a set equal to the current one is a
+        // no-op with no history row, and a real change touches updatedAt so the
+        // side-table-only edit still bumps @Version exactly once.
+        VersionService.VersionChange fixChange = null;
+        VersionService.VersionChange affectsChange = null;
+        if (newFixVersions != null) {
+            fixChange = versionService.diffVersions(currentVersionRows, newFixVersions, VersionLinkType.FIX);
+            if (fixChange.changed()) {
+                historyEntries.add(makeHistory(issue, actor, "fixVersions",
+                        fixChange.oldNames(), fixChange.newNames()));
+                issue.setUpdatedAt(java.time.Instant.now());
+            }
+        }
+        if (newAffectsVersions != null) {
+            affectsChange = versionService.diffVersions(
+                    currentVersionRows, newAffectsVersions, VersionLinkType.AFFECTS);
+            if (affectsChange.changed()) {
+                historyEntries.add(makeHistory(issue, actor, "affectsVersions",
+                        affectsChange.oldNames(), affectsChange.newNames()));
+                issue.setUpdatedAt(java.time.Instant.now());
+            }
+        }
+
         // Custom fields: partial map, JSON null clears; changes land in history
         fieldValueService.applyValues(issue, req.fields(), false,
                 (fieldName, oldVal, newVal) ->
                         historyEntries.add(makeHistory(issue, actor, fieldName, oldVal, newVal)));
 
         issueRepository.save(issue);
+        labelService.applyLabelChange(issue, labelChange);
+        versionService.applyVersionChanges(issue, fixChange, affectsChange);
         historyRepository.saveAll(historyEntries);
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_UPDATED",
-                Map.of("projectId", projectId.toString(), "issueNumber", number));
+        // changeSet mirrors the history diff for future consumers (Phase-5 triggers);
+        // the SSE payload is unchanged (the listener ignores it).
+        var changeSet = historyEntries.stream()
+                .map(h -> new FieldChange(h.getField(), h.getOldValue(), h.getNewValue()))
+                .toList();
+        eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
         return toResponse(issue);
     }
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long number) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         requireNotArchived(project);
         requireProjectRole(actor, project, ProjectRole.MANAGER);
         var issue = issueRepository.findByProjectAndNumber(project, number)
@@ -391,8 +573,7 @@ public class IssueService {
         attachmentService.removeStoredFilesForIssue(issue);
         issueRepository.delete(issue);
 
-        sseRegistry.broadcast(workspaceId, "ISSUE_DELETED",
-                Map.of("projectId", projectId.toString(), "issueNumber", number));
+        eventPublisher.publishEvent(new IssueDeleted(workspaceId, projectId, number));
     }
 
     // ---- catalog resolution ----
@@ -479,8 +660,9 @@ public class IssueService {
         int childCount = (int) issueRepository.countByParent(issue);
         int doneCount = childCount == 0 ? 0
                 : (int) issueRepository.countByParentAndStatusCategory(issue, StatusCategory.DONE);
-        return IssueResponse.of(issue, fieldValueService.values(issue), parentRef,
-                new IssueResponse.Rollup(childCount, doneCount));
+        return IssueResponse.of(issue, fieldValueService.values(issue),
+                labelService.labelsForIssue(issue), versionService.versionsForIssue(issue),
+                parentRef, new IssueResponse.Rollup(childCount, doneCount));
     }
 
     /**
@@ -501,6 +683,13 @@ public class IssueService {
     private List<IssueResponse> toResponses(List<Issue> issues) {
         if (issues.isEmpty()) return List.of();
         var valuesByIssue = fieldValueService.valuesByIssue(issues);
+        // HD-30 §3.7: ONE query for the whole page's labels, keyed by issue id — a
+        // board page of 100 issues must stay a constant number of queries.
+        var labelsByIssue = labelService.labelsByIssue(issues);
+        // HD-32 §3.7: ONE query for the whole page's version links — BOTH roles come
+        // back together and are split per issue, so the page stays a constant number of
+        // queries no matter how many issues carry versions.
+        var versionsByIssue = versionService.versionsByIssue(issues);
 
         var issueIds = issues.stream().map(Issue::getId).toList();
         var rollups = new HashMap<UUID, IssueResponse.Rollup>();
@@ -526,6 +715,7 @@ public class IssueService {
 
         return issues.stream()
                 .map(i -> IssueResponse.of(i, valuesByIssue.get(i.getId()),
+                        labelsByIssue.get(i.getId()), versionsByIssue.get(i.getId()),
                         i.getParent() == null ? null : parentRefs.get(i.getParent().getId()),
                         rollups.get(i.getId())))
                 .toList();
@@ -553,14 +743,6 @@ public class IssueService {
         return userRepository.findById(assigneeId)
                 .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee"));
-    }
-
-    private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
     }
 
     private void requireProjectRole(User actor, Project project, ProjectRole required) {

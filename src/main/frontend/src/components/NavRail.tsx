@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings, Search,
+  Home, CheckSquare, Columns3, ListTodo, Rocket, BarChart3, Settings, Search,
   Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid,
-  PanelLeftClose, PanelLeftOpen, type LucideIcon,
+  PanelLeftClose, PanelLeftOpen, Keyboard, type LucideIcon,
 } from 'lucide-react'
 import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
 import { useAuthStore } from '../auth'
@@ -48,6 +48,7 @@ export default function NavRail() {
   const cur = useCurrentProject()
   const { user, clear } = useAuthStore()
   const openCreateIssue = useUiStore(s => s.openCreateIssue)
+  const openHelp = useUiStore(s => s.openHelp)
   const reducedMotion = useReducedMotion()
   const [menuOpen, setMenuOpen] = useState(false)
   const [showAbout, setShowAbout] = useState(false)
@@ -215,6 +216,9 @@ export default function NavRail() {
           {collapsed && <div style={{ height: 12 }} />}
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}`} end icon={Columns3} label="Board" collapsed={collapsed} />
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/backlog`} icon={ListTodo} label="Backlog" collapsed={collapsed} />
+          {/* Releases (HD-32) — versions are working data with a lifecycle, so
+              they are managed on their own page, not in project settings */}
+          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/releases`} icon={Rocket} label="Releases" collapsed={collapsed} />
           {/* Reports — no backend yet */}
           <div
             style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11, padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}
@@ -267,6 +271,9 @@ export default function NavRail() {
               {user?.systemRole === 'ADMIN' && (
                 <MenuItem icon={Gear} label="System administration" onClick={() => { setMenuOpen(false); navigate('/admin') }} />
               )}
+              {/* Keyboard map — the `?` overlay needs a mouse-reachable entry
+                  point too, or it is only discoverable by accident (HD-39 §9). */}
+              <MenuItem icon={Keyboard} label="Keyboard shortcuts" onClick={() => { setMenuOpen(false); openHelp() }} />
               <MenuItem icon={Info} label="About Hamstrack" onClick={() => { setMenuOpen(false); setShowAbout(true) }} />
               <MenuItem icon={LogOut} label="Sign out" onClick={handleLogout} />
             </div>

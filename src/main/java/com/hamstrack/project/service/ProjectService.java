@@ -9,9 +9,8 @@ import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
 import com.hamstrack.project.repository.*;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -25,7 +24,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ProjectService {
 
-    private final WorkspaceRepository workspaceRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
@@ -157,11 +156,7 @@ public class ProjectService {
     // ---- helpers ----
 
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
+        return workspaceAccess.requireMember(actor, workspaceId).workspace();
     }
 
     private Project resolveProject(Workspace workspace, UUID projectId) {

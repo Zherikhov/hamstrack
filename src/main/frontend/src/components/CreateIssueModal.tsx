@@ -1,10 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { X } from 'lucide-react'
+import { ChevronDown, ChevronRight, X } from 'lucide-react'
 import { apiCreateIssue, apiGetProjectConfig, apiListIssues, apiListProjects, apiListWorkspaceMembers, apiListWorkspaces } from '../api'
 import type { CreateIssuePreset } from '../uiStore'
-import type { FieldValue } from '../types'
+import type { BoardIssues, FieldValue } from '../types'
+import { boardIssuesKey, projectIssuesKeyPrefix } from '../lib/queryKeys'
 import { FieldInput } from './fields'
+import { LabelPicker } from './labels'
+import { ComponentSelect, useProjectComponents } from './projectComponents'
+import { VersionPicker, useProjectVersions } from './versions'
 import { Button, Input, Select, Textarea } from './ui'
 
 interface Props {
@@ -44,12 +48,29 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [typeId, setTypeId] = useState('')
-  const [statusId, setStatusId] = useState('')
+  // Board column quick-add pre-selects a status. It's only a default (the Status
+  // select stays editable) and only valid for the preset's project — switching
+  // project runs resetTaxonomySelections() and drops it, since statuses are
+  // per-project taxonomy.
+  const [statusId, setStatusId] = useState(preset?.projectId ? preset.statusId ?? '' : '')
   const [priorityId, setPriorityId] = useState('')
   const [parentId, setParentId] = useState(preset?.parentId ?? '')
   const [assigneeId, setAssigneeId] = useState('')
   const [dueDate, setDueDate] = useState('')
   const [fieldValues, setFieldValues] = useState<Record<string, FieldValue>>({})
+  // Components are project-scoped (HD-31), so the selection is dropped whenever
+  // the project changes — see resetTaxonomySelections().
+  const [componentId, setComponentId] = useState('')
+  // Versions are project-scoped too (HD-32) — dropped on a project change. Two
+  // independent roles: "fix" ships the change, "affects" records where the defect
+  // lives. Only the fix picker is on the short path; affects hides behind
+  // "More fields" so the common create stays two selects long.
+  const [fixVersionIds, setFixVersionIds] = useState<string[]>([])
+  const [affectsVersionIds, setAffectsVersionIds] = useState<string[]>([])
+  const [moreOpen, setMoreOpen] = useState(false)
+  // Labels are workspace-scoped (HD-30), so unlike the taxonomy selections they
+  // survive a project change — only switching workspace clears them.
+  const [labelIds, setLabelIds] = useState<string[]>([])
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -66,6 +87,14 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const statuses = config?.statuses ?? []
   const priorities = config?.priorities ?? []
   const createFields = (config?.fields ?? []).filter(f => f.showOnCreate)
+
+  // Project components (HD-31) — non-archived only; own endpoint/key, never part
+  // of the project config.
+  const { data: componentOptions = [] } = useProjectComponents(effectiveWsId, effectiveProjectId)
+
+  // Project versions (HD-32) — non-archived only; own endpoint/key, never part
+  // of the project config. Both pickers read this one list.
+  const { data: versionOptions = [] } = useProjectVersions(effectiveWsId, effectiveProjectId)
 
   // Option list for the Assignee picker and for USER-type custom fields
   const { data: members = [] } = useQuery({
@@ -99,8 +128,16 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     [issueTypes],
   )
   const { data: projectIssues = [] } = useQuery({
-    queryKey: ['issues', effectiveWsId, effectiveProjectId, 'board', ''],
+    // Same cache entry as the board's unfiltered list (`boardIssuesKey`) — so the
+    // dialog reuses whatever the board already fetched. HD-79: the endpoint
+    // returns a capped wrapper; the cached value under a board key is ALWAYS that
+    // wrapper and the parent picker projects the array out with `select` rather
+    // than caching a different shape under the same key (a mismatch here used to
+    // crash the SPA with "projectIssues.filter is not a function" whenever the
+    // dialog was opened over a board).
+    queryKey: boardIssuesKey(effectiveWsId, effectiveProjectId),
     queryFn: () => apiListIssues(effectiveWsId, effectiveProjectId),
+    select: (board: BoardIssues) => board.issues,
     enabled: !!effectiveWsId && !!effectiveProjectId && (anyParentableEdge || preset?.parentId !== undefined),
   })
 
@@ -124,7 +161,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     (typeId && typeOptions.some(t => t.id === typeId) ? typeId : '')
     || (presetParentLevel !== undefined ? presetDefaultTypeId : '')
     || typeOptions[0]?.id || ''
-  const effectiveStatusId = statusId || statuses[0]?.id || ''
+  // Guard against a status that isn't offered by the selected project's workflow
+  // (e.g. a stale preset) — fall back to the workflow's first column.
+  const effectiveStatusId =
+    (statusId && statuses.some(s => s.id === statusId) ? statusId : '')
+    || statuses[0]?.id || ''
   const effectivePriorityId = priorityId
     || priorities.find(p => p.isDefault)?.id || priorities[0]?.id || ''
 
@@ -150,6 +191,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     setWsSelection(id)
     setProjectId('')
     resetTaxonomySelections()
+    setLabelIds([])   // labels belong to the workspace we just left
   }
 
   function handleProjectChange(id: string) {
@@ -164,6 +206,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     setPriorityId('')
     setParentId('')
     setAssigneeId('')  // members are workspace-scoped
+    setComponentId('') // components belong to the project we just left
+    setFixVersionIds([])     // …and so do versions (HD-32)
+    setAffectsVersionIds([])
     setFieldValues({})
   }
 
@@ -221,9 +266,13 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
         assigneeId: assigneeId || undefined,
         dueDate: dueDate || undefined,
         parentId: effectiveParentId || undefined,
+        labelIds: labelIds.length > 0 ? labelIds : undefined,
+        componentId: componentId || undefined,
+        fixVersionIds: fixVersionIds.length > 0 ? fixVersionIds : undefined,
+        affectsVersionIds: affectsVersionIds.length > 0 ? affectsVersionIds : undefined,
         fields: Object.keys(fieldValues).length > 0 ? fieldValues : undefined,
       })
-      await qc.invalidateQueries({ queryKey: ['issues', effectiveWsId, effectiveProjectId] })
+      await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(effectiveWsId, effectiveProjectId) })
       onClose()
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create issue')
@@ -256,7 +305,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   }
 
   return (
-    <div style={overlayStyle} onClick={onClose}>
+    <div data-modal-open="true" style={overlayStyle} onClick={onClose}>
       <div style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
           className="flex items-center justify-between px-5 py-4 border-b flex-shrink-0"
@@ -316,6 +365,29 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             <Input label="Due date" type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
           </div>
 
+          {/* Component (HD-31) — one per issue, project-scoped. Hidden entirely
+              when the project curates none, so the form doesn't grow an empty
+              control. A component with auto-assign on fills the assignee with
+              its lead server-side, but only when none was picked here. */}
+          {componentOptions.length > 0 && (
+            <div className="flex flex-col gap-1">
+              <ComponentSelect
+                label="Component"
+                components={componentOptions}
+                value={componentId}
+                onChange={setComponentId}
+              />
+              {!assigneeId && (() => {
+                const c = componentOptions.find(o => o.id === componentId)
+                return c?.autoAssign && c.leadName ? (
+                  <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                    Will be assigned to {c.leadName} (component lead).
+                  </span>
+                ) : null
+              })()}
+            </div>
+          )}
+
           {/* Parent picker — only for types with a tier exactly one level above.
               When opened as "create sub-task" the parent is fixed (disabled). */}
           {canHaveParent && (
@@ -355,6 +427,63 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             <FieldInput key={f.id} field={f} value={fieldValues[f.id]}
                         onChange={v => setFieldValue(f.id, v)} members={members} />
           ))}
+
+          {/* Fix version(s) (HD-32) — on the short path: "this ships in 2.4.0"
+              is a normal thing to say while filing. Hidden entirely when the
+              project curates no versions, so the form doesn't grow an empty
+              control. */}
+          {versionOptions.length > 0 && effectiveWsId && effectiveProjectId && (
+            <VersionPicker
+              label="Fix version(s)"
+              wsId={effectiveWsId}
+              projectId={effectiveProjectId}
+              value={fixVersionIds}
+              onChange={setFixVersionIds}
+              placeholder="Where will this ship?"
+            />
+          )}
+
+          {/* Labels (HD-30) — below the custom fields; workspace-scoped, and any
+              member may create one on the fly from here. */}
+          {effectiveWsId && (
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Labels</span>
+              <LabelPicker wsId={effectiveWsId} value={labelIds} onChange={setLabelIds} />
+            </div>
+          )}
+
+          {/* "More fields" (HD-32) — the rarely-needed classification lives here
+              so the create path stays short. Affects versions is a triage detail
+              ("this defect exists in 2.3.1"), not something most filings need. */}
+          {versionOptions.length > 0 && effectiveWsId && effectiveProjectId && (
+            <div className="flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => setMoreOpen(o => !o)}
+                aria-expanded={moreOpen}
+                className="inline-flex items-center gap-1 text-xs cursor-pointer self-start hover:underline"
+                style={{ color: 'var(--color-text-secondary)' }}
+              >
+                {moreOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                More fields
+                {!moreOpen && affectsVersionIds.length > 0 && (
+                  <span className="mono" style={{ color: 'var(--color-brand)' }}>
+                    ({affectsVersionIds.length})
+                  </span>
+                )}
+              </button>
+              {moreOpen && (
+                <VersionPicker
+                  label="Affects version(s)"
+                  wsId={effectiveWsId}
+                  projectId={effectiveProjectId}
+                  value={affectsVersionIds}
+                  onChange={setAffectsVersionIds}
+                  placeholder="Where does the defect exist?"
+                />
+              )}
+            </div>
+          )}
 
           {error && (
             <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>

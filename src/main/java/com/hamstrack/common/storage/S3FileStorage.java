@@ -6,7 +6,9 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
@@ -15,6 +17,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.InputStream;
 import java.net.URI;
+import java.time.Duration;
 
 @Component
 @ConditionalOnProperty(name = "app.storage.type", havingValue = "s3")
@@ -48,6 +51,20 @@ public class S3FileStorage implements FileStorage {
             builder.credentialsProvider(StaticCredentialsProvider.create(
                     AwsBasicCredentials.create(cfg.accessKey(), cfg.secretKey())));
         }
+        // Bound a hung/slow S3: socket connect/read on the (Apache5) HTTP client,
+        // overall + per-attempt caps via the SDK client override. Without these a
+        // stalled endpoint blocks the worker until the OS socket timeout — with
+        // HD-77 the blob write is off the DB tx, so this only fails the worker fast.
+        var t = cfg.timeouts();
+        builder.httpClientBuilder(
+                Apache5HttpClient.builder()
+                        .connectionTimeout(Duration.ofMillis(t.connectMs()))
+                        .socketTimeout(Duration.ofMillis(t.readMs())));
+        builder.overrideConfiguration(
+                ClientOverrideConfiguration.builder()
+                        .apiCallTimeout(Duration.ofMillis(t.apiCallMs()))
+                        .apiCallAttemptTimeout(Duration.ofMillis(t.apiCallAttemptMs()))
+                        .build());
         this.s3 = builder.build();
     }
 

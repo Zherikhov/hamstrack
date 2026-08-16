@@ -3,11 +3,8 @@ package com.hamstrack.common.sse;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
-import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -51,43 +48,32 @@ public class SseRegistry {
         return emitter;
     }
 
-    /** Send an event to every user connected to the workspace. */
+    /**
+     * Send an event to every user connected to the workspace, immediately.
+     *
+     * <p>Since HD-80 the after-commit timing is owned by the caller: the domain-event
+     * {@code @TransactionalEventListener(AFTER_COMMIT)} in {@code common.event} only
+     * invokes this once the publishing transaction has committed (or, for the
+     * non-transactional attachment-upload path, via {@code fallbackExecution}). So this
+     * method no longer wraps the send in its own {@code afterCommit} deferral — it just
+     * delivers to the connected emitters now.
+     */
     public void broadcast(UUID workspaceId, String event, Object data) {
-        afterCommit(() -> {
-            var list = connections.get(workspaceId);
-            if (list == null || list.isEmpty()) return;
-            for (var ue : list) {
+        var list = connections.get(workspaceId);
+        if (list == null || list.isEmpty()) return;
+        for (var ue : list) {
+            send(ue.emitter(), event, data);
+        }
+    }
+
+    /** Send an event only to a specific user's connections in the workspace, immediately (see {@link #broadcast}). */
+    public void sendToUser(UUID workspaceId, UUID userId, String event, Object data) {
+        var list = connections.get(workspaceId);
+        if (list == null || list.isEmpty()) return;
+        for (var ue : list) {
+            if (ue.userId().equals(userId)) {
                 send(ue.emitter(), event, data);
             }
-        });
-    }
-
-    /** Send an event only to a specific user's connections in the workspace. */
-    public void sendToUser(UUID workspaceId, UUID userId, String event, Object data) {
-        afterCommit(() -> {
-            var list = connections.get(workspaceId);
-            if (list == null || list.isEmpty()) return;
-            for (var ue : list) {
-                if (ue.userId().equals(userId)) {
-                    send(ue.emitter(), event, data);
-                }
-            }
-        });
-    }
-
-    // Callers broadcast from inside @Transactional services. Sending immediately would
-    // race clients against the commit (they refetch before the data is visible) and
-    // would announce changes that a rollback then undoes — so defer until after commit.
-    private void afterCommit(Runnable action) {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    action.run();
-                }
-            });
-        } else {
-            action.run();
         }
     }
 
@@ -95,7 +81,12 @@ public class SseRegistry {
         try {
             String json = objectMapper.writeValueAsString(data);
             emitter.send(SseEmitter.event().name(event).data(json));
-        } catch (IOException e) {
+        } catch (Exception e) {
+            // IOException on a broken pipe, but also the unchecked
+            // IllegalStateException SseEmitter.send throws once the emitter has
+            // completed/timed out. Swallow both here so a single dead emitter
+            // never aborts the broadcast loop for the remaining subscribers —
+            // completeWithError re-fires onError, whose cleanup removes it.
             emitter.completeWithError(e);
         }
     }

@@ -6,6 +6,9 @@ import com.hamstrack.common.dto.Paging;
 import com.hamstrack.issue.dto.IssueResponse;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.service.IssueService;
+import com.hamstrack.issue.service.ComponentService;
+import com.hamstrack.issue.service.LabelService;
+import com.hamstrack.issue.service.VersionService;
 import com.hamstrack.search.dto.SearchRequest;
 import com.hamstrack.search.dto.SearchResultRow;
 import com.hamstrack.search.dto.SearchSchemaResponse;
@@ -13,9 +16,7 @@ import com.hamstrack.search.dto.SuggestResponse;
 import com.hamstrack.search.parser.HqlParser;
 import com.hamstrack.search.parser.ast.Query;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import jakarta.persistence.EntityManager;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -43,17 +44,28 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class SearchService {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ResolutionContextFactory resolutionContextFactory;
     private final HqlValidator validator;
     private final HqlCompiler compiler;
     private final FieldRegistry registry;
     private final IssueService issueService;
+    private final LabelService labelService;
+    private final ComponentService componentService;
+    private final VersionService versionService;
     private final EntityManager em;
 
     /** Bounded typeahead cap for {@code /suggest} (§16.4). */
     private static final int SUGGEST_LIMIT = 20;
+
+    /** Max entries embedded in the {@code /schema} LABEL picklist (HD-30 §3.5). */
+    private static final int LABEL_PICKLIST_LIMIT = 200;
+
+    /** Max entries embedded in the {@code /schema} COMPONENT picklist (HD-31 §3.5). */
+    private static final int COMPONENT_PICKLIST_LIMIT = 200;
+
+    /** Max entries embedded in the {@code /schema} VERSION picklist (HD-32 §3.5). */
+    private static final int VERSION_PICKLIST_LIMIT = 200;
 
     @Transactional(readOnly = true)
     public PageResponse<SearchResultRow> search(User actor, UUID workspaceId, SearchRequest req) {
@@ -111,6 +123,20 @@ public class SearchService {
         values.put("STATUS", labels(ctx.statusNames()));
         values.put("TYPE", labels(ctx.typeNames()));
         values.put("PRIORITY", labels(ctx.priorityNames()));
+        // LABEL (HD-30): a workspace can accumulate thousands of labels, so this
+        // picklist is CAPPED (§3.5). When it is truncated the client falls back to
+        // /suggest?field=label&q= — the same bounded typeahead users get for members.
+        values.put("LABEL", capped(labels(ctx.labelNames()), LABEL_PICKLIST_LIMIT));
+        // COMPONENT (HD-31): the non-archived component names of the caller's VISIBLE
+        // projects, capped for the same reason — beyond the cap the client falls back
+        // to /suggest?field=component&q=.
+        values.put("COMPONENT", capped(labels(ctx.componentNames()), COMPONENT_PICKLIST_LIMIT));
+        // VERSION (HD-32): the non-archived version names of the caller's VISIBLE
+        // projects, capped for the same reason — beyond the cap the client falls back
+        // to /suggest?field=fixVersion&q=. ONE picklist backs both fixVersion and
+        // affectsVersion (both descriptors declare valueSuggest = "VERSION"): the two
+        // roles draw from the same catalog, only the link differs.
+        values.put("VERSION", capped(labels(ctx.versionNames()), VERSION_PICKLIST_LIMIT));
 
         // Custom fields (HD-52): append after the system fields, hidden system-name
         // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field
@@ -135,6 +161,51 @@ public class SearchService {
     public SuggestResponse suggest(User actor, UUID workspaceId, String fieldName, String q) {
         var ws = resolveWorkspace(actor, workspaceId);
         var ctx = resolutionContextFactory.build(actor, ws);
+
+        // label (HD-30): a bounded prefix search straight over the workspace's
+        // non-archived labels — the fallback when the /schema LABEL picklist is capped.
+        boolean isLabel = registry.find(fieldName)
+                .filter(FieldDescriptor::available)
+                .filter(f -> f.dataType() == FieldDataType.LABEL_REF)
+                .isPresent();
+        if (isLabel) {
+            var suggestions = labelService.suggestNames(ws, q, SUGGEST_LIMIT).stream()
+                    .map(name -> new SuggestResponse.Suggestion(name, name))
+                    .toList();
+            return new SuggestResponse(fieldName, suggestions);
+        }
+
+        // component (HD-31): a bounded prefix search over the non-archived components
+        // of the caller's VISIBLE projects — the fallback when the /schema COMPONENT
+        // picklist is capped. Matched on the descriptor's canonical name, so the
+        // `components` alias resolves here too.
+        boolean isComponent = registry.find(fieldName)
+                .filter(FieldDescriptor::available)
+                .filter(f -> "component".equals(f.name()))
+                .isPresent();
+        if (isComponent) {
+            var suggestions = componentService
+                    .suggestNames(ctx.visibleProjectIds(), q, SUGGEST_LIMIT).stream()
+                    .map(name -> new SuggestResponse.Suggestion(name, name))
+                    .toList();
+            return new SuggestResponse(fieldName, suggestions);
+        }
+
+        // fixVersion / affectsVersion (HD-32): a bounded prefix search over the
+        // non-archived versions of the caller's VISIBLE projects — the fallback when the
+        // /schema VERSION picklist is capped. Both roles share one catalog, so the
+        // suggestions are identical for either field name.
+        boolean isVersion = registry.find(fieldName)
+                .filter(FieldDescriptor::available)
+                .filter(f -> f.dataType() == FieldDataType.VERSION_REF)
+                .isPresent();
+        if (isVersion) {
+            var suggestions = versionService
+                    .suggestNames(ctx.visibleProjectIds(), q, SUGGEST_LIMIT).stream()
+                    .map(name -> new SuggestResponse.Suggestion(name, name))
+                    .toList();
+            return new SuggestResponse(fieldName, suggestions);
+        }
 
         // A user-valued field: a system USER_REF (assignee/reporter) OR a visible USER
         // custom field (HD-52). Both resolve via the same member typeahead.
@@ -212,6 +283,12 @@ public class SearchService {
         return list;
     }
 
+    /** Truncate an embedded picklist; the client falls back to /suggest beyond this. */
+    private List<SearchSchemaResponse.ValueOption> capped(List<SearchSchemaResponse.ValueOption> options,
+                                                          int limit) {
+        return options.size() <= limit ? options : List.copyOf(options.subList(0, limit));
+    }
+
     private List<SearchSchemaResponse.ValueOption> labels(Iterable<String> names) {
         var list = new ArrayList<SearchSchemaResponse.ValueOption>();
         for (String n : names) list.add(SearchSchemaResponse.ValueOption.label(n));
@@ -225,10 +302,6 @@ public class SearchService {
 
     /** Membership gate — 404 (not 403) whether the ws is missing or the caller isn't a member. */
     private Workspace resolveWorkspace(User actor, UUID workspaceId) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        return workspace;
+        return workspaceAccess.requireMember(actor, workspaceId).workspace();
     }
 }

@@ -7,6 +7,9 @@ import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.PrioritySetItem;
 import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.IssueType;
+import com.hamstrack.issue.repository.ComponentRepository;
+import com.hamstrack.issue.repository.LabelRepository;
+import com.hamstrack.issue.repository.VersionRepository;
 import com.hamstrack.issue.service.FieldValueService;
 import com.hamstrack.issue.service.ProjectConfigService;
 import com.hamstrack.project.entity.Project;
@@ -37,6 +40,9 @@ import java.util.UUID;
 public class ResolutionContextFactory {
 
     private final ProjectRepository projectRepository;
+    private final LabelRepository labelRepository;
+    private final ComponentRepository componentRepository;
+    private final VersionRepository versionRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectConfigService projectConfigService;
     private final FieldValueService fieldValueService;
@@ -61,6 +67,53 @@ public class ResolutionContextFactory {
         Map<String, String> statusNames = new LinkedHashMap<>();
         Map<String, String> typeNames = new LinkedHashMap<>();
         Map<String, String> priorityNames = new LinkedHashMap<>();
+        // Labels (HD-30) are WORKSPACE-scoped — no per-project narrowing, the workspace
+        // is the tenant boundary. Archived labels are excluded from name resolution
+        // (§6.1); issues carrying one still match by id.
+        //
+        // Deliberately an (id, name) PROJECTION, not findAllByWorkspace: resolution
+        // must stay unbounded (a name typed in HQL has to resolve, so there is no
+        // limit to apply), but this runs on every /search, /schema and /suggest — no
+        // reason to hydrate whole Label entities and LEFT JOIN FETCH their creators.
+        Map<String, List<UUID>> labelIds = new LinkedHashMap<>();
+        Map<String, String> labelNames = new LinkedHashMap<>();
+        for (var row : labelRepository.findIdAndNameByWorkspace(ws)) {
+            UUID labelId = (UUID) row[0];
+            String labelName = (String) row[1];
+            addId(labelIds, labelName, labelId);
+            labelNames.putIfAbsent(labelName.toLowerCase(Locale.ROOT), labelName);
+        }
+        // Components (HD-31) are PROJECT-scoped, so they are built from the VISIBLE
+        // PROJECT set — never "all components of the workspace": a name must never
+        // resolve through a project the search scope would hide. A name maps to a LIST
+        // of ids on purpose (two visible projects may each own a "Billing"), exactly
+        // like statuses. Archived components are excluded from name resolution; issues
+        // carrying one still match by id (§6.1). Same (id, name) projection rationale
+        // as labels above.
+        Map<String, List<UUID>> componentIds = new LinkedHashMap<>();
+        Map<String, String> componentNames = new LinkedHashMap<>();
+        // Versions (HD-32) are PROJECT-scoped like components, so the same rules apply:
+        // built from the VISIBLE PROJECT set only, a name maps to a LIST of ids (two
+        // visible projects may each ship a "2.4.0"), archived versions are excluded from
+        // name resolution but issues linked to one still match by id. ONE map serves
+        // both fixVersion and affectsVersion — the role is applied by the compiler's
+        // link_type filter, not by name resolution.
+        Map<String, List<UUID>> versionIds = new LinkedHashMap<>();
+        Map<String, String> versionNames = new LinkedHashMap<>();
+        if (!visibleIds.isEmpty()) {   // an empty IN list is invalid in JPQL
+            for (var row : componentRepository.findIdAndNameByProjectIds(visibleIds)) {
+                UUID componentId = (UUID) row[0];
+                String componentName = (String) row[1];
+                addId(componentIds, componentName, componentId);
+                componentNames.putIfAbsent(componentName.toLowerCase(Locale.ROOT), componentName);
+            }
+            for (var row : versionRepository.findIdAndNameByProjectIds(visibleIds)) {
+                UUID versionId = (UUID) row[0];
+                String versionName = (String) row[1];
+                addId(versionIds, versionName, versionId);
+                versionNames.putIfAbsent(versionName.toLowerCase(Locale.ROOT), versionName);
+            }
+        }
         // Custom fields (HD-52): union of non-archived field_defs reachable by any
         // visible project via its effective field set — the same source /schema uses.
         Map<String, CustomFieldMeta> customFields = new LinkedHashMap<>();
@@ -97,10 +150,14 @@ public class ResolutionContextFactory {
         }
 
         return new ResolutionContext(actor, ws, visibleIds,
-                statusIds, typeIds, priorityIds, prioritiesByName, members,
+                statusIds, typeIds, priorityIds, prioritiesByName, labelIds, componentIds,
+                versionIds, members,
                 List.copyOf(statusNames.values()),
                 List.copyOf(typeNames.values()),
                 List.copyOf(priorityNames.values()),
+                List.copyOf(labelNames.values()),
+                List.copyOf(componentNames.values()),
+                List.copyOf(versionNames.values()),
                 customFields);
     }
 

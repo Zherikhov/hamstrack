@@ -16,8 +16,9 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li>an unknown field — neither a system field nor a custom field reachable by
  *       the caller's visible projects (with a Levenshtein "did you mean …" hint);</li>
- *   <li>a field that is registered but not yet queryable ({@code label}) — a distinct
- *       "not yet available" message;</li>
+ *   <li>a field that is registered but not yet queryable — a distinct
+ *       "not yet available" message (no such field today; {@code label} went live
+ *       with HD-30);</li>
  *   <li>an operator illegal for the field ({@code ~} on {@code status}; {@code >} on
  *       a SELECT custom field, etc.);</li>
  *   <li>{@code IS [NOT] EMPTY} on a non-nullable field;</li>
@@ -122,8 +123,8 @@ public class HqlValidator {
 
     /**
      * Resolve a name to a system {@link FieldDescriptor}, or {@code null} if the name
-     * isn't a system field. A registered-but-not-available field ({@code label}) is a
-     * system name and throws its own "not yet queryable" error here.
+     * isn't a system field. A registered-but-not-available field is still a system
+     * name and throws its own "not yet queryable" error here.
      */
     private FieldDescriptor systemField(String name) {
         var found = registry.find(name);

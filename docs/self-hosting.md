@@ -145,9 +145,19 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
+| `MAIL_SMTP_CONNECT_TIMEOUT_MS` / `MAIL_SMTP_READ_TIMEOUT_MS` / `MAIL_SMTP_WRITE_TIMEOUT_MS` | `5000` / `10000` / `10000` | SMTP socket timeouts (ms) — a black-holed mail host fails a worker fast instead of hanging (connect / per-read / per-write) |
+| `MAIL_ASYNC_CORE_POOL` / `MAIL_ASYNC_MAX_POOL` / `MAIL_ASYNC_QUEUE_CAPACITY` | `2` / `5` / `100` | Bounded async mail executor — mail can't starve other `@Async` work or spawn a thread-per-task under an SMTP stall (`CallerRunsPolicy` backpressure) |
+| `MAIL_CRITICAL_MAX_ATTEMPTS` / `MAIL_CRITICAL_RETRY_BACKOFF_MS` | `3` / `2000` | CRITICAL mail (verification + password reset) retries with backoff, then dead-letters to `failed_email`; invite mail stays best-effort |
 | `STORAGE_TYPE` | `local` (dc) / `s3` (cloud) | Attachment storage backend |
 | `STORAGE_LOCAL_DIR` | `./data/attachments` | Local storage path (mount a volume) |
 | `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION` / `STORAGE_S3_ENDPOINT` / `STORAGE_S3_PATH_STYLE` / `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY` | — | S3 or S3-compatible storage (MinIO etc.); empty keys fall back to the AWS default credentials chain |
+| `STORAGE_S3_CONNECT_TIMEOUT_MS` / `STORAGE_S3_READ_TIMEOUT_MS` / `STORAGE_S3_API_CALL_TIMEOUT_MS` / `STORAGE_S3_API_CALL_ATTEMPT_TIMEOUT_MS` | `3000` / `20000` / `30000` / `10000` | S3 client timeouts (ms), only when storage type is `s3`: TCP connect / per socket-read / total per-request budget / per single attempt |
+| `BOARD_MAX_ISSUES` | `500` | Max issues a single board query returns — a guard against unbounded board loads on very large projects |
+| `MAX_LABELS_PER_ISSUE` | `20` | Max labels attachable to a single issue — a DoS guard; a payload above it is rejected with 422. Valid range 1–100; an out-of-range value fails startup instead of being clamped |
+| `MAX_LABELS_PER_WORKSPACE` | `1000` | Max labels in one workspace's catalog. Any member may create labels, so this bounds what every picker, `/search/schema` and HQL name resolution loads; creating past it is a 422. Valid range 1–100000 |
+| `MAX_COMPONENTS_PER_PROJECT` | `500` | Max components in one project's catalog. Creation needs a project curator, but anyone can create their own workspace and curate every project in it, and HQL name resolution loads each visible project's whole component catalog on every search; creating past the cap is a 422. Valid range 1–100000 |
+| `MAX_VERSION_LINKS_PER_ISSUE` | `20` | Max versions linkable to a single issue **per link type** — this many fix versions and, independently, this many affects versions; a payload above it is rejected with 422. Valid range 1–100; an out-of-range value fails startup instead of being clamped |
+| `MAX_VERSIONS_PER_PROJECT` | `500` | Max versions in one project's catalog — same reasoning as `MAX_COMPONENTS_PER_PROJECT`: curator-gated creation is no volume barrier, HQL name resolution loads each visible project's version names on every search, and the versions list endpoint is unpaged. Archived and released versions count toward the cap; creating past it is a 422. Valid range 1–100000 |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
 | `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
@@ -239,6 +249,24 @@ Mailgun…) or your own relay. Configure:
 Verification, invite and password-reset links point at `APP_BASE_URL`, so set it
 correctly or the links won't work.
 
+**Timeouts & delivery reliability** (all optional; defaults shown). SMTP socket
+timeouts stop a black-holed mail host from hanging a worker; the async executor
+and CRITICAL-mail retry settings bound how mail is dispatched:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAIL_SMTP_CONNECT_TIMEOUT_MS` | `5000` | TCP connect timeout to the SMTP host |
+| `MAIL_SMTP_READ_TIMEOUT_MS` | `10000` | per-read (server response) timeout |
+| `MAIL_SMTP_WRITE_TIMEOUT_MS` | `10000` | per-write (send) timeout |
+| `MAIL_ASYNC_CORE_POOL` | `2` | steady-state mail-sender threads |
+| `MAIL_ASYNC_MAX_POOL` | `5` | max mail-sender threads under load |
+| `MAIL_ASYNC_QUEUE_CAPACITY` | `100` | queued mails before backpressure (`CallerRunsPolicy`) |
+| `MAIL_CRITICAL_MAX_ATTEMPTS` | `3` | verification/reset send attempts before dead-lettering to `failed_email` |
+| `MAIL_CRITICAL_RETRY_BACKOFF_MS` | `2000` | base backoff between CRITICAL-mail retries |
+
+Only verification + password-reset mail is CRITICAL (retried, then
+dead-lettered); invite mail stays best-effort with no retry.
+
 **Local testing:** run [MailHog](https://github.com/mailhog/MailHog) (SMTP on
 `1025`, web UI on `8025`) and set `MAIL_HOST=mailhog`, `MAIL_PORT=1025` (no auth).
 Every message shows up in the UI instead of being delivered — these are also the
@@ -297,6 +325,11 @@ the database.
 | `STORAGE_S3_BUCKET` / `STORAGE_S3_REGION` | target bucket + region |
 | `STORAGE_S3_ENDPOINT` / `STORAGE_S3_PATH_STYLE` | only for S3-compatible stores (MinIO, Ceph…): the endpoint URL and `true` for path-style addressing |
 | `STORAGE_S3_ACCESS_KEY` / `STORAGE_S3_SECRET_KEY` | static credentials; **leave empty** to use the AWS default chain (env vars, `~/.aws`, instance/task role) |
+| `STORAGE_S3_CONNECT_TIMEOUT_MS` (`3000`) / `STORAGE_S3_READ_TIMEOUT_MS` (`20000`) | TCP connect timeout / per socket-read timeout, in ms — a large attachment streams over one socket, so read is a per-read ceiling, not the whole transfer |
+| `STORAGE_S3_API_CALL_TIMEOUT_MS` (`30000`) / `STORAGE_S3_API_CALL_ATTEMPT_TIMEOUT_MS` (`10000`) | total per-request budget incl. SDK retries / budget per single attempt, in ms — bound a hung S3 rather than block a request thread indefinitely |
+
+The four `STORAGE_S3_*_TIMEOUT_MS` values only take effect when the effective
+storage type is `s3`; local-disk storage ignores them.
 
 MinIO example:
 
@@ -347,6 +380,7 @@ Rate-limit tuning (all optional; defaults shown):
 | `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` | `5` | failed logins for one account before backoff starts |
 | `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` | `30` | first backoff delay (doubles on each further failure) |
 | `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS` | `900` | backoff cap (15 min); a success resets the counter |
+| `RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Key the per-IP budget on the rightmost `X-Forwarded-For` entry. Enable **only** behind a trusted proxy that strips client-supplied XFF; if the app port is directly reachable, leaving this `false` stops clients spoofing XFF to bypass the per-IP limit. The bundled `docker-compose.prod.yml` forces it `true` (all traffic goes through Caddy, which strips XFF). |
 
 The limiter is **in-memory / single-node**. If you run multiple app replicas it
 applies per-node (there's no shared store yet), so keep it in mind when scaling out.

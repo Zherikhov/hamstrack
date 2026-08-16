@@ -69,7 +69,9 @@ Run the app / tests (PowerShell):
 ```
 $env:DB_URL="jdbc:postgresql://localhost:15432/hamstrack"; $env:DB_USERNAME="hamstrack"; $env:DB_PASSWORD="hamstrack"; $env:JWT_SECRET="dev-only-jwt-secret-hamstrack-0123456789abcdef"; .\mvnw.cmd spring-boot:run
 ```
-`JWT_SECRET` must be at least 32 bytes — `JwtService` fails fast at startup otherwise (HMAC-SHA256 key size requirement). Skip the frontend build with `-Dfrontend.skip=true` (in PowerShell prefix args with `--%` so `-D` flags aren't mangled).
+`JWT_SECRET` must be at least 32 bytes — `JwtService` fails fast at startup otherwise (HMAC-SHA256 key size requirement).
+
+**`-Dfrontend.skip=true` does nothing** (verified 2026-08-16): `frontend-maven-plugin` in `pom.xml` has no `<skip>` configuration bound to that property, so `npm run build` runs on every Maven invocation regardless. The flag is harmless and is still passed by convention in agent instructions, but do not rely on it for a fast backend-only loop, and do not treat a slow `mvnw test` as a symptom of something else. Making it real means adding `<skipTests>`-style skip config to the plugin — worth a ticket, not a silent change. In PowerShell, prefix args with `--%` so `-D` flags aren't mangled.
 
 ## Commands
 

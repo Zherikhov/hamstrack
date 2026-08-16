@@ -26,6 +26,8 @@ import java.io.IOException;
 public class AuthRateLimitFilter extends OncePerRequestFilter {
 
     private final RateLimitService rateLimitService;
+    // See RateLimitProperties#trustForwardedFor — default false is DC-safe.
+    private final boolean trustForwardedFor;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
@@ -47,12 +49,17 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     }
 
     /**
-     * On prod only Caddy is reachable from outside and (Caddy ≥ 2.5) it
-     * discards client-supplied X-Forwarded-For, so the rightmost entry is the
-     * real peer address. Without the header (local dev, direct DC exposure)
-     * the socket address is used.
+     * When {@code trustForwardedFor} is enabled the request is assumed to come
+     * through a trusted proxy that strips client-supplied X-Forwarded-For (prod
+     * Caddy ≥ 2.5 does), so the rightmost entry is the real peer address. When
+     * disabled (default — DC self-host on a directly-reachable app port) the
+     * header is ignored entirely, because a client could otherwise spoof it to
+     * dodge the per-IP budget; the socket address is used instead.
      */
     private String clientIp(HttpServletRequest request) {
+        if (!trustForwardedFor) {
+            return request.getRemoteAddr();
+        }
         var forwarded = request.getHeader("X-Forwarded-For");
         if (forwarded == null || forwarded.isBlank()) {
             return request.getRemoteAddr();

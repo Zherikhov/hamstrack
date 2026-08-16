@@ -1,11 +1,12 @@
 package com.hamstrack.notification.service;
 
 import com.hamstrack.auth.entity.User;
-import com.hamstrack.common.sse.SseRegistry;
+import com.hamstrack.common.event.NotificationRaised;
 import com.hamstrack.notification.dto.NotificationResponse;
 import com.hamstrack.notification.entity.Notification;
 import com.hamstrack.notification.repository.NotificationRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -21,7 +22,7 @@ import java.util.UUID;
 public class NotificationService {
 
     private final NotificationRepository notificationRepository;
-    private final SseRegistry sseRegistry;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional(readOnly = true)
     public List<NotificationResponse> list(User user) {
@@ -52,7 +53,14 @@ public class NotificationService {
         notificationRepository.markAllReadForUser(user, Instant.now());
     }
 
-    /** Create a notification and push it via SSE to the recipient's active connections. */
+    /**
+     * Insert the notification row inside the caller's transaction and publish a
+     * {@link NotificationRaised} event. The row commits atomically with the caller
+     * (e.g. a mention notification and its comment); the SSE push to the recipient's
+     * active connections is performed AFTER commit by the domain-event listener, so it
+     * fires once, only if the tx committed — identical net behavior to the old inline
+     * {@code sseRegistry.sendToUser(...)} deferral.
+     */
     @Transactional
     public void create(User recipient, UUID workspaceId, String type, String title, String body, String link) {
         var n = new Notification();
@@ -63,7 +71,7 @@ public class NotificationService {
         n.setLink(link);
         notificationRepository.save(n);
 
-        // Push in real-time if the user is connected
-        sseRegistry.sendToUser(workspaceId, recipient.getId(), "NOTIFICATION", NotificationResponse.of(n));
+        eventPublisher.publishEvent(
+                new NotificationRaised(workspaceId, recipient.getId(), NotificationResponse.of(n)));
     }
 }

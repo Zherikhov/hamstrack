@@ -1,25 +1,23 @@
 package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
-import com.hamstrack.common.sse.SseRegistry;
+import com.hamstrack.common.event.CommentAdded;
+import com.hamstrack.common.event.CommentDeleted;
+import com.hamstrack.common.event.CommentUpdated;
 import com.hamstrack.issue.dto.CommentResponse;
 import com.hamstrack.issue.dto.CreateCommentRequest;
 import com.hamstrack.issue.entity.CommentMention;
 import com.hamstrack.issue.entity.IssueComment;
 import com.hamstrack.issue.exception.CommentNotFoundException;
-import com.hamstrack.issue.exception.IssueNotFoundException;
 import com.hamstrack.issue.repository.CommentMentionRepository;
 import com.hamstrack.issue.repository.IssueCommentRepository;
-import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.notification.service.NotificationService;
-import com.hamstrack.project.exception.ProjectNotFoundException;
-import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -27,7 +25,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -36,18 +33,16 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class CommentService {
 
-    private final WorkspaceRepository workspaceRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceMemberRepository workspaceMemberRepository;
-    private final ProjectRepository projectRepository;
-    private final IssueRepository issueRepository;
     private final IssueCommentRepository commentRepository;
     private final CommentMentionRepository mentionRepository;
     private final NotificationService notificationService;
-    private final SseRegistry sseRegistry;
+    private final ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public CommentResponse create(User actor, UUID workspaceId, UUID projectId, long issueNumber, CreateCommentRequest req) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         requireNotArchived(issue);
         var comment = new IssueComment();
         comment.setIssue(issue);
@@ -58,22 +53,21 @@ public class CommentService {
         // Notify @mentioned members (none previously mentioned on a new comment)
         applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, Set.of());
 
-        sseRegistry.broadcast(workspaceId, "COMMENT_ADDED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
+        eventPublisher.publishEvent(new CommentAdded(workspaceId, projectId, issueNumber));
         return CommentResponse.of(comment);
     }
 
     @Transactional(readOnly = true)
     public PageResponse<CommentResponse> list(User actor, UUID workspaceId, UUID projectId,
                                               long issueNumber, org.springframework.data.domain.Pageable pageable) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         return PageResponse.of(commentRepository.findForIssueWithAuthor(issue, pageable).map(CommentResponse::of));
     }
 
     @Transactional
     public CommentResponse update(User actor, UUID workspaceId, UUID projectId, long issueNumber,
                                   UUID commentId, CreateCommentRequest req) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         requireNotArchived(issue);
         var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
@@ -88,14 +82,13 @@ public class CommentService {
                 .map(m -> m.getUser().getId()).collect(Collectors.toSet());
         applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, already);
 
-        sseRegistry.broadcast(workspaceId, "COMMENT_UPDATED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
+        eventPublisher.publishEvent(new CommentUpdated(workspaceId, projectId, issueNumber));
         return CommentResponse.of(comment);
     }
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID commentId) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         requireNotArchived(issue);
         var comment = findCommentOnIssue(commentId, issue);
         if (!comment.getAuthor().getId().equals(actor.getId())) {
@@ -104,8 +97,7 @@ public class CommentService {
         comment.setDeletedAt(Instant.now());
         commentRepository.save(comment);
 
-        sseRegistry.broadcast(workspaceId, "COMMENT_DELETED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
+        eventPublisher.publishEvent(new CommentDeleted(workspaceId, projectId, issueNumber));
     }
 
     /**
@@ -181,14 +173,4 @@ public class CommentService {
         return comment;
     }
 
-    private com.hamstrack.issue.entity.Issue resolveIssue(User actor, UUID workspaceId, UUID projectId, long issueNumber) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        return issueRepository.findByProjectAndNumber(project, issueNumber)
-                .orElseThrow(IssueNotFoundException::new);
-    }
 }

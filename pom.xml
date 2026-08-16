@@ -126,6 +126,14 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>s3</artifactId>
         </dependency>
+        <!-- Apache5 sync HTTP client — already pulled transitively by :s3 (runtime).
+             Declared explicitly (version managed by the AWS BOM) so S3FileStorage can
+             reference Apache5HttpClient.builder() at compile time to set the HD-76
+             connect/socket timeouts. Not a NEW http client — the one already resolved. -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>apache5-client</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-docker-compose</artifactId>
@@ -217,6 +225,44 @@
                             <artifactId>lombok</artifactId>
                         </path>
                     </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <!--
+                      TEST-ONLY connection-pool cap.
+
+                      The suite runs many @SpringBootTest classes and every distinct
+                      context configuration (each `properties = …` override spawns one)
+                      is CACHED for the whole JVM, holding its own Hikari pool. At the
+                      production default (maximum-pool-size=10, minimum-idle=5) roughly a
+                      dozen cached contexts is already 60+ idle connections, and the suite
+                      hit PostgreSQL's default `max_connections = 100` ceiling: two runs
+                      died with `FATAL: sorry, too many clients already` inside
+                      WorkspaceCreationTest — a class that touches none of the new code and
+                      fails at CONTEXT STARTUP, so the symptom looks nothing like the cause.
+                      The local container was raised to max_connections=300 as a stopgap,
+                      but CI Postgres service containers default to 100, so the cap has to
+                      live in the build.
+
+                      4 connections is ample: tests are single-threaded per class
+                      (forkCount defaults to 1, no parallel execution) and
+                      spring.jpa.open-in-view=false means a connection is held only for the
+                      duration of a transaction. minimum-idle=0 lets an idle cached
+                      context's pool drain back to zero instead of parking 5 connections
+                      each for the rest of the run.
+
+                      System properties sit ABOVE application.properties and BELOW
+                      @SpringBootTest(properties = …) / @TestPropertySource in Spring's
+                      precedence order, so this overrides the production defaults without
+                      taking anything away from a test that deliberately tunes the pool.
+                    -->
+                    <systemPropertyVariables>
+                        <spring.datasource.hikari.maximum-pool-size>4</spring.datasource.hikari.maximum-pool-size>
+                        <spring.datasource.hikari.minimum-idle>0</spring.datasource.hikari.minimum-idle>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>

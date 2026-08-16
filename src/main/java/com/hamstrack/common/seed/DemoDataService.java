@@ -2,20 +2,31 @@ package com.hamstrack.common.seed;
 
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.config.AppProperties;
+import com.hamstrack.issue.dto.CreateComponentRequest;
 import com.hamstrack.issue.dto.CreateIssueRequest;
+import com.hamstrack.issue.dto.CreateLabelRequest;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.Status;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.hamstrack.issue.dto.CreateVersionRequest;
+import com.hamstrack.issue.dto.ReleaseVersionRequest;
+import com.hamstrack.issue.entity.VersionLinkType;
+import com.hamstrack.issue.repository.ComponentRepository;
+import com.hamstrack.issue.repository.VersionRepository;
+import com.hamstrack.issue.service.VersionService;
 import com.hamstrack.issue.repository.FieldDefRepository;
 import com.hamstrack.issue.repository.FieldSetRepository;
 import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.issue.repository.IssueTypeRepository;
+import com.hamstrack.issue.repository.LabelRepository;
 import com.hamstrack.issue.repository.PriorityRepository;
 import com.hamstrack.issue.repository.StatusRepository;
 import com.hamstrack.issue.service.FieldValueService;
+import com.hamstrack.issue.service.ComponentService;
 import com.hamstrack.issue.service.IssueService;
+import com.hamstrack.issue.service.LabelService;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.project.dto.CreateProjectRequest;
 import com.hamstrack.project.service.ProjectService;
@@ -28,6 +39,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Function;
@@ -56,6 +71,12 @@ public class DemoDataService {
     private final FieldSetRepository fieldSetRepository;
     private final FieldDefRepository fieldDefRepository;
     private final FieldValueService fieldValueService;
+    private final LabelService labelService;
+    private final LabelRepository labelRepository;
+    private final ComponentService componentService;
+    private final ComponentRepository componentRepository;
+    private final VersionService versionService;
+    private final VersionRepository versionRepository;
     private final ProjectRepository projectRepository;
     private final IssueRepository issueRepository;
 
@@ -217,6 +238,25 @@ public class DemoDataService {
         } catch (RuntimeException e) {
             log.warn("Demo field-value seeding skipped for project {}: {}", projectId, e.toString());
         }
+        // Same best-effort contract for the starter labels (HD-30 §3.9).
+        try {
+            seedDemoLabels(user, wsId, projectId);
+        } catch (RuntimeException e) {
+            log.warn("Demo label seeding skipped for workspace {}: {}", wsId, e.toString());
+        }
+        // …and for the starter components (HD-31 §3.9).
+        try {
+            seedDemoComponents(user, wsId, projectId);
+        } catch (RuntimeException e) {
+            log.warn("Demo component seeding skipped for project {}: {}", projectId, e.toString());
+        }
+        // …and for the starter versions (HD-32 §3.9). Deliberately LAST — see
+        // seedDemoVersions: releasing one of them clears the persistence context.
+        try {
+            seedDemoVersions(user, wsId, projectId);
+        } catch (RuntimeException e) {
+            log.warn("Demo version seeding skipped for project {}: {}", projectId, e.toString());
+        }
 
         log.info("Demo data seeded for user {}: workspace {}, project {}", userId, wsId, projectId);
     }
@@ -258,6 +298,191 @@ public class DemoDataService {
         }
     }
 
+    /**
+     * Starter labels (HD-30 §3.9) so the feature isn't an empty list on first look:
+     * four labels in the demo workspace, attached to a handful of the seeded issues.
+     * Created through {@link LabelService} so normalization, the color palette and the
+     * uniqueness rules apply exactly as for user-created labels. Everything cascades
+     * away with the workspace, so the test-mode reset block needs no change.
+     *
+     * <p><strong>Why the pre-check instead of relying on the caller's catch:</strong>
+     * the whole seed shares ONE transaction, and {@code LabelService.create} lets a
+     * {@code DataIntegrityViolationException} mark it rollback-only before rethrowing.
+     * By then the outer "best-effort" catch can no longer recover — the seed would
+     * still blow up at commit with {@code UnexpectedRollbackException} and first-login
+     * seeding would fail forever. Looking the name up first keeps the failure mode out
+     * of the database entirely (latent today: a freshly created workspace can't hold a
+     * duplicate, but the invariant must not depend on that).
+     */
+    private void seedDemoLabels(com.hamstrack.auth.entity.User user, UUID wsId, UUID projectId) {
+        var project = projectRepository.findById(projectId).orElseThrow();
+        var workspace = project.getWorkspace();
+
+        var labelIds = new LinkedHashMap<String, UUID>();
+        for (var spec : List.of(
+                new String[]{"customer-reported", "#F04438", "Raised by a customer, not found internally"},
+                new String[]{"tech debt", "#667085", "Cleanup work that unblocks future changes"},
+                new String[]{"quick win", "#12B981", "Small scope, visible payoff"},
+                new String[]{"needs design", "#7C6CF5", "Blocked until a design decision lands"})) {
+            var existing = labelRepository.findByWorkspaceAndNameIgnoreCase(workspace, spec[0]);
+            labelIds.put(spec[0], existing.map(com.hamstrack.issue.entity.Label::getId).orElseGet(() ->
+                    labelService.create(user, wsId, new CreateLabelRequest(spec[0], spec[1], spec[2])).id()));
+        }
+
+        // Issue numbers follow the creation order in seedOnFirstLogin above.
+        attachLabels(workspace, project, 5, labelIds, "customer-reported");
+        attachLabels(workspace, project, 6, labelIds, "tech debt", "quick win");
+        attachLabels(workspace, project, 9, labelIds, "customer-reported", "needs design");
+        attachLabels(workspace, project, 13, labelIds, "customer-reported");
+        attachLabels(workspace, project, 17, labelIds, "needs design");
+        attachLabels(workspace, project, 20, labelIds, "quick win");
+    }
+
+    /**
+     * Starter components (HD-31 §3.9) so the project-settings Components tab and the
+     * component picker aren't empty on first look: three modules in the demo project,
+     * assigned to a handful of the seeded issues.
+     *
+     * <p>Created through {@link ComponentService} so normalization and the uniqueness
+     * rules apply exactly as for user-created components. The demo user is the lead of
+     * "Platform" with auto-assign ON, which makes the feature discoverable — it only
+     * ever affects issues created <em>after</em> the seed. Everything cascades away
+     * with the workspace, so the documented test-mode reset block needs no change.
+     *
+     * <p><strong>Why the pre-check instead of relying on the caller's catch</strong>
+     * (same reasoning as {@link #seedDemoLabels}): the whole seed shares ONE
+     * transaction, and a {@code DataIntegrityViolationException} escaping
+     * {@code ComponentService.create} would mark it rollback-only — by then the outer
+     * best-effort catch can no longer recover and the commit would still blow up with
+     * {@code UnexpectedRollbackException}, so first-login seeding would fail forever.
+     * Looking the name up first keeps that failure mode out of the database entirely.
+     */
+    private void seedDemoComponents(com.hamstrack.auth.entity.User user, UUID wsId, UUID projectId) {
+        var project = projectRepository.findById(projectId).orElseThrow();
+
+        var componentIds = new LinkedHashMap<String, UUID>();
+        record Spec(String name, String description, boolean lead) {}
+        for (var spec : List.of(
+                new Spec("Platform", "Core services, storage and the API surface", true),
+                new Spec("Web app", "The React single-page app and its design system", false),
+                new Spec("Mobile", "The companion mobile client", false))) {
+            var existing = componentRepository.findByProjectAndNameIgnoreCase(project, spec.name());
+            componentIds.put(spec.name(), existing
+                    .map(com.hamstrack.issue.entity.Component::getId)
+                    .orElseGet(() -> componentService.create(user, wsId, projectId,
+                            new CreateComponentRequest(spec.name(), spec.description(),
+                                    spec.lead() ? user.getId() : null, spec.lead())).id()));
+        }
+
+        // Issue numbers follow the creation order in seedOnFirstLogin above.
+        assignComponent(project, 4, componentIds.get("Platform"));
+        assignComponent(project, 6, componentIds.get("Platform"));
+        assignComponent(project, 9, componentIds.get("Web app"));
+        assignComponent(project, 13, componentIds.get("Platform"));
+        assignComponent(project, 16, componentIds.get("Mobile"));
+        assignComponent(project, 20, componentIds.get("Web app"));
+    }
+
+    /**
+     * Starter versions (HD-32 §3.9) so the Releases page isn't empty on first look:
+     * two versions in the demo project — a shipped "1.0" and the in-flight "1.1" —
+     * with fix links spread over a handful of the seeded issues so the progress bar
+     * shows something real.
+     *
+     * <p>Created through {@link VersionService} so normalization, the uniqueness rules
+     * and the release lifecycle apply exactly as for user-created versions. Everything
+     * cascades away with the workspace, so the documented test-mode reset block needs
+     * no change.
+     *
+     * <p><strong>Why the pre-check instead of relying on the caller's catch</strong>
+     * (same reasoning as {@link #seedDemoLabels} / {@link #seedDemoComponents}): the
+     * whole seed shares ONE transaction, and a {@code DataIntegrityViolationException}
+     * escaping {@code VersionService.create} would mark it rollback-only — by then the
+     * outer best-effort catch can no longer recover and the commit would still blow up
+     * with {@code UnexpectedRollbackException}, so first-login seeding would fail
+     * forever. Looking the name up first keeps that failure mode out of the database.
+     *
+     * <p><strong>Why this runs LAST, and why the release is the last thing it does:</strong>
+     * {@code VersionService.release} flips the flag with a conditional bulk UPDATE
+     * whose {@code @Modifying} carries {@code clearAutomatically} (it must re-read the
+     * row) — which {@code em.clear()}s the persistence context. The paired
+     * {@code flushAutomatically} writes every pending insert first, so nothing is lost
+     * (the documented "workspace vanishes" trap), but every entity this seeder still
+     * holds is detached afterwards. Nothing may touch them after this point.
+     */
+    private void seedDemoVersions(com.hamstrack.auth.entity.User user, UUID wsId, UUID projectId) {
+        var project = projectRepository.findById(projectId).orElseThrow();
+
+        // UTC, matching VersionService.release's own default: LocalDate.now() would make
+        // the seeded plan dates depend on the container's timezone.
+        var todayUtc = LocalDate.now(ZoneOffset.UTC);
+
+        var versionIds = new LinkedHashMap<String, UUID>();
+        record Spec(String name, String description, LocalDate releaseDate, boolean released) {}
+        for (var spec : List.of(
+                new Spec("1.0", "First public release", todayUtc.minusDays(30), true),
+                new Spec("1.1", "Next release — in flight", todayUtc.plusDays(30), false))) {
+            var existing = versionRepository.findByProjectAndNameIgnoreCase(project, spec.name());
+            versionIds.put(spec.name(), existing
+                    .map(com.hamstrack.issue.entity.Version::getId)
+                    .orElseGet(() -> versionService.create(user, wsId, projectId,
+                            new CreateVersionRequest(spec.name(), spec.description(),
+                                    spec.releaseDate())).id()));
+        }
+
+        // Issue numbers follow the creation order in seedOnFirstLogin above.
+        linkVersions(project, 4, VersionLinkType.FIX, versionIds.get("1.0"));
+        linkVersions(project, 6, VersionLinkType.FIX, versionIds.get("1.0"));
+        linkVersions(project, 9, VersionLinkType.FIX, versionIds.get("1.1"));
+        linkVersions(project, 13, VersionLinkType.FIX, versionIds.get("1.1"));
+        linkVersions(project, 17, VersionLinkType.FIX, versionIds.get("1.1"));
+        // A bug that exists in the shipped release and is fixed in the next one — the
+        // two roles on one issue, which is exactly what the join table's
+        // (issue, version, link_type) key exists to allow.
+        linkVersions(project, 13, VersionLinkType.AFFECTS, versionIds.get("1.0"));
+
+        // LAST statement of the whole seed: clears the persistence context (see above).
+        var shipped = versionIds.get("1.0");
+        if (shipped != null) {
+            versionService.release(user, wsId, projectId, shipped,
+                    new ReleaseVersionRequest(todayUtc.minusDays(30), null));
+        }
+    }
+
+    /** Link one already-seeded issue to one version in the given role. */
+    private void linkVersions(com.hamstrack.project.entity.Project project, long number,
+                              VersionLinkType linkType, UUID versionId) {
+        if (versionId == null) return;
+        issueRepository.findByProjectAndNumber(project, number).ifPresent(issue ->
+                versionService.attachAll(issue,
+                        versionService.resolveForIssue(project, List.of(versionId), linkType),
+                        linkType));
+    }
+
+    /**
+     * Set a component on one already-seeded issue. Goes through the managed entity
+     * rather than a bulk UPDATE: these issues were created earlier in THIS transaction,
+     * so a bulk update would leave the L1 copies stale (CLAUDE.md).
+     */
+    private void assignComponent(com.hamstrack.project.entity.Project project, long number, UUID componentId) {
+        if (componentId == null) return;
+        var component = componentRepository.findByIdAndProject(componentId, project).orElse(null);
+        if (component == null) return;
+        issueRepository.findByProjectAndNumber(project, number).ifPresent(issue -> {
+            issue.setComponent(component);
+            issueRepository.save(issue);
+        });
+    }
+
+    private void attachLabels(com.hamstrack.workspace.entity.Workspace workspace,
+                              com.hamstrack.project.entity.Project project,
+                              long number, Map<String, UUID> labelIds, String... names) {
+        var ids = new ArrayList<UUID>(names.length);
+        for (var name : names) ids.add(labelIds.get(name));
+        issueRepository.findByProjectAndNumber(project, number).ifPresent(issue ->
+                labelService.attachAll(issue, labelService.resolveForIssue(workspace, ids)));
+    }
+
     private void setField(UUID projectId, long number, UUID fieldId, JsonNode value) {
         var project = projectRepository.findById(projectId).orElseThrow();
         issueRepository.findByProjectAndNumber(project, number).ifPresent(issue ->
@@ -269,8 +494,11 @@ public class DemoDataService {
                                      String type, String status, String priority,
                                      String title, String description,
                                      UUID assigneeId, UUID parentId, LocalDate dueDate) {
+        // labelIds/componentId/fix+affectsVersionIds = null: all are attached afterwards,
+        // once they exist (seedDemoLabels / seedDemoComponents / seedDemoVersions)
         return new CreateIssueRequest(title, description,
                 typeIds.get(type), statusIds.get(status),
-                prioIds.get(priority), assigneeId, parentId, dueDate, null);
+                prioIds.get(priority), assigneeId, parentId, dueDate,
+                null, null, null, null, null);
     }
 }

@@ -21,6 +21,21 @@ public record StorageProperties(
             String endpoint,
             boolean pathStyleAccess,
             String accessKey,
-            String secretKey
-    ) {}
+            String secretKey,
+            Timeouts timeouts
+    ) {
+        /**
+         * S3 client timeouts. The AWS SDK v2 sync client has no default request
+         * timeout, so a stalled remote endpoint blocks the calling thread until the
+         * OS-level socket timeout — effectively forever for a slow drip. These bound
+         * both the HTTP-client socket layer and the SDK's overall/per-attempt call.
+         * Ignored entirely by {@code local} storage. All in milliseconds.
+         */
+        public record Timeouts(
+                long connectMs,        // TCP connect
+                long readMs,           // socket read (per read)
+                long apiCallMs,        // overall call incl. retries
+                long apiCallAttemptMs  // single attempt
+        ) {}
+    }
 }

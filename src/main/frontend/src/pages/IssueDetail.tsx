@@ -13,11 +13,15 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
 import { FieldInput, FieldValueDisplay } from '../components/fields'
+import { LabelChip, LabelPicker } from '../components/labels'
+import { ComponentSelect, useProjectComponents } from '../components/projectComponents'
+import { VersionBadge, VersionPicker, useProjectVersions } from '../components/versions'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
+import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import type {
   Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, FieldType, TransitionRule,
-  Comment, Attachment, IssueHistoryEntry, WorkspaceMember,
+  Comment, Attachment, IssueHistoryEntry, WorkspaceMember, VersionRef,
 } from '../types'
 
 function fieldValuesOf(issue: Issue): Record<string, FieldValue> {
@@ -36,13 +40,111 @@ function numberFromKey(key: string): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
+/**
+ * The single source of truth for Activity timestamps (HD-69) — comment rows and
+ * history rows must never drift apart again. `label` is the compact, locale-aware
+ * date + hh:mm (no seconds) shown in the feed; `title` is the full precise value
+ * surfaced on hover.
+ */
+function formatActivityTime(iso: string): { label: string; title: string } {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return { label: iso, title: iso }
+  return {
+    label: d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }),
+    title: d.toLocaleString(undefined, { dateStyle: 'full', timeStyle: 'long' }),
+  }
+}
+
+/**
+ * Right-aligned timestamp cell for an activity row. `ml-auto` pushes it to the
+ * row's right edge and `flex-shrink-0` keeps it whole while the text before it
+ * truncates (the drawer can be as narrow as 360px).
+ */
+function ActivityTime({ at }: { at: string }) {
+  const { label, title } = formatActivityTime(at)
+  return (
+    <span
+      className="mono text-xs ml-auto flex-shrink-0 whitespace-nowrap"
+      style={{ color: 'var(--color-text-muted)' }}
+      title={title}
+    >
+      {label}
+    </span>
+  )
+}
+
+/** Width reserved on every activity row for the hover delete button, so the
+ *  timestamps of comment and history rows land on the same right edge. */
+const ACTIVITY_ACTION_W = 13
+
 function historyLabel(field: string) {
   const labels: Record<string, string> = {
     title: 'Title', description: 'Description', status: 'Status',
     priority: 'Priority', type: 'Type', assignee: 'Assignee', dueDate: 'Due date',
-    parent: 'Parent',
+    parent: 'Parent', labels: 'Labels', component: 'Component',
+    fixVersions: 'Fix versions', affectsVersions: 'Affects versions',
   }
   return labels[field] ?? field
+}
+
+/**
+ * One version role (fix / affects) in the details grid (HD-32) — read = badges,
+ * click = the shared multi-select picker, commit = one full-replacement PATCH for
+ * that role only. Identical rhythm to the Labels cell (muted caption above value,
+ * Save/Cancel under the editor), so the details area stays one visual language.
+ */
+function VersionCell({
+  caption, emptyText, wsId, projectId, versions, editing, draft,
+  onDraftChange, onStart, onCommit, onCancel,
+}: {
+  caption: string
+  emptyText: string
+  wsId: string
+  projectId: string
+  versions: VersionRef[]
+  editing: boolean
+  draft: string[]
+  onDraftChange: (ids: string[]) => void
+  onStart: () => void
+  onCommit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <>
+      <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{caption}</div>
+      {editing ? (
+        <div onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); onCancel() } }}>
+          <VersionPicker
+            wsId={wsId}
+            projectId={projectId}
+            value={draft}
+            onChange={onDraftChange}
+            known={versions}
+            autoFocus
+          />
+          <div className="flex gap-3 mt-1.5">
+            <button onClick={onCommit} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+            <button onMouseDown={e => { e.preventDefault(); onCancel() }}
+                    className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div
+          onClick={onStart}
+          className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+          title="Click to edit"
+        >
+          {versions.length > 0 ? (
+            <div className="flex items-center gap-1 flex-wrap">
+              {versions.map(v => <VersionBadge key={v.id} version={v} />)}
+            </div>
+          ) : (
+            <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{emptyText}</span>
+          )}
+        </div>
+      )}
+    </>
+  )
 }
 
 // Small uppercase section heading — the future jump-nav anchors (HD-65) target these.
@@ -122,6 +224,16 @@ export default function IssueDetail({
   const [addFieldOpen, setAddFieldOpen] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
 
+  // Inline labels edit (HD-30) — a draft set committed as one full-replacement
+  // PATCH, so the request is skipped when the set comes back unchanged.
+  const [labelsEditing, setLabelsEditing] = useState(false)
+  const [labelDraft, setLabelDraft] = useState<string[]>([])
+
+  // Inline version edit (HD-32) — one draft per ROLE, each committed as its own
+  // full-replacement PATCH, so an unchanged set skips the request entirely.
+  const [versionRoleEditing, setVersionRoleEditing] = useState<'fix' | 'affects' | null>(null)
+  const [versionDraft, setVersionDraft] = useState<string[]>([])
+
   // Inline title editing (HD-60 — the first inline field; the pattern the rest follow)
   const [titleEditing, setTitleEditing] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
@@ -136,7 +248,8 @@ export default function IssueDetail({
   const commentRef = useRef<HTMLTextAreaElement>(null)
 
   // Merged activity feed (comments + history) — newest first (HD-64)
-  const [activityFilter, setActivityFilter] = useState<'all' | 'comments' | 'history'>('all')
+  // Defaults to Comments (HD-69) — the discussion is what people open an issue for.
+  const [activityFilter, setActivityFilter] = useState<'all' | 'comments' | 'history'>('comments')
   const [commentPreview, setCommentPreview] = useState(false)
   const activityHeadingRef = useRef<HTMLDivElement>(null)
 
@@ -221,7 +334,7 @@ export default function IssueDetail({
       // Any field change writes a history entry; keep the feed fresh.
       apiGetIssueHistory(wsId, projectId, issueNumber, { size: 100 })
         .then(h => setHistory(h.content)).catch(() => {})
-      await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+      await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, projectId) })
       await qc.invalidateQueries({ queryKey: ['issue', wsId, projectId] })
       return updated
     } catch (err: unknown) {
@@ -265,7 +378,7 @@ export default function IssueDetail({
     setMenuOpen(false)
     if (!window.confirm(`Delete ${issue.key}? This cannot be undone.`)) return
     await apiDeleteIssue(wsId, projectId, issueNumber)
-    await qc.invalidateQueries({ queryKey: ['issues', wsId, projectId] })
+    await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, projectId) })
     onClose?.()
   }
 
@@ -406,7 +519,8 @@ export default function IssueDetail({
   function ensureParents() {
     if (parentsLoaded.current || !canHaveParent) return
     parentsLoaded.current = true
-    apiListIssues(wsId, projectId).then(setCandidateParents).catch(() => {})
+    // HD-79: board list endpoint returns a capped wrapper — take the issue array.
+    apiListIssues(wsId, projectId).then(r => setCandidateParents(r.issues)).catch(() => {})
   }
 
   // Changing type can strand the current parent (adjacency breaks) — mirror the
@@ -426,6 +540,56 @@ export default function IssueDetail({
   }
 
   const gridCols = narrow ? 'grid-cols-1' : 'grid-cols-2'
+
+  // ── Component (HD-31) ──
+  // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
+  // it isn't threaded through the surface props like statuses/priorities are).
+  const { data: componentOptions = [] } = useProjectComponents(wsId, projectId)
+  // The cell is hidden when the project curates no components AND this issue
+  // carries none — nothing to choose from, so no empty control.
+  const showComponentCell = componentOptions.length > 0 || !!issue?.component
+
+  // ── Inline labels (HD-30) ──
+  const issueLabels = issue?.labels ?? []
+  function startLabelsEdit() {
+    setLabelDraft(issueLabels.map(l => l.id))
+    setLabelsEditing(true)
+  }
+  function commitLabels() {
+    setLabelsEditing(false)
+    if (!issue) return
+    const before = [...issueLabels.map(l => l.id)].sort().join(',')
+    const after = [...labelDraft].sort().join(',')
+    if (before === after) return          // unchanged — no request, no history row
+    commitField({ labelIds: labelDraft })  // full replacement ([] clears them all)
+  }
+
+  // ── Inline versions (HD-32) ──
+  // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
+  // it isn't threaded through the surface props like statuses/priorities are).
+  const { data: versionOptions = [] } = useProjectVersions(wsId, projectId)
+  const fixVersions = issue?.fixVersions ?? []
+  const affectsVersions = issue?.affectsVersions ?? []
+  // A cell is hidden when the project curates no versions AND this issue carries
+  // none in that role — nothing to choose from, so no empty control.
+  const showFixVersionCell = versionOptions.length > 0 || fixVersions.length > 0
+  const showAffectsVersionCell = versionOptions.length > 0 || affectsVersions.length > 0
+
+  function startVersionsEdit(role: 'fix' | 'affects') {
+    setVersionDraft((role === 'fix' ? fixVersions : affectsVersions).map(v => v.id))
+    setVersionRoleEditing(role)
+  }
+  function commitVersions(role: 'fix' | 'affects') {
+    setVersionRoleEditing(null)
+    if (!issue) return
+    const current = role === 'fix' ? fixVersions : affectsVersions
+    const before = [...current.map(v => v.id)].sort().join(',')
+    const after = [...versionDraft].sort().join(',')
+    if (before === after) return          // unchanged — no request, no history row
+    // Full replacement for THAT role only ([] clears it); the other role is
+    // absent from the payload and therefore untouched.
+    commitField(role === 'fix' ? { fixVersionIds: versionDraft } : { affectsVersionIds: versionDraft })
+  }
 
   // ── Inline description (HD-62) ──
   function startDescEdit() {
@@ -765,10 +929,14 @@ export default function IssueDetail({
           </h2>
         )}
 
-        {/* Metadata grid — inline click-to-edit (HD-61). Each control commits its
-            own field; Reporter is read-only. */}
+        {/* ── Details (HD-68): built-in metadata + custom fields ────────────────
+            One continuous details area that sits ABOVE the Description: custom
+            fields are metadata, so they belong next to Status/Priority/… on the
+            same grid + label rhythm rather than interrupting the flow from the
+            Description into the discussion sections. Inline click-to-edit
+            throughout (HD-61 built-ins / HD-62 custom); Reporter is read-only. */}
         {issue && (
-          <>
+          <div className="flex flex-col gap-3">
             <div className={`grid ${gridCols} gap-3`}>
               {/* Status — only legal workflow transitions are offered */}
               <div>
@@ -829,6 +997,24 @@ export default function IssueDetail({
                 </Select>
               </div>
 
+              {/* Component (HD-31) — one per issue; blank unsets it
+                  (clearComponent). The current component stays selectable even
+                  when archived, mirroring the assignee-who-left handling above;
+                  changing it here never reassigns anyone (auto-assign is a
+                  create-time rule). */}
+              {showComponentCell && (
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Component</div>
+                  <ComponentSelect
+                    ariaLabel="Component"
+                    components={componentOptions}
+                    value={issue.component?.id ?? ''}
+                    current={issue.component}
+                    onChange={id => commitField(id ? { componentId: id } : { clearComponent: true })}
+                  />
+                </div>
+              )}
+
               {/* Due date — clearing the field clears the due date */}
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Due date</div>
@@ -867,15 +1053,192 @@ export default function IssueDetail({
                   <span className="text-sm truncate">{issue.reporter.displayName}</span>
                 </div>
               </div>
+
+              {/* Labels (HD-30) — chips when read, a picker when editing. Spans
+                  the full grid width (like TEXTAREA fields) because a label row
+                  wraps; `col-span-2` is only safe when the grid HAS two columns. */}
+              <div className={narrow ? '' : 'col-span-2'}>
+                <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Labels</div>
+                {labelsEditing ? (
+                  <div onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setLabelsEditing(false) } }}>
+                    <LabelPicker wsId={wsId} value={labelDraft} onChange={setLabelDraft}
+                                 known={issueLabels} autoFocus />
+                    <div className="flex gap-3 mt-1.5">
+                      <button onClick={commitLabels} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                      <button onMouseDown={e => { e.preventDefault(); setLabelsEditing(false) }}
+                              className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    onClick={startLabelsEdit}
+                    className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+                    title="Click to edit"
+                  >
+                    {issueLabels.length > 0 ? (
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {issueLabels.map(l => <LabelChip key={l.id} label={l} />)}
+                      </div>
+                    ) : (
+                      <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Add labels…</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Fix / Affects versions (HD-32) — badges when read, a picker when
+                  editing, one independent full-replacement PATCH per role. Full
+                  grid width like Labels (a version row wraps); `col-span-2` is
+                  only safe when the grid HAS two columns. An already-linked
+                  ARCHIVED version stays visible and removable — the picker's
+                  `known` list keeps it selectable even though it is no longer
+                  offered (the same handling as an archived component). */}
+              {showFixVersionCell && (
+                <div className={narrow ? '' : 'col-span-2'}>
+                  <VersionCell
+                    caption="Fix versions"
+                    emptyText="Add fix versions…"
+                    wsId={wsId}
+                    projectId={projectId}
+                    versions={fixVersions}
+                    editing={versionRoleEditing === 'fix'}
+                    draft={versionDraft}
+                    onDraftChange={setVersionDraft}
+                    onStart={() => startVersionsEdit('fix')}
+                    onCommit={() => commitVersions('fix')}
+                    onCancel={() => setVersionRoleEditing(null)}
+                  />
+                </div>
+              )}
+
+              {showAffectsVersionCell && (
+                <div className={narrow ? '' : 'col-span-2'}>
+                  <VersionCell
+                    caption="Affects versions"
+                    emptyText="Add affects versions…"
+                    wsId={wsId}
+                    projectId={projectId}
+                    versions={affectsVersions}
+                    editing={versionRoleEditing === 'affects'}
+                    draft={versionDraft}
+                    onDraftChange={setVersionDraft}
+                    onStart={() => startVersionsEdit('affects')}
+                    onCommit={() => commitVersions('affects')}
+                    onCancel={() => setVersionRoleEditing(null)}
+                  />
+                </div>
+              )}
             </div>
             {metaError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{metaError}</p>}
-          </>
+
+            {/* Custom fields (HD-62) — same `gridCols` and the same
+                muted-label-above-value typography as the built-ins, set off by a
+                hairline only (no card), so the two halves read as one details
+                area. Filled fields show by default; "+ Add field" reveals an
+                unfilled one. */}
+            {fields.length > 0 && (
+              <div
+                className="flex flex-col gap-3 pt-3 border-t"
+                style={{ borderColor: 'var(--color-border)' }}
+              >
+                <div className="flex items-center justify-between">
+                  <SectionHeading>Fields</SectionHeading>
+                  {fields.some(f => fieldValues[f.id] === undefined) && (
+                    <div className="relative" ref={addMenuRef}>
+                      <button
+                        onClick={() => setAddFieldOpen(o => !o)}
+                        className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
+                        style={{ color: 'var(--color-brand)' }}
+                      >
+                        <Plus size={12} /> Add field
+                      </button>
+                      {addFieldOpen && (
+                        <div
+                          className="absolute right-0 mt-1 border rounded-md py-1 z-30"
+                          style={{ minWidth: 180, background: 'var(--color-card)', borderColor: 'var(--color-border-2)', boxShadow: 'var(--shadow-lg)' }}
+                        >
+                          {fields.filter(f => fieldValues[f.id] === undefined).map(f => (
+                            <button
+                              key={f.id}
+                              onClick={() => startEditField(f)}
+                              className="w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
+                              style={{ color: 'var(--color-text)' }}
+                            >
+                              {f.name}{f.required ? ' *' : ''}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {fields.some(f => fieldValues[f.id] !== undefined || editingFieldId === f.id) ? (
+                  <div className={`grid ${gridCols} gap-3`}>
+                    {fields.filter(f => fieldValues[f.id] !== undefined || editingFieldId === f.id).map(f => {
+                      // Long-value types keep the full width — but only when the
+                      // grid actually has two columns (a `col-span-2` in the
+                      // narrow one-column layout would spawn a phantom column).
+                      const fullWidth = !narrow && (f.type === 'TEXTAREA' || f.type === 'MULTI_SELECT')
+                      return (
+                        <div key={f.id} className={fullWidth ? 'col-span-2' : ''}>
+                          {editingFieldId === f.id ? (
+                            <div
+                              ref={fieldEditorRef}
+                              onBlur={isDiscreteField(f.type) ? undefined : (e => {
+                                if (!e.currentTarget.contains(e.relatedTarget as Node)) commitFieldDraft(f, fieldDraft)
+                              })}
+                              onKeyDown={e => {
+                                if (e.key === 'Escape') { e.preventDefault(); cancelEditField() }
+                                else if (e.key === 'Enter' && (f.type === 'TEXT' || f.type === 'URL' || f.type === 'NUMBER')) { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
+                                else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && f.type === 'TEXTAREA') { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
+                              }}
+                            >
+                              <FieldInput
+                                field={f}
+                                value={fieldDraft}
+                                members={members}
+                                onChange={v => { setFieldDraft(v); if (isDiscreteField(f.type)) commitFieldDraft(f, v) }}
+                              />
+                              <div className="flex gap-3 mt-1.5">
+                                {!isDiscreteField(f.type) && (
+                                  <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                                )}
+                                <button onMouseDown={e => { e.preventDefault(); cancelEditField() }} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+                              </div>
+                            </div>
+                          ) : (
+                            <div
+                              onClick={() => startEditField(f)}
+                              className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+                              title="Click to edit"
+                            >
+                              <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
+                              <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No field values set.</p>
+                )}
+              </div>
+            )}
+          </div>
         )}
 
-        {/* Description — inline edit (HD-62). Plain text for now; Markdown is HD-66. */}
+        {/* Description — inline edit (HD-62), Markdown (HD-66). First of the
+            content sections: now that the details area ends above it, it carries
+            the same hairline + heading rhythm as Sub-issues/Files/Activity. */}
         {issue && (
-          <div ref={descSectionRef} style={{ scrollMarginTop: 8 }}>
-            <div className="mb-1.5"><SectionHeading>Description</SectionHeading></div>
+          <div
+            ref={descSectionRef}
+            className="flex flex-col gap-2 pt-1 border-t"
+            style={{ borderColor: 'var(--color-border)', scrollMarginTop: 8 }}
+          >
+            <div className="pt-2"><SectionHeading>Description</SectionHeading></div>
             {descEditing ? (
               <div>
                 <div className="flex items-center gap-2 mb-1">
@@ -935,93 +1298,6 @@ export default function IssueDetail({
               >
                 Add a description…
               </button>
-            )}
-          </div>
-        )}
-
-        {/* Custom fields — inline click-to-edit (HD-62). Filled fields show by
-            default; "+ Add field" reveals an unfilled one. */}
-        {issue && fields.length > 0 && (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <SectionHeading>Fields</SectionHeading>
-              {fields.some(f => fieldValues[f.id] === undefined) && (
-                <div className="relative" ref={addMenuRef}>
-                  <button
-                    onClick={() => setAddFieldOpen(o => !o)}
-                    className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
-                    style={{ color: 'var(--color-brand)' }}
-                  >
-                    <Plus size={12} /> Add field
-                  </button>
-                  {addFieldOpen && (
-                    <div
-                      className="absolute right-0 mt-1 border rounded-md py-1 z-30"
-                      style={{ minWidth: 180, background: 'var(--color-card)', borderColor: 'var(--color-border-2)', boxShadow: 'var(--shadow-lg)' }}
-                    >
-                      {fields.filter(f => fieldValues[f.id] === undefined).map(f => (
-                        <button
-                          key={f.id}
-                          onClick={() => startEditField(f)}
-                          className="w-full text-left px-3 py-1.5 text-sm cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
-                          style={{ color: 'var(--color-text)' }}
-                        >
-                          {f.name}{f.required ? ' *' : ''}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {fields.some(f => fieldValues[f.id] !== undefined || editingFieldId === f.id) ? (
-              <div className={`grid ${gridCols} gap-3`}>
-                {fields.filter(f => fieldValues[f.id] !== undefined || editingFieldId === f.id).map(f => {
-                  const fullWidth = f.type === 'TEXTAREA' || f.type === 'MULTI_SELECT'
-                  return (
-                    <div key={f.id} className={fullWidth ? 'col-span-2' : ''}>
-                      {editingFieldId === f.id ? (
-                        <div
-                          ref={fieldEditorRef}
-                          onBlur={isDiscreteField(f.type) ? undefined : (e => {
-                            if (!e.currentTarget.contains(e.relatedTarget as Node)) commitFieldDraft(f, fieldDraft)
-                          })}
-                          onKeyDown={e => {
-                            if (e.key === 'Escape') { e.preventDefault(); cancelEditField() }
-                            else if (e.key === 'Enter' && (f.type === 'TEXT' || f.type === 'URL' || f.type === 'NUMBER')) { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
-                            else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && f.type === 'TEXTAREA') { e.preventDefault(); commitFieldDraft(f, fieldDraft) }
-                          }}
-                        >
-                          <FieldInput
-                            field={f}
-                            value={fieldDraft}
-                            members={members}
-                            onChange={v => { setFieldDraft(v); if (isDiscreteField(f.type)) commitFieldDraft(f, v) }}
-                          />
-                          <div className="flex gap-3 mt-1.5">
-                            {!isDiscreteField(f.type) && (
-                              <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
-                            )}
-                            <button onMouseDown={e => { e.preventDefault(); cancelEditField() }} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
-                          </div>
-                        </div>
-                      ) : (
-                        <div
-                          onClick={() => startEditField(f)}
-                          className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
-                          title="Click to edit"
-                        >
-                          <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
-                          <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : (
-              <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>No field values set.</p>
             )}
           </div>
         )}
@@ -1166,21 +1442,22 @@ export default function IssueDetail({
                   <Avatar name={item.comment.authorName} size={22} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-baseline gap-2 mb-0.5">
-                      <span className="text-xs font-medium">{item.comment.authorName}</span>
-                      <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                        {new Date(item.comment.createdAt).toLocaleDateString()}
-                      </span>
+                      <span className="text-xs font-medium truncate min-w-0">{item.comment.authorName}</span>
+                      <ActivityTime at={item.comment.createdAt} />
                     </div>
                     <Markdown>{item.comment.body}</Markdown>
                   </div>
-                  {user?.id === item.comment.authorId && (
+                  {user?.id === item.comment.authorId ? (
                     <button
                       onClick={() => handleDeleteComment(item.comment.id)}
                       className="opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
                       style={{ color: 'var(--color-text-muted)' }}
+                      title="Delete comment"
                     >
                       <Trash2 size={13} />
                     </button>
+                  ) : (
+                    <span className="flex-shrink-0" style={{ width: ACTIVITY_ACTION_W }} aria-hidden />
                   )}
                 </div>
               ) : (
@@ -1190,14 +1467,12 @@ export default function IssueDetail({
                     style={{ width: 6, height: 6, background: 'var(--color-brand)' }}
                   />
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline gap-1.5 flex-wrap">
-                      <span className="text-xs font-medium">{item.entry.changedByName}</span>
-                      <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                        changed <strong>{historyLabel(item.entry.field)}</strong>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-xs truncate min-w-0" style={{ color: 'var(--color-text-muted)' }}>
+                        <span className="font-medium" style={{ color: 'var(--color-text)' }}>{item.entry.changedByName}</span>
+                        {' '}changed <strong>{historyLabel(item.entry.field)}</strong>
                       </span>
-                      <span className="mono text-xs ml-auto" style={{ color: 'var(--color-text-muted)' }}>
-                        {new Date(item.entry.createdAt).toLocaleDateString()}
-                      </span>
+                      <ActivityTime at={item.entry.createdAt} />
                     </div>
                     {(item.entry.oldValue !== undefined || item.entry.newValue !== undefined) && item.entry.field !== 'description' && (
                       <div className="text-xs mt-0.5 flex items-center gap-1" style={{ color: 'var(--color-text-secondary)' }}>
@@ -1218,6 +1493,9 @@ export default function IssueDetail({
                       </div>
                     )}
                   </div>
+                  {/* Mirrors the comment row's delete-button gutter so both kinds
+                      of timestamp share one right edge. */}
+                  <span className="flex-shrink-0" style={{ width: ACTIVITY_ACTION_W }} aria-hidden />
                 </div>
               ))}
             </div>

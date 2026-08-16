@@ -2,25 +2,21 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.AttachmentProperties;
+import com.hamstrack.common.event.AttachmentAdded;
+import com.hamstrack.common.event.AttachmentDeleted;
 import com.hamstrack.common.observability.ProductMetrics;
-import com.hamstrack.common.sse.SseRegistry;
 import com.hamstrack.common.storage.FileStorage;
 import com.hamstrack.issue.dto.AttachmentResponse;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueAttachment;
 import com.hamstrack.issue.exception.AttachmentNotFoundException;
-import com.hamstrack.issue.exception.IssueNotFoundException;
 import com.hamstrack.issue.repository.IssueAttachmentRepository;
-import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
-import com.hamstrack.project.exception.ProjectNotFoundException;
-import com.hamstrack.project.repository.ProjectRepository;
-import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
-import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.MediaTypeFactory;
@@ -28,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
@@ -35,7 +32,6 @@ import org.springframework.web.server.ResponseStatusException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -43,77 +39,140 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class AttachmentService {
 
-    private final WorkspaceRepository workspaceRepository;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
-    private final ProjectRepository projectRepository;
+    private final WorkspaceAccessService workspaceAccess;
     private final ProjectMemberRepository projectMemberRepository;
-    private final IssueRepository issueRepository;
     private final IssueAttachmentRepository attachmentRepository;
     private final FileStorage fileStorage;
-    private final SseRegistry sseRegistry;
+    private final ApplicationEventPublisher eventPublisher;
     private final ProductMetrics metrics;
     private final AttachmentProperties attachmentProperties;
+    private final TransactionTemplate txTemplate;
 
     public record AttachmentDownload(String filename, String contentType, long sizeBytes, InputStream stream) {}
 
-    @Transactional
+    // Row-and-response holder assembled inside the reserve tx, so nothing after
+    // commit touches a lazy association (open-in-view=false).
+    private record ReservedAttachment(UUID attachmentId, String storageKey, String contentType,
+                                      long sizeBytes, AttachmentResponse response) {}
+
+    /**
+     * Upload orchestrator — deliberately NOT {@code @Transactional}. The blob write
+     * runs OFF the DB transaction so a slow/hung storage backend (bounded by HD-76)
+     * can never pin a Hikari connection until the pool exhausts. Flow:
+     * <ol>
+     *   <li>a short tx reserves + commits the attachment row (tenant scoping + the
+     *       server-generated key resolved inside it),</li>
+     *   <li>{@code fileStorage.store} runs after commit on the request thread (the
+     *       client still blocks until the blob is durably stored),</li>
+     *   <li>on store failure a second short tx deletes ONLY the reserved row (scoped
+     *       to the resolved issue), then the failure is rethrown as 500.</li>
+     * </ol>
+     * Because {@code @Transactional} self-invocation would bypass the proxy, the two
+     * DB steps run via {@link TransactionTemplate} rather than same-bean calls.
+     */
     public AttachmentResponse upload(User actor, UUID workspaceId, UUID projectId, long issueNumber, MultipartFile file) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
-        requireNotArchived(issue);
+        // Cheap pre-checks (no DB) so an empty upload never reserves a row.
         if (file.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "File is empty");
         }
         validateUpload(file);
 
-        var filename = sanitizeFilename(file.getOriginalFilename());
-        var attachment = new IssueAttachment();
-        attachment.setIssue(issue);
-        attachment.setFilename(filename);
-        attachment.setSizeBytes(file.getSize());
-        // Never trust the client Content-Type: derive a safe one from the filename.
-        // A malformed client header would otherwise be stored verbatim and later
-        // 500 the download (MediaType.parseMediaType) or spoof how a browser renders.
-        attachment.setContentType(MediaTypeFactory.getMediaType(filename)
-                .map(MediaType::toString).orElse(MediaType.APPLICATION_OCTET_STREAM_VALUE));
-        attachment.setUploadedBy(actor);
-        // Key is server-generated (no user input) — the original filename lives only in the DB
-        attachment.setStorageKey("ws/" + workspaceId + "/issues/" + issue.getId() + "/" + UUID.randomUUID());
-        attachmentRepository.save(attachment);
+        // Step 1 — short tx: resolve (tenant scoping) + persist the row, assemble the
+        // response, and commit. The key is server-generated from the resolved ids.
+        var reserved = txTemplate.execute(status -> {
+            var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
+            requireNotArchived(issue);
 
-        // Last side effect before commit: if the write to storage fails, the tx rolls
-        // back and no row exists; a commit failure after this leaks at most one blob
+            var filename = sanitizeFilename(file.getOriginalFilename());
+            var attachment = new IssueAttachment();
+            attachment.setIssue(issue);
+            attachment.setFilename(filename);
+            attachment.setSizeBytes(file.getSize());
+            // Never trust the client Content-Type: derive a safe one from the filename.
+            // A malformed client header would otherwise be stored verbatim and later
+            // 500 the download (MediaType.parseMediaType) or spoof how a browser renders.
+            attachment.setContentType(MediaTypeFactory.getMediaType(filename)
+                    .map(MediaType::toString).orElse(MediaType.APPLICATION_OCTET_STREAM_VALUE));
+            attachment.setUploadedBy(actor);
+            // Key is server-generated (no user input) — the original filename lives only in the DB
+            attachment.setStorageKey("ws/" + workspaceId + "/issues/" + issue.getId() + "/" + UUID.randomUUID());
+            attachmentRepository.save(attachment);
+            return new ReservedAttachment(attachment.getId(), attachment.getStorageKey(),
+                    attachment.getContentType(), attachment.getSizeBytes(), AttachmentResponse.of(attachment));
+        });
+
+        // Step 2 — off any tx (row already committed): write the blob. A store failure
+        // (IOException / SdkException / HD-76 timeout) triggers compensation below.
         try (var in = file.getInputStream()) {
-            fileStorage.store(attachment.getStorageKey(), in, file.getSize(), attachment.getContentType());
-        } catch (IOException e) {
+            fileStorage.store(reserved.storageKey(), in, reserved.sizeBytes(), reserved.contentType());
+        } catch (IOException | RuntimeException e) {
+            // Step 3 — compensate: delete ONLY the reserved row (scoped to the resolved
+            // issue). If compensation itself fails, log the orphan for out-of-band
+            // cleanup (mirrors deleteFromStorageAfterCommit) and still surface the 500.
+            compensateFailedUpload(actor, workspaceId, projectId, issueNumber,
+                    reserved.attachmentId(), reserved.storageKey());
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store file");
         }
-        metrics.attachmentUploaded(file.getSize());
 
-        sseRegistry.broadcast(workspaceId, "ATTACHMENT_ADDED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
-        return AttachmentResponse.of(attachment);
+        // Only signal "added" once the blob truly exists. NOTE: this method is NOT
+        // @Transactional (blob I/O runs off the tx, HD-76), so this event is published
+        // with no active transaction — the AFTER_COMMIT listener fires it inline via
+        // fallbackExecution = true (see SseEventListener), reproducing the old
+        // SseRegistry.afterCommit no-tx branch.
+        metrics.attachmentUploaded(reserved.sizeBytes());
+        eventPublisher.publishEvent(new AttachmentAdded(workspaceId, projectId, issueNumber));
+        return reserved.response();
+    }
+
+    // Compensating delete for a failed store — a short tx that re-resolves the issue
+    // (tenant scoping) and removes only the reserved attachment belonging to it. Never
+    // a global deleteById, so a race can't delete another issue's/tenant's row.
+    private void compensateFailedUpload(User actor, UUID workspaceId, UUID projectId, long issueNumber,
+                                        UUID attachmentId, String storageKey) {
+        try {
+            txTemplate.executeWithoutResult(status -> {
+                var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
+                attachmentRepository.findByIdAndIssue(attachmentId, issue)
+                        .ifPresent(attachmentRepository::delete);
+            });
+        } catch (RuntimeException ce) {
+            log.warn("Failed to compensate (delete) orphaned attachment {} key {}",
+                    attachmentId, storageKey, ce);
+        }
     }
 
     @Transactional(readOnly = true)
     public List<AttachmentResponse> list(User actor, UUID workspaceId, UUID projectId, long issueNumber) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         return attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue).stream()
                 .map(AttachmentResponse::of)
                 .toList();
     }
 
-    @Transactional(readOnly = true)
+    // Metadata resolved in a short read tx, materialized into a plain record so the
+    // DB connection is released BEFORE the (potentially slow, HD-76-bounded) blob read.
+    private record AttachmentMeta(String filename, String contentType, long sizeBytes, String storageKey) {}
+
+    /**
+     * Non-{@code @Transactional} orchestrator: look up the attachment metadata in a
+     * short read tx (tenant scoping preserved), then open the blob stream OUTSIDE the
+     * tx so the DB connection isn't held while the response streams to the client.
+     */
     public AttachmentDownload download(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID attachmentId) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
-        var attachment = findAttachmentOnIssue(attachmentId, issue);
-        return new AttachmentDownload(
-                attachment.getFilename(), attachment.getContentType(), attachment.getSizeBytes(),
-                fileStorage.open(attachment.getStorageKey()));
+        var meta = txTemplate.execute(status -> {
+            var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
+            var attachment = findAttachmentOnIssue(attachmentId, issue);
+            return new AttachmentMeta(attachment.getFilename(), attachment.getContentType(),
+                    attachment.getSizeBytes(), attachment.getStorageKey());
+        });
+        // Open outside the tx — the read connection is already released.
+        return new AttachmentDownload(meta.filename(), meta.contentType(), meta.sizeBytes(),
+                fileStorage.open(meta.storageKey()));
     }
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID attachmentId) {
-        var issue = resolveIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
         requireNotArchived(issue);
         var attachment = findAttachmentOnIssue(attachmentId, issue);
         if (!attachment.getUploadedBy().getId().equals(actor.getId())
@@ -123,8 +182,7 @@ public class AttachmentService {
         attachmentRepository.delete(attachment);
         deleteFromStorageAfterCommit(attachment.getStorageKey());
 
-        sseRegistry.broadcast(workspaceId, "ATTACHMENT_DELETED",
-                Map.of("projectId", projectId.toString(), "issueNumber", issueNumber));
+        eventPublisher.publishEvent(new AttachmentDeleted(workspaceId, projectId, issueNumber));
     }
 
     /**
@@ -201,14 +259,4 @@ public class AttachmentService {
                 .orElseThrow(AttachmentNotFoundException::new);
     }
 
-    private Issue resolveIssue(User actor, UUID workspaceId, UUID projectId, long issueNumber) {
-        var workspace = workspaceRepository.findById(workspaceId)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
-                .orElseThrow(WorkspaceNotFoundException::new);
-        var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
-                .orElseThrow(ProjectNotFoundException::new);
-        return issueRepository.findByProjectAndNumber(project, issueNumber)
-                .orElseThrow(IssueNotFoundException::new);
-    }
 }
