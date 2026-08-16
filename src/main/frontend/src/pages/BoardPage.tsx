@@ -12,7 +12,11 @@ import { useUiStore } from '../uiStore'
 import { isMoveAllowed } from '../lib/transitions'
 import { boardIssuesKey } from '../lib/queryKeys'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
+import { LabelChips, LabelFilter } from '../components/labels'
+import { ComponentFilter, ComponentName } from '../components/projectComponents'
+import { FixVersionFilter } from '../components/versions'
 import IssueSidePanel from './IssueSidePanel'
+import type { LabelMatch } from '../api'
 import type { BoardIssues, Issue, IssueType } from '../types'
 
 // Board issue-panel sizing (HD-54): user-draggable width, clamped and additionally
@@ -48,6 +52,20 @@ export default function BoardPage() {
     (location.state as { openIssue?: number } | null)?.openIssue,
   )
   const [filterPriority, setFilterPriority] = useState<string>('')
+  // Label filter (HD-30) — SERVER-side, unlike the HD-43 quick chips below: a
+  // classification filter has to search the whole project, not just the first
+  // `cap` issues the board loaded. So it travels as query params and joins the
+  // query key. `labelMatch` picks OR (any) vs AND (all) within the dimension.
+  const [filterLabelIds, setFilterLabelIds] = useState<string[]>([])
+  const [labelMatch, setLabelMatch] = useState<LabelMatch>('any')
+  // Component filter (HD-31) — server-side for the same reason as the labels
+  // above: "component = Billing" must search the whole project, not the first
+  // `cap` issues. One component per issue, so this is a single id.
+  const [filterComponentId, setFilterComponentId] = useState<string>('')
+  // Fix-version filter (HD-32) — server-side for the same reason. FIX links only:
+  // "ships in 2.4.0" and "is broken in 2.4.0" are different questions, so an
+  // AFFECTS link deliberately does not match.
+  const [filterFixVersionId, setFilterFixVersionId] = useState<string>('')
   // Quick filters (HD-43) — client-side chips over the already-loaded board data,
   // persisted per user + per project. Never sent to the API.
   const [quick, setQuick] = useState<BoardQuickFilters>(EMPTY_QUICK)
@@ -152,10 +170,17 @@ export default function BoardPage() {
   // Shared key (lib/queryKeys.ts) — the create-issue dialog reads the same cache
   // entry for its parent picker, so the cached value must stay the `BoardIssues`
   // wrapper for both.
-  const issuesKey = boardIssuesKey(wsId, projectId, filterPriority)
+  const serverFilters = {
+    priorityId: filterPriority || undefined,
+    labelIds: filterLabelIds,
+    labelMatch,
+    componentId: filterComponentId || undefined,
+    fixVersionId: filterFixVersionId || undefined,
+  }
+  const issuesKey = boardIssuesKey(wsId, projectId, serverFilters)
   const { data: board, isLoading, isError } = useQuery({
     queryKey: issuesKey,
-    queryFn: () => apiListIssues(wsId!, projectId!, { priorityId: filterPriority || undefined }),
+    queryFn: () => apiListIssues(wsId!, projectId!, serverFilters),
     enabled: !!wsId && !!projectId,
   })
   const issues = board?.issues ?? []
@@ -204,10 +229,15 @@ export default function BoardPage() {
 
   function clearAllFilters() {
     setFilterPriority('')
+    setFilterLabelIds([])
+    setLabelMatch('any')
+    setFilterComponentId('')
+    setFilterFixVersionId('')
     resetQuick()
   }
 
-  const anyFilterActive = quickActive || !!filterPriority
+  const anyFilterActive = quickActive || !!filterPriority || filterLabelIds.length > 0
+    || !!filterComponentId || !!filterFixVersionId
 
   // Project gone or access revoked — drop it from the recency journal so the
   // "/" redirect stops pointing here
@@ -314,6 +344,33 @@ export default function BoardPage() {
             <option value="">All types</option>
             {issueTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
           </Select>
+
+          {/* Components — server-side (query param); hides itself when the
+              project curates none (HD-31) */}
+          <ComponentFilter
+            wsId={wsId}
+            projectId={projectId}
+            value={filterComponentId}
+            onChange={setFilterComponentId}
+          />
+
+          {/* Fix versions — server-side (query param); hides itself when the
+              project curates none (HD-32) */}
+          <FixVersionFilter
+            wsId={wsId}
+            projectId={projectId}
+            value={filterFixVersionId}
+            onChange={setFilterFixVersionId}
+          />
+
+          {/* Labels — server-side (query params), next to the priority select */}
+          <LabelFilter
+            wsId={wsId}
+            value={filterLabelIds}
+            onChange={setFilterLabelIds}
+            match={labelMatch}
+            onMatchChange={setLabelMatch}
+          />
 
           <span className="flex-shrink-0" style={{ width: 1, height: 18, background: 'var(--color-border)' }} />
 
@@ -499,6 +556,10 @@ export default function BoardPage() {
                         key={issue.id}
                         issue={issue}
                         issueTypes={issueTypes}
+                        // Every card in a component-filtered board carries the
+                        // same component — showing it would be noise (DESIGN.md:
+                        // compact in the board).
+                        showComponent={!filterComponentId}
                         active={openIssueNumber === issue.number}
                         isDragging={dragging?.id === issue.id}
                         onClick={() => setOpenIssueNumber(
@@ -672,10 +733,12 @@ function BoardIssueDrawer({
 }
 
 function IssueCard({
-  issue, issueTypes, active, isDragging, onClick, onOpenNumber, onDragStart, onDragEnd,
+  issue, issueTypes, showComponent, active, isDragging, onClick, onOpenNumber, onDragStart, onDragEnd,
 }: {
   issue: Issue
   issueTypes: IssueType[]
+  /** HD-31: suppressed while the board is filtered to one component. */
+  showComponent: boolean
   active: boolean
   isDragging: boolean
   onClick: () => void
@@ -724,6 +787,13 @@ function IssueCard({
       <div className="text-sm mb-2" style={{ color: 'var(--color-text)', lineHeight: 1.35 }}>
         {issue.title}
       </div>
+      {/* Component (HD-31) — a quiet line under the title, only when the board
+          isn't already filtered down to a single component */}
+      {showComponent && issue.component && (
+        <div className="mb-2 min-w-0">
+          <ComponentName component={issue.component} compact />
+        </div>
+      )}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs truncate" style={{ color: issue.type.color }}>{issue.type.name}</span>
@@ -737,6 +807,13 @@ function IssueCard({
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>—</span>
         )}
       </div>
+      {/* Labels (HD-30) — at most 3 chips + "+k" beneath the type/assignee row,
+          keeping the card compact (DESIGN.md: dense in the board). */}
+      {issue.labels && issue.labels.length > 0 && (
+        <div className="mt-2">
+          <LabelChips labels={issue.labels} max={3} compact />
+        </div>
+      )}
     </div>
   )
 }

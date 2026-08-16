@@ -126,6 +126,106 @@ export interface AssigneeInfo {
   avatarUrl?: string;
 }
 
+// ── Labels (HD-30) ──────────────────────────────────────────────────────────
+// Workspace-scoped, colored, many-per-issue. Deliberately NOT part of
+// ProjectConfig: labels are content, not bound taxonomy, so they live under
+// their own query key (`['labels', wsId]`) and never invalidate the board's
+// config fetch when someone recolors one.
+
+/** A label as embedded in an issue payload — id/name/color + archived (dimmed). */
+export interface LabelRef {
+  id: string;
+  name: string;
+  color: string;
+  archived: boolean;
+}
+
+/** A full workspace label row (settings page / picker source). */
+export interface Label extends LabelRef {
+  description?: string;
+  createdById?: string;
+  createdByName?: string;
+  /** null unless the caller asked for usage (`withUsage=true` / the /usage endpoint). */
+  issueCount: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MergeLabelsResult {
+  targetId: string;
+  mergedLabelCount: number;
+  reassignedIssueCount: number;
+}
+
+// ── Components (HD-31) ──────────────────────────────────────────────────────
+// Project-scoped modules ("Billing", "iOS app") with an optional lead and an
+// optional auto-assign switch, ONE per issue. Like labels they are content, not
+// bound taxonomy — they never travel in ProjectConfig and live under their own
+// query key (`['components', wsId, projectId]`).
+
+/** A component as embedded in an issue payload — enough to render it (dimmed when archived). */
+export interface ComponentRef {
+  id: string;
+  name: string;
+  archived: boolean;
+}
+
+/** A full project component row (settings page / picker source). */
+export interface Component extends ComponentRef {
+  description?: string;
+  /** The lead may have left the workspace — the row survives and auto-assign silently skips. */
+  leadId?: string;
+  leadName?: string;
+  leadAvatarUrl?: string;
+  /** Assign new issues to the lead when the create request carries no assignee. */
+  autoAssign: boolean;
+  /** null unless the caller asked for usage (`withUsage=true` / the /usage endpoint). */
+  issueCount: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ── Versions (HD-32) ────────────────────────────────────────────────────────
+// Project-scoped release targets with a lifecycle (unreleased ⇄ released, plus
+// an orthogonal archived). Issues link to them in TWO roles — fix version ("the
+// change ships here") and affects version ("the defect exists there") — both
+// many-to-many. Like labels and components they are content, not bound taxonomy:
+// their own endpoint, their own query key (`['versions', wsId, projectId]`),
+// never part of ProjectConfig.
+
+/** A version as embedded in an issue payload — enough to render it (dimmed when archived). */
+export interface VersionRef {
+  id: string;
+  name: string;
+  released: boolean;
+  archived: boolean;
+}
+
+/** A full project version row (Releases page / picker source). */
+export interface Version extends VersionRef {
+  description?: string;
+  /** Planned/actual release date, `YYYY-MM-DD`. Preserved when un-releasing. */
+  releaseDate?: string;
+  /** Instant the version was flipped to released; null while unreleased. */
+  releasedAt?: string;
+  /** FIX-link progress — ALWAYS present (one grouped query for the whole list),
+   *  so the Releases page needs no extra round-trip per card. */
+  issueCount: number;
+  doneIssueCount: number;
+  /** Issues that merely *affect* this version (triage), not part of progress. */
+  affectsIssueCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** `GET …/versions/{id}/usage` — drives the delete dialog and the release dialog. */
+export interface VersionUsage {
+  fixIssueCount: number;
+  affectsIssueCount: number;
+  /** FIX-linked issues NOT in a DONE-category status — the "move N unresolved" count. */
+  unresolvedFixIssueCount: number;
+}
+
 export interface Issue {
   id: string;
   number: number;
@@ -146,6 +246,19 @@ export interface Issue {
   childCount: number;
   doneChildCount: number;
   dueDate?: string;
+  // Attached workspace labels, ordered by name (HD-30). The API always sends the
+  // key ([] when none); optional here so hand-built fixtures and locally-patched
+  // copies stay valid — every consumer reads it as `issue.labels ?? []`.
+  labels?: LabelRef[];
+  // The project component this issue belongs to (HD-31), or null/absent when it
+  // has none. Read as `issue.component ?? undefined` so hand-built fixtures and
+  // locally-patched copies stay valid.
+  component?: ComponentRef | null;
+  // Version links (HD-32), one array per role. The API always sends both keys
+  // ([] when none); optional here so hand-built fixtures and locally-patched
+  // copies stay valid — every consumer reads them as `issue.fixVersions ?? []`.
+  fixVersions?: VersionRef[];
+  affectsVersions?: VersionRef[];
   fields: FieldValueEntry[];          // filled custom fields only
   version: number;
   createdAt: string;
@@ -369,8 +482,10 @@ export interface SearchValueOption {
 // One queryable HQL field's public schema (drives autocomplete).
 export interface SearchField {
   name: string;
-  // data-type family (serialized as `type`): ENUM_REF/USER_REF/ISSUE_REF/TEXT/DATE/TIMESTAMP/NUMBER
-  type: 'ENUM_REF' | 'USER_REF' | 'ISSUE_REF' | 'TEXT' | 'DATE' | 'TIMESTAMP' | 'NUMBER';
+  // data-type family (serialized as `type`): ENUM_REF/USER_REF/ISSUE_REF/LABEL_REF/
+  // TEXT/DATE/TIMESTAMP/NUMBER. LABEL_REF (HD-30) is many-valued — it compiles to
+  // an EXISTS over the join table server-side and is not sortable.
+  type: 'ENUM_REF' | 'USER_REF' | 'ISSUE_REF' | 'LABEL_REF' | 'TEXT' | 'DATE' | 'TIMESTAMP' | 'NUMBER';
   operators: string[];
   nullable: boolean;
   sortable: boolean;

@@ -207,12 +207,27 @@ class SearchApiTest {
                 .andExpect(jsonPath("$.field").value("status"));
     }
 
+    /**
+     * HD-30 activated {@code label} (the last remaining not-available stub in
+     * {@link FieldRegistry} — every descriptor is now {@code available = true}), so the
+     * former "not yet queryable" assertion has no field left to point at. What must
+     * still hold is the distinction the old test protected: a KNOWN field whose value
+     * cannot be resolved is a value-level semantic error anchored on the field, not
+     * "Unknown field" (which is what a typo gets, see
+     * {@link #unknownFieldReturns422SemanticWithField()}).
+     *
+     * <p>If a not-available stub is ever registered again, add a case here for it.
+     */
     @Test
-    void notYetAvailableFieldReturns422NotUnknown() throws Exception {
+    void liveLabelFieldWithUnresolvableValueReturns422SemanticNotUnknownField() throws Exception {
         var ctx = newProject();
         search(ctx.wsId, ctx.token, "label = \"x\"")
                 .andExpect(status().isUnprocessableContent())
-                .andExpect(jsonPath("$.detail", containsString("not yet queryable")));
+                .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
+                .andExpect(jsonPath("$.field").value("label"))
+                .andExpect(jsonPath("$.detail", containsString("No label named 'x'")))
+                .andExpect(jsonPath("$.detail", not(containsString("not yet queryable"))))
+                .andExpect(jsonPath("$.detail", not(containsString("Unknown field"))));
     }
 
     // ============================================================ semantics
@@ -284,8 +299,15 @@ class SearchApiTest {
                         .header("Authorization", "Bearer " + ctx.token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.fields[*].name", hasItem("status")))
-                // label (not-available) must NOT be advertised
-                .andExpect(jsonPath("$.fields[*].name", not(hasItem("label"))))
+                // HD-30: label is live now, so /schema DOES advertise it …
+                .andExpect(jsonPath("$.fields[*].name", hasItem("label")))
+                // … exactly once: `labels` is an ALIAS pointing at the same descriptor
+                // instance and availableFields() de-duplicates by identity, so neither
+                // a second "label" entry nor a "labels" entry may appear.
+                .andExpect(jsonPath("$.fields[?(@.name == 'label')]", hasSize(1)))
+                .andExpect(jsonPath("$.fields[*].name", not(hasItem("labels"))))
+                // and the LABEL value picklist exists (empty here — no labels yet)
+                .andExpect(jsonPath("$.values.LABEL").exists())
                 .andExpect(jsonPath("$.values.STATUS", not(empty())))
                 .andExpect(jsonPath("$.keywords", hasItem("ORDER BY")));
     }

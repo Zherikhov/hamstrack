@@ -13,12 +13,15 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
 import { FieldInput, FieldValueDisplay } from '../components/fields'
+import { LabelChip, LabelPicker } from '../components/labels'
+import { ComponentSelect, useProjectComponents } from '../components/projectComponents'
+import { VersionBadge, VersionPicker, useProjectVersions } from '../components/versions'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
 import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import type {
   Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, FieldType, TransitionRule,
-  Comment, Attachment, IssueHistoryEntry, WorkspaceMember,
+  Comment, Attachment, IssueHistoryEntry, WorkspaceMember, VersionRef,
 } from '../types'
 
 function fieldValuesOf(issue: Issue): Record<string, FieldValue> {
@@ -78,9 +81,70 @@ function historyLabel(field: string) {
   const labels: Record<string, string> = {
     title: 'Title', description: 'Description', status: 'Status',
     priority: 'Priority', type: 'Type', assignee: 'Assignee', dueDate: 'Due date',
-    parent: 'Parent',
+    parent: 'Parent', labels: 'Labels', component: 'Component',
+    fixVersions: 'Fix versions', affectsVersions: 'Affects versions',
   }
   return labels[field] ?? field
+}
+
+/**
+ * One version role (fix / affects) in the details grid (HD-32) — read = badges,
+ * click = the shared multi-select picker, commit = one full-replacement PATCH for
+ * that role only. Identical rhythm to the Labels cell (muted caption above value,
+ * Save/Cancel under the editor), so the details area stays one visual language.
+ */
+function VersionCell({
+  caption, emptyText, wsId, projectId, versions, editing, draft,
+  onDraftChange, onStart, onCommit, onCancel,
+}: {
+  caption: string
+  emptyText: string
+  wsId: string
+  projectId: string
+  versions: VersionRef[]
+  editing: boolean
+  draft: string[]
+  onDraftChange: (ids: string[]) => void
+  onStart: () => void
+  onCommit: () => void
+  onCancel: () => void
+}) {
+  return (
+    <>
+      <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{caption}</div>
+      {editing ? (
+        <div onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); onCancel() } }}>
+          <VersionPicker
+            wsId={wsId}
+            projectId={projectId}
+            value={draft}
+            onChange={onDraftChange}
+            known={versions}
+            autoFocus
+          />
+          <div className="flex gap-3 mt-1.5">
+            <button onClick={onCommit} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+            <button onMouseDown={e => { e.preventDefault(); onCancel() }}
+                    className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div
+          onClick={onStart}
+          className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+          title="Click to edit"
+        >
+          {versions.length > 0 ? (
+            <div className="flex items-center gap-1 flex-wrap">
+              {versions.map(v => <VersionBadge key={v.id} version={v} />)}
+            </div>
+          ) : (
+            <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>{emptyText}</span>
+          )}
+        </div>
+      )}
+    </>
+  )
 }
 
 // Small uppercase section heading — the future jump-nav anchors (HD-65) target these.
@@ -159,6 +223,16 @@ export default function IssueDetail({
   const fieldEditorRef = useRef<HTMLDivElement>(null)
   const [addFieldOpen, setAddFieldOpen] = useState(false)
   const addMenuRef = useRef<HTMLDivElement>(null)
+
+  // Inline labels edit (HD-30) — a draft set committed as one full-replacement
+  // PATCH, so the request is skipped when the set comes back unchanged.
+  const [labelsEditing, setLabelsEditing] = useState(false)
+  const [labelDraft, setLabelDraft] = useState<string[]>([])
+
+  // Inline version edit (HD-32) — one draft per ROLE, each committed as its own
+  // full-replacement PATCH, so an unchanged set skips the request entirely.
+  const [versionRoleEditing, setVersionRoleEditing] = useState<'fix' | 'affects' | null>(null)
+  const [versionDraft, setVersionDraft] = useState<string[]>([])
 
   // Inline title editing (HD-60 — the first inline field; the pattern the rest follow)
   const [titleEditing, setTitleEditing] = useState(false)
@@ -466,6 +540,56 @@ export default function IssueDetail({
   }
 
   const gridCols = narrow ? 'grid-cols-1' : 'grid-cols-2'
+
+  // ── Component (HD-31) ──
+  // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
+  // it isn't threaded through the surface props like statuses/priorities are).
+  const { data: componentOptions = [] } = useProjectComponents(wsId, projectId)
+  // The cell is hidden when the project curates no components AND this issue
+  // carries none — nothing to choose from, so no empty control.
+  const showComponentCell = componentOptions.length > 0 || !!issue?.component
+
+  // ── Inline labels (HD-30) ──
+  const issueLabels = issue?.labels ?? []
+  function startLabelsEdit() {
+    setLabelDraft(issueLabels.map(l => l.id))
+    setLabelsEditing(true)
+  }
+  function commitLabels() {
+    setLabelsEditing(false)
+    if (!issue) return
+    const before = [...issueLabels.map(l => l.id)].sort().join(',')
+    const after = [...labelDraft].sort().join(',')
+    if (before === after) return          // unchanged — no request, no history row
+    commitField({ labelIds: labelDraft })  // full replacement ([] clears them all)
+  }
+
+  // ── Inline versions (HD-32) ──
+  // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
+  // it isn't threaded through the surface props like statuses/priorities are).
+  const { data: versionOptions = [] } = useProjectVersions(wsId, projectId)
+  const fixVersions = issue?.fixVersions ?? []
+  const affectsVersions = issue?.affectsVersions ?? []
+  // A cell is hidden when the project curates no versions AND this issue carries
+  // none in that role — nothing to choose from, so no empty control.
+  const showFixVersionCell = versionOptions.length > 0 || fixVersions.length > 0
+  const showAffectsVersionCell = versionOptions.length > 0 || affectsVersions.length > 0
+
+  function startVersionsEdit(role: 'fix' | 'affects') {
+    setVersionDraft((role === 'fix' ? fixVersions : affectsVersions).map(v => v.id))
+    setVersionRoleEditing(role)
+  }
+  function commitVersions(role: 'fix' | 'affects') {
+    setVersionRoleEditing(null)
+    if (!issue) return
+    const current = role === 'fix' ? fixVersions : affectsVersions
+    const before = [...current.map(v => v.id)].sort().join(',')
+    const after = [...versionDraft].sort().join(',')
+    if (before === after) return          // unchanged — no request, no history row
+    // Full replacement for THAT role only ([] clears it); the other role is
+    // absent from the payload and therefore untouched.
+    commitField(role === 'fix' ? { fixVersionIds: versionDraft } : { affectsVersionIds: versionDraft })
+  }
 
   // ── Inline description (HD-62) ──
   function startDescEdit() {
@@ -873,6 +997,24 @@ export default function IssueDetail({
                 </Select>
               </div>
 
+              {/* Component (HD-31) — one per issue; blank unsets it
+                  (clearComponent). The current component stays selectable even
+                  when archived, mirroring the assignee-who-left handling above;
+                  changing it here never reassigns anyone (auto-assign is a
+                  create-time rule). */}
+              {showComponentCell && (
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Component</div>
+                  <ComponentSelect
+                    ariaLabel="Component"
+                    components={componentOptions}
+                    value={issue.component?.id ?? ''}
+                    current={issue.component}
+                    onChange={id => commitField(id ? { componentId: id } : { clearComponent: true })}
+                  />
+                </div>
+              )}
+
               {/* Due date — clearing the field clears the due date */}
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Due date</div>
@@ -911,6 +1053,81 @@ export default function IssueDetail({
                   <span className="text-sm truncate">{issue.reporter.displayName}</span>
                 </div>
               </div>
+
+              {/* Labels (HD-30) — chips when read, a picker when editing. Spans
+                  the full grid width (like TEXTAREA fields) because a label row
+                  wraps; `col-span-2` is only safe when the grid HAS two columns. */}
+              <div className={narrow ? '' : 'col-span-2'}>
+                <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Labels</div>
+                {labelsEditing ? (
+                  <div onKeyDown={e => { if (e.key === 'Escape') { e.preventDefault(); setLabelsEditing(false) } }}>
+                    <LabelPicker wsId={wsId} value={labelDraft} onChange={setLabelDraft}
+                                 known={issueLabels} autoFocus />
+                    <div className="flex gap-3 mt-1.5">
+                      <button onClick={commitLabels} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                      <button onMouseDown={e => { e.preventDefault(); setLabelsEditing(false) }}
+                              className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    onClick={startLabelsEdit}
+                    className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
+                    title="Click to edit"
+                  >
+                    {issueLabels.length > 0 ? (
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {issueLabels.map(l => <LabelChip key={l.id} label={l} />)}
+                      </div>
+                    ) : (
+                      <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Add labels…</span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Fix / Affects versions (HD-32) — badges when read, a picker when
+                  editing, one independent full-replacement PATCH per role. Full
+                  grid width like Labels (a version row wraps); `col-span-2` is
+                  only safe when the grid HAS two columns. An already-linked
+                  ARCHIVED version stays visible and removable — the picker's
+                  `known` list keeps it selectable even though it is no longer
+                  offered (the same handling as an archived component). */}
+              {showFixVersionCell && (
+                <div className={narrow ? '' : 'col-span-2'}>
+                  <VersionCell
+                    caption="Fix versions"
+                    emptyText="Add fix versions…"
+                    wsId={wsId}
+                    projectId={projectId}
+                    versions={fixVersions}
+                    editing={versionRoleEditing === 'fix'}
+                    draft={versionDraft}
+                    onDraftChange={setVersionDraft}
+                    onStart={() => startVersionsEdit('fix')}
+                    onCommit={() => commitVersions('fix')}
+                    onCancel={() => setVersionRoleEditing(null)}
+                  />
+                </div>
+              )}
+
+              {showAffectsVersionCell && (
+                <div className={narrow ? '' : 'col-span-2'}>
+                  <VersionCell
+                    caption="Affects versions"
+                    emptyText="Add affects versions…"
+                    wsId={wsId}
+                    projectId={projectId}
+                    versions={affectsVersions}
+                    editing={versionRoleEditing === 'affects'}
+                    draft={versionDraft}
+                    onDraftChange={setVersionDraft}
+                    onStart={() => startVersionsEdit('affects')}
+                    onCommit={() => commitVersions('affects')}
+                    onCancel={() => setVersionRoleEditing(null)}
+                  />
+                </div>
+              )}
             </div>
             {metaError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{metaError}</p>}
 

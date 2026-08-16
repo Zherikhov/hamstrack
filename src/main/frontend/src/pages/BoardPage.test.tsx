@@ -36,12 +36,17 @@ const BUG: IssueType = { id: 't2', name: 'Bug', color: '#c00', position: 1, hier
 
 const PRIORITY: PriorityOption = { id: 'pr1', name: 'Medium', color: '#888', isDefault: true }
 
+// HD-31: one project component, carried by a single fixture issue — enough to
+// assert both the card display rule and the server-side filter round-trip.
+const BILLING = { id: 'c1', name: 'Billing', archived: false }
+
 let n = 0
 function issue(
   title: string,
   type: IssueType,
   status: Status,
   assignee: { id: string; displayName: string } | undefined,
+  component?: { id: string; name: string; archived: boolean },
 ): Issue {
   n += 1
   return {
@@ -50,6 +55,7 @@ function issue(
     assignee,
     reporter: OTHER,
     childCount: 0, doneChildCount: 0,
+    component,
     fields: [], version: 1,
     createdAt: '2026-08-10T09:00:00Z', updatedAt: '2026-08-10T09:00:00Z',
   }
@@ -57,7 +63,7 @@ function issue(
 
 // 5 issues across both assignee buckets and both types, so every combination of
 // chips selects a *different*, non-trivial subset.
-const MINE_TASK = issue('Mine task', TASK, TODO, ME)
+const MINE_TASK = issue('Mine task', TASK, TODO, ME, BILLING)
 const MINE_BUG = issue('Mine bug', BUG, TODO, ME)
 const OTHER_TASK = issue('Other task', TASK, DOING, OTHER)
 const OTHER_BUG = issue('Other bug', BUG, TODO, OTHER)
@@ -93,6 +99,15 @@ vi.mock('../api', () => ({
   apiGetIssueHistory: vi.fn(async () => ({ content: [] })),
   apiListWorkspaceMembers: vi.fn(async () => []),
   apiGetIssueChildren: vi.fn(async () => []),
+  // HD-30: the (server-side) label filter and the drawer's label picker read the
+  // workspace's labels through this group.
+  labelsApi: { list: vi.fn(async () => []), create: vi.fn() },
+  // HD-31: the (server-side) component filter and the drawer's Component cell
+  // read the project's components through this one.
+  componentsApi: { list: vi.fn(async () => [BILLING]), update: vi.fn() },
+  // HD-32: the (server-side) fix-version filter and the drawer's version cells
+  // read the project's versions through this one.
+  versionsApi: { list: vi.fn(async () => []) },
 }))
 
 beforeAll(() => {
@@ -399,6 +414,70 @@ describe('BoardPage quick filters (HD-43)', () => {
     expect(within(column('To Do')).getByText('2')).toBeInTheDocument()
     expect(within(column('In Progress')).getByText('No issues')).toBeInTheDocument()
     expect(screen.getAllByText('No issues')).toHaveLength(1)
+  })
+})
+
+// HD-31: the component filter is SERVER-side (a query param + part of the cache
+// key), unlike the HD-43 chips — and the card drops its component line while that
+// filter is active, since every visible card would then repeat the same name.
+describe('BoardPage component filter (HD-31)', () => {
+  const componentFilter = () => screen.getByRole('button', { name: 'Filter by component' })
+
+  /** The card of one issue — the filter button also renders the component NAME
+   *  once it is selected, so the display rule has to be asserted inside a card. */
+  function cardOf(title: string) {
+    return screen.getByText(title).closest('div.rounded-lg') as HTMLElement
+  }
+
+  /** The (ws, project, filters) triple the board last asked the API for. */
+  function lastListArgs() {
+    const calls = apiListIssuesMock.mock.calls
+    return calls[calls.length - 1] as unknown as
+      [string, string, { componentId?: string } | undefined]
+  }
+
+  it('shows the component under the card title while unfiltered', async () => {
+    renderBoard()
+    await boardReady()
+
+    expect(cardOf(MINE_TASK.title).textContent).toContain(BILLING.name)
+    // …only on the card that actually has one.
+    expect(cardOf(MINE_BUG.title).textContent).not.toContain(BILLING.name)
+    expect(componentFilter()).toHaveTextContent('All components')
+    // Nothing selected ⇒ no componentId travels to the server.
+    expect(lastListArgs()[2]?.componentId).toBeUndefined()
+  })
+
+  it('refetches server-side with ?componentId and hides the now-redundant card line', async () => {
+    renderBoard()
+    await boardReady()
+
+    await userEvent.click(componentFilter())
+    await userEvent.click(await screen.findByRole('option', { name: BILLING.name }))
+
+    // Server-side: a new request, carrying the id (the label filter's contract).
+    await waitFor(() => expect(apiListIssuesMock).toHaveBeenCalledTimes(2))
+    expect(lastListArgs()[2]?.componentId).toBe(BILLING.id)
+
+    // …and the per-card component line is gone (every card shares it now).
+    await waitFor(() => expect(cardOf(MINE_TASK.title).textContent).not.toContain(BILLING.name))
+    // The issues themselves are untouched — this is a display rule, not a filter.
+    expect(visibleTitles()).toEqual(ALL_ISSUES.map(i => i.title).sort())
+  })
+
+  it('is cleared by "Clear filters" together with the other dimensions', async () => {
+    renderBoard()
+    await boardReady()
+
+    await userEvent.click(componentFilter())
+    await userEvent.click(await screen.findByRole('option', { name: BILLING.name }))
+    await waitFor(() => expect(componentFilter()).toHaveTextContent(BILLING.name))
+
+    await userEvent.click(screen.getByRole('button', { name: /clear filters/i }))
+
+    await waitFor(() => expect(componentFilter()).toHaveTextContent('All components'))
+    expect(cardOf(MINE_TASK.title).textContent).toContain(BILLING.name)   // the card line is back
+    expect(screen.queryByRole('button', { name: /clear filters/i })).not.toBeInTheDocument()
   })
 })
 

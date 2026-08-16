@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { NavLink, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
-  Home, CheckSquare, Columns3, ListTodo, BarChart3, Settings, Search,
+  Home, CheckSquare, Columns3, ListTodo, Rocket, BarChart3, Settings, Search,
   Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid,
   PanelLeftClose, PanelLeftOpen, Keyboard, type LucideIcon,
 } from 'lucide-react'
@@ -216,6 +216,9 @@ export default function NavRail() {
           {collapsed && <div style={{ height: 12 }} />}
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}`} end icon={Columns3} label="Board" collapsed={collapsed} />
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/backlog`} icon={ListTodo} label="Backlog" collapsed={collapsed} />
+          {/* Releases (HD-32) — versions are working data with a lifecycle, so
+              they are managed on their own page, not in project settings */}
+          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/releases`} icon={Rocket} label="Releases" collapsed={collapsed} />
           {/* Reports — no backend yet */}
           <div
             style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11, padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}

@@ -1,6 +1,7 @@
 package com.hamstrack.common.exception;
 
 import com.hamstrack.common.ratelimit.RateLimitedException;
+import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.search.HqlSemanticException;
 import com.hamstrack.search.parser.HqlParseException;
 import org.springframework.http.HttpHeaders;
@@ -32,6 +33,18 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getStatus())
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
                 .body(problem);
+    }
+
+    // More specific than the AppException handler — publishes the winning label's id
+    // as the `existingId` ProblemDetail extension so the label picker can recover from
+    // a duplicate-name 409 in one round-trip (HD-30 §4.3).
+    @ExceptionHandler(LabelNameConflictException.class)
+    public ResponseEntity<ProblemDetail> handleLabelNameConflict(LabelNameConflictException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        if (ex.getExistingId() != null) {
+            problem.setProperty("existingId", ex.getExistingId().toString());
+        }
+        return ResponseEntity.status(ex.getStatus()).body(problem);
     }
 
     // HQL parse error (Advanced Search §7.1): 422 with a highlight span. The custom

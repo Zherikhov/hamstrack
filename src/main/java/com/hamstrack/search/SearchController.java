@@ -29,10 +29,15 @@ import java.util.UUID;
  *       422 with a highlight {@code position} on a parse error, 422 with a
  *       {@code field} on a semantic error;</li>
  *   <li>{@code GET …/search/schema} — fields, operators-per-field and small static
- *       value picklists (statuses/types/priorities reachable by visible projects)
- *       for autocomplete; the member list is NOT embedded;</li>
- *   <li>{@code GET …/search/suggest?field=&q=} — bounded prefix typeahead for
- *       user-valued fields ({@code assignee}/{@code reporter}).</li>
+ *       value picklists (statuses/types/priorities reachable by visible projects,
+ *       plus the workspace's labels and the visible projects' components and
+ *       versions, each capped at 200 entries) for autocomplete; the member list is
+ *       NOT embedded;</li>
+ *   <li>{@code GET …/search/suggest?field=&q=} — bounded typeahead for user-valued
+ *       fields ({@code assignee}/{@code reporter} or a USER custom field), for
+ *       {@code label}/{@code labels} (HD-30), for {@code component}/
+ *       {@code components} (HD-31) and for {@code fixVersion}/{@code affectsVersion}
+ *       (HD-32), capped at 20 suggestions.</li>
  * </ul>
  */
 @RestController

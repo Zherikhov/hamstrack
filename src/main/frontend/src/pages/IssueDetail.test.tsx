@@ -78,6 +78,12 @@ vi.mock('../api', () => ({
   })),
   apiListWorkspaceMembers: vi.fn(async () => []),
   apiGetIssueChildren: vi.fn(async () => []),
+  // HD-30: the details grid's Labels cell picks from the workspace's labels.
+  labelsApi: { list: vi.fn(async () => []), create: vi.fn() },
+  // HD-31: …and its Component cell from the project's components.
+  componentsApi: { list: vi.fn(async () => []) },
+  // HD-32: …and its Fix/Affects versions cells from the project's versions.
+  versionsApi: { list: vi.fn(async () => []) },
 }))
 
 beforeAll(() => {

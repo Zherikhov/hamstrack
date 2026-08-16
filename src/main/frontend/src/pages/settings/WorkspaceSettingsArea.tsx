@@ -9,6 +9,7 @@ import AdminIssueTypesPage from '../admin/AdminIssueTypesPage'
 import AdminFieldsPage from '../admin/AdminFieldsPage'
 import AdminWorkflowsPage from '../admin/AdminWorkflowsPage'
 import WorkspaceProjectsMatrix from './WorkspaceProjectsMatrix'
+import WorkspaceLabelsPage from './WorkspaceLabelsPage'
 
 const SECTIONS = [
   { path: '', label: 'Projects', end: true },
@@ -17,6 +18,9 @@ const SECTIONS = [
   { path: 'issue-types', label: 'Issue types', end: false },
   { path: 'priorities', label: 'Priorities', end: false },
   { path: 'fields', label: 'Fields', end: false },
+  // Labels are workspace content (not bound taxonomy), but their curation lives
+  // with the rest of the workspace-level settings.
+  { path: 'labels', label: 'Labels', end: false },
 ]
 
 /**
@@ -82,6 +86,7 @@ export default function WorkspaceSettingsArea() {
               <Route path="issue-types" element={<AdminIssueTypesPage />} />
               <Route path="priorities" element={<AdminPrioritiesPage />} />
               <Route path="fields" element={<AdminFieldsPage />} />
+              <Route path="labels" element={<WorkspaceLabelsPage />} />
               <Route path="*" element={<Navigate to={base} replace />} />
             </Routes>
           </AdminApiProvider>

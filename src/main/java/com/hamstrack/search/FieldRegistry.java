@@ -17,12 +17,20 @@ import java.util.Set;
  * validation, value resolution, Criteria compilation and the {@code /schema}
  * autocomplete endpoint. One place to register a queryable field.
  *
- * <p>MVP live fields: {@code status type priority assignee reporter parent text
- * created updated due}. {@code label} and custom fields are registered as
- * <em>known-but-not-available</em> stubs ({@link FieldDescriptor#available()} ==
- * false) so they yield a clear "not yet queryable" semantic error instead of
- * "unknown field", but are hidden from {@code /schema} so autocomplete never
- * suggests a dead field (§5.4). Adding a field later needs no grammar/parser change.
+ * <p>Live fields: {@code status type priority assignee reporter parent text
+ * created updated due label component fixVersion affectsVersion} (HD-30 promoted the
+ * former {@code label} stub from not-available to live; HD-31 added
+ * {@code component}; HD-32 added the two version roles). Custom fields are not
+ * registered here at all — they are
+ * resolved per request from the caller's {@link ResolutionContext}. A field can also
+ * be registered as a <em>known-but-not-available</em> stub
+ * ({@link FieldDescriptor#available()} == false) so it yields a clear "not yet
+ * queryable" semantic error instead of "unknown field" while staying hidden from
+ * {@code /schema} (§5.4). Adding a field needs no grammar/parser change.
+ *
+ * <p>A field may carry <strong>aliases</strong> (extra keys pointing at the same
+ * descriptor, e.g. {@code labels} → {@code label}); {@link #availableFields}
+ * de-duplicates so {@code /schema} lists each field once.
  */
 @Component
 public class FieldRegistry {
@@ -68,13 +76,73 @@ public class FieldRegistry {
         register(new FieldDescriptor("due", FieldDataType.DATE, ORDERED,
                 false, true, true, "dueDate", "DATE", List.of("now()", "startOfWeek()"), true));
 
-        // ---- reserved, not yet available (§5.4): parse OK → "not yet queryable" 422 ----
-        register(new FieldDescriptor("label", FieldDataType.ENUM_REF, EQ_ONLY,
-                true, false, false, null, null, List.of(), false));
+        // ---- LABEL_REF (HD-30) ----
+        // Many-valued, so it has no entityPath: the compiler emits a correlated
+        // EXISTS over IssueLabel instead (§3.5). Nullable (IS [NOT] EMPTY = "has no
+        // labels"), never sortable — an issue has a *set* of labels, so there is no
+        // meaningful ORDER BY key; `ORDER BY label` is a 422 from HqlValidator.
+        var label = new FieldDescriptor("label", FieldDataType.LABEL_REF, EQ_ONLY,
+                true, true, false, null, "LABEL", List.of(), true);
+        register(label);
+        register("labels", label);   // plural alias, same descriptor
+
+        // ---- component (HD-31) ----
+        // Single-valued ToOne, so it reuses the plain ENUM_REF id-set path — no new
+        // compiler branch, just `entityPath = "component.id"`. Nullable
+        // (IS [NOT] EMPTY = "has no component") and, unlike label, SORTABLE: one
+        // component per issue means `component.name` is a meaningful ORDER BY key
+        // (§3.5). Names resolve across the caller's VISIBLE PROJECTS only, so two
+        // projects may each own a "Billing" and both match.
+        var component = new FieldDescriptor("component", FieldDataType.ENUM_REF, EQ_ONLY,
+                true, true, true, "component.id", "COMPONENT", List.of(), true);
+        register(component);
+        register("components", component);   // plural alias, same descriptor
+
+        // ---- VERSION_REF (HD-32) ----
+        // Two fields over ONE join table, told apart by link_type. Many-valued like
+        // label, so neither has an entityPath: the compiler emits a correlated EXISTS
+        // over IssueVersionLink filtered by the role (§3.5). Nullable
+        // (IS [NOT] EMPTY = "has no fix version" — the "unassigned work" query),
+        // never sortable: an issue has a *set* of versions, so there is no meaningful
+        // ORDER BY key and `ORDER BY fixVersion` is a 422 from HqlValidator.
+        //
+        // Names resolve across the caller's VISIBLE PROJECTS only, so two projects may
+        // each ship a "2.4.0" and both match — exactly like component.
+        //
+        // The canonical names are camelCase for display (/schema, error messages);
+        // the registry KEY is lowercased below, which is also what makes the spec's
+        // `fixversion`/`affectsversion` aliases work without a second entry.
+        register(new FieldDescriptor("fixVersion", FieldDataType.VERSION_REF, EQ_ONLY,
+                true, true, false, null, "VERSION", List.of(), true));
+        register(new FieldDescriptor("affectsVersion", FieldDataType.VERSION_REF, EQ_ONLY,
+                true, true, false, null, "VERSION", List.of(), true));
     }
 
+    /**
+     * Register a descriptor under its own name. The key is <strong>lowercased</strong>
+     * because {@link #find} lowercases its argument: a descriptor whose display name
+     * carries capitals ({@code fixVersion}) would otherwise be unreachable. This is
+     * also what makes the spec's all-lowercase aliases ({@code fixversion},
+     * {@code affectsversion}) resolve without a separate entry — they ARE the key.
+     */
     private void register(FieldDescriptor d) {
-        byName.put(d.name(), d);
+        byName.put(d.name().toLowerCase(Locale.ROOT), d);
+    }
+
+    /**
+     * Register an additional lookup name for an existing descriptor (e.g. the plural
+     * {@code labels} → {@code label}). Aliases are extra map entries pointing at the
+     * SAME descriptor instance, so {@link #availableFields} de-duplicates them and
+     * {@code /schema} still lists each field exactly once.
+     *
+     * <p>The alias is lowercased for the same reason the canonical name is: {@link #find}
+     * always lowercases its argument, so an alias registered verbatim with a capital in
+     * it would be permanently unreachable — and silently so, since it would still count
+     * as "registered" for validation. Today's aliases are already lowercase; this makes
+     * that a property of the method rather than of the call sites.
+     */
+    private void register(String alias, FieldDescriptor d) {
+        byName.put(alias.toLowerCase(Locale.ROOT), d);
     }
 
     /** Case-insensitive lookup. Includes not-yet-available stubs. */
@@ -83,9 +151,13 @@ public class FieldRegistry {
         return Optional.ofNullable(byName.get(name.toLowerCase(Locale.ROOT)));
     }
 
-    /** Live, queryable fields only (drives {@code /schema}; hides not-available stubs). */
+    /**
+     * Live, queryable fields only (drives {@code /schema}; hides not-available stubs).
+     * De-duplicated by descriptor so an aliased field ({@code label}/{@code labels})
+     * is listed once, under its canonical name.
+     */
     public List<FieldDescriptor> availableFields() {
-        return byName.values().stream().filter(FieldDescriptor::available).toList();
+        return byName.values().stream().filter(FieldDescriptor::available).distinct().toList();
     }
 
     /**

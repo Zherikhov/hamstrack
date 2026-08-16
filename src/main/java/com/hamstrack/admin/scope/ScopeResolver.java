@@ -65,4 +65,45 @@ public class ScopeResolver {
         }
         return project;
     }
+
+    /**
+     * Project whose <em>content catalog</em> (components, versions — HD-6 §3.3) the
+     * actor may curate: a project <strong>MANAGER</strong>, <em>or</em> an
+     * OWNER/ADMIN of the enclosing workspace who may not be a project member at all.
+     *
+     * <p>Semantics, in order:
+     * <ol>
+     *   <li>{@code requireProjectMember} — a missing workspace, a missing project or a
+     *       non-member of the workspace all yield <strong>404</strong>, never 403 (no
+     *       existence leak across tenants);</li>
+     *   <li>workspace role ≥ ADMIN → pass;</li>
+     *   <li>else project role ≥ MANAGER → pass;</li>
+     *   <li>else <strong>403</strong> {@link InsufficientProjectRoleException} — the
+     *       caller already knows the project exists, so a role failure is honest.</li>
+     * </ol>
+     *
+     * <p>Rationale for the workspace-admin bypass: a workspace admin already edits
+     * that project's <em>bindings</em> through
+     * {@code PATCH /workspaces/{ws}/admin/projects/{p}/bindings} without being a
+     * project member, so refusing them the component list would be arbitrary.
+     * Differs from {@link #requireProjectAdmin} (which is MANAGER-only and 404s a
+     * non-project-member) exactly in that bypass. {@code SystemRole.ADMIN} gets
+     * nothing extra — instance admins act through their workspace membership, as they
+     * do for every workspace-scoped resource.
+     */
+    @Transactional(readOnly = true)
+    public Project requireProjectCurator(User actor, UUID workspaceId, UUID projectId) {
+        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        if (ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
+            return ctx.project();
+        }
+        boolean manager = projectMemberRepository.findByProjectAndUser(ctx.project(), actor)
+                .map(ProjectMember::getRole)
+                .filter(r -> r.isAtLeast(ProjectRole.MANAGER))
+                .isPresent();
+        if (!manager) {
+            throw new InsufficientProjectRoleException();
+        }
+        return ctx.project();
+    }
 }

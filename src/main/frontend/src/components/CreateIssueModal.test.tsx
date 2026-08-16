@@ -54,6 +54,14 @@ vi.mock('../api', () => ({
   apiListWorkspaceMembers: vi.fn(async () => []),
   apiListIssues: vi.fn(async () => mockState.board),
   apiCreateIssue: vi.fn(),
+  // HD-30: the dialog's LabelPicker reads the workspace's labels and recovers
+  // from a duplicate-name 409 — both come from this module.
+  ApiResponseError: class ApiResponseError extends Error { status = 0 },
+  labelsApi: { list: vi.fn(async () => []), create: vi.fn() },
+  // HD-31: the dialog's Component select reads the project's components.
+  componentsApi: { list: vi.fn(async () => []) },
+  // HD-32: …and its fix/affects version pickers the project's versions.
+  versionsApi: { list: vi.fn(async () => []) },
 }))
 
 beforeEach(() => {
