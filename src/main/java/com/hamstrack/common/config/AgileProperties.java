@@ -61,8 +61,18 @@ public record AgileProperties(
      * The widest planning view the operator may configure — {@code (open sprints + 1) ×
      * section cap}, i.e. the number of fully-assembled {@code IssueResponse}s ONE
      * unpaged {@code GET …/backlog} can build.
+     *
+     * <p>It is also the ceiling on {@link BoardProperties# maxIssues} ({@code @Max}
+     * references this constant, so the two cannot drift): a board is the same animal —
+     * one unpaged list of assembled {@code IssueResponse}s — and a cheaper one, so a
+     * separate number would be a second, contradictory budget for the same work.
+     *
+     * <p><strong>Changing this value changes the board cap too</strong>, and the
+     * "1–20000" range is quoted to operators in three documents that are NOT generated
+     * from here: {@code .env.prod.example}, {@code docs/self-hosting.md} and
+     * {@code docs/api-dc.md}. Update all three in the same change.
      */
-    private static final int MAX_PLANNING_VIEW_ROWS = 20_000;
+    static final int MAX_PLANNING_VIEW_ROWS = 20_000;
 
     /**
      * The per-field maxima are not composable, so the PRODUCT is validated too
