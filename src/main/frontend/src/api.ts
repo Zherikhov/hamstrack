@@ -5,7 +5,8 @@ import type {
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
   ProjectBinding, BindingOptions, TransitionRule, UsageDetail, AdminUser, PendingInvite,
   SearchResultRow, SearchSchema, SavedFilter, Label, MergeLabelsResult, Component,
-  Version, VersionUsage,
+  Version, VersionUsage, BoardMode, Sprint, SprintState, BacklogView,
+  SprintCompletionPreview, SprintCompletionResult, UnfinishedDisposition,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -267,6 +268,25 @@ export async function apiUnarchiveProject(wsId: string, projectId: string): Prom
   return request(`/workspaces/${wsId}/projects/${projectId}/unarchive`, { method: 'POST' })
 }
 
+/**
+ * Partial project update. Gated server-side by `requireProjectCurator` (project
+ * MANAGER *or* workspace OWNER/ADMIN) since HD-22 §3.2 — the same predicate the
+ * settings area already checks client-side.
+ *
+ * `boardMode` (HD-27) is a presentation switch, not a permission: the sprint API
+ * behaves identically in both modes.
+ */
+export async function apiUpdateProject(
+  wsId: string,
+  projectId: string,
+  payload: Partial<{ name: string; description: string; boardMode: BoardMode }>,
+): Promise<Project> {
+  return request(`/workspaces/${wsId}/projects/${projectId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
 // ── Project taxonomy config ──────────────────────────────────────────────────
 // Statuses, transitions, priorities and types all come from one endpoint since
 // M1 — the project's effective workflow/priority-set resolution happens server-side
@@ -320,9 +340,47 @@ export interface IssueListFilters {
    * NOT match: "ships in 2.4.0" and "is broken in 2.4.0" are different questions.
    */
   fixVersionId?: string
+  /**
+   * HD-22 — issues committed to this sprint. A foreign sprint id simply matches
+   * nothing (never an error, never a leak). Mutually exclusive with `noSprint`
+   * — sending both is a 400, so `appendIssueFilters` lets `sprintId` win.
+   */
+  sprintId?: string
+  /** HD-22 — only issues with no sprint (the ranked backlog). */
+  noSprint?: boolean
 }
 
 export type LabelMatch = 'any' | 'all'
+
+/**
+ * The sprint half of an issue write, as a MUTUALLY EXCLUSIVE pair (HD-22 §4.4).
+ *
+ * `sprintId` (move into that sprint) and `clearSprint` (return to the ranked
+ * backlog) answer the same question, so sending both is a **400** — the server
+ * refuses rather than silently letting one win. Modelling it as a union with
+ * `never` makes the illegal payload a COMPILE error at every call site instead of
+ * a runtime 400 the user has to read:
+ *
+ *     { sprintId: id }                 // ok
+ *     { clearSprint: true }            // ok
+ *     { sprintId: id, clearSprint: true }   // Type error — as intended
+ */
+export type SprintTargetPatch =
+  | { sprintId?: string; clearSprint?: never }
+  | { sprintId?: never; clearSprint?: boolean }
+
+/**
+ * Runtime twin of the type above, for the one thing types can't cover: a payload
+ * assembled from `unknown`/`any` or widened through a spread. It throws BEFORE
+ * the request, so the bug surfaces at its origin instead of as a server 400.
+ */
+function assertSingleSprintTarget(payload: SprintTargetPatch, endpoint: string): void {
+  const p = payload as { sprintId?: string; clearSprint?: boolean }
+  if (p.sprintId && p.clearSprint) {
+    throw new Error(
+      `${endpoint}: sprintId and clearSprint are mutually exclusive (the server answers 400)`)
+  }
+}
 
 function appendIssueFilters(params: URLSearchParams, filters?: IssueListFilters) {
   if (!filters) return
@@ -331,6 +389,10 @@ function appendIssueFilters(params: URLSearchParams, filters?: IssueListFilters)
   if (filters.priorityId) params.set('priorityId', filters.priorityId)
   if (filters.componentId) params.set('componentId', filters.componentId)
   if (filters.fixVersionId) params.set('fixVersionId', filters.fixVersionId)
+  // `sprintId` and `noSprint` together are a 400 — never send both, and never
+  // let a stale `noSprint` sneak alongside an explicit sprint selection.
+  if (filters.sprintId) params.set('sprintId', filters.sprintId)
+  else if (filters.noSprint) params.set('noSprint', 'true')
   for (const id of filters.labelIds ?? []) params.append('labelId', id)
   // Only meaningful with 2+ labels; the server defaults to `any`.
   if (filters.labelMatch === 'all' && (filters.labelIds?.length ?? 0) > 1) params.set('labelMatch', 'all')
@@ -369,8 +431,12 @@ export async function apiCreateIssue(
   // componentId sets the project component (HD-31) — when that component has
   // autoAssign + a lead and no assigneeId is sent, the server assigns the lead;
   // fixVersionIds/affectsVersionIds link project versions per role (HD-32) —
-  // the same version may appear in both (a regression introduced and fixed in 2.4.0)
-  payload: { title: string; typeId: string; statusId: string; priorityId?: string; description?: string; assigneeId?: string; dueDate?: string; parentId?: string; labelIds?: string[]; componentId?: string; fixVersionIds?: string[]; affectsVersionIds?: string[]; fields?: Record<string, FieldValue> }
+  // the same version may appear in both (a regression introduced and fixed in 2.4.0);
+  // sprintId commits the new issue to a sprint (HD-22) — unknown/foreign = 422,
+  // a COMPLETED sprint = 422; omitted = the ranked backlog (new issues land at
+  // the BOTTOM of it — filing is not a priority statement);
+  // storyPoints is the native estimate — 0…999, at most 2 decimals (422 otherwise)
+  payload: { title: string; typeId: string; statusId: string; priorityId?: string; description?: string; assigneeId?: string; dueDate?: string; parentId?: string; labelIds?: string[]; componentId?: string; fixVersionIds?: string[]; affectsVersionIds?: string[]; sprintId?: string; storyPoints?: number; fields?: Record<string, FieldValue> }
 ): Promise<Issue> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues`, {
     method: 'POST',
@@ -390,14 +456,25 @@ export async function apiUpdateIssue(
   // componentId sets the component and clearComponent: true unsets it (HD-31) — changing a
   // component on update NEVER reassigns the issue (auto-assign is create-time only);
   // fixVersionIds/affectsVersionIds REPLACE their whole role's set when present
-  // ([] clears that role), absent = unchanged — exactly like labelIds (HD-32)
-  payload: Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; parentId: string; clearAssignee: boolean; clearDueDate: boolean; clearParent: boolean; labelIds: string[]; componentId: string; clearComponent: boolean; fixVersionIds: string[]; affectsVersionIds: string[]; fields: Record<string, FieldValue | null>; version: number }>
+  // ([] clears that role), absent = unchanged — exactly like labelIds (HD-32);
+  // sprintId moves the issue into a sprint and clearSprint: true returns it to the
+  // backlog (HD-22) — the rank is PRESERVED either way; sending both is a 400;
+  // storyPoints sets the native estimate and clearStoryPoints: true unsets it
+  // (unestimated ≠ 0), both writing one `storyPoints` history row when they change
+  payload: UpdateIssuePayload
 ): Promise<Issue> {
+  assertSingleSprintTarget(payload, 'PATCH issue')
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   })
 }
+
+/**
+ * The issue PATCH body. Everything is optional; `sprintId`/`clearSprint` are the
+ * one pair that cannot both be present (see `SprintTargetPatch`).
+ */
+export type UpdateIssuePayload = Partial<{ title: string; typeId: string; statusId: string; priorityId: string; description: string; assigneeId: string; dueDate: string; parentId: string; clearAssignee: boolean; clearDueDate: boolean; clearParent: boolean; labelIds: string[]; componentId: string; clearComponent: boolean; fixVersionIds: string[]; affectsVersionIds: string[]; storyPoints: number; clearStoryPoints: boolean; fields: Record<string, FieldValue | null>; version: number }> & SprintTargetPatch
 
 export async function apiDeleteIssue(wsId: string, projectId: string, number: number): Promise<void> {
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}`, { method: 'DELETE' })
@@ -908,6 +985,195 @@ export const versionsApi = {
   },
   usage: (wsId: string, projectId: string, id: string) =>
     request<VersionUsage>(`/workspaces/${wsId}/projects/${projectId}/versions/${id}/usage`),
+}
+
+// ── Sprints, backlog ranking — HD-22 ──────────────────────────────────────────
+// Project-scoped iterations. READS (list/get/completion-preview/backlog view)
+// need project membership only; the LIFECYCLE (create/rename/dates/start/
+// complete/delete) needs project MANAGER *or* workspace OWNER/ADMIN (the
+// server's `requireProjectCurator`) and 403s otherwise; putting issues INTO a
+// sprint and dragging them (`addIssues`/`removeIssue`/`apiRankIssue`) is
+// ordinary planning work any issue-editor may do. A non-member of the workspace
+// gets 404 (never 403 — no existence leak).
+//
+// Error shapes the UI has to handle:
+//   400 — `sprintId` AND `clearSprint` both set · a rank request with neither an
+//         anchor nor a sprint change · an oversized `issueIds`
+//   409 — start when not FUTURE / another sprint already ACTIVE · complete when
+//         not ACTIVE · delete an ACTIVE sprint · delete one that still holds
+//         issues without `force` · stale `version` · STALE RANK ANCHORS ("the
+//         list changed — refresh") · duplicate name · project archived
+//   422 — unknown/foreign sprint or anchor id · anchor not in the target section
+//         · anchor == the moved issue · assign to a COMPLETED sprint · a
+//         complete-target that is not a FUTURE sprint of this project ·
+//         `endAt <= startAt` · `storyPoints` out of range / > 2 decimals ·
+//         the open-sprint cap
+//
+// Exported as `sprintsApi` (not `sprints`) so pages can keep a local `sprints`
+// variable for the fetched rows.
+
+/** Blank/absent name → the server names it "Sprint {sequence}". */
+export interface CreateSprintPayload {
+  name?: string
+  goal?: string
+  /** Plan only — this does NOT start the sprint. ISO-8601 UTC. */
+  startAt?: string
+  endAt?: string
+}
+
+/** Partial — only the keys present change; the `clear*` flags unset the dates. */
+export interface UpdateSprintPayload {
+  name?: string
+  goal?: string
+  startAt?: string
+  endAt?: string
+  clearStartAt?: boolean
+  clearEndAt?: boolean
+}
+
+/** All optional: an empty body means "start now, end in `default-sprint-length-days`". */
+export interface StartSprintPayload {
+  startAt?: string
+  endAt?: string
+  /** Optional last-minute goal; omitted = leave whatever is stored. */
+  goal?: string
+}
+
+export interface CompleteSprintPayload {
+  moveUnfinishedTo: UnfinishedDisposition
+  /** Required iff `moveUnfinishedTo === 'SPRINT'`; must be a FUTURE sprint of this project. */
+  targetSprintId?: string
+}
+
+export interface AddIssuesToSprintPayload {
+  issueIds: string[]
+  /** Default BOTTOM. */
+  position?: 'TOP' | 'BOTTOM'
+}
+
+/**
+ * Placement is computed SERVER-side from the neighbour anchors — the client
+ * never sends a rank value (`position` isn't even exposed on `IssueResponse`).
+ * Both anchors absent ⇒ append to the end of the target section.
+ * `version` is optional: present = checked (409 on stale), absent = last-drag-wins.
+ */
+export type RankIssuePayload = {
+  afterIssueId?: string
+  beforeIssueId?: string
+  version?: number
+  /**
+   * `sprintId` moves into that sprint, `clearSprint` returns to the ranked
+   * backlog — mutually exclusive (400), enforced by `SprintTargetPatch` at
+   * compile time and by `assertSingleSprintTarget` at runtime.
+   */
+} & SprintTargetPatch
+
+export const sprintsApi = {
+  /**
+   * ALWAYS paged (COMPLETED sprints accumulate for years). Order: ACTIVE first,
+   * then FUTURE by sequence ASC, then COMPLETED by sequence DESC. `state` is a
+   * repeatable filter; omitting it returns every state.
+   */
+  list: (
+    wsId: string,
+    projectId: string,
+    opts?: { state?: SprintState | SprintState[]; page?: number; size?: number },
+  ) => {
+    const params = new URLSearchParams()
+    const states = opts?.state === undefined
+      ? []
+      : Array.isArray(opts.state) ? opts.state : [opts.state]
+    for (const s of states) params.append('state', s)
+    if (opts?.page !== undefined) params.set('page', String(opts.page))
+    if (opts?.size !== undefined) params.set('size', String(opts.size))
+    const qs = params.toString()
+    return request<Page<Sprint>>(`/workspaces/${wsId}/projects/${projectId}/sprints${qs ? `?${qs}` : ''}`)
+  },
+  get: (wsId: string, projectId: string, id: string) =>
+    request<Sprint>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}`),
+  create: (wsId: string, projectId: string, payload: CreateSprintPayload = {}) =>
+    request<Sprint>(`/workspaces/${wsId}/projects/${projectId}/sprints`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  update: (wsId: string, projectId: string, id: string, payload: UpdateSprintPayload) =>
+    request<Sprint>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}`, {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
+  // Starting an EMPTY sprint is allowed by design — the UI warns, the API doesn't.
+  start: (wsId: string, projectId: string, id: string, payload: StartSprintPayload = {}) =>
+    request<Sprint>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}/start`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  // Read-only for any project member — the dialog never guesses its counters.
+  completionPreview: (wsId: string, projectId: string, id: string) =>
+    request<SprintCompletionPreview>(
+      `/workspaces/${wsId}/projects/${projectId}/sprints/${id}/completion-preview`),
+  // DONE issues KEEP their sprint (that is its record of what it delivered);
+  // everything else moves to the chosen destination with its rank preserved.
+  // A double-click is a 409 by design, never a silent second destructive move.
+  complete: (wsId: string, projectId: string, id: string, payload: CompleteSprintPayload) =>
+    request<SprintCompletionResult>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}/complete`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  addIssues: (wsId: string, projectId: string, id: string, payload: AddIssuesToSprintPayload) =>
+    request<Sprint>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}/issues`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  removeIssue: (wsId: string, projectId: string, id: string, issueId: string) =>
+    request<void>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}/issues/${issueId}`,
+      { method: 'DELETE' }),
+  // 409 for an ACTIVE sprint ("complete it first") and for a FUTURE/COMPLETED
+  // one that still holds issues unless `force` — then their sprint is nulled and
+  // their rank preserved.
+  remove: (wsId: string, projectId: string, id: string, force = false) =>
+    request<void>(`/workspaces/${wsId}/projects/${projectId}/sprints/${id}${force ? '?force=true' : ''}`,
+      { method: 'DELETE' }),
+}
+
+/** Extra knobs of the planning view on top of the shared issue filters. */
+export interface BacklogViewOptions extends IssueListFilters {
+  /**
+   * Default false: a done, unranked issue is planning noise. Sprint sections
+   * ALWAYS include DONE issues regardless — that is the sprint's record.
+   */
+  includeDone?: boolean
+}
+
+/**
+ * The whole planning view in one aggregate: ACTIVE-first sprint sections plus
+ * the ranked backlog, each with whole-section stats and HD-79 truncation
+ * metadata. Sections are ALSO independently refreshable through
+ * `apiListIssuesPaged({ sprintId })` / `({ noSprint: true })` — see
+ * `useBacklogView` in `components/sprints.tsx`.
+ */
+export async function apiGetBacklogView(
+  wsId: string,
+  projectId: string,
+  opts?: BacklogViewOptions,
+): Promise<BacklogView> {
+  const params = new URLSearchParams()
+  if (opts?.includeDone) params.set('includeDone', 'true')
+  appendIssueFilters(params, opts)
+  const qs = params.toString()
+  return request(`/workspaces/${wsId}/projects/${projectId}/backlog${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * Re-rank an issue (and optionally move it between sections) in ONE request.
+ * The moved issue is addressed by NUMBER (the established issue addressing);
+ * anchors and the sprint travel as ids (the established reference convention).
+ */
+export async function apiRankIssue(
+  wsId: string,
+  projectId: string,
+  number: number,
+  payload: RankIssuePayload,
+): Promise<Issue> {
+  assertSingleSprintTarget(payload, 'POST rank')
+  return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/rank`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
 }
 
 // ── Advanced search (HQL) — HD-25 ─────────────────────────────────────────────

@@ -1,5 +1,6 @@
 package com.hamstrack.project.service;
 
+import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.exception.UserNotFoundException;
@@ -12,8 +13,10 @@ import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
@@ -25,6 +28,7 @@ import java.util.stream.Collectors;
 public class ProjectService {
 
     private final WorkspaceAccessService workspaceAccess;
+    private final ScopeResolver scopeResolver;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
@@ -81,15 +85,44 @@ public class ProjectService {
         return ProjectResponse.of(project, role);
     }
 
+    /**
+     * Rename / re-describe / switch the board mode.
+     *
+     * <p><strong>Deliberate, flagged permission change (HD-22 §3.2):</strong> this used
+     * to be {@code requireRole(MANAGER)}. It is now
+     * {@link ScopeResolver#requireProjectCurator} — project MANAGER <em>or</em>
+     * workspace OWNER/ADMIN — because {@code boardMode} joined this PATCH and the SPA's
+     * {@code ProjectSettingsArea} has always admitted exactly the curator predicate, so
+     * a workspace admin could reach the form and then 403 on save. It also aligns this
+     * endpoint with every other project-content write since HD-6 (components, versions,
+     * and now sprints), all of which are curator-gated.
+     *
+     * <p>The widening is scoped on purpose: {@code archive}/{@code unarchive} and member
+     * management stay MANAGER-only. What it grants a workspace OWNER/ADMIN who is not a
+     * project member is the ability to rename a project in their own workspace — which
+     * they can already do indirectly through the admin console's project bindings.
+     * Tenancy is unchanged: {@code requireProjectCurator} resolves through workspace
+     * membership first, so a missing workspace, a missing project and a non-member all
+     * still yield 404, never 403.
+     *
+     * <p><strong>Archived projects are frozen</strong> (security review L5): every issue
+     * edit, sprint mutation and rank move already 409s on an archived project, so its
+     * own settings — now including {@code boardMode}, which changes how the board and
+     * the backlog render — must not stay quietly writable. {@code unarchive} is the way
+     * back, and it is deliberately still MANAGER-only.
+     */
     @Transactional
     public ProjectResponse update(User actor, UUID workspaceId, UUID projectId, UpdateProjectRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
-        requireRole(actor, project, ProjectRole.MANAGER);
+        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        requireNotArchived(project);
         if (req.name() != null) project.setName(req.name());
         if (req.description() != null) project.setDescription(req.description());
+        if (req.boardMode() != null) project.setBoardMode(req.boardMode());
         projectRepository.save(project);
-        return ProjectResponse.of(project, ProjectRole.MANAGER);
+        // The caller's REAL project role, not a hardcoded MANAGER: a workspace
+        // OWNER/ADMIN who is not a project member now reaches this method, and echoing
+        // MANAGER back would make the SPA render project-manager-only actions for them.
+        return ProjectResponse.of(project, getRole(actor, project));
     }
 
     @Transactional
@@ -174,6 +207,17 @@ public class ProjectService {
         var role = getRole(actor, project);
         if (!role.isAtLeast(required)) {
             throw new InsufficientProjectRoleException();
+        }
+    }
+
+    /**
+     * An archived project's content is frozen (issues, sprints, ranks) and so are its
+     * settings — same 409 and same wording as {@code IssueService}/{@code SprintService},
+     * so the SPA renders one message for the whole class. Reads still work.
+     */
+    private void requireNotArchived(Project project) {
+        if (project.isArchived()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is archived");
         }
     }
 }

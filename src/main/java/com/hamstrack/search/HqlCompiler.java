@@ -204,7 +204,30 @@ public class HqlCompiler {
             };
         }
 
-        // id-set membership fields: status/type/priority(=,!=), assignee/reporter, parent
+        // storyPoints (HD-22 §4.7): the first NATIVE numeric system field, so it is a
+        // plain column comparison — unlike the custom-field NUMBER path, which has to
+        // cast out of JSONB inside a correlated EXISTS. `!=` deliberately also matches
+        // UNESTIMATED issues (a null column is "not equal to 5" in the intuitive sense,
+        // and SQL's three-valued logic would otherwise silently drop them), mirroring
+        // how `due != …` and the id-set fields already behave.
+        if (f.dataType() == FieldDataType.NUMBER) {
+            var num = (ResolvedValue.NumberValue) valueResolver.resolve(f, c.value(), ctx);
+            Path<BigDecimal> numPath = path(root, f.entityPath());
+            BigDecimal n = num.value();
+            return switch (op) {
+                case EQ -> cb.equal(numPath, n);
+                case NEQ -> cb.or(cb.isNull(numPath), cb.notEqual(numPath, n));
+                case GT -> cb.greaterThan(numPath, n);
+                case GTE -> cb.greaterThanOrEqualTo(numPath, n);
+                case LT -> cb.lessThan(numPath, n);
+                case LTE -> cb.lessThanOrEqualTo(numPath, n);
+                default -> throw new HqlSemanticException(
+                        "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
+            };
+        }
+
+        // id-set membership fields: status/type/priority(=,!=), assignee/reporter,
+        // component, sprint, parent
         var resolved = resolveIdSet(f, c.value(), ctx);
         Path<UUID> idPath = path(root, f.entityPath());
         return switch (op) {

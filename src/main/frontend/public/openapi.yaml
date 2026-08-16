@@ -31,7 +31,10 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds).
+    header (seconds). One non-auth endpoint has a throttle of its own:
+    `POST …/issues/{number}/rank` allows at most one whole-project rank
+    rebalance per project per 60 s and answers `429` + `Retry-After` for a
+    second one inside that window — a retryable throttle, not a fault.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/easyTask
@@ -82,6 +85,16 @@ tags:
       **affects** ("broken in") versions (content, not bound taxonomy: versions
       never appear in a project's config). Reads are open to project members;
       writes need project MANAGER or workspace OWNER/ADMIN.
+  - name: Sprints
+    description: >-
+      A project's iterations — a time-box with a one-way lifecycle
+      (`FUTURE` → `ACTIVE` → `COMPLETED`, no re-open, at most one active sprint
+      per project), plus the project's planning view (`GET …/backlog`). Sprints
+      are content, not bound taxonomy: they never appear in a project's config.
+      Reads are open to project members; the lifecycle (create/edit/start/
+      complete/delete) needs project MANAGER or workspace OWNER/ADMIN, while
+      putting issues into a sprint and ranking them is the ordinary issue-edit
+      tier.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -559,8 +572,21 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [Projects]
-      summary: Update name / description
-      description: Requires project `MANAGER`.
+      summary: Update name / description / board mode
+      description: >-
+        Requires the **project curator** role — project `MANAGER`, **or** an
+        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
+        member); any other member gets `403`. This is **wider than it used to
+        be**: the endpoint was `MANAGER`-only before `boardMode` joined it, and
+        it now matches every other project-content write (components, versions,
+        sprints). `archive`/`unarchive` and member management stay
+        `MANAGER`-only. Partial — omitted fields are left unchanged.
+
+        An **archived** project is frozen: its settings — `boardMode` included,
+        which changes how the board and the backlog render — are as read-only as
+        its issues, sprints and ranks, so this returns `409 "Project is
+        archived"`. `POST …/unarchive` is the way back, and it stays
+        `MANAGER`-only.
       operationId: updateProject
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -578,6 +604,13 @@ paths:
               schema: { $ref: '#/components/schemas/ProjectResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            `Project is archived` — an archived project's settings are frozen
+            along with its content. Unarchive it first.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/archive:
     post:
@@ -1336,7 +1369,14 @@ paths:
         `affectsVersionIds` link versions of **this** project in the two
         independent roles — an unknown, foreign-project or archived version, or
         more than `app.classification.max-version-links-per-issue` distinct ids
-        **per link type**, is a `422`.
+        **per link type**, is a `422`. `sprintId` files the issue straight into
+        a sprint of **this** project (an unknown, foreign-project or
+        **completed** sprint is a `422`); omitted, the issue lands in the
+        backlog. `storyPoints` is the native estimate — `0`…`999` with at most 2
+        decimals (`422` otherwise), and `null`/omitted means *unestimated*,
+        which is deliberately not the same as `0`. A new issue is always
+        appended to the **bottom** of the ranked backlog; `position` is
+        server-written and never accepted from a payload.
       operationId: createIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1383,6 +1423,14 @@ paths:
         uuids. `fixVersionId` matches the **fix** role only — an affects link to
         the same version does not match it. A `componentId`/`fixVersionId`
         belonging to another project simply matches nothing — never an error.
+
+        The **sprint filters** work the same way: `sprintId` narrows to one
+        sprint (a foreign id matches nothing, never an error) and
+        `noSprint=true` narrows to the backlog (issues in no sprint at all).
+        They are **mutually exclusive** — "in this sprint" and "in no sprint"
+        can never both hold, so sending both is a `400` rather than a silently
+        empty result. Rows come back in the shared backlog/board rank order
+        (`position`, then newest first); the rank value itself is not exposed.
       operationId: listIssues
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1430,6 +1478,20 @@ paths:
             same version does not match. An id from another project matches
             nothing rather than erroring.
           schema: { type: string, format: uuid }
+        - name: sprintId
+          in: query
+          description: >-
+            Filter to issues committed to this sprint, ANDed with the other
+            filters. An id from another project matches nothing rather than
+            erroring. Mutually exclusive with `noSprint` (`400` when both are
+            sent).
+          schema: { type: string, format: uuid }
+        - name: noSprint
+          in: query
+          description: >-
+            Filter to issues in **no** sprint — the backlog. Mutually exclusive
+            with `sprintId` (`400` when both are sent).
+          schema: { type: boolean, default: false }
         - name: excludeDone
           in: query
           description: Paginated mode only — drop issues in a DONE-category status
@@ -1455,8 +1517,9 @@ paths:
                             items: { $ref: '#/components/schemas/IssueResponse' }
         '400':
           description: >-
-            Unknown `labelMatch` value, or more than
-            `app.classification.max-labels-per-issue` distinct `labelId` values.
+            Unknown `labelMatch` value, more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values,
+            or `sprintId` and `noSprint` sent together.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1498,7 +1561,18 @@ paths:
         full-replacement sets **per role** — sending one never touches the
         other, `[]` clears that role, absent leaves it unchanged; the same `422`
         rules as create apply, with the per-issue cap counted separately per
-        link type.
+        link type. `sprintId` moves the issue into a sprint of this project and
+        `clearSprint: true` returns it to the backlog (the
+        `assigneeId`/`clearAssignee` convention); sending **both** is a `400`
+        (it used to let `sprintId` win silently — `POST …/rank` already refused
+        the same combination, and the two write paths now agree). An unknown,
+        foreign-project or **completed** target sprint is a `422`, and so is
+        moving the issue out of a sprint that is already `COMPLETED`.
+        `storyPoints` sets the estimate
+        (`0`…`999`, at most 2 decimals — `422` otherwise) and
+        `clearStoryPoints: true` marks the issue unestimated again. Both a
+        sprint and a story-point change write one history entry each; the issue
+        **rank** is never changed here — that is `POST …/issues/{number}/rank`.
       operationId: updateIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1515,13 +1589,32 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/IssueResponse' }
+        '400':
+          description: >-
+            Malformed request — `sprintId` and `clearSprint` sent together
+            ("put it in sprint X" and "take it out of every sprint" cannot both
+            hold).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Stale `version` — the issue was modified by someone else, or the project is archived
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
-        '422': { $ref: '#/components/responses/UnprocessableReference' }
+        '422':
+          description: >-
+            Unknown status/type/assignee/parent, a workflow-forbidden
+            transition, an unknown / foreign-project / archived label,
+            component or version, an out-of-range `storyPoints`, an unknown /
+            foreign-project / **completed** target sprint — or the issue's
+            **current** sprint is `COMPLETED` and the request changes or clears
+            it. A completed sprint's membership is frozen in both directions;
+            every other field of such an issue stays editable.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
     delete:
       tags: [Issues]
       summary: Delete an issue
@@ -1535,6 +1628,98 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/rank:
+    post:
+      tags: [Issues]
+      summary: Move an issue in the backlog / board rank
+      description: >-
+        Re-ranks one issue in the project-wide order the board and the backlog
+        **share**, optionally moving it into or out of a sprint in the same
+        request. Permission is the ordinary **issue-edit** tier (any workspace
+        member on a non-archived project), not curator: dragging items at a
+        planning meeting is teamwork.
+
+        The client never sends a rank value — it sends the neighbours it dropped
+        between (`afterIssueId` / `beforeIssueId`, both by **id**, while the
+        moved issue travels by `number`), and the server computes the placement
+        from them. Whichever neighbour is missing is looked up in the target
+        section; both absent means "append to the end of the section". Because
+        the rank is server-written it is not exposed anywhere — there is no
+        `position` field on `IssueResponse`.
+
+        Rank changes write **no** history (positional churn would drown the
+        log); a sprint change in the same request does. `version` is
+        **optional**: sent, it is an optimistic check (`409` when stale);
+        omitted, the move simply applies — ranking is last-drag-wins.
+
+        Repeatedly dropping an issue into the same gap eventually exhausts it
+        and the server re-spaces the whole project's ranks. That rebalance is
+        throttled to **once per project per 60 s**: a second one inside the
+        window is a `429` with `Retry-After`, which is a retryable throttle, not
+        a fault — nothing was moved, and the same request succeeds after the
+        wait.
+      operationId: rankIssue
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/issueNumber'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RankIssueRequest' }
+      responses:
+        '200':
+          description: Moved — the issue in its new state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IssueResponse' }
+        '400':
+          description: >-
+            Malformed request — `sprintId` and `clearSprint` sent together, or
+            neither an anchor nor a sprint change (the request asks for
+            nothing).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            Stale `version`, the project is archived, or **the list changed** —
+            the anchors are no longer consistent with each other
+            (`after.position >= before.position`), so the caller's view is out
+            of date. Refresh and drag again; nothing was moved.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            An anchor is unknown / belongs to another project, an anchor is not
+            in the **target** section (a different sprint, or the backlog when
+            moving into a sprint), an anchor **is** the issue being moved,
+            `sprintId` is unknown / foreign / **completed**, or the issue's
+            **current** sprint is `COMPLETED` and the request would move it out
+            of (or on from) that sprint — a completed sprint's membership is the
+            delivery record the completion already reported, so it is frozen in
+            both directions. A pure rank move inside a completed sprint is still
+            allowed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429':
+          description: >-
+            The project's ranks were just re-spaced — this request would have
+            triggered a second whole-project rebalance inside the 60 s cooldown.
+            A **retryable throttle, not a fault**: nothing was moved, and
+            retrying after the number of seconds in `Retry-After` succeeds.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/children:
     get:
@@ -2608,6 +2793,548 @@ paths:
               schema: { $ref: '#/components/schemas/VersionUsageResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/sprints:
+    get:
+      tags: [Sprints]
+      summary: List the project's sprints
+      description: >-
+        Any project member; a missing workspace, a missing project or a
+        non-member all give `404`, never `403`. **Always paginated** (default
+        size 50): open sprints are capped, but `COMPLETED` ones accumulate for
+        years. Ordering is `ACTIVE` first, then `FUTURE` by `sequence`
+        ascending, then `COMPLETED` newest-first — the `page`/`size` parameters
+        control the window, not the order. `state` is a **repeatable** filter
+        (`?state=ACTIVE&state=FUTURE`); omitting it returns every state. The
+        counters (`issueCount`, `doneIssueCount`, `points`, `donePoints`,
+        `unestimatedCount`) are always filled — they cost one grouped query for
+        the whole page, so there is nothing to opt out of.
+      operationId: listSprints
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: state
+          in: query
+          description: >-
+            Repeatable state filter (`?state=ACTIVE&state=FUTURE`); omitted =
+            every state.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { $ref: '#/components/schemas/SprintState' }
+        - $ref: '#/components/parameters/pageParam'
+        - $ref: '#/components/parameters/sizeParam'
+      responses:
+        '200':
+          description: OK — ACTIVE, then FUTURE by sequence, then COMPLETED newest-first
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageResponse'
+                  - type: object
+                    properties:
+                      content:
+                        type: array
+                        items: { $ref: '#/components/schemas/SprintResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Sprints]
+      summary: Create a sprint
+      description: >-
+        Requires the **project curator** role — project `MANAGER`, or an
+        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
+        member); any other member gets `403`. Everything in the body is
+        optional: a blank/absent `name` becomes `"Sprint {sequence}"`, which is
+        why default names can never collide. The name is normalized server-side
+        (NFC, invisible control/format characters stripped, whitespace
+        collapsed, max 60 characters after normalization) and is unique per
+        **project**, case-insensitively, **completed sprints included** — a
+        collision is a `409`.
+
+        A sprint is always born `FUTURE`: `startAt`/`endAt` are only the plan,
+        and starting it is the separate `POST …/start` call.
+      operationId: createSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateSprintRequest' }
+      responses:
+        '201':
+          description: 'Created — always `state: FUTURE`, all counters 0'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintResponse' }
+        '400':
+          description: >-
+            A `name` that normalizes to blank or to more than 60 characters, or
+            a `goal` over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/SprintConflict' }
+        '422':
+          description: >-
+            The project already holds `app.agile.max-open-sprints-per-project`
+            (default 20) open sprints — complete or delete one first.
+            `COMPLETED` sprints do not count toward that cap (they are history
+            and can never be started again). Also returned for
+            `endAt <= startAt`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}:
+    get:
+      tags: [Sprints]
+      summary: Get a sprint
+      description: >-
+        Any project member. The counters are filled here too (the same grouped
+        query as the list). A sprint id belonging to another project or another
+        workspace is a `404` — only a *payload* `sprintId` (on issue create /
+        update / rank) turns a foreign id into a `422`.
+      operationId: getSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Sprints]
+      summary: Rename / re-goal / re-plan a sprint
+      description: >-
+        Project curator only. Partial — omitted fields are left unchanged.
+        `startAt`/`endAt` are nullable scalars: a value sets them and
+        `clearStartAt`/`clearEndAt` unset them (the
+        `assigneeId`/`clearAssignee` convention). The **lifecycle deliberately
+        does not move through here** — there is no `state` field, so a PATCH can
+        neither start, complete nor re-open a sprint.
+      operationId: updateSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateSprintRequest' }
+      responses:
+        '200':
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintResponse' }
+        '400':
+          description: >-
+            A `name` that normalizes to blank or to more than 60 characters, or
+            a `goal` over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/SprintConflict' }
+        '422':
+          description: 'The resulting dates are inconsistent (`endAt <= startAt`).'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+    delete:
+      tags: [Sprints]
+      summary: Delete a sprint
+      description: >-
+        Project curator only. An **ACTIVE** sprint is a `409` ("complete it
+        first") — deleting a running commitment silently is never what anybody
+        meant. A `FUTURE`/`COMPLETED` sprint that still holds issues is a `409`
+        as well unless you pass `force=true`, which detaches the issues first
+        (their **rank is preserved**, so they keep their relative place in the
+        backlog they return to) and then deletes the sprint.
+      operationId: deleteSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+        - name: force
+          in: query
+          description: >-
+            Detach every issue still in the sprint (preserving their rank) and
+            then delete it. Never allowed for an ACTIVE sprint.
+          schema: { type: boolean, default: false }
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >-
+            The workspace, project or sprint was not found (or the caller is not
+            a member) — **including** the case where another curator deleted the
+            same sprint a moment earlier. The row is removed by a conditional
+            delete, so the loser of that race gets this `404` rather than a
+            `500`; the sprint is gone either way, so treat it as success.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '409':
+          description: >-
+            The sprint is ACTIVE (complete it first), it still holds issues and
+            `force` was not given (the message states the count), or the project
+            is archived.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}/start:
+    post:
+      tags: [Sprints]
+      summary: Start a sprint
+      description: >-
+        Project curator only, `FUTURE` → `ACTIVE`. The request body is
+        **optional** — a bare `POST` means "start it now and run it for
+        `app.agile.default-sprint-length-days` (default 14) days". A `startAt`
+        in the past is allowed on purpose (backfilling a sprint that actually
+        began on Monday is normal).
+
+        **At most one sprint per project may be active**, and that invariant is
+        enforced by the database, not only in Java: starting a second one is a
+        `409`, and so is a double-click on the same one. Starting an **empty**
+        sprint is allowed — the UI warns, the API does not.
+      operationId: startSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartSprintRequest' }
+      responses:
+        '200':
+          description: 'Started — `state: ACTIVE`, `startAt`/`endAt` stamped'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintResponse' }
+        '400':
+          description: A `goal` over 500 characters.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The sprint is not `FUTURE` (already active, or completed — there is
+            no re-open), **another sprint of this project is already active**,
+            or the project is archived.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: '`endAt <= startAt`.'
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}/completion-preview:
+    get:
+      tags: [Sprints]
+      summary: What completing this sprint would report
+      description: >-
+        The completion dialog's data source, so it never has to guess: the same
+        counters the subsequent completion reports (off the same query — no
+        drift), plus the `FUTURE` sprints the unfinished work may be carried
+        over to. **Read-only and readable by any project member**, unlike the
+        completion itself — looking at the numbers is not a commitment. An empty
+        `targetCandidates` means the dialog must offer "create a sprint"
+        instead.
+      operationId: sprintCompletionPreview
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintCompletionPreview' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}/complete:
+    post:
+      tags: [Sprints]
+      summary: Complete a sprint
+      description: >-
+        Project curator only, `ACTIVE` → `COMPLETED`. **Terminal — there is no
+        re-open**; the recovery path is to create a new sprint and move the
+        issues back.
+
+        Unlike `start` the body is **required**: the disposition of the
+        unfinished work is a real decision, and defaulting it silently would
+        move issues nobody asked to move. Every issue whose status category is
+        **not DONE** moves to the chosen destination (the backlog, or a `FUTURE`
+        sprint of the same project); **DONE issues keep their sprint** — that is
+        the sprint's record of what it delivered. The rank is never rewritten,
+        so carried-over items keep their relative order.
+
+        Conditional like release: a double-click is a `409`, not an
+        idempotent-looking success that would run the destructive move twice.
+      operationId: completeSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CompleteSprintRequest' }
+      responses:
+        '200':
+          description: Completed — the done-vs-carried-over report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintCompletionResult' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            The sprint is not `ACTIVE` (already completed, or never started), or
+            the project is archived.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `moveUnfinishedTo: "SPRINT"` without a `targetSprintId`, or a target
+            that is unknown, belongs to another project, is the sprint being
+            completed, or is not `FUTURE`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}/issues:
+    post:
+      tags: [Sprints]
+      summary: Put a batch of issues into the sprint
+      description: >-
+        The **issue-edit** tier, not curator: filling a sprint is ordinary
+        planning work the whole team does at a planning meeting. Issues are
+        addressed by **id** here. An issue already in this sprint is a silent
+        no-op (no history entry, no `version` bump, no event); the others are
+        re-ranked to the `TOP` or `BOTTOM` of the sprint's section, keeping
+        their relative order among themselves. Assigning to the `ACTIVE` sprint
+        mid-sprint is allowed — a scope change is a real event — but a
+        `COMPLETED` sprint is a `422`.
+
+        This call is also a **removal** path: an issue joining this sprint
+        leaves whichever sprint it is in today, so a completed sprint's frozen
+        membership applies here in both directions — a `422` if the **target**
+        sprint is `COMPLETED`, and a `422` if **any** issue in `issueIds`
+        currently belongs to a `COMPLETED` sprint. The whole batch is validated
+        before anything moves, so that rejection is **atomic**: no issue in the
+        request changes sprint or rank.
+
+        Returns the sprint with its **refreshed** counters, so a client does not
+        need a second round trip.
+      operationId: addIssuesToSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddIssuesToSprintRequest' }
+      responses:
+        '200':
+          description: OK — the sprint with refreshed counters
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintResponse' }
+        '400':
+          description: >-
+            An empty `issueIds`, or more than
+            `app.agile.max-issues-per-bulk-move` (default 100) distinct ids
+            after de-duplication — chunk the request. Over 500 entries is
+            rejected at binding as a payload guard.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: The project is archived
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            An issue id is unknown or belongs to another project ("Unknown
+            issue" — never a `404`, which would confirm existence), the
+            **target** sprint is `COMPLETED`, or **any** issue in `issueIds` is
+            currently in a `COMPLETED` sprint (`"Sprint 'X' is completed"`,
+            where `X` is that source sprint) — the same frozen-membership rule
+            as `DELETE …/sprints/{id}/issues/{issueId}`. The batch is checked as
+            a whole up front, so this rejection is **atomic**: no issue moves.
+            An issue already in the target sprint is a no-op and is not checked.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/sprints/{sprintId}/issues/{issueId}:
+    delete:
+      tags: [Sprints]
+      summary: Take one issue out of the sprint
+      description: >-
+        The issue-edit tier, like the bulk add. The issue's **rank is
+        preserved**, so it keeps its relative place in the backlog it returns
+        to.
+
+        **Idempotent:** removing an issue that is not in this sprint is a `204`
+        as well, not a `404` — the endpoint expresses "this issue must not be in
+        this sprint", which is already true, and a retried request must never
+        surprise the client. An `issueId` that does not resolve **within the
+        project** is still a `404`.
+
+        A `COMPLETED` sprint's membership is **frozen** — the delivery record
+        the completion already reported — so taking an issue out of one is a
+        `422`. The idempotent `204` is checked **first**: an issue that is not
+        in the sprint still returns `204`, completed or not.
+      operationId: removeIssueFromSprint
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+        - name: issueId
+          in: path
+          required: true
+          description: The issue's **id** (not its project-scoped number)
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 'Removed — or already not in this sprint (idempotent)' }
+        '404':
+          description: >-
+            The workspace, project or sprint was not found (or the caller is not
+            a member), **or** the `issueId` does not resolve within this
+            project.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '409':
+          description: The project is archived
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            The sprint is `COMPLETED` and the issue **is** in it — its
+            membership is a delivered fact and stays frozen. (An issue that is
+            not in the sprint returns the idempotent `204` instead, because that
+            check runs first.)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/backlog:
+    get:
+      tags: [Sprints]
+      summary: The project's planning view
+      description: >-
+        One request returns every section the backlog screen renders: the
+        project's **open** sprint sections (`ACTIVE` first, then `FUTURE` by
+        `sequence`) above the rank-ordered backlog. Any project member may read
+        it; a missing workspace, a missing project or a non-member all give
+        `404`.
+
+        The filter parameters are exactly the ones `GET …/issues` accepts and
+        are all applied **server-side**, so filtering searches the whole project
+        rather than the capped page already on screen. Each section is
+        independently capped at `sectionCap`
+        (`app.agile.section-max-issues`, default 300) and reports `truncated` /
+        `totalAvailable` — while its `stats` are computed over the **whole**
+        section, so a truncated section still shows honest totals.
+
+        The response also carries `bulkMoveCap`
+        (`app.agile.max-issues-per-bulk-move`, default 100) — the limit on ONE
+        `POST …/sprints/{sprintId}/issues` call, which is a **different** knob
+        from `sectionCap`. Chunk "move everything to…" actions at that number
+        rather than hardcoding it or deriving it from `sectionCap`.
+
+        Rows inside every section are in the shared rank order (`position`, then
+        newest first), which is the same order the board uses.
+      operationId: getBacklogView
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: statusId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: assigneeId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: priorityId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: componentId
+          in: query
+          description: An id from another project matches nothing rather than erroring.
+          schema: { type: string, format: uuid }
+        - name: labelId
+          in: query
+          description: >-
+            Repeatable, combined per `labelMatch`. More than
+            `app.classification.max-labels-per-issue` (default 20) distinct
+            values is a `400`.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, format: uuid }
+        - name: labelMatch
+          in: query
+          description: '`any` = carries at least one, `all` = carries every one.'
+          schema: { type: string, enum: [any, all], default: any }
+        - name: fixVersionId
+          in: query
+          description: Matches the **fix** link role only.
+          schema: { type: string, format: uuid }
+        - name: includeDone
+          in: query
+          description: >-
+            Include DONE-category issues in the **backlog** section. Defaults to
+            `false` — a done, unranked issue is planning noise. Sprint sections
+            always include their DONE issues, because that is the sprint's
+            record of what it delivered, so this flag never affects them.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK — sprint sections (ACTIVE first) plus the backlog section
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacklogViewResponse' }
+        '400':
+          description: >-
+            Unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /notifications:
     get:
       tags: [Notifications]
@@ -2702,8 +3429,9 @@ paths:
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
           `priority`, `created`, `updated`, `due`, `parent`, `text`, `label`
           (alias `labels`), `component` (alias `components`), `fixVersion`,
-          `affectsVersion`, plus any **custom field** (M2) by its `key` (e.g.
-          `story_points`, `severity`) — the exact list a caller may query comes
+          `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias
+          `points`), plus any **custom field** (M2) by its `key` (e.g.
+          `severity`) — the exact list a caller may query comes
           from `GET /search/schema`. Field names are matched
           case-insensitively, so the all-lowercase `fixversion` /
           `affectsversion` spellings work too (`/schema` always advertises the
@@ -2715,7 +3443,8 @@ paths:
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
           (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`,
-          `affectsVersion`, and every custom field except CHECKBOX).
+          `affectsVersion`, `sprint`, `storyPoints`, and every custom field
+          except CHECKBOX).
         - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
           last). Custom fields are **not sortable** (yet).
         - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
@@ -2746,6 +3475,25 @@ paths:
           **projects** (two projects may each ship a "2.4.0"), and archived
           versions are excluded from name resolution (a `422` at run time),
           though issues keep carrying them.
+        - **Sprints** (`sprint`, alias `sprints`) are single-valued and given by
+          **name** (`= != IN` and `IS [NOT] EMPTY`), and — like `label` —
+          **not sortable**, so `ORDER BY sprint` is a `422`: sprint order across
+          several projects has no common meaning. `sprint IS EMPTY` means "in no
+          sprint", i.e. the backlog. Names resolve across the caller's visible
+          **projects**, so two projects may each run a "Sprint 7" and both
+          match. `COMPLETED` sprints are excluded from name resolution (years of
+          history would flood the namespace), though issues carrying them still
+          match by id.
+        - **Story points** (`storyPoints`, alias `points`) is the first native
+          numeric field: a real column, so it takes ordered comparisons directly
+          (`= != > < >= <=`) and **is sortable** — that is the point ("show me
+          the big ones first"). `storyPoints IS EMPTY` means **unestimated**,
+          which is deliberately not the same statement as `= 0`. It has no value
+          picklist. The **operand is bounded to the field's own domain** — the
+          same `0`…`999` with at most 2 decimals the write path enforces — so
+          `storyPoints > 1e999` or `storyPoints = 1.234` is a `422` semantic
+          error naming the field, not a `500`. A filter that could never match a
+          row is rejected up front rather than handed to the database.
         - **Custom fields** are queried by `key`, operators per type — TEXT /
           TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT:
           `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER:
@@ -2753,7 +3501,7 @@ paths:
           `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given
           by option **label or id**, USER values by email / display name /
           `currentUser()` / UUID, DATE as `YYYY-MM-DD`. Example:
-          `story_points >= 5 AND severity = "High"`.
+          `severity = "High" AND environment = prod`.
 
         An empty/blank `query` matches all visible issues (default sort).
         Examples:
@@ -2814,9 +3562,18 @@ paths:
         `/search/suggest?field=component`), and the `VERSION` picklist does the
         same for version names — **one** picklist backs both `fixVersion` and
         `affectsVersion` (both declare `valueSuggest: "VERSION"`), since the two
-        roles draw from the same catalog. Field names are matched
+        roles draw from the same catalog. A `SPRINT` picklist holds the **open**
+        (non-completed) sprint names of the caller's visible projects, capped at
+        200 the same way — but note that unlike the other picklists it has **no
+        `/search/suggest` fallback**: `?field=sprint` is intentionally not wired
+        and returns the standard `422`, because a project's open sprints are
+        bounded by `app.agile.max-open-sprints-per-project` and cannot overflow
+        the picklist in practice. `storyPoints` has no picklist at all (it is
+        numeric). Field names are matched
         case-insensitively internally, but each field is advertised here exactly
-        **once**, under its canonical camelCase name. Workspace members only.
+        **once**, under its canonical camelCase name (aliases such as `sprints`
+        and `points` de-duplicate onto their descriptor). Workspace members
+        only.
       operationId: searchSchema
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2846,6 +3603,11 @@ paths:
         `affectsVersion` return identical suggestions (names de-duplicated
         case-insensitively, so a "2.4.0" shipped by two projects is offered
         once). Workspace members only.
+
+        **Not** served here: `sprint`. Its `/search/schema` `SPRINT` picklist is
+        already bounded by `app.agile.max-open-sprints-per-project`, so no
+        typeahead fallback was wired — `?field=sprint` returns the same `422`
+        any other non-suggestable field returns.
       operationId: searchSuggest
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2855,7 +3617,8 @@ paths:
           description: >-
             The HQL field to suggest values for — a user-valued field (e.g.
             `assignee`), `label`/`labels`, `component`/`components`, or
-            `fixVersion`/`affectsVersion`
+            `fixVersion`/`affectsVersion`. Anything else (including `sprint`) is
+            a `422`.
           schema: { type: string }
         - name: q
           in: query
@@ -2870,6 +3633,13 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SuggestResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >-
+            `field` is unknown or is not a suggestable field — `sprint` is the
+            notable one: it has a `/search/schema` picklist but no typeahead.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/HqlProblemDetail' }
 
   /workspaces/{workspaceId}/filters:
     get:
@@ -3078,6 +3848,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    sprintId:
+      name: sprintId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     adminId:
       name: id
       in: path
@@ -3174,6 +3949,17 @@ components:
         itself is archived and its release plan is frozen. Like a component
         conflict, and unlike a label one, this body carries **no** `existingId`
         extension.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    SprintConflict:
+      description: >-
+        Either a sprint with this name already exists **in this project**
+        (case-insensitively; a `COMPLETED` sprint keeps its name slot, so rename
+        the new one) — the same name in another project is fine, sprints are
+        project-owned — or the project itself is archived and its sprints are
+        frozen. Like a component/version conflict, this body carries **no**
+        `existingId` extension.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -3586,8 +4372,8 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        key: { type: string, example: story_points }
-        name: { type: string, example: Story points }
+        key: { type: string, example: severity }
+        name: { type: string, example: Severity }
         type: { $ref: '#/components/schemas/FieldType' }
         config: { $ref: '#/components/schemas/FieldConfig' }
         description: { type: string, nullable: true }
@@ -3666,11 +4452,30 @@ components:
           example: DEMO
         description: { type: string, nullable: true }
 
+    BoardMode:
+      type: string
+      enum: [KANBAN, SCRUM]
+      default: KANBAN
+      description: >-
+        How the project's board reads. A **presentation switch, not a
+        permission**: the sprint API behaves identically either way, so a Kanban
+        team may still plan an iteration. `SCRUM` scopes the board to the active
+        sprint and shows a sprint header; `KANBAN` shows the whole project.
+
     UpdateProjectRequest:
       type: object
+      description: Partial project update — omitted fields are left unchanged
       properties:
         name: { type: string, minLength: 2, maxLength: 255 }
         description: { type: string }
+        boardMode:
+          allOf:
+            - $ref: '#/components/schemas/BoardMode'
+          description: >-
+            Switch the project between Kanban and Scrum. A closed set — an
+            unknown value is a `400`, never a silent fall-through; omitted/null
+            leaves the current mode. Adding this field is what widened the
+            endpoint's gate from project `MANAGER` to project **curator**.
 
     ProjectResponse:
       type: object
@@ -3681,6 +4486,13 @@ components:
         key: { type: string, example: DEMO }
         description: { type: string, nullable: true }
         archived: { type: boolean }
+        boardMode:
+          allOf:
+            - $ref: '#/components/schemas/BoardMode'
+          description: >-
+            `KANBAN` or `SCRUM`. It rides this response because the shell
+            already fetches the project, so a Scrum board costs no extra
+            request.
         myRole: { $ref: '#/components/schemas/ProjectRole' }
         createdAt: { type: string, format: date-time }
 
@@ -3758,8 +4570,8 @@ components:
             type: object
             properties:
               id: { type: string, format: uuid }
-              key: { type: string, example: story_points }
-              name: { type: string, example: Story points }
+              key: { type: string, example: severity }
+              name: { type: string, example: Severity }
               type: { $ref: '#/components/schemas/FieldType' }
               config: { $ref: '#/components/schemas/FieldConfig' }
               description: { type: string, nullable: true }
@@ -3832,6 +4644,42 @@ components:
             independent budget as `fixVersionIds`. The same version may
             legitimately be both fix and affects on one issue.
           items: { type: string, format: uuid }
+        sprintId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            File the issue straight into a sprint of **this** project.
+            Absent/null = the backlog, which is the normal case. Resolved inside
+            the issue's own project — an unknown or foreign-project id is a
+            `422` ("Unknown sprint", never a `404`), and so is a **completed**
+            sprint (its membership is a delivered fact).
+        storyPoints:
+          type: number
+          nullable: true
+          minimum: 0
+          maximum: 999
+          example: 5
+          description: >-
+            Native story-point estimate. `0`…`999` with at most **2 decimals**
+            (`0.5`, `1.5`, `13` are all valid) — anything else is a `422`.
+            Absent/null means **unestimated**, which is deliberately not the
+            same statement as `0`.
+        clearSprint:
+          type: boolean
+          default: false
+          description: >-
+            **Accepted and ignored on create.** A brand-new issue has nothing to
+            clear — omitting `sprintId` already means "the backlog". It exists
+            only so a client that shares one payload builder between create and
+            update is not rejected; the meaningful flag is on
+            `UpdateIssueRequest`.
+        clearStoryPoints:
+          type: boolean
+          default: false
+          description: >-
+            **Accepted and ignored on create**, for the same reason as
+            `clearSprint` — omitting `storyPoints` already means "unestimated".
         fields:
           type: object
           nullable: true
@@ -3901,6 +4749,36 @@ components:
             **Full-replacement** affects-version set — same rules, independent
             budget, and a change writes one `affectsVersions` history entry.
           items: { type: string, format: uuid }
+        sprintId:
+          type: string
+          format: uuid
+          description: >-
+            Move the issue into a sprint of **this** project. A nullable scalar,
+            so it follows the `assigneeId`/`clearAssignee` convention rather
+            than the full-replacement one: a non-null id sets it, absent leaves
+            it unchanged. An unknown, foreign-project or **completed** sprint is
+            a `422`, and so is moving the issue out of a sprint that is already
+            `COMPLETED`. Mutually exclusive with `clearSprint` (`400` when both
+            are sent). A change writes one `sprint` history entry and bumps
+            `version`; the issue's **rank is not touched** (use
+            `POST …/issues/{number}/rank` to place it).
+        clearSprint:
+          type: boolean
+          default: false
+          description: >-
+            Return the issue to the backlog. **Mutually exclusive with
+            `sprintId`** — sending both is a `400` (it used to let `sprintId`
+            win silently). Clearing a `COMPLETED` sprint is a `422`.
+        storyPoints:
+          type: number
+          minimum: 0
+          maximum: 999
+          example: 5
+          description: >-
+            Set the estimate — `0`…`999` with at most **2 decimals**, `422`
+            otherwise. A real change writes one `storyPoints` history entry; a
+            no-op writes none.
+        clearStoryPoints: { type: boolean, default: false, description: 'Mark the issue unestimated again; ignored when storyPoints is also given' }
         fields:
           type: object
           additionalProperties: true
@@ -3975,6 +4853,22 @@ components:
             The versions this issue is **broken in**, same shape and ordering;
             `[]` when none. A version may appear in both lists.
           items: { $ref: '#/components/schemas/VersionRef' }
+        sprint:
+          allOf:
+            - $ref: '#/components/schemas/SprintRef'
+          description: >-
+            The sprint this issue is committed to, or `null` = the backlog. Note
+            that the issue's **rank** (`position`) is deliberately **not**
+            exposed: it is server-written only and a client never needs its
+            value — drag placement travels as neighbour ids instead.
+        storyPoints:
+          type: number
+          nullable: true
+          example: 5
+          description: >-
+            Native story-point estimate; `null` = **unestimated**, which is
+            deliberately not `0`. Serialized as a plain JSON number with
+            trailing zeros stripped (`5`, not `5.00`).
         fields:
           type: array
           description: Filled custom fields only
@@ -4077,9 +4971,10 @@ components:
           type: string
           nullable: true
           description: >-
-            The value-source token (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`DATE`/…),
-            `CUSTOM:<key>` for a SELECT/MULTI_SELECT custom field, or null when
-            there is no picklist.
+            The value-source token
+            (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`LABEL`/`COMPONENT`/`VERSION`/
+            `SPRINT`/…), `CUSTOM:<key>` for a SELECT/MULTI_SELECT custom field,
+            or null when there is no picklist (e.g. `storyPoints`).
           example: USER
         functions:
           type: array
@@ -4506,6 +5401,306 @@ components:
         fixIssueCount: { type: integer, example: 24, description: 'Issues with a fix link' }
         affectsIssueCount: { type: integer, example: 3, description: 'Issues with an affects link' }
         unresolvedFixIssueCount: { type: integer, example: 6, description: 'Fix-linked issues NOT in a DONE-category status — what `moveUnresolvedToVersionId` would move' }
+
+    SprintState:
+      type: string
+      enum: [FUTURE, ACTIVE, COMPLETED]
+      description: >-
+        The sprint lifecycle, one-way: `FUTURE` (a planning bucket) →
+        `ACTIVE` (at most one per project, enforced in the database) →
+        `COMPLETED` (terminal — there is **no re-open**).
+
+    SprintResponse:
+      type: object
+      description: >-
+        A project sprint. The counters are **always** present (like
+        `VersionResponse`'s progress): they cost one grouped query for the whole
+        page, so there is nothing to opt out of.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 60, example: Sprint 7, description: 'Display name (casing preserved); unique per project case-insensitively, completed sprints included' }
+        goal: { type: string, nullable: true, maxLength: 500, example: Ship billing v2 }
+        state: { $ref: '#/components/schemas/SprintState' }
+        sequence: { type: integer, example: 7, description: '1-based, per project — drives the default name and the FUTURE/COMPLETED ordering' }
+        startAt: { type: string, format: date-time, nullable: true, description: 'Planned while FUTURE; stamped when the sprint is started' }
+        endAt: { type: string, format: date-time, nullable: true, description: 'Planned end; defaults at start to startAt + app.agile.default-sprint-length-days' }
+        completedAt: { type: string, format: date-time, nullable: true, description: 'Non-null exactly when state is COMPLETED' }
+        daysRemaining:
+          type: integer
+          nullable: true
+          example: 6
+          description: >-
+            Whole days from today (UTC) to `endAt`, for an **ACTIVE** sprint
+            with an end date only — `0` means it ends today and a **negative**
+            value means it is overdue. `null` otherwise: a FUTURE or COMPLETED
+            sprint has nothing to count down.
+        issueCount: { type: integer, example: 12 }
+        doneIssueCount: { type: integer, example: 7, description: 'Of those, the ones in a DONE-category status' }
+        points: { type: number, example: 34.5, description: 'Sum of the sprint''s story points; unestimated issues contribute nothing (they are counted separately, not as zero)' }
+        donePoints: { type: number, example: 21, description: 'Sum of story points over the DONE-category issues' }
+        unestimatedCount: { type: integer, example: 2, description: 'Issues with no storyPoints' }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    SprintRef:
+      type: object
+      description: >-
+        A sprint's display summary as embedded in an issue and in the completion
+        dialog's target list — deliberately minimal, but it carries `state` so a
+        client can badge the active sprint differently without a second fetch.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, example: Sprint 7 }
+        state: { $ref: '#/components/schemas/SprintState' }
+
+    SectionStats:
+      type: object
+      description: >-
+        Roll-up of one planning section — a sprint or the backlog. **Always
+        computed over the whole section**, never over the truncated page, so a
+        capped section still shows honest totals.
+      properties:
+        issueCount: { type: integer, example: 12, description: 'Issues in the section after the request''s filters' }
+        doneIssueCount: { type: integer, example: 7 }
+        points: { type: number, example: 34.5 }
+        donePoints: { type: number, example: 21 }
+        unestimatedCount: { type: integer, example: 2, description: '"We didn''t estimate it" is a different statement from "it''s free"' }
+
+    BacklogViewResponse:
+      type: object
+      description: >-
+        The whole planning view of one project in a single round trip. Sections
+        are independently truncatable at `sectionCap` and independently
+        refreshable — treat them as such, because if the payload ever gets too
+        large the fix is lazy per-section fetches behind this same shape.
+      properties:
+        sprints:
+          type: array
+          description: 'The project''s OPEN sprint sections — ACTIVE first, then FUTURE by sequence. `[]` for a project with no open sprint.'
+          items:
+            type: object
+            properties:
+              sprint: { $ref: '#/components/schemas/SprintResponse' }
+              issues:
+                type: array
+                items: { $ref: '#/components/schemas/IssueResponse' }
+              truncated: { type: boolean, description: 'True when the section holds more than `sectionCap` matching issues' }
+              totalAvailable: { type: integer, format: int64, description: 'Full filtered count of the section (equals issues length when not truncated)' }
+              stats: { $ref: '#/components/schemas/SectionStats' }
+        backlog:
+          type: object
+          description: The ranked backlog — the same shape without a sprint header.
+          properties:
+            issues:
+              type: array
+              items: { $ref: '#/components/schemas/IssueResponse' }
+            truncated: { type: boolean }
+            totalAvailable: { type: integer, format: int64 }
+            stats: { $ref: '#/components/schemas/SectionStats' }
+        sectionCap: { type: integer, example: 300, description: 'The per-section cap in force for this response (app.agile.section-max-issues)' }
+        bulkMoveCap:
+          type: integer
+          example: 100
+          description: >-
+            The cap on ONE `POST …/sprints/{sprintId}/issues` call
+            (`app.agile.max-issues-per-bulk-move`, default 100). Echoed here
+            because it is a **different** operator knob from `sectionCap`
+            (default 300): a "move everything to…" action is driven by the
+            rendered section, so a client that derives one number from the other
+            `400`s on every section above the bulk cap. Chunk bulk moves at this
+            value instead of hardcoding it.
+
+    SprintCompletionPreview:
+      type: object
+      description: >-
+        What `POST …/sprints/{sprintId}/complete` would report, computed before
+        the fact — off the same query, so the dialog and the result cannot
+        drift.
+      properties:
+        totalIssueCount: { type: integer, example: 12 }
+        doneIssueCount: { type: integer, example: 7 }
+        unfinishedIssueCount: { type: integer, example: 5, description: 'Issues whose status category is NOT DONE — exactly what the completion will move' }
+        totalPoints: { type: number, example: 34.5 }
+        donePoints: { type: number, example: 21 }
+        unfinishedPoints: { type: number, example: 13.5 }
+        targetCandidates:
+          type: array
+          description: >-
+            The `FUTURE` sprints of this project the unfinished work may be
+            carried over to (the sprint being completed is excluded). An empty
+            list means the dialog must offer "create a sprint" instead.
+          items: { $ref: '#/components/schemas/SprintRef' }
+
+    CompleteSprintRequest:
+      type: object
+      required: [moveUnfinishedTo]
+      description: >-
+        Body of `POST …/sprints/{sprintId}/complete` — **required**, unlike the
+        optional start body: the disposition of the unfinished work is a real
+        decision, and defaulting it silently would move issues nobody asked to
+        move.
+      properties:
+        moveUnfinishedTo:
+          type: string
+          enum: [BACKLOG, SPRINT]
+          description: >-
+            `BACKLOG` clears the sprint of every unfinished issue (the rank is
+            preserved, so they keep their order); `SPRINT` carries them over to
+            `targetSprintId`.
+        targetSprintId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Required exactly when `moveUnfinishedTo` is `SPRINT`. Must be a
+            `FUTURE` sprint of **this** project and not the sprint being
+            completed — `422` otherwise. Deliberately not an ACTIVE one (there
+            is none — this sprint is it) and not a COMPLETED one.
+
+    SprintCompletionResult:
+      type: object
+      description: The honest done-vs-carried-over report of a completed sprint.
+      properties:
+        sprint: { $ref: '#/components/schemas/SprintResponse' }
+        completedIssueCount: { type: integer, example: 7, description: 'Issues that ended the sprint in a DONE-category status — they KEEP their sprint, which is the sprint''s record of what it delivered' }
+        carriedOverIssueCount: { type: integer, example: 5, description: 'Unfinished issues moved to the chosen destination' }
+        carriedOverToSprintId: { type: string, format: uuid, nullable: true, description: 'The target sprint, or null when the unfinished work went back to the backlog' }
+        donePoints: { type: number, example: 21 }
+        carriedOverPoints: { type: number, example: 13.5 }
+
+    CreateSprintRequest:
+      type: object
+      description: >-
+        Body of `POST …/projects/{projectId}/sprints`. Project curator only.
+        Everything is optional — the empty object `{}` creates the next
+        `"Sprint N"`.
+      properties:
+        name:
+          type: string
+          maxLength: 60
+          example: Sprint 7
+          description: >-
+            Blank or absent → `"Sprint " + sequence`, which is why default names
+            can never collide. Normalized server-side (NFC, invisible
+            control/format characters stripped, whitespace collapsed) and then
+            limited to 60 characters — a longer result is a `400`. Unique per
+            project, case-insensitively, **completed sprints included** (`409`).
+        goal: { type: string, nullable: true, maxLength: 500, example: Ship billing v2 }
+        startAt: { type: string, format: date-time, nullable: true, description: 'The **plan** only — filling it in does NOT start the sprint (that is POST …/start)' }
+        endAt: { type: string, format: date-time, nullable: true, description: 'Must be after `startAt` (`422` otherwise)' }
+
+    UpdateSprintRequest:
+      type: object
+      description: >-
+        Body of `PATCH …/sprints/{sprintId}` — partial; omitted means "leave
+        unchanged". Project curator only. There is deliberately no `state`
+        field: the lifecycle moves only through `POST …/start` and
+        `POST …/complete`, and there is no re-open.
+      properties:
+        name: { type: string, maxLength: 60, description: 'Same normalization, 60-char limit and per-project case-insensitive uniqueness as create (`409`; a pure casing change is allowed).' }
+        goal: { type: string, maxLength: 500, description: 'New goal if present; a blank string clears it.' }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        clearStartAt: { type: boolean, default: false, description: 'Unset the start date (a null startAt cannot be distinguished from "not sent"); ignored when startAt is also given.' }
+        clearEndAt: { type: boolean, default: false, description: 'Unset the end date; ignored when endAt is also given.' }
+
+    StartSprintRequest:
+      type: object
+      description: >-
+        Body of `POST …/sprints/{sprintId}/start` — **entirely optional**, so no
+        body at all (or `{}`) means "start it now with the default length".
+      properties:
+        startAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Defaults to **now** (UTC). A date in the past is allowed on purpose:
+            backfilling a sprint that actually began on Monday is normal.
+        endAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Defaults to `startAt` + `app.agile.default-sprint-length-days`
+            (default 14). `endAt <= startAt` is a `422`.
+        goal: { type: string, nullable: true, maxLength: 500, description: 'An optional last-minute goal; omitted leaves the stored one.' }
+
+    AddIssuesToSprintRequest:
+      type: object
+      required: [issueIds]
+      description: Body of `POST …/sprints/{sprintId}/issues`.
+      properties:
+        issueIds:
+          type: array
+          minItems: 1
+          maxItems: 500
+          description: >-
+            The issues to move, by **id** (the established convention for
+            references — only the rank endpoint's moved issue travels by
+            number). Duplicates are de-duped; an issue already in this sprint is
+            a silent no-op. More than `app.agile.max-issues-per-bulk-move`
+            (default 100) distinct ids is a `400` — chunk the request. The
+            500-entry schema limit is only a payload guard.
+          items: { type: string, format: uuid }
+        position:
+          type: string
+          enum: [TOP, BOTTOM]
+          default: BOTTOM
+          description: >-
+            Where the moved issues land in the target sprint's slice of the
+            shared rank space; they keep their relative order among themselves.
+            `BOTTOM` is the default — adding work to a sprint is not a priority
+            statement.
+
+    RankIssueRequest:
+      type: object
+      description: >-
+        Body of `POST …/issues/{number}/rank`. **The client never sends a rank
+        value** — it sends the neighbours it dropped between and the server
+        computes the placement, which is why `position` is not exposed anywhere.
+      properties:
+        afterIssueId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The issue the moved one should land **after** (below it). Must
+            already be in the target section (`422` otherwise) and may not be
+            the moved issue itself (`422`).
+        beforeIssueId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The issue it should land **before** (above it), same rules.
+            Whichever anchor is omitted is filled in server-side; **both**
+            omitted means "append to the end of the target section" and is only
+            valid together with a sprint change.
+        sprintId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Move the issue into this sprint in the same request. Unknown,
+            foreign-project or `COMPLETED` → `422`; so is moving the issue out
+            of a sprint that is already `COMPLETED`. Mutually exclusive with
+            `clearSprint` (`400` when both are set).
+        clearSprint:
+          type: boolean
+          default: false
+          description: >-
+            Move the issue back to the backlog. **Mutually exclusive with
+            `sprintId`** (`400` when both are set). Clearing a `COMPLETED`
+            sprint is a `422`.
+        version:
+          type: integer
+          nullable: true
+          description: >-
+            **Optional** optimistic check: sent → `409` when stale, omitted →
+            the move simply applies. Ranking is a positional, last-drag-wins
+            operation, so a mandatory version round trip would produce a `409`
+            storm during a planning meeting.
 
     NotificationResponse:
       type: object

@@ -23,7 +23,7 @@ import java.util.UUID;
  * </ul>
  */
 public sealed interface ResolvedValue
-        permits ResolvedValue.Ids, ResolvedValue.PositionValue,
+        permits ResolvedValue.Ids, ResolvedValue.PositionValue, ResolvedValue.NumberValue,
                 ResolvedValue.DateBounds, ResolvedValue.TextTerm {
 
     /** One or more ids the value resolves to (catalog / user / issue). */
@@ -32,6 +32,15 @@ public sealed interface ResolvedValue
             ids = List.copyOf(ids);
         }
     }
+
+    /**
+     * A native NUMERIC column operand — {@code storyPoints} (HD-22 §4.7), the first
+     * system field of type {@link FieldDataType#NUMBER}. Distinct from
+     * {@link PositionValue}, which is a {@code priority}'s catalog rank rather than a
+     * value the user typed, and from the custom-field NUMBER path, which compares
+     * inside a JSONB {@code EXISTS} instead of against a column.
+     */
+    record NumberValue(java.math.BigDecimal value) implements ResolvedValue {}
 
     /** A priority catalog {@code position} for ordered comparison. */
     record PositionValue(short position) implements ResolvedValue {}

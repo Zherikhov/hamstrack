@@ -50,7 +50,10 @@ public class ProductMetrics {
     }
 
     public enum RateLimitKind {
-        IP_WINDOW("ip_window"), LOGIN_BACKOFF("login_backoff");
+        IP_WINDOW("ip_window"),
+        LOGIN_BACKOFF("login_backoff"),
+        // Per-project cooldown on whole-project rank rebalances (IssueRankService).
+        RANK_REBALANCE("rank_rebalance");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }

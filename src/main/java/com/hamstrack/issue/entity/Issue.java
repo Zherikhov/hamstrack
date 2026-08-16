@@ -70,8 +70,44 @@ public class Issue extends BaseEntity {
     @JoinColumn(name = "component_id")
     private Component component;
 
+    /**
+     * The sprint this issue is committed to (HD-22), or null = the backlog. Backed by
+     * the COMPOSITE FK {@code (sprint_id, workspace_id) → sprints (id, workspace_id)}
+     * with {@code ON DELETE SET NULL (sprint_id)}, so a cross-tenant assignment is
+     * unrepresentable and deleting a sprint nulls it here (§3.1, §4.2). Mapped as a
+     * plain ToOne — it joins into the board/backlog/search fetch blocks and needs no
+     * batch loader.
+     *
+     * <p><strong>Trap:</strong> the FK clears this column <em>behind JPA's back</em>,
+     * so {@code SprintService.delete} must run an explicit bulk
+     * {@code set i.sprint = null} BEFORE deleting the row — otherwise a managed,
+     * now-stale {@code Issue} flushed later writes the old id back (the
+     * {@code issue_seq}-clobber class of bug).
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "sprint_id")
+    private Sprint sprint;
+
+    /**
+     * The project-wide backlog/board rank (agile-sprints-proposal §3.3) — written
+     * ONLY by {@code IssueRankService} and by {@code IssueService.create}; never by
+     * the client (it is not even exposed in {@code IssueResponse}). Spaced by
+     * {@code RANK_STEP = 2^26}, so a drag is a midpoint between two neighbours and a
+     * whole-project rebalance is rare.
+     */
     @Column(nullable = false)
     private long position = 0;
+
+    /**
+     * Native story-point estimate (HD-22 §3.4), promoted from the V1-seeded
+     * {@code story_points} custom field (archived by V11, values migrated here).
+     * {@code null} = unestimated, which is deliberately NOT the same statement as
+     * {@code 0} ("it's free") — the section stats report {@code unestimatedCount}
+     * separately. Range 0…999 with at most 2 decimals, enforced in the service (422)
+     * and by {@code issues_story_points_ck}.
+     */
+    @Column(name = "story_points", precision = 5, scale = 2)
+    private java.math.BigDecimal storyPoints;
 
     @Column(name = "due_date")
     private LocalDate dueDate;

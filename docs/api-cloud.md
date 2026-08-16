@@ -32,6 +32,7 @@ https://hamstrack.com/api
 - [Labels](#labels)
 - [Components](#components)
 - [Versions](#versions)
+- [Sprints & backlog](#sprints--backlog)
 - [Search (HQL)](#search-hql)
 - [Saved filters](#saved-filters)
 - [Notifications](#notifications)
@@ -141,7 +142,9 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 
 ### Rate limits
 
-The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget of 15 requests per minute**. Additionally, repeated failed logins for one account trigger an **exponential backoff** (starting at 30 s after 5 consecutive failures, doubling per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds). The rest of the API is currently not rate-limited.
+The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget of 15 requests per minute**. Additionally, repeated failed logins for one account trigger an **exponential backoff** (starting at 30 s after 5 consecutive failures, doubling per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds).
+
+One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank`](#sprints--backlog) allows at most one whole-project rank *rebalance* per project per 60 s and answers `429` + `Retry-After` for a second one inside that window. It is a retryable throttle, not a fault — nothing was moved. The rest of the API is not rate-limited.
 
 ## Roles
 
@@ -253,7 +256,7 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 | `POST` | `/workspaces/{wsId}/projects` | member | Create (`{"name", "key", "description?"}`); key is 1–10 chars `A-Z0-9`, unique per workspace. `201` |
 | `GET` | `/workspaces/{wsId}/projects?includeArchived=false` | member | List projects |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | `MANAGER` | Update `name` / `description` |
+| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | curator | Update `name` / `description` / `boardMode` |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/archive` | `MANAGER` | Archive (read-only afterwards). `204` |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `MANAGER` | Restore. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members |
@@ -264,9 +267,16 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 // project shape
 {
   "id": "…", "workspaceId": "…", "name": "Demo Project", "key": "DEMO",
-  "description": "…", "archived": false, "myRole": "MANAGER", "createdAt": "…"
+  "description": "…", "archived": false, "boardMode": "KANBAN",
+  "myRole": "MANAGER", "createdAt": "…"
 }
 ```
+
+**Update permission.** `PATCH …/projects/{projectId}` needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member); any other member gets `403`. This is wider than it used to be: the endpoint was `MANAGER`-only until `boardMode` joined it, and it now matches every other project-content write ([components](#components), [versions](#versions), [sprints](#sprints--backlog)). Archiving, unarchiving and member management stay `MANAGER`-only.
+
+**Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `boardMode` too, which changes how the board and the backlog render. Unarchive it first (`POST …/unarchive`, `MANAGER`-only); reads keep working throughout.
+
+**Board mode.** `boardMode` is `KANBAN` (default) or `SCRUM` and is a **presentation switch, not a permission**: the [sprint API](#sprints--backlog) behaves identically either way, so a Kanban team may still plan an iteration. `SCRUM` scopes the board to the active sprint and adds a sprint header; `KANBAN` shows the whole project. An unknown value is a `400`; omitting the field leaves the current mode.
 
 ## Project configuration
 
@@ -368,13 +378,15 @@ Issues live under a project and are addressed by **number** — the numeric part
 
 **Hierarchy.** An issue may have a parent in the same project, governed by issue-type [hierarchy levels](#project-configuration) (a parent's type level must be strictly greater than the child's). Every `IssueResponse` carries the parent summary (`parentId`, `parentKey`, `parentTitle`, `parentTypeId`, all `null` when there is no parent) and a direct-children roll-up (`childCount`, and `doneChildCount` for children in a DONE-category status). `GET …/issues/{number}/children` lists the direct children in board order.
 
-**Listing — dual shape.** Without `size`, `GET …/issues` returns a `BoardIssuesResponse` object (the board/kanban path): `{ "issues": IssueResponse[], "truncated": boolean, "totalAvailable": integer, "cap": integer }`. `issues` is bounded server-side to `cap` (default 500, never client-overridable); when the project after the same filters exceeds it, `truncated` is `true` and `totalAvailable` reports the full count so the UI can show "Showing first {cap} of {totalAvailable}". Pass `size` to switch to a paginated [envelope](#conventions) (the backlog path); the optional `excludeDone=true` then drops issues in a DONE-category status server-side. The `statusId` / `assigneeId` / `priorityId` / `componentId` / `labelId` / `fixVersionId` filters apply in both modes and are ANDed together.
+**Listing — dual shape.** Without `size`, `GET …/issues` returns a `BoardIssuesResponse` object (the board/kanban path): `{ "issues": IssueResponse[], "truncated": boolean, "totalAvailable": integer, "cap": integer }`. `issues` is bounded server-side to `cap` (default 500, never client-overridable); when the project after the same filters exceeds it, `truncated` is `true` and `totalAvailable` reports the full count so the UI can show "Showing first {cap} of {totalAvailable}". Pass `size` to switch to a paginated [envelope](#conventions) (the backlog path); the optional `excludeDone=true` then drops issues in a DONE-category status server-side. The `statusId` / `assigneeId` / `priorityId` / `componentId` / `labelId` / `fixVersionId` / `sprintId` / `noSprint` filters apply in both modes and are ANDed together. Rows come back in the shared backlog/board **rank** order (`position`, then newest first) — the rank value itself is never exposed.
 
 **Filtering by label.** The [label](#labels) filter is applied **server-side** in both modes (it has to search the whole project, not just the capped page already on screen): repeat `labelId` once per label and choose how they combine with `labelMatch` — `any` (default, carries at least one) or `all` (carries every one), lowercase. Any other `labelMatch` value is a `400`, as is passing more than 20 distinct `labelId` values (the per-issue label limit).
 
 **Filtering by component.** Same rule, simpler shape: `componentId` is a single optional uuid, applied **server-side** and ANDed with everything above. A [component](#components) id belonging to another project simply matches nothing — it is never an error.
 
 **Filtering by fix version.** Likewise: `fixVersionId` is a single optional uuid, applied **server-side** and ANDed with everything above. It matches the **fix** role only — an *affects* link to the same [version](#versions) does not match a "fix version" filter. An id from another project simply matches nothing.
+
+**Filtering by sprint.** `sprintId` narrows the list to one [sprint](#sprints--backlog); `noSprint=true` narrows it to the backlog (issues in no sprint at all). Both are applied **server-side** and ANDed with everything above, and a sprint id from another project simply matches nothing. The two are **mutually exclusive** — "in this sprint" and "in no sprint" can never both hold, so sending both is a `400` rather than a silently empty result you would misread as "nothing matches".
 
 ```bash
 curl -s "$BASE/workspaces/$WS/projects/$PROJ/issues?labelId=$L1&labelId=$L2&labelMatch=all" \
@@ -385,19 +397,23 @@ curl -s "$BASE/workspaces/$WS/projects/$PROJ/issues?componentId=$COMP" \
 
 curl -s "$BASE/workspaces/$WS/projects/$PROJ/issues?fixVersionId=$VER" \
   -H "Authorization: Bearer $TOKEN"
+
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/issues?sprintId=$SPRINT" \
+  -H "Authorization: Bearer $TOKEN"
 ```
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | member | Create. `201` |
-| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=&componentId=&labelId=&labelMatch=&fixVersionId=&excludeDone=&page=&size=` | member | List with optional filters — **dual shape** (see above) |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=&componentId=&labelId=&labelMatch=&fixVersionId=&sprintId=&noSprint=&excludeDone=&page=&size=` | member | List with optional filters — **dual shape** (see above) |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Get one |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/children` | member | Direct children of the issue, in board order |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history?page=&size=` | member | Field-level change history (paginated, oldest first) |
 | `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Partial update with optimistic locking |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | member | Move the issue in the backlog/board [rank](#sprints--backlog), optionally into or out of a sprint |
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `MANAGER` | Delete issue + comments + attachments. `204` |
 
-**Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links the issue to a parent in the same project — rejected with `422` if the parent is unknown, in another project, or its type's [hierarchy level](#project-configuration) is not strictly greater than this issue's type level; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`. `labelIds` attaches workspace [labels](#labels) (duplicates are de-duped); an unknown, foreign-workspace or archived label id — or more than 20 distinct ids — is rejected with `422`. `componentId` files the issue under a [component](#components) of this project; an unknown, foreign-project or archived component is a `422`, and when the component has auto-assign the lead may become the assignee (see [auto-assign](#components)). `fixVersionIds` and `affectsVersionIds` link [versions](#versions) of this project in the two independent roles — "ships in" and "is broken in"; an unknown, foreign-project or archived version, or more than 20 distinct ids **per link type**, is a `422` (linking an already-*released* version is allowed on purpose):
+**Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links the issue to a parent in the same project — rejected with `422` if the parent is unknown, in another project, or its type's [hierarchy level](#project-configuration) is not strictly greater than this issue's type level; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`. `labelIds` attaches workspace [labels](#labels) (duplicates are de-duped); an unknown, foreign-workspace or archived label id — or more than 20 distinct ids — is rejected with `422`. `componentId` files the issue under a [component](#components) of this project; an unknown, foreign-project or archived component is a `422`, and when the component has auto-assign the lead may become the assignee (see [auto-assign](#components)). `fixVersionIds` and `affectsVersionIds` link [versions](#versions) of this project in the two independent roles — "ships in" and "is broken in"; an unknown, foreign-project or archived version, or more than 20 distinct ids **per link type**, is a `422` (linking an already-*released* version is allowed on purpose). `sprintId` files the issue straight into a [sprint](#sprints--backlog) of this project — an unknown, foreign-project or *completed* sprint is a `422`, and omitting it means the backlog. `storyPoints` is the native estimate: `0`–`999` with at most 2 decimals (`422` otherwise), where `null`/omitted means **unestimated**, which is deliberately not the same as `0`. A new issue is always appended to the **bottom** of the ranked backlog:
 
 ```bash
 curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
@@ -412,9 +428,13 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
   "componentId": "0198d5b2-…",
   "fixVersionIds": ["0198e6c3-…"],
   "affectsVersionIds": ["0198e6c3-…"],
+  "sprintId": "0198f7d4-…",
+  "storyPoints": 5,
   "fields": { "e1b2…": 5, "f3c4…": "critical" }
 }'
 ```
+
+> `clearSprint` and `clearStoryPoints` are accepted on **create** for payload symmetry with the update body, but they do nothing there — a brand-new issue has nothing to clear, and omitting `sprintId`/`storyPoints` already means "backlog" / "unestimated". They only carry meaning on `PATCH`.
 
 ```json
 {
@@ -437,13 +457,17 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues \
   "component": { "id": "0198d5b2-…", "name": "Billing", "archived": false },
   "fixVersions": [ { "id": "0198e6c3-…", "name": "2.4.0", "released": false, "archived": false } ],
   "affectsVersions": [ { "id": "0198e6c3-…", "name": "2.3.1", "released": true, "archived": false } ],
+  "sprint": { "id": "0198f7d4-…", "name": "Sprint 7", "state": "ACTIVE" },
+  "storyPoints": 5,
   "fields": [ { "fieldId": "e1b2…", "value": 5 }, { "fieldId": "f3c4…", "value": "critical" } ],
   "version": 0,
   "createdAt": "…", "updatedAt": "…"
 }
 ```
 
-**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `labelIds`, `componentId`, `fixVersionIds`, `affectsVersionIds`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). To unset a nullable core field send `clearAssignee: true` / `clearDueDate: true` — a plain `null` can't be told apart from an omitted field (ignored when the id/date is also given). A `parentId` sets or changes the parent and `clearParent: true` detaches it (same convention); an illegal parent — unknown, in another project, self, a cycle, a [hierarchy-level](#project-configuration) violation, or a type change that conflicts with an existing parent or child edge — returns `422`. `labelIds`, `fixVersionIds` and `affectsVersionIds` are the **full-replacement** fields: when present the issue ends up carrying exactly those labels / versions-in-that-role, `[]` removes them all, and omitting one leaves it untouched (no clear-flag needed — `[]` is unambiguous); an already-attached archived label or version may stay, it just cannot be added. The two version roles are independent, so sending only `fixVersionIds` never touches the affects set, and the 20-per-issue cap is counted separately per role. `componentId` sets or changes the [component](#components) and `clearComponent: true` unsets it (the `assigneeId`/`clearAssignee` convention again); attaching an unknown, foreign-project or **archived** component is a `422`, though an issue already carrying an archived one stays editable — and component auto-assign never fires on an update. Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
+`sprint` is `null` when the issue sits in the backlog, and `storyPoints` is `null` when it is unestimated (never `0` — "we didn't estimate it" and "it's free" are different statements). The issue's **rank** is deliberately *not* exposed: it is server-written only, and a client places an issue by naming its neighbours instead (see [rank](#sprints--backlog)).
+
+**Update & optimistic locking** — send any subset of `title`, `description`, `typeId`, `statusId`, `priorityId`, `assigneeId`, `dueDate`, `labelIds`, `componentId`, `fixVersionIds`, `affectsVersionIds`, `sprintId`, `storyPoints`, `fields`, plus the `version` you last read. If the issue changed since, you get `409 Conflict` — re-fetch and retry. Omitting `version` skips the check (last write wins). To unset a nullable core field send `clearAssignee: true` / `clearDueDate: true` — a plain `null` can't be told apart from an omitted field (ignored when the id/date is also given). A `parentId` sets or changes the parent and `clearParent: true` detaches it (same convention); an illegal parent — unknown, in another project, self, a cycle, a [hierarchy-level](#project-configuration) violation, or a type change that conflicts with an existing parent or child edge — returns `422`. `labelIds`, `fixVersionIds` and `affectsVersionIds` are the **full-replacement** fields: when present the issue ends up carrying exactly those labels / versions-in-that-role, `[]` removes them all, and omitting one leaves it untouched (no clear-flag needed — `[]` is unambiguous); an already-attached archived label or version may stay, it just cannot be added. The two version roles are independent, so sending only `fixVersionIds` never touches the affects set, and the 20-per-issue cap is counted separately per role. `componentId` sets or changes the [component](#components) and `clearComponent: true` unsets it (the `assigneeId`/`clearAssignee` convention again); attaching an unknown, foreign-project or **archived** component is a `422`, though an issue already carrying an archived one stays editable — and component auto-assign never fires on an update. `sprintId` moves the issue into a [sprint](#sprints--backlog) of this project and `clearSprint: true` returns it to the backlog (the same nullable-scalar convention); sending **both** is a `400` — "put it in sprint X" and "take it out of every sprint" cannot both hold, so `sprintId` no longer wins silently, and this now matches the [rank endpoint](#sprints--backlog), which has always refused the same combination. An unknown, foreign-project or **completed** target sprint is a `422`, and so is changing or clearing the sprint of an issue whose **current** sprint is `COMPLETED` — a completed sprint's membership is frozen in both directions, though every other field of such an issue stays editable. `storyPoints` sets the estimate (`0`–`999`, at most 2 decimals — `422` otherwise) and `clearStoryPoints: true` marks the issue unestimated again; a real change writes one `storyPoints` history entry, a no-op writes none. Neither of them touches the issue's **rank** — that is the separate [rank endpoint](#sprints--backlog). Inside `fields` only the listed field ids change; JSON `null` clears a value (required fields cannot be cleared):
 
 ```bash
 curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
@@ -458,7 +482,7 @@ curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
   "changedById": "…", "changedByName": "Ada Lovelace", "createdAt": "…" }
 ```
 
-Custom field changes appear with the field's display name in `field` and human-readable values (option labels rather than ids, user display names, `yes`/`no` for checkboxes). A [label](#labels) change is recorded once under `labels`, with the label names before and after comma-joined (a label **merge** deliberately writes no per-issue history — it can touch thousands of issues). A [component](#components) change is recorded under `component` with the old and new component names (a forced component **delete** writes no per-issue history either, for the same reason). [Version](#versions) changes are recorded per role, under `fixVersions` and `affectsVersions`, with the names before and after comma-joined — and, for the same "one request must stay bounded" reason, a version **delete** (forced or remapped) and a release-time `moveUnresolvedToVersionId` write no per-issue history.
+Custom field changes appear with the field's display name in `field` and human-readable values (option labels rather than ids, user display names, `yes`/`no` for checkboxes). A [label](#labels) change is recorded once under `labels`, with the label names before and after comma-joined (a label **merge** deliberately writes no per-issue history — it can touch thousands of issues). A [component](#components) change is recorded under `component` with the old and new component names (a forced component **delete** writes no per-issue history either, for the same reason). [Version](#versions) changes are recorded per role, under `fixVersions` and `affectsVersions`, with the names before and after comma-joined — and, for the same "one request must stay bounded" reason, a version **delete** (forced or remapped) and a release-time `moveUnresolvedToVersionId` write no per-issue history. A [sprint](#sprints--backlog) change is recorded under `sprint` with the old and new sprint names (`null` when there is none), and a story-point change under `storyPoints` — while a **rank** change writes nothing at all, because positional churn would drown the log.
 
 ## Comments
 
@@ -705,6 +729,160 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/versions/$VER/release \
 
 **Using versions** — set `fixVersionIds` / `affectsVersionIds` when creating or updating an [issue](#issues) (full-replacement sets, one per role), filter the board/backlog with `?fixVersionId=`, and query them in [HQL](#search-hql) as `fixVersion` and `affectsVersion`. An issue's own versions come back in `IssueResponse.fixVersions` and `IssueResponse.affectsVersions` as `{id, name, released, archived}`, ordered by name, `[]` when there are none. An issue may carry at most 20 versions **per role**.
 
+## Sprints & backlog
+
+A **sprint** is one project's iteration — a time-box with a goal, a start and an end, holding the issues the team committed to. Like [labels](#labels), [components](#components) and [versions](#versions) it is *content*, not configuration: sprints never appear in a project's [config](#project-configuration), and two projects may each run a "Sprint 7".
+
+**Lifecycle — one way only.** A sprint is created `FUTURE` (a planning bucket), moves to `ACTIVE` when it is started, and ends `COMPLETED` when it is completed. **At most one sprint per project may be active**, and that is enforced by the database rather than only in code. **There is no re-open**: a completion is a reported event (the done-vs-carried-over numbers were handed to the user and the unfinished issues were already moved), so the recovery path is "create a new sprint and move the issues back" — two clicks, no ambiguity.
+
+**Rank.** Every issue in a project carries a position in one project-wide order that the **board and the backlog share** — there is no second "backlog order" that could disagree with the board. The rank is **server-written only** and is deliberately not exposed in any response: to move an issue you name the neighbours you dropped it between (`POST …/issues/{number}/rank`), and the server computes the placement. A newly created issue lands at the **bottom** of the backlog (filing an issue is not a priority statement).
+
+**Story points** are a native issue attribute (`storyPoints` on every issue), not a custom field: `0`–`999` with at most 2 decimals, where `null` means **unestimated** — deliberately not the same as `0`, which is why the section totals report `unestimatedCount` separately.
+
+**Permissions.** Reads (sprint list/detail, completion preview, the backlog view) need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs the **project curator** role: project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint, taking them out and dragging them around is the ordinary **issue-edit** tier, because planning is teamwork and requiring `MANAGER` to drag would make the backlog read-only for most of the team. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/workspaces/{wsId}/projects/{pId}/sprints?state=&page=&size=` | member | The project's sprints — **always paginated** |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints` | curator | Create a `FUTURE` sprint. `201` |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}` | member | Get one |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}` | curator | Rename / re-goal / re-plan the dates |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/start` | curator | `FUTURE` → `ACTIVE` (body optional) |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/completion-preview` | member | What completing it would report |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/complete` | curator | `ACTIVE` → `COMPLETED` (body required) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues` | member | Put a batch of issues into the sprint |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues/{issueId}` | member | Take one issue out. `204` (idempotent); `422` for a completed sprint |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}?force=false` | curator | Delete. `204` |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/backlog?…&includeDone=false` | member | The whole planning view in one request |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | member | Move an issue in the shared rank |
+
+**List** — always paginated (the [envelope](#conventions), default size 50): open sprints are capped, but completed ones accumulate for years. The order is `ACTIVE` first, then `FUTURE` by `sequence` ascending, then `COMPLETED` newest-first. `state` is a **repeatable** filter (`?state=ACTIVE&state=FUTURE`); omitting it returns every state. The counters are always filled — they cost one grouped query for the whole page, so there is nothing to opt out of:
+
+```json
+{ "id": "0198f7d4-…", "name": "Sprint 7", "goal": "Ship billing v2",
+  "state": "ACTIVE", "sequence": 7,
+  "startAt": "2026-08-10T09:00:00Z", "endAt": "2026-08-24T17:00:00Z",
+  "completedAt": null, "daysRemaining": 6,
+  "issueCount": 12, "doneIssueCount": 7,
+  "points": 34.5, "donePoints": 21, "unestimatedCount": 2,
+  "createdAt": "…", "updatedAt": "…" }
+```
+
+`daysRemaining` counts whole days from today (UTC) to `endAt` for an **active** sprint only — `0` means it ends today and a **negative** value means it is overdue; it is `null` for a future or completed sprint, which has nothing to count down. `points` sums the story points of the sprint's issues (unestimated ones contribute nothing rather than zero), and `donePoints` sums them over the DONE-category issues.
+
+**Create** — the body is `{"name?", "goal?", "startAt?", "endAt?"}` and everything in it is optional, so `{}` creates the next sprint:
+
+- a blank or absent `name` becomes `"Sprint {sequence}"` — which is why default names can never collide. A supplied name is normalized server-side (Unicode NFC, invisible control/format characters stripped, whitespace trimmed and collapsed) and must be 1–60 characters afterwards, else `400`;
+- names are **unique per project, case-insensitively, completed sprints included** — a collision is a `409`. The same name in a different project is fine;
+- `goal` is optional, max 500 characters;
+- `startAt`/`endAt` are only **the plan** — filling them in does not start anything. `endAt <= startAt` is a `422`;
+- a project that already holds the maximum number of **open** sprints (20 — `FUTURE` + `ACTIVE`; completed ones are history and don't count) returns `422`.
+
+```bash
+curl -X POST $BASE/workspaces/$WS/projects/$PROJ/sprints \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "Sprint 7", "goal": "Ship billing v2"}'
+```
+
+**Update** — `PATCH` takes `{"name?", "goal?", "startAt?", "endAt?", "clearStartAt?", "clearEndAt?"}`; omitted fields are left unchanged, and `clearStartAt`/`clearEndAt` unset the dates (the `assigneeId`/`clearAssignee` convention — a plain `null` can't be told apart from an omitted field). There is deliberately **no** `state` field: the lifecycle moves only through the two calls below, and it never moves backwards.
+
+**Start** — `POST …/sprints/{sprintId}/start`, body **optional**: a bare `POST` means "start it now and run it for 14 days". `{"startAt?", "endAt?", "goal?"}` overrides any of that; `endAt` defaults to `startAt` + the instance's default sprint length, and a `startAt` in the past is allowed on purpose (backfilling a sprint that actually began on Monday is normal).
+
+- Starting a sprint that is not `FUTURE` — already active, or completed — is a `409`, so a double-click can never re-start anything.
+- Starting one while **another sprint of the project is already active** is a `409` too, and that verdict comes from a database-level uniqueness rule, so two simultaneous starts always resolve to exactly one winner.
+- Starting an **empty** sprint is allowed: blocking it would only push teams to file a placeholder issue. The UI warns; the API does not.
+
+**Completion preview** — `GET …/sprints/{sprintId}/completion-preview` is the completion dialog's data source and is readable by any project member (looking at the numbers is not a commitment). It returns the same counters the completion itself reports, off the same query, so the two cannot drift:
+
+```json
+{ "totalIssueCount": 12, "doneIssueCount": 7, "unfinishedIssueCount": 5,
+  "totalPoints": 34.5, "donePoints": 21, "unfinishedPoints": 13.5,
+  "targetCandidates": [ { "id": "0198f7d5-…", "name": "Sprint 8", "state": "FUTURE" } ] }
+```
+
+An empty `targetCandidates` means the project has no future sprint to carry work over to — offer "create a sprint" instead.
+
+**Complete** — `POST …/sprints/{sprintId}/complete`. Unlike `start` the body is **required**, because the disposition of the unfinished work is a real decision and defaulting it silently would move issues nobody asked to move:
+
+```bash
+curl -X POST $BASE/workspaces/$WS/projects/$PROJ/sprints/$SPRINT/complete \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"moveUnfinishedTo": "SPRINT", "targetSprintId": "0198f7d5-…"}'
+```
+
+- `moveUnfinishedTo` is `BACKLOG` or `SPRINT`; with `SPRINT` a `targetSprintId` is required and must be a **`FUTURE` sprint of the same project** and not the sprint being completed — anything else is a `422`.
+- Every issue whose status category is **not DONE** moves to the chosen destination. **DONE issues keep their sprint** — that is the sprint's record of what it delivered.
+- The **rank is never rewritten**, so carried-over items keep their relative order wherever they land.
+- Completing something that is not `ACTIVE` is a `409` — a double-click gets one `200` and one `409`, never a second destructive move.
+
+The response is the honest done-vs-carried-over report (nothing is persisted as a report artifact — burndown and velocity are not part of this release):
+
+```json
+{ "sprint": { "id": "0198f7d4-…", "state": "COMPLETED", … },
+  "completedIssueCount": 7, "carriedOverIssueCount": 5,
+  "carriedOverToSprintId": "0198f7d5-…",
+  "donePoints": 21, "carriedOverPoints": 13.5 }
+```
+
+**Putting issues in and taking them out** — `POST …/sprints/{sprintId}/issues` takes `{"issueIds": [...], "position": "TOP"|"BOTTOM"}` (default `BOTTOM`) and returns the sprint with refreshed counters. Issues are addressed by **id** here. An issue already in the sprint is a silent no-op (no history entry, no `version` bump); the rest are placed at the top or bottom of the sprint's slice of the shared rank, keeping their relative order among themselves. An unknown or foreign-project issue id is a `422` ("Unknown issue" — never a `404`, which would confirm existence), an empty list or more than 100 distinct ids is a `400`, and a `COMPLETED` target sprint is a `422` (assigning to the *active* one mid-sprint is fine — a scope change is a real event).
+
+This call is a **removal** path too: an issue joining the sprint leaves whichever sprint it is in today, so a completed sprint's frozen membership applies in both directions here. You get `422 "Sprint 'X' is completed"` when the **target** sprint is completed, **and** when any issue in `issueIds` is currently in a completed sprint (`X` is then that source sprint) — the same message and `ProblemDetail` shape as `DELETE …/sprints/{sprintId}/issues/{issueId}`. The batch is validated as a whole before anything moves, so the rejection is **atomic**: one frozen member fails the request and *no* issue changes sprint or rank, rather than leaving the move half-applied. Issues already in the target sprint are no-ops and are not part of that check.
+
+`DELETE …/sprints/{sprintId}/issues/{issueId}` takes one issue back out, preserving its rank. It is **idempotent**: removing an issue that is not in that sprint returns `204` as well, because the request expresses "this issue must not be in this sprint" and that is already true. An `issueId` that does not resolve **within the project** is still a `404`. A **`COMPLETED`** sprint is a `422` ("Sprint 'X' is completed"): its membership is the delivery record the completion already reported, so it is frozen on the removal side exactly as it is on the assignment side. The two rules coexist in that order — the idempotent check runs **first**, so an issue that is not in the sprint still gets `204`, completed or not.
+
+**Delete** — `DELETE …/sprints/{sprintId}` is curator-only and refuses an **ACTIVE** sprint with `409` ("complete it first"). A future or completed sprint that still holds issues is a `409` too unless you pass `force=true`, which detaches them first — their **rank is preserved**, so they keep their relative place in the backlog they return to. If another curator deleted the same sprint a moment earlier you get a `404` rather than a `500`: the row is removed by a conditional delete, so the loser of that race is told the sprint is gone — which it is, so treat it as success.
+
+**Archived projects.** Every sprint mutation (create, update, start, complete, delete, add/remove issues), every rank move and the project's own `PATCH …/projects/{pId}` on an **archived project** return `409 "Project is archived"`. Reads keep working.
+
+### The planning view
+
+`GET …/projects/{pId}/backlog` returns everything the backlog screen renders in one round trip: the project's **open** sprint sections (`ACTIVE` first, then `FUTURE` by `sequence`) above the rank-ordered backlog. It takes exactly the same filters as the [issue list](#issues) (`statusId`, `assigneeId`, `priorityId`, `componentId`, `labelId` + `labelMatch`, `fixVersionId`), all applied server-side so filtering searches the whole project rather than the page already on screen, plus `includeDone`.
+
+`includeDone` defaults to `false` — a done, unranked issue is planning noise. It affects the **backlog** section only: sprint sections always include their DONE issues, because that is the sprint's record of what it delivered.
+
+```json
+{
+  "sprints": [
+    { "sprint": { "id": "0198f7d4-…", "name": "Sprint 7", "state": "ACTIVE", … },
+      "issues": [ { "id": "…", "key": "DEMO-18", … } ],
+      "truncated": false, "totalAvailable": 12,
+      "stats": { "issueCount": 12, "doneIssueCount": 7,
+                 "points": 34.5, "donePoints": 21, "unestimatedCount": 2 } }
+  ],
+  "backlog": {
+    "issues": [ … ], "truncated": true, "totalAvailable": 812,
+    "stats": { "issueCount": 812, "doneIssueCount": 0,
+               "points": 1204, "donePoints": 0, "unestimatedCount": 310 }
+  },
+  "sectionCap": 300,
+  "bulkMoveCap": 100
+}
+```
+
+Each section is capped independently at `sectionCap` (300) and reports `truncated` / `totalAvailable` — but its `stats` are computed over the **whole** section, so a truncated section still shows honest totals. Treat sections as independently refreshable.
+
+`bulkMoveCap` (100) is the limit on **one** `POST …/sprints/{sprintId}/issues` call, and it is a *different* number from `sectionCap` on purpose. A "move everything to sprint X" action is driven by the section you rendered, so a client that assumes one cap from the other would `400` on every section larger than the bulk limit. Chunk bulk moves at `bulkMoveCap` instead of hardcoding a value.
+
+### Ranking an issue
+
+`POST …/issues/{number}/rank` moves one issue in the order the board and the backlog share, optionally into or out of a sprint in the same request. The moved issue is addressed by **number** (the usual issue addressing) while the anchors and the sprint travel as **ids**:
+
+```bash
+curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/rank \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"afterIssueId": "0198a…", "beforeIssueId": "0198b…", "sprintId": "0198f7d4-…"}'
+```
+
+- You send **anchors, never a rank value**. Supply `afterIssueId`, `beforeIssueId`, or both — the server fills in whichever neighbour is missing by looking at the target section. Sending **neither** is only valid together with a sprint change, and means "append to the end of that section"; a request with no anchor and no sprint change asks for nothing and is a `400`.
+- `sprintId` moves the issue into a sprint at the same time and `clearSprint: true` returns it to the backlog; sending both is a `400`. An unknown, foreign-project or **completed** target sprint is a `422` — and so is moving an issue whose **current** sprint is `COMPLETED`, in or out: that membership is a delivered fact and is frozen both ways. A pure rank move *within* a completed sprint is still fine.
+- Both anchors must already be **in the target section** — dropping next to a row that lives in a different sprint is an ordering paradox, not a placement, so it is a `422`; so is naming the moved issue itself as its own anchor, or an anchor that does not resolve in the project.
+- If the anchors are no longer consistent with each other (someone else re-ordered the list under you), the answer is `409` "the list changed — refresh", never a silent arbitrary placement.
+- `version` is **optional**: send it and you get the usual `409` on a stale read; omit it and the move simply applies. Ranking is a positional, last-drag-wins operation, so a mandatory optimistic check would produce a storm of conflicts during a planning meeting.
+- Dropping an issue into the same gap over and over eventually exhausts it, and the server re-spaces the whole project's ranks. That rebalance is **throttled to once per project per 60 s** — a second one inside the window answers `429` with a `Retry-After` header (seconds). This is a **retryable throttle, not a fault**: nothing was moved, and the identical request succeeds after the wait. Back off for `Retry-After` rather than retrying immediately. Hitting it in normal use is essentially impossible — right after a rebalance every gap is wide again, so exhausting one takes ~26 successive drops into that same spot.
+- The response is the full updated [`IssueResponse`](#issues). A rank change writes **no** history entry (positional churn would drown the log); a sprint change in the same request does.
+
+**Using sprints elsewhere** — set `sprintId` / `storyPoints` when creating or updating an [issue](#issues) (`clearSprint` / `clearStoryPoints` unset them), filter the board and backlog with `?sprintId=` or `?noSprint=true`, and query them in [HQL](#search-hql) as `sprint` (alias `sprints`) and `storyPoints` (alias `points`). An issue's own sprint comes back in `IssueResponse.sprint` as `{id, name, state}`, or `null`.
+
 ## Search (HQL)
 
 Search issues across a whole workspace with **HQL** (Hamstrack Query Language) — a small, readable query language. Results are cross-project but always restricted to the caller's **visible (non-archived) projects**; this scope is enforced server-side and no query text can widen it. All three endpoints require workspace membership (`404` for a non-member).
@@ -734,17 +912,19 @@ Each row in the paginated `content` reuses the full [`IssueResponse`](#issues) p
 
 **HQL grammar** — a boolean expression of `field OP value` comparisons:
 
-- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`, `label` (alias `labels`), `component` (alias `components`), `fixVersion`, `affectsVersion`, plus any **custom field** by its `key` (e.g. `story_points`, `severity`). The exact list you may query comes from `/search/schema`. Field names are matched case-insensitively, so the all-lowercase `fixversion` / `affectsversion` spellings work too — `/search/schema` always advertises the camelCase name, exactly once per field.
+- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`, `label` (alias `labels`), `component` (alias `components`), `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias `points`), plus any **custom field** by its `key` (e.g. `severity`). The exact list you may query comes from `/search/schema`. Field names are matched case-insensitively, so the all-lowercase `fixversion` / `affectsversion` spellings work too — `/search/schema` always advertises the camelCase name, exactly once per field.
 - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=`. Which operators a field accepts is per-field (see `/search/schema`): `~` is a case-insensitive substring match, only on `text` (title + description); ordered comparisons (`>` `<` `>=` `<=`) apply to the date fields and to `priority`.
 - **Booleans:** combine terms with `AND`, `OR`, `NOT` and parentheses `( )`. Precedence is `NOT` > `AND` > `OR`.
-- **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`, `affectsVersion`, and every custom field except CHECKBOX).
+- **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`, `affectsVersion`, `sprint`, `storyPoints`, and every custom field except CHECKBOX).
 - **Sorting:** an optional trailing `ORDER BY field [ASC|DESC], …` clause — it must come last. Custom fields are **not sortable** (yet).
 - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (evaluated in server UTC).
 - **Values:** status / type / priority are given by **name** (quote names with spaces, e.g. `"In Progress"`); users by email, display name, `currentUser()`, or UUID; dates as `YYYY-MM-DD`.
 - **Labels:** `label` (alias `labels`) is many-valued and given by **name** — operators `= != IN` plus `IS [NOT] EMPTY`; it is **not sortable** (an issue has a *set* of labels, so `ORDER BY label` is a `422`). `label = "needs-design"` means "carries it", `label != "needs-design"` means "does not carry it" (issues with no labels at all included), and `label IS EMPTY` means "carries no label". Archived labels are excluded from name resolution, so a name that no longer exists in the workspace fails with `422` when the query runs — including for a stored [saved filter](#saved-filters).
 - **Components:** `component` (alias `components`) is single-valued and given by **name** — operators `= != IN` plus `IS [NOT] EMPTY` — and, unlike `label`, it **is sortable** (`ORDER BY component` orders by component name and keeps issues that have none). Names resolve across your visible **projects**, so `component = Billing` matches the "Billing" of every project you can see. `component IS EMPTY` means "has no component". Archived components are excluded from name resolution (a name that only an archived component holds is a `422` at run time), even though issues keep carrying them.
 - **Versions:** `fixVersion` ("ships in") and `affectsVersion` ("broken in") are two fields over the same link table, told apart by the role. Both are many-valued and given by **name** — operators `= != IN` plus `IS [NOT] EMPTY` — and, like `label`, **not sortable** (an issue has a *set* of versions, so `ORDER BY fixVersion` is a `422`). `fixVersion = "2.4.0"` means "ships in 2.4.0", `fixVersion != "2.4.0"` means "does not" (issues with no fix version at all included), and `fixVersion IS EMPTY` means "not scheduled for any release" — the unassigned-work query. An affects link never satisfies a `fixVersion` term and vice versa. Names resolve across your visible **projects**, so `fixVersion = "2.4.0"` matches the "2.4.0" of every project you can see. Archived versions are excluded from name resolution (a `422` at run time), even though issues keep carrying them.
-- **Custom fields:** queried by `key`, with operators per type — TEXT / TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT: `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER: `= != IN` + `currentUser()`; CHECKBOX: `=`. All support `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given by option **label or id**; USER values by email / display name / `currentUser()` / UUID; DATE as `YYYY-MM-DD`. Example: `story_points >= 5 AND severity = "High"`.
+- **Sprints:** `sprint` (alias `sprints`) is single-valued and given by **name** — operators `= != IN` plus `IS [NOT] EMPTY` — and, like `label`, **not sortable** (`ORDER BY sprint` is a `422`: sprint order across several projects has no common meaning). `sprint IS EMPTY` means "in no sprint", i.e. the backlog. Names resolve across your visible **projects**, so `sprint = "Sprint 7"` matches the "Sprint 7" of every project you can see. **Completed** sprints are excluded from name resolution — years of history would flood the namespace — though issues carrying them still match by id.
+- **Story points:** `storyPoints` (alias `points`) is a native numeric field, so it takes ordered comparisons directly (`= != > < >= <=`) and **is sortable** — `ORDER BY storyPoints DESC` is the "show me the big ones first" query. `storyPoints IS EMPTY` means **unestimated**, which is deliberately not the same statement as `storyPoints = 0`. The operand is held to the field's own domain — the same `0`–`999` with at most 2 decimals that writing an estimate allows — so `storyPoints > 1e999` or `storyPoints = 1.234` comes back as the usual `422` semantic error naming the field, not a `500`. A comparison that could never match a row is rejected up front rather than passed to the database. Example: `sprint = "Sprint 7" AND storyPoints >= 5`.
+- **Custom fields:** queried by `key`, with operators per type — TEXT / TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT: `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER: `= != IN` + `currentUser()`; CHECKBOX: `=`. All support `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given by option **label or id**; USER values by email / display name / `currentUser()` / UUID; DATE as `YYYY-MM-DD`. Example: `severity = "High" AND environment = prod`.
 
 More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assignee IS EMPTY AND created >= startOfWeek()` · `text ~ "flux capacitor" OR parent = "DEMO-12"`.
 
@@ -759,7 +939,7 @@ More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assign
   "errorType": "SEMANTIC_ERROR", "field": "asignee", "position": 0 }
 ```
 
-**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, a `LABEL` picklist of the workspace's non-archived label names, a `COMPONENT` picklist of the non-archived component names of those visible projects, a `VERSION` picklist of their non-archived version names (**one** picklist serves both `fixVersion` and `affectsVersion` — the two roles draw from the same catalog, so both fields declare `valueSuggest: "VERSION"`), plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The `LABEL`, `COMPONENT` and `VERSION` picklists are **capped at 200 entries** each — a workspace can accumulate far more, so fall back to `/search/suggest?field=label` / `?field=component` / `?field=fixVersion` beyond that. The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it.
+**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, a `LABEL` picklist of the workspace's non-archived label names, a `COMPONENT` picklist of the non-archived component names of those visible projects, a `VERSION` picklist of their non-archived version names (**one** picklist serves both `fixVersion` and `affectsVersion` — the two roles draw from the same catalog, so both fields declare `valueSuggest: "VERSION"`), a `SPRINT` picklist of the **open** (non-completed) sprint names of those projects, plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The `LABEL`, `COMPONENT`, `VERSION` and `SPRINT` picklists are **capped at 200 entries** each — a workspace can accumulate far more, so fall back to `/search/suggest?field=label` / `?field=component` / `?field=fixVersion` beyond that. **`sprint` is the exception: it has no `/search/suggest` fallback** (`?field=sprint` returns the usual `422`), because a project's open sprints are already bounded and cannot realistically overflow the picklist. `storyPoints` has no picklist at all — it is numeric. The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it.
 
 ```json
 {
@@ -806,6 +986,8 @@ The same endpoint serves **labels** — `field=label` (or `labels`) returns up t
 { "field": "fixVersion",
   "suggestions": [ { "label": "2.4.0", "value": "2.4.0" } ] }
 ```
+
+**`sprint` is intentionally not served here.** Its `/search/schema` `SPRINT` picklist is already bounded by the per-project open-sprint cap, so no typeahead was wired — `?field=sprint` returns the same `422` any other non-suggestable field returns. `storyPoints` is numeric and has no picklist either.
 
 ## Saved filters
 

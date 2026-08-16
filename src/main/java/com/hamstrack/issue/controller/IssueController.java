@@ -41,6 +41,20 @@ import java.util.UUID;
  * unchanged — while the single-valued {@code componentId} follows the
  * {@code assigneeId}/{@code clearAssignee} convention. An unknown, foreign-tenant
  * or archived id in any of them is a <strong>422</strong>, never a 404.
+ *
+ * <p>Since HD-22 an issue also carries its <em>agile</em> attributes: a
+ * {@code sprintId} (single-valued, so the {@code clearSprint} convention — sending both
+ * is a <strong>400</strong>, matching {@code POST /{number}/rank}; a foreign/unknown/
+ * COMPLETED sprint is a 422, and so is changing or clearing the sprint of an issue whose
+ * CURRENT sprint is COMPLETED) and native {@code storyPoints}
+ * (0…999, ≤ 2 decimals, 422 otherwise; {@code clearStoryPoints} marks the issue
+ * unestimated again — which is deliberately NOT the same as 0). The list gains
+ * the mutually-exclusive {@code ?sprintId=} / {@code ?noSprint=} filters (400
+ * when both are sent), and {@code POST /{number}/rank} moves an issue in the
+ * project-wide order the board and the backlog share. That rank
+ * ({@code issues.position}) is <strong>server-written only</strong> and is not
+ * exposed on {@code IssueResponse}: a client places an issue by naming its
+ * neighbours, never by sending a value.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/issues")
@@ -109,6 +123,8 @@ public class IssueController {
                                   @RequestParam(required = false) List<UUID> labelId,
                                   @RequestParam(defaultValue = "any") String labelMatch,
                                   @RequestParam(required = false) UUID fixVersionId,
+                                  @RequestParam(required = false) UUID sprintId,
+                                  @RequestParam(defaultValue = "false") boolean noSprint,
                                   @RequestParam(required = false) Integer page,
                                   @RequestParam(required = false) Integer size,
                                   @RequestParam(defaultValue = "false") boolean excludeDone) {
@@ -118,13 +134,44 @@ public class IssueController {
         if (size == null) {
             return ResponseEntity.ok(issueService.listCapped(
                     actor, workspaceId, projectId, statusId, assigneeId, priorityId,
-                    componentId, labelId, match, fixVersionId));
+                    componentId, labelId, match, fixVersionId, sprintId, noSprint));
         }
         var pageable = Paging.of(page, size,
                 Sort.by(Sort.Order.asc("position"), Sort.Order.desc("createdAt")));
         return ResponseEntity.ok(issueService.listPaged(
                 actor, workspaceId, projectId, statusId, assigneeId, priorityId,
-                componentId, labelId, match, fixVersionId, excludeDone, pageable));
+                componentId, labelId, match, fixVersionId, sprintId, noSprint,
+                excludeDone, pageable));
+    }
+
+    /**
+     * Move this issue in the shared backlog/board rank, optionally into or out of a
+     * sprint in the same request (HD-22 §3.3). The moved issue is addressed by
+     * <strong>number</strong> (the established issue addressing) while the anchors and
+     * the sprint travel as <strong>ids</strong> (the established DTO convention for
+     * references).
+     *
+     * <p>The client sends only the neighbours it dropped between — the server computes
+     * the rank, so {@code position} is server-written only and is not exposed on the
+     * response at all. Permission is the issue-edit tier, not curator: dragging at a
+     * planning meeting is teamwork.
+     *
+     * <p>Status codes: 400 (no anchor and no sprint change · {@code sprintId} together
+     * with {@code clearSprint}) · 422 (unknown/foreign anchor or sprint · an anchor from
+     * another section · an anchor that IS the moved issue · a COMPLETED target sprint ·
+     * a COMPLETED <em>current</em> sprint the request would move the issue out of) ·
+     * 409 (stale {@code version} · stale anchors, i.e. "the list changed — refresh" ·
+     * archived project) · <strong>429</strong> (the per-project rank-rebalance throttle:
+     * a second whole-project re-spacing within 60 s, answered with {@code Retry-After} —
+     * a retryable throttle, not a fault; nothing was moved).
+     */
+    @PostMapping("/{number}/rank")
+    public IssueResponse rank(@AuthenticationPrincipal User actor,
+                              @PathVariable UUID workspaceId,
+                              @PathVariable UUID projectId,
+                              @PathVariable long number,
+                              @Valid @RequestBody RankIssueRequest req) {
+        return issueService.rank(actor, workspaceId, projectId, number, req);
     }
 
     @GetMapping("/{number}")

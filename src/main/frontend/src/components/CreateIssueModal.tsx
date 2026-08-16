@@ -9,6 +9,7 @@ import { FieldInput } from './fields'
 import { LabelPicker } from './labels'
 import { ComponentSelect, useProjectComponents } from './projectComponents'
 import { VersionPicker, useProjectVersions } from './versions'
+import { SprintPicker, useOpenSprints } from './sprints'
 import { Button, Input, Select, Textarea } from './ui'
 
 interface Props {
@@ -67,6 +68,12 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   // "More fields" so the common create stays two selects long.
   const [fixVersionIds, setFixVersionIds] = useState<string[]>([])
   const [affectsVersionIds, setAffectsVersionIds] = useState<string[]>([])
+  // Sprints are project-scoped too (HD-22) — dropped on a project change. Omitted
+  // means the ranked backlog, where a new issue lands at the BOTTOM: filing an
+  // issue is not a priority statement. Story points are a plain string draft so
+  // "unestimated" (blank) stays representable.
+  const [sprintId, setSprintId] = useState('')
+  const [storyPoints, setStoryPoints] = useState('')
   const [moreOpen, setMoreOpen] = useState(false)
   // Labels are workspace-scoped (HD-30), so unlike the taxonomy selections they
   // survive a project change — only switching workspace clears them.
@@ -95,6 +102,11 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   // Project versions (HD-32) — non-archived only; own endpoint/key, never part
   // of the project config. Both pickers read this one list.
   const { data: versionOptions = [] } = useProjectVersions(effectiveWsId, effectiveProjectId)
+
+  // Project sprints (HD-22) — open ones only; own endpoint/key, never part of
+  // the project config. The cell hides itself when the project plans none, so a
+  // pure-Kanban project's create form grows no Scrum vocabulary.
+  const { data: sprintOptions = [] } = useOpenSprints(effectiveWsId, effectiveProjectId)
 
   // Option list for the Assignee picker and for USER-type custom fields
   const { data: members = [] } = useQuery({
@@ -209,6 +221,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     setComponentId('') // components belong to the project we just left
     setFixVersionIds([])     // …and so do versions (HD-32)
     setAffectsVersionIds([])
+    setSprintId('')          // …and sprints (HD-22)
+    setStoryPoints('')
     setFieldValues({})
   }
 
@@ -270,6 +284,10 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
         componentId: componentId || undefined,
         fixVersionIds: fixVersionIds.length > 0 ? fixVersionIds : undefined,
         affectsVersionIds: affectsVersionIds.length > 0 ? affectsVersionIds : undefined,
+        sprintId: sprintId || undefined,
+        // Blank stays UNESTIMATED — never coerced to 0.
+        storyPoints: storyPoints.trim() && Number.isFinite(Number(storyPoints))
+          ? Number(storyPoints) : undefined,
         fields: Object.keys(fieldValues).length > 0 ? fieldValues : undefined,
       })
       await qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(effectiveWsId, effectiveProjectId) })
@@ -386,6 +404,45 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
                 ) : null
               })()}
             </div>
+          )}
+
+          {/* Sprint + story points (HD-22). The Sprint select only appears once
+              the project actually plans iterations, so a pure-Kanban project's
+              form is unchanged. Leaving Sprint blank files the issue at the
+              BOTTOM of the ranked backlog; leaving points blank means
+              "unestimated", which is deliberately not 0. */}
+          {sprintOptions.length > 0 ? (
+            <div className="grid grid-cols-2 gap-3">
+              <SprintPicker
+                label="Sprint"
+                wsId={effectiveWsId}
+                projectId={effectiveProjectId}
+                value={sprintId}
+                onChange={setSprintId}
+                emptyLabel="Backlog"
+              />
+              <Input
+                label="Story points"
+                type="number"
+                min={0}
+                max={999}
+                step={0.5}
+                placeholder="Unestimated"
+                value={storyPoints}
+                onChange={e => setStoryPoints(e.target.value)}
+              />
+            </div>
+          ) : (
+            <Input
+              label="Story points"
+              type="number"
+              min={0}
+              max={999}
+              step={0.5}
+              placeholder="Unestimated"
+              value={storyPoints}
+              onChange={e => setStoryPoints(e.target.value)}
+            />
           )}
 
           {/* Parent picker — only for types with a tier exactly one level above.

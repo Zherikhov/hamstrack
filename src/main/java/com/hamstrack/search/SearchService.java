@@ -67,6 +67,9 @@ public class SearchService {
     /** Max entries embedded in the {@code /schema} VERSION picklist (HD-32 §3.5). */
     private static final int VERSION_PICKLIST_LIMIT = 200;
 
+    /** Max entries embedded in the {@code /schema} SPRINT picklist (HD-22 §4.7). */
+    private static final int SPRINT_PICKLIST_LIMIT = 200;
+
     @Transactional(readOnly = true)
     public PageResponse<SearchResultRow> search(User actor, UUID workspaceId, SearchRequest req) {
         var ws = resolveWorkspace(actor, workspaceId);
@@ -137,6 +140,12 @@ public class SearchService {
         // affectsVersion (both descriptors declare valueSuggest = "VERSION"): the two
         // roles draw from the same catalog, only the link differs.
         values.put("VERSION", capped(labels(ctx.versionNames()), VERSION_PICKLIST_LIMIT));
+        // SPRINT (HD-22): the OPEN sprint names of the caller's VISIBLE projects. Capped
+        // like the others, though the open-sprint cap already bounds it per project —
+        // "visible projects" is what makes the total unbounded. COMPLETED sprints are
+        // deliberately absent: they are excluded from name resolution too, so offering
+        // them would suggest values that then 422.
+        values.put("SPRINT", capped(labels(ctx.sprintNames()), SPRINT_PICKLIST_LIMIT));
 
         // Custom fields (HD-52): append after the system fields, hidden system-name
         // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field

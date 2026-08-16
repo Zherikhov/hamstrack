@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -45,6 +46,28 @@ public record CreateIssueRequest(
         // Versions this defect EXISTS IN (HD-32). Same rules, independent budget — the
         // same version may legitimately be both fix and affects on one issue.
         @Size(max = 100) List<UUID> affectsVersionIds,
+        // The sprint to file this issue into (HD-22). Absent/null = the backlog, which
+        // is the normal case. Resolved through the issue's OWN project — a
+        // foreign/unknown id is a 422 "Unknown sprint", never a 404; a COMPLETED sprint
+        // is a 422 too (its membership is a delivered fact).
+        UUID sprintId,
+        // Native story-point estimate (HD-22 §3.4). Absent/null = unestimated, which is
+        // deliberately NOT the same as 0. Range 0…999 with at most 2 decimals — 422
+        // otherwise (the DB backs it with issues_story_points_ck).
+        BigDecimal storyPoints,
+        // Accepted for payload symmetry with UpdateIssueRequest (spec §7 lists all four
+        // additions for both), and INERT here: a brand-new issue has nothing to clear, so
+        // "no sprint"/"unestimated" is already what omitting sprintId/storyPoints means.
+        // They exist so a client that shares one payload builder between create and
+        // update cannot be broken by an operator enabling FAIL_ON_UNKNOWN_PROPERTIES.
+        // Boxed Boolean for the Jackson-3 primitive trap, coalesced below.
+        Boolean clearSprint,
+        Boolean clearStoryPoints,
         // Custom field values keyed by field id; shapes per field type
         Map<UUID, JsonNode> fields
-) {}
+) {
+    public CreateIssueRequest {
+        clearSprint = clearSprint != null && clearSprint;
+        clearStoryPoints = clearStoryPoints != null && clearStoryPoints;
+    }
+}

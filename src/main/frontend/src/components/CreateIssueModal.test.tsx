@@ -62,6 +62,9 @@ vi.mock('../api', () => ({
   componentsApi: { list: vi.fn(async () => []) },
   // HD-32: …and its fix/affects version pickers the project's versions.
   versionsApi: { list: vi.fn(async () => []) },
+  // HD-22: …and its Sprint select the project's open sprints (none here, so the
+  // select hides itself and only the Story points input renders).
+  sprintsApi: { list: vi.fn(async () => ({ content: [], page: 0, size: 200, totalElements: 0, totalPages: 0, hasNext: false })) },
 }))
 
 beforeEach(() => {

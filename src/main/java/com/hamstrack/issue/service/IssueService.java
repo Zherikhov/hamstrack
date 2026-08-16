@@ -10,11 +10,13 @@ import com.hamstrack.common.event.IssueCreated;
 import com.hamstrack.common.event.IssueDeleted;
 import com.hamstrack.common.event.IssueUpdated;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.util.Points;
 import com.hamstrack.issue.dto.BoardIssuesResponse;
 import com.hamstrack.issue.dto.CreateIssueRequest;
 import com.hamstrack.issue.dto.IssueHistoryResponse;
 import com.hamstrack.issue.dto.IssueResponse;
 import com.hamstrack.issue.dto.LabelMatch;
+import com.hamstrack.issue.dto.RankIssueRequest;
 import com.hamstrack.issue.dto.UpdateIssueRequest;
 import com.hamstrack.issue.entity.*;
 import com.hamstrack.issue.exception.IssueNotFoundException;
@@ -66,6 +68,8 @@ public class IssueService {
     private final LabelService labelService;
     private final ComponentService componentService;
     private final VersionService versionService;
+    private final SprintService sprintService;
+    private final IssueRankService rankService;
     private final AttachmentService attachmentService;
     private final ApplicationEventPublisher eventPublisher;
     private final ProductMetrics metrics;
@@ -175,6 +179,16 @@ public class IssueService {
         var assignee = req.assigneeId() != null
                 ? resolveAssignee(workspace, req.assigneeId())
                 : componentService.autoAssignee(workspace, component);
+        // HD-22: same ordering rule again. A sprint of another project is a 422 "Unknown
+        // sprint"; filing straight into a COMPLETED sprint is a 422 too (every
+        // create-time value is a new assignment).
+        var sprint = sprintService.resolveForIssue(project, req.sprintId());
+        sprintService.requireAssignable(sprint);
+        var storyPoints = requireValidStoryPoints(req.storyPoints());
+        // The backlog rank: a new issue lands at the BOTTOM (§3.3.1) — filing an issue
+        // is not a priority statement, the team ranks it at grooming. Read here with the
+        // other queries, before any mutation.
+        long bottomPosition = issueRepository.maxPosition(project) + IssueRankService.RANK_STEP;
 
         // Atomic seq increment
         long seq = projectRepository.incrementAndGetIssueSeq(project.getId());
@@ -189,7 +203,14 @@ public class IssueService {
         issue.setStatus(status);
         issue.setPriority(priority);
         issue.setReporter(actor);
-        issue.setPosition(seq);
+        // NOT the issue sequence any more (§3.3.1): position is the shared, rescaled
+        // backlog/board rank, and a fresh issue appends at max + RANK_STEP. Two
+        // concurrent creates may receive the same position — harmless (the
+        // `createdAt DESC` tie-break keeps the order stable) and the first drag
+        // separates them.
+        issue.setPosition(bottomPosition);
+        issue.setSprint(sprint);
+        issue.setStoryPoints(storyPoints);
         if (status.getCategory() == StatusCategory.DONE) {
             issue.setClosedAt(OffsetDateTime.now());
         }
@@ -237,17 +258,18 @@ public class IssueService {
     public BoardIssuesResponse listCapped(User actor, UUID workspaceId, UUID projectId,
                                           UUID statusId, UUID assigneeId, UUID priorityId,
                                           UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
-                                          UUID fixVersionId) {
+                                          UUID fixVersionId, UUID sprintId, boolean noSprint) {
         var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
+        requireCoherentSprintFilter(sprintId, noSprint);
 
         int cap = boardProperties.maxIssues();
         // Fetch cap+1 (in board order) so a single query tells us whether more exist.
         var fetched = issueRepository.findByProjectFilteredCapped(
                 project, statusId, assigneeId, priorityId, componentId,
                 labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
-                fixVersionId, VersionLinkType.FIX,
+                fixVersionId, VersionLinkType.FIX, sprintId, noSprint,
                 PageRequest.of(0, cap + 1));
         boolean truncated = fetched.size() > cap;
         var capped = truncated ? fetched.subList(0, cap) : fetched;
@@ -255,7 +277,7 @@ public class IssueService {
         long totalAvailable = truncated
                 ? issueRepository.countByProjectFiltered(project, statusId, assigneeId, priorityId,
                         componentId, labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
-                        fixVersionId, VersionLinkType.FIX)
+                        fixVersionId, VersionLinkType.FIX, sprintId, noSprint)
                 : capped.size();
         return new BoardIssuesResponse(toResponses(capped), truncated, totalAvailable, cap);
     }
@@ -269,14 +291,16 @@ public class IssueService {
     public PageResponse<IssueResponse> listPaged(User actor, UUID workspaceId, UUID projectId,
                                                  UUID statusId, UUID assigneeId, UUID priorityId,
                                                  UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
-                                                 UUID fixVersionId, boolean excludeDone, Pageable pageable) {
+                                                 UUID fixVersionId, UUID sprintId, boolean noSprint,
+                                                 boolean excludeDone, Pageable pageable) {
         var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
+        requireCoherentSprintFilter(sprintId, noSprint);
         var page = issueRepository.findByProjectFilteredPaged(
                 project, statusId, assigneeId, priorityId, componentId,
                 labelFilter.ids(), labelFilter.count(), labelFilter.requiredMatches(),
-                fixVersionId, VersionLinkType.FIX,
+                fixVersionId, VersionLinkType.FIX, sprintId, noSprint,
                 excludeDone, StatusCategory.DONE, pageable);
         var responses = toResponses(page.getContent());
         var byId = responses.stream().collect(Collectors.toMap(IssueResponse::id, r -> r));
@@ -309,6 +333,15 @@ public class IssueService {
         var project = ctx.project();
         requireNotArchived(project);
 
+        // Request shape, before anything is read: "put it in sprint X" and "take it out
+        // of every sprint" cannot both hold. Letting sprintId silently win would make a
+        // buggy client's contradictory payload look successful — and POST …/rank already
+        // 400s on exactly this combination, so the two write paths must agree (§4.4).
+        if (req.sprintId() != null && req.clearSprint()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Send either sprintId or clearSprint, not both");
+        }
+
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
         var newType = req.typeId() != null
                 ? projectConfigService.requireTypeInSet(project, resolveType(req.typeId()))
@@ -338,6 +371,10 @@ public class IssueService {
                 project, req.fixVersionIds(), VersionLinkType.FIX);
         var newAffectsVersions = versionService.resolveForIssue(
                 project, req.affectsVersionIds(), VersionLinkType.AFFECTS);
+        // HD-22: null when `sprintId` is absent (leave it alone, unless clearSprint asks
+        // for null). Resolved with the other READS, before any mutation.
+        var newSprint = sprintService.resolveForIssue(project, req.sprintId());
+        var newStoryPoints = requireValidStoryPoints(req.storyPoints());
 
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
@@ -463,6 +500,43 @@ public class IssueService {
             }
         }
 
+        // Sprint (HD-22): a non-null sprintId sets/changes it; clearSprint (no id)
+        // returns the issue to the backlog — the assigneeId/clearAssignee convention.
+        // The RANK is deliberately untouched here: an issue that changes sprint keeps
+        // its relative place, and re-ranking is the dedicated /rank endpoint's job.
+        // A COMPLETED sprint is only rejected when it is an actual CHANGE — an issue
+        // already sitting in one stays editable (its title, status, points…).
+        // The freeze cuts BOTH ways: a completed sprint's membership is the delivery
+        // record `complete` already reported, so an issue may no more be pulled OUT of
+        // one than pushed INTO one.
+        if (newSprint != null || req.clearSprint()) {
+            var oldId = issue.getSprint() != null ? issue.getSprint().getId() : null;
+            var newId = newSprint != null ? newSprint.getId() : null;
+            if (!Objects.equals(oldId, newId)) {
+                sprintService.requireDetachable(issue.getSprint());
+                sprintService.requireAssignable(newSprint);
+                String oldName = issue.getSprint() != null ? issue.getSprint().getName() : null;
+                String newName = newSprint != null ? newSprint.getName() : null;
+                historyEntries.add(makeHistory(issue, actor, "sprint", oldName, newName));
+                issue.setSprint(newSprint);
+            }
+        }
+
+        // Story points (HD-22): same nullable-scalar convention. A no-op writes no
+        // history row (compareTo, not equals: 5 and 5.00 are the same estimate).
+        if (newStoryPoints != null || req.clearStoryPoints()) {
+            var old = issue.getStoryPoints();
+            boolean changed = newStoryPoints == null
+                    ? old != null
+                    : old == null || old.compareTo(newStoryPoints) != 0;
+            if (changed) {
+                historyEntries.add(makeHistory(issue, actor, "storyPoints",
+                        old == null ? null : old.toPlainString(),
+                        newStoryPoints == null ? null : newStoryPoints.toPlainString()));
+                issue.setStoryPoints(newStoryPoints);
+            }
+        }
+
         // Parent: a non-null parentId sets/changes it; clearParent (no id) detaches.
         // History records the old → new parent key.
         if (newParent != null || req.clearParent()) {
@@ -536,6 +610,99 @@ public class IssueService {
                 .toList();
         eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
         return toResponse(issue);
+    }
+
+    /**
+     * Move one issue in the shared backlog/board rank, optionally into or out of a
+     * sprint in the same request (HD-22 §3.3, §4.4) — {@code POST …/issues/{n}/rank}.
+     *
+     * <p><strong>Permission is the ISSUE-EDIT tier, not curator</strong> (§3.2):
+     * dragging items around at a planning meeting is ordinary work the whole team does,
+     * and requiring MANAGER would make the backlog read-only for most of it.
+     *
+     * <p>The client sends only ANCHORS — the server computes the position
+     * ({@link IssueRankService}), so a rank can never be invented or corrupted from a
+     * payload, and {@code position} is not exposed on the response at all. Rank changes
+     * write <strong>no history</strong> (positional churn would drown the log — the same
+     * reasoning as label merge); a sprint change in the same request does.
+     *
+     * <p>{@code version} is OPTIONAL: present → 409 when stale, absent → the move
+     * applies. Ranking is last-drag-wins; a mandatory optimistic round trip would 409-storm
+     * a planning meeting (§3.3.3).
+     */
+    @Transactional
+    public IssueResponse rank(User actor, UUID workspaceId, UUID projectId, long number,
+                              RankIssueRequest req) {
+        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        requireNotArchived(project);
+
+        // ---- request shape: these are malformed requests, not business rejections ----
+        if (req.sprintId() != null && req.clearSprint()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Send either sprintId or clearSprint, not both");
+        }
+        boolean sprintChangeRequested = req.sprintId() != null || req.clearSprint();
+        if (req.afterIssueId() == null && req.beforeIssueId() == null && !sprintChangeRequested) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "A rank request needs an anchor or a sprint change");
+        }
+
+        // ---- all reads first ----
+        var issue = issueRepository.findByProjectAndNumber(project, number)
+                .orElseThrow(IssueNotFoundException::new);
+        if (req.version() != null && req.version() != issue.getVersion()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Issue was modified by someone else — refresh and retry");
+        }
+        if (issue.getId().equals(req.afterIssueId()) || issue.getId().equals(req.beforeIssueId())) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "An issue can't be ranked against itself");
+        }
+
+        // The TARGET section: the sprint the issue ends up in (null = the backlog).
+        UUID currentSprintId = issue.getSprint() == null ? null : issue.getSprint().getId();
+        String oldSprintName = issue.getSprint() == null ? null : issue.getSprint().getName();
+        UUID targetSprintId = req.sprintId() != null ? req.sprintId()
+                : req.clearSprint() ? null : currentSprintId;
+        boolean sprintChanges = !Objects.equals(currentSprintId, targetSprintId);
+        if (sprintChanges) {
+            // A COMPLETED sprint's membership is a delivered fact: it can neither take a
+            // new issue nor give one up (§4.5). Checked before any write happens.
+            sprintService.requireDetachable(issue.getSprint());
+            if (targetSprintId != null) {
+                // Validates the id against THIS project (422 "Unknown sprint" for a
+                // foreign one) and refuses a COMPLETED target.
+                sprintService.requireAssignable(sprintService.resolveForIssue(project, targetSprintId));
+            }
+        }
+
+        // Placement. NOTE: this may run a whole-project rebalance, whose @Modifying
+        // carries clearAutomatically — so every entity loaded above is DETACHED
+        // afterwards and must be re-read before it is mutated. It may also refuse with a
+        // 429 when this project just re-spaced its ranks (the rebalance throttle).
+        long newPosition = rankService.resolve(actor, project, issue.getId(), targetSprintId,
+                req.afterIssueId(), req.beforeIssueId());
+
+        // ---- then mutate, on freshly-managed entities ----
+        var moved = issueRepository.findByProjectAndNumber(project, number)
+                .orElseThrow(IssueNotFoundException::new);
+        var historyEntries = new ArrayList<IssueHistory>(1);
+        if (sprintChanges) {
+            var targetSprint = targetSprintId == null ? null
+                    : sprintService.resolveForIssue(project, targetSprintId);
+            historyEntries.add(makeHistory(moved, actor, "sprint", oldSprintName,
+                    targetSprint == null ? null : targetSprint.getName()));
+            moved.setSprint(targetSprint);
+        }
+        moved.setPosition(newPosition);
+        issueRepository.save(moved);
+        historyRepository.saveAll(historyEntries);
+
+        var changeSet = historyEntries.stream()
+                .map(h -> new FieldChange(h.getField(), h.getOldValue(), h.getNewValue()))
+                .toList();
+        eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
+        return toResponse(moved);
     }
 
     @Transactional
@@ -734,6 +901,50 @@ public class IssueService {
     private void requireNotArchived(Project project) {
         if (project.isArchived()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is archived");
+        }
+    }
+
+    // ---- sprint / story-point validation (HD-22) ----
+
+    /**
+     * Validate a {@code storyPoints} payload (§3.4): {@code 0 ≤ v ≤ 999} with at most 2
+     * decimals, else <strong>422</strong> — a nonsensical field value in a request the
+     * caller is entitled to make. {@code null} (absent) is always fine and means
+     * "unestimated", which is deliberately NOT the same statement as {@code 0}.
+     *
+     * <p>Checked here rather than left to {@code issues_story_points_ck} because a
+     * driver-level constraint failure is a free 500 for any member — and the scale
+     * check has no DB equivalent at all ({@code NUMERIC(5,2)} silently ROUNDS 1.234 to
+     * 1.23, which would quietly change the user's number).
+     *
+     * <p>The bounds themselves live in {@link Points} because the HQL query path applies
+     * the SAME domain to a {@code storyPoints} operand — a filter the write path could
+     * never satisfy is a 422 there too, not a numeric-overflow 500 from the driver.
+     */
+    private static java.math.BigDecimal requireValidStoryPoints(java.math.BigDecimal raw) {
+        if (raw == null) return null;
+        if (!Points.inStoryPointRange(raw)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "Story points must be between 0 and 999");
+        }
+        if (!Points.hasStoryPointScale(raw)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "Story points allow at most 2 decimal places");
+        }
+        return raw;
+    }
+
+    /**
+     * {@code ?sprintId=} and {@code ?noSprint=true} are contradictory ("in this sprint"
+     * AND "in no sprint" can never both hold), so sending both is a malformed request —
+     * <strong>400</strong>, not a silently empty result the caller would misread as
+     * "nothing matches". A foreign sprint id on its own is NOT an error: it simply
+     * matches nothing, which leaks nothing.
+     */
+    private static void requireCoherentSprintFilter(UUID sprintId, boolean noSprint) {
+        if (sprintId != null && noSprint) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Use either sprintId or noSprint, not both");
         }
     }
 

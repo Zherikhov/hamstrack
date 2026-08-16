@@ -158,6 +158,10 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `MAX_COMPONENTS_PER_PROJECT` | `500` | Max components in one project's catalog. Creation needs a project curator, but anyone can create their own workspace and curate every project in it, and HQL name resolution loads each visible project's whole component catalog on every search; creating past the cap is a 422. Valid range 1–100000 |
 | `MAX_VERSION_LINKS_PER_ISSUE` | `20` | Max versions linkable to a single issue **per link type** — this many fix versions and, independently, this many affects versions; a payload above it is rejected with 422. Valid range 1–100; an out-of-range value fails startup instead of being clamped |
 | `MAX_VERSIONS_PER_PROJECT` | `500` | Max versions in one project's catalog — same reasoning as `MAX_COMPONENTS_PER_PROJECT`: curator-gated creation is no volume barrier, HQL name resolution loads each visible project's version names on every search, and the versions list endpoint is unpaged. Archived and released versions count toward the cap; creating past it is a 422. Valid range 1–100000 |
+| `AGILE_SECTION_MAX_ISSUES` | `300` | Max issues rendered per section of the planning view (`GET …/backlog`) — one section per open sprint plus the backlog. Together with `AGILE_MAX_OPEN_SPRINTS` this bounds the response size; a truncated section still reports honest whole-section totals. Valid range 1–2000, but **not independently attainable** — see the joint bound on `AGILE_MAX_OPEN_SPRINTS` below (at the default 20 open sprints this caps out around 952, not 2000). An out-of-range value fails startup instead of being clamped |
+| `AGILE_MAX_OPEN_SPRINTS` | `20` | Max FUTURE + ACTIVE sprints in one project (COMPLETED ones are history and cannot be started, so they don't count); creating past the cap is a 422. Valid range 1–100; an out-of-range value fails startup instead of being clamped. **Also validated jointly with `AGILE_SECTION_MAX_ISSUES`:** their product `(this + 1) × section cap` must stay ≤ 20 000, since one `GET …/backlog` assembles that many issues in a single unpaged response — both at their individual maxima would be ~202 000 rows, so startup fails rather than OOM later |
+| `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
+| `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
 | `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
@@ -384,6 +388,12 @@ Rate-limit tuning (all optional; defaults shown):
 
 The limiter is **in-memory / single-node**. If you run multiple app replicas it
 applies per-node (there's no shared store yet), so keep it in mind when scaling out.
+
+The same caveat applies to the **backlog rank-rebalance cooldown** (the 429 with
+`Retry-After` on `POST …/issues/{number}/rank`): it is node-local, so N replicas
+allow up to N whole-project rebalances per cooldown window instead of one. It
+degrades safely — the operation is idempotent and the throttle only damps an
+abuse vector — and a restart re-arms the window rather than locking planners out.
 
 ## Observability (optional)
 

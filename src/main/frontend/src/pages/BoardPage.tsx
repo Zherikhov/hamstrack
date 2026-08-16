@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Filter, Plus } from 'lucide-react'
-import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
+import { apiGetProject, apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
@@ -15,9 +15,13 @@ import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } f
 import { LabelChips, LabelFilter } from '../components/labels'
 import { ComponentFilter, ComponentName } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
+import {
+  CompleteSprintDialog, SprintHeader, StartSprintDialog, StoryPointsChip,
+  formatPoints, useActiveSprint, useIsProjectCurator, useOpenSprints,
+} from '../components/sprints'
 import IssueSidePanel from './IssueSidePanel'
 import type { LabelMatch } from '../api'
-import type { BoardIssues, Issue, IssueType } from '../types'
+import type { BoardIssues, Issue, IssueType, Sprint } from '../types'
 
 // Board issue-panel sizing (HD-54): user-draggable width, clamped and additionally
 // capped at 55% of the viewport so the board never disappears. Owned by BoardPage
@@ -167,21 +171,50 @@ export default function BoardPage() {
   const priorities = config?.priorities ?? []
   const fields = config?.fields ?? []
 
+  // ── Scrum mode (HD-27) ──────────────────────────────────────────────────────
+  // `boardMode` rides along on the ProjectResponse the rail and the settings
+  // areas already fetch, so this costs no request on the hot path. KANBAN is
+  // byte-identical to the pre-0.13.0 board: no sprint fetch, no header, no extra
+  // filter param.
+  // `boardMode` comes off the ProjectResponse the rail already caches; the
+  // workspace-role half of the curator predicate is only fetched once the board
+  // is actually in Scrum mode, so a Kanban board issues no new request.
+  const projectQuery = useQuery({
+    queryKey: ['project', wsId, projectId],
+    queryFn: () => apiGetProject(wsId!, projectId!),
+    enabled: !!wsId && !!projectId,
+  })
+  const scrum = (projectQuery.data?.boardMode ?? 'KANBAN') === 'SCRUM'
+  const { isCurator } = useIsProjectCurator(wsId, projectId, scrum)
+  const { sprint: activeSprint, isLoading: sprintLoading } = useActiveSprint(wsId, projectId, scrum)
+  // Only consulted by the "no active sprint" empty state, so it stays unfetched
+  // on a healthy Scrum board.
+  const { data: openSprints = [] } = useOpenSprints(
+    wsId, projectId, scrum && !sprintLoading && !activeSprint && isCurator)
+  const futureSprints = openSprints.filter(s => s.state === 'FUTURE')
+
+  const [startingSprint, setStartingSprint] = useState<Sprint | null>(null)
+  const [completing, setCompleting] = useState(false)
+
   // Shared key (lib/queryKeys.ts) — the create-issue dialog reads the same cache
   // entry for its parent picker, so the cached value must stay the `BoardIssues`
-  // wrapper for both.
+  // wrapper for both. In Scrum mode the active sprint id joins the filters (and
+  // therefore the key), so the Kanban and Scrum caches never mix.
   const serverFilters = {
     priorityId: filterPriority || undefined,
     labelIds: filterLabelIds,
     labelMatch,
     componentId: filterComponentId || undefined,
     fixVersionId: filterFixVersionId || undefined,
+    sprintId: scrum ? activeSprint?.id : undefined,
   }
   const issuesKey = boardIssuesKey(wsId, projectId, serverFilters)
   const { data: board, isLoading, isError } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, serverFilters),
-    enabled: !!wsId && !!projectId,
+    // A Scrum board with no active sprint has nothing to scope to — it renders
+    // the empty state instead of the whole project's issues.
+    enabled: !!wsId && !!projectId && (!scrum || !!activeSprint),
   })
   const issues = board?.issues ?? []
 
@@ -311,9 +344,20 @@ export default function BoardPage() {
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <div className="flex items-center gap-2 min-w-0">
+            {/* The rail item and this title stay "Board" in both modes — the
+                header strip below says WHICH sprint is on screen (HD-27). */}
             <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>Board</span>
           </div>
         </div>
+
+        {/* Sprint header strip — Scrum mode only; Kanban is pixel-unchanged. */}
+        {scrum && activeSprint && (
+          <SprintHeader
+            sprint={activeSprint}
+            canCurate={isCurator}
+            onComplete={() => setCompleting(true)}
+          />
+        )}
 
         {/* Filter bar — server-side priority select, client-side type select and
             assignee chips (HD-43) */}
@@ -456,7 +500,42 @@ export default function BoardPage() {
           className="flex-1 flex gap-3 overflow-x-auto overflow-y-hidden p-4"
           style={{ background: 'var(--color-surface)' }}
         >
-          {isLoading ? (
+          {scrum && !activeSprint ? (
+            sprintLoading ? (
+              <div className="flex-1 flex items-center justify-center">
+                <span className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
+              </div>
+            ) : (
+              // A Scrum board with nothing running shows a way forward, not an
+              // empty grid of columns (HD-27).
+              <div className="flex-1 flex items-center justify-center">
+                <div
+                  className="flex flex-col items-center gap-3 rounded-lg border text-center"
+                  style={{
+                    padding: '36px 32px', background: 'white',
+                    borderColor: 'var(--color-border)', boxShadow: 'var(--shadow-card)',
+                    maxWidth: 460,
+                  }}
+                >
+                  <p className="font-semibold" style={{ fontSize: 15 }}>No active sprint</p>
+                  <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                    This project’s board is scoped to the running sprint. Plan one in the Backlog,
+                    then start it to see the work here.
+                  </p>
+                  <div className="flex items-center gap-2 flex-wrap justify-center">
+                    <Link to={`/w/${wsId}/p/${projectId}/backlog`} style={{ textDecoration: 'none' }}>
+                      <Button variant="primary" size="sm">Go to Backlog</Button>
+                    </Link>
+                    {isCurator && futureSprints.length > 0 && (
+                      <Button variant="secondary" size="sm" onClick={() => setStartingSprint(futureSprints[0])}>
+                        Start “{futureSprints[0].name}”
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )
+          ) : isLoading ? (
             <div className="flex-1 flex items-center justify-center">
               <span className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
             </div>
@@ -476,6 +555,12 @@ export default function BoardPage() {
               const columnIssues = visibleIssues.filter(i => i.status.id === status.id)
               const allowed = dragging ? isMoveAllowed(dragging.status, status.id, transitions) : false
               const isOver = dragOverStatusId === status.id
+              // Scrum only: the column's point subtotal over the LOADED cards.
+              // The board is server-capped, so a truncated board suffixes "+" —
+              // the existing truncation banner explains why.
+              const columnPoints = scrum
+                ? columnIssues.reduce((sum, i) => sum + (i.storyPoints ?? 0), 0)
+                : null
               return (
                 <div
                   key={status.id}
@@ -518,6 +603,20 @@ export default function BoardPage() {
                     <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
                       {columnIssues.length}
                     </span>
+                    {columnPoints !== null && (
+                      <span
+                        className="mono text-xs"
+                        title="Story points in this column (over the loaded cards)"
+                        style={{
+                          borderRadius: 'var(--radius-full, 9999px)',
+                          padding: '0 7px',
+                          background: 'var(--color-surface)',
+                          color: 'var(--color-text-secondary)',
+                        }}
+                      >
+                        {formatPoints(columnPoints)}{board?.truncated ? '+' : ''} pts
+                      </span>
+                    )}
                     {/* Quick add (HD-70) — a permanent, quiet affordance in every
                         column: muted at rest, stronger (ink + tinted fill) on
                         hover/focus. Every workflow status can receive a new
@@ -619,6 +718,30 @@ export default function BoardPage() {
             />
           )}
         </BoardIssueDrawer>
+      )}
+
+      {/* Complete-sprint from the board header opens the very same dialog the
+          Backlog uses; on success there is no ACTIVE sprint any more, so the
+          board falls back to the empty state (HD-27). */}
+      {completing && activeSprint && wsId && projectId && (
+        <CompleteSprintDialog
+          wsId={wsId}
+          projectId={projectId}
+          sprint={activeSprint}
+          onClose={() => setCompleting(false)}
+          onCompleted={() => setCompleting(false)}
+        />
+      )}
+
+      {startingSprint && wsId && projectId && (
+        <StartSprintDialog
+          wsId={wsId}
+          projectId={projectId}
+          sprint={startingSprint}
+          issueCount={startingSprint.issueCount}
+          onClose={() => setStartingSprint(null)}
+          onStarted={() => setStartingSprint(null)}
+        />
       )}
     </div>
   )
@@ -797,6 +920,9 @@ function IssueCard({
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="text-xs truncate" style={{ color: issue.type.color }}>{issue.type.name}</span>
+          {/* Story points (HD-22) — a native attribute now, so it reads the same
+              on every surface; unestimated renders nothing. */}
+          <StoryPointsChip points={issue.storyPoints} compact />
           {issue.childCount > 0 && (
             <ChildrenProgress done={issue.doneChildCount} total={issue.childCount} compact />
           )}

@@ -4,7 +4,8 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import IssueDetail from './IssueDetail'
-import type { Issue, IssueType, PriorityOption, ProjectField, Status } from '../types'
+import { apiUpdateIssue } from '../api'
+import type { Issue, IssueType, PriorityOption, ProjectField, Sprint, Status } from '../types'
 
 // HD-69: refinements to the merged Activity feed (HD-64).
 //  1. the filter defaults to Comments — history entries stay hidden until the
@@ -51,6 +52,21 @@ const ISSUE_WITH_FIELDS: Issue = { ...ISSUE, fields: [{ fieldId: FIELD_TEAM.id, 
 /** What the mocked `apiGetIssue` resolves with — swappable per test. */
 let issueResponse: Issue = ISSUE
 
+// HD-22: the project's OPEN sprints (ACTIVE + FUTURE), i.e. everything the Sprint
+// picker may legally offer. Swappable per test, like `issueResponse`.
+const SPRINT_ACTIVE: Sprint = {
+  id: 'sp-active', name: 'Sprint 7', state: 'ACTIVE', sequence: 7,
+  goal: null, startAt: '2026-08-01T00:00:00Z', endAt: '2026-08-15T00:00:00Z',
+  completedAt: null, daysRemaining: 3,
+  issueCount: 1, doneIssueCount: 0, points: 0, donePoints: 0, unestimatedCount: 1,
+  createdAt: '2026-07-30T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+}
+const SPRINT_FUTURE: Sprint = {
+  ...SPRINT_ACTIVE, id: 'sp-future', name: 'Sprint 8', state: 'FUTURE', sequence: 8,
+  startAt: null, endAt: null, daysRemaining: null, issueCount: 0, unestimatedCount: 0,
+}
+let openSprints: Sprint[] = []
+
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
   apiGetIssue: vi.fn(async () => issueResponse),
@@ -84,6 +100,14 @@ vi.mock('../api', () => ({
   componentsApi: { list: vi.fn(async () => []) },
   // HD-32: …and its Fix/Affects versions cells from the project's versions.
   versionsApi: { list: vi.fn(async () => []) },
+  // HD-22: …and its Sprint cell from the project's open sprints (none here, so
+  // the cell hides itself exactly as the Component/Version cells do).
+  sprintsApi: {
+    list: vi.fn(async () => ({
+      content: openSprints, page: 0, size: 200,
+      totalElements: openSprints.length, totalPages: 1, hasNext: false,
+    })),
+  },
 }))
 
 beforeAll(() => {
@@ -120,7 +144,11 @@ function renderDetail(fields: ProjectField[] = []) {
   )
 }
 
-afterEach(() => { issueResponse = ISSUE })
+afterEach(() => {
+  issueResponse = ISSUE
+  openSprints = []
+  vi.mocked(apiUpdateIssue).mockReset()
+})
 
 /** The activity filter is a segmented control of buttons labelled "<filter> <count>". */
 function filterButton(name: 'all' | 'comments' | 'history') {
@@ -232,5 +260,97 @@ describe('IssueDetail custom fields placement (HD-68)', () => {
     expect(screen.getByText('No field values set.')).toBeInTheDocument()
     expect(heading('Fields').compareDocumentPosition(heading('Description')) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy()
+  })
+})
+
+// HD-22 + the 0.13.0 review: the Sprint cell.
+//
+// A COMPLETED sprint's membership is a delivered fact — the server now refuses to
+// take an issue OUT of one (422) as firmly as it refuses to put one IN. The picker
+// must therefore stop OFFERING the move rather than let the user discover it as a
+// 422 that silently reverts their edit.
+describe('IssueDetail sprint cell (HD-22 / 0.13.0 freeze)', () => {
+  /**
+   * The design system's `Select` is a custom listbox, not a native `<select>`: the
+   * trigger is a button carrying the aria-label, and the options only exist in the
+   * DOM while the popup is open.
+   */
+  function sprintTrigger() {
+    return screen.queryByRole('button', { name: 'Sprint' })
+  }
+
+  it('hides the cell entirely when the project plans no sprints and the issue has none', async () => {
+    renderDetail()
+    await screen.findByText('Something to fix')
+    // Same rule as the Component/Version cells: nothing to choose from, no empty control.
+    expect(sprintTrigger()).toBeNull()
+  })
+
+  it('offers the open sprints and clears with `clearSprint` — never both keys', async () => {
+    openSprints = [SPRINT_ACTIVE, SPRINT_FUTURE]
+    issueResponse = {
+      ...ISSUE,
+      sprint: { id: SPRINT_ACTIVE.id, name: SPRINT_ACTIVE.name, state: 'ACTIVE' },
+    }
+    vi.mocked(apiUpdateIssue).mockResolvedValue({ ...ISSUE, version: 2 })
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    const trigger = await waitFor(() => {
+      const el = sprintTrigger()
+      expect(el).not.toBeNull()
+      return el!
+    })
+    expect(trigger).not.toBeDisabled()
+    expect(trigger).toHaveTextContent('Sprint 7 (active)')
+
+    // Both OPEN sprints are on offer, the running one flagged as such.
+    await userEvent.click(trigger)
+    expect(await screen.findByRole('option', { name: 'Sprint 8' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Sprint 7 (active)' })).toBeInTheDocument()
+
+    // "No sprint (backlog)" is the clear — and it must go out as `clearSprint`
+    // ALONE: `sprintId` + `clearSprint` is a 400 (and now a type error too).
+    await userEvent.click(screen.getByRole('option', { name: 'No sprint (backlog)' }))
+    await waitFor(() => expect(apiUpdateIssue).toHaveBeenCalled())
+    const payload = vi.mocked(apiUpdateIssue).mock.calls[0][3] as Record<string, unknown>
+    expect(payload.clearSprint).toBe(true)
+    expect(payload).not.toHaveProperty('sprintId')
+
+    // …and moving it to another open sprint sends the id alone.
+    await userEvent.click(sprintTrigger()!)
+    await userEvent.click(await screen.findByRole('option', { name: 'Sprint 8' }))
+    await waitFor(() => expect(apiUpdateIssue).toHaveBeenCalledTimes(2))
+    const moved = vi.mocked(apiUpdateIssue).mock.calls[1][3] as Record<string, unknown>
+    expect(moved.sprintId).toBe(SPRINT_FUTURE.id)
+    expect(moved).not.toHaveProperty('clearSprint')
+  })
+
+  it('goes read-only, with the reason, once the issue’s sprint has completed', async () => {
+    // A completed sprint has left the OPEN list; the issue's own sprint keeps it
+    // displayable, exactly like an archived component.
+    openSprints = [SPRINT_FUTURE]
+    issueResponse = {
+      ...ISSUE,
+      sprint: { id: 'sp-closed', name: 'Sprint 6', state: 'COMPLETED' },
+    }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    const trigger = await waitFor(() => {
+      const el = sprintTrigger()
+      expect(el).not.toBeNull()
+      return el!
+    })
+    // Read-only rather than absent: the issue must still show what it was delivered in.
+    expect(trigger).toBeDisabled()
+    expect(trigger).toHaveTextContent('Sprint 6')
+    // …and the control explains itself instead of looking broken.
+    expect(screen.getByText(/no longer be moved/i)).toBeInTheDocument()
+
+    // The picker cannot even be opened, so no move can be attempted from here.
+    await userEvent.click(trigger)
+    expect(screen.queryByRole('option', { name: 'Sprint 8' })).toBeNull()
+    expect(apiUpdateIssue).not.toHaveBeenCalled()
   })
 })

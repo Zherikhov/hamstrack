@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { apiMe, ApiResponseError } from './api'
+import { apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError } from './api'
+import type { RankIssuePayload, UpdateIssuePayload } from './api'
 import { useAuthStore } from './auth'
 
 // Exercises the shared request()/authFetch() plumbing through a public wrapper
@@ -143,5 +144,54 @@ describe('request() error normalization', () => {
     expect(err.status).toBe(500)
     expect(err.detail).not.toBe('')
     expect(err.detail).toContain('500')
+  })
+})
+
+// HD-22 §4.4: `sprintId` (move into a sprint) and `clearSprint` (return to the
+// ranked backlog) answer the same question, so the server answers 400 when both
+// arrive — it does NOT let one win silently. The client must be structurally
+// unable to emit that payload: the types forbid it at every call site (the casts
+// below are what it takes to even express it), and this guard is the runtime
+// twin for anything assembled dynamically.
+describe('issue writes: sprintId and clearSprint are mutually exclusive', () => {
+  it('throws before the request instead of letting the server 400', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => jsonResponse(200, {}))
+    globalThis.fetch = fetchMock
+
+    const both = { sprintId: 'sp1', clearSprint: true } as unknown as UpdateIssuePayload
+    await expect(apiUpdateIssue('w1', 'p1', 7, both)).rejects.toThrow(/mutually exclusive/)
+    await expect(apiRankIssue('w1', 'p1', 7, both as RankIssuePayload)).rejects.toThrow(/mutually exclusive/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('lets each of them through on its own', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => jsonResponse(200, { id: 'i1' }))
+    globalThis.fetch = fetchMock
+
+    await apiUpdateIssue('w1', 'p1', 7, { sprintId: 'sp1' })
+    await apiUpdateIssue('w1', 'p1', 7, { clearSprint: true })
+    await apiRankIssue('w1', 'p1', 7, { afterIssueId: 'i2', sprintId: 'sp1' })
+    await apiRankIssue('w1', 'p1', 7, { afterIssueId: 'i2', clearSprint: true })
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  /**
+   * The runtime guard above is the SECOND line of defence; the first is the type
+   * itself, and a type has no runtime trace to assert on. `@ts-expect-error` is the
+   * assertion: if the union is ever loosened so both keys become legal, these lines
+   * stop being errors and `tsc -b` fails with "unused '@ts-expect-error'" — i.e. the
+   * build breaks the moment the compile-time half regresses, which is exactly when
+   * a dynamically-assembled payload would start reaching the server as a 400.
+   */
+  it('is rejected by the TYPES too, not only at runtime', () => {
+    // @ts-expect-error — sprintId and clearSprint are mutually exclusive by type.
+    const bothOnUpdate: UpdateIssuePayload = { sprintId: 'sp1', clearSprint: true }
+    // @ts-expect-error — …and on the rank payload, which shares the same union.
+    const bothOnRank: RankIssuePayload = { afterIssueId: 'i2', sprintId: 'sp1', clearSprint: true }
+
+    // Each on its own type-checks — the union forbids the PAIR, not the fields.
+    const idOnly: UpdateIssuePayload = { sprintId: 'sp1' }
+    const clearOnly: UpdateIssuePayload = { clearSprint: true }
+    expect([bothOnUpdate, bothOnRank, idOnly, clearOnly]).toHaveLength(4)
   })
 })

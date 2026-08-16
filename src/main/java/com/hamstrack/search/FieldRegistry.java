@@ -116,6 +116,33 @@ public class FieldRegistry {
                 true, true, false, null, "VERSION", List.of(), true));
         register(new FieldDescriptor("affectsVersion", FieldDataType.VERSION_REF, EQ_ONLY,
                 true, true, false, null, "VERSION", List.of(), true));
+
+        // ---- sprint (HD-22 §4.7) ----
+        // A single-valued ToOne like `component`, so it reuses the plain ENUM_REF id-set
+        // path — no new compiler branch, just `entityPath = "sprint.id"`. Nullable
+        // (IS [NOT] EMPTY = "not in any sprint", i.e. the backlog). Deliberately NOT
+        // sortable: sprint order across several projects has no common meaning, so
+        // `ORDER BY sprint` is a 422 from HqlValidator.
+        //
+        // Names resolve across the caller's VISIBLE PROJECTS only, so two projects may
+        // each run a "Sprint 7" and both match. COMPLETED sprints are excluded from name
+        // resolution (years of history would flood the namespace); issues carrying one
+        // still match by id.
+        var sprint = new FieldDescriptor("sprint", FieldDataType.ENUM_REF, EQ_ONLY,
+                true, true, false, "sprint.id", "SPRINT", List.of(), true);
+        register(sprint);
+        register("sprints", sprint);   // plural alias, same descriptor
+
+        // ---- storyPoints (HD-22 §4.7) ----
+        // The first NATIVE numeric field: a real NUMERIC column on issues, so it takes
+        // ordered comparisons directly (unlike the custom-field NUMBER path, which
+        // compares inside a JSONB EXISTS). Nullable — `IS EMPTY` means UNESTIMATED,
+        // which is deliberately not the same statement as `= 0` — and SORTABLE, which is
+        // the point ("show me the big ones first").
+        var storyPoints = new FieldDescriptor("storyPoints", FieldDataType.NUMBER, ORDERED,
+                false, true, true, "storyPoints", null, List.of(), true);
+        register(storyPoints);
+        register("points", storyPoints);   // short alias, same descriptor
     }
 
     /**

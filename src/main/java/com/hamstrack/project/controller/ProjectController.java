@@ -14,9 +14,23 @@ import java.util.UUID;
 
 /**
  * Project management within a workspace: CRUD, archive/unarchive and project
- * membership. Visible to all workspace members; mutations require the
- * project MANAGER role (the creator gets MANAGER automatically). Archived
- * projects are hidden from listings by default and reject issue mutations.
+ * membership. Visible to all workspace members; the creator gets MANAGER
+ * automatically. Archived projects are hidden from listings by default and
+ * reject issue mutations.
+ *
+ * <p><strong>Two mutation tiers</strong> since HD-22 (agile-sprints-proposal
+ * §3.2): {@code PATCH /{projectId}} (name / description / {@code boardMode})
+ * takes the <em>project curator</em> — project MANAGER <strong>or</strong>
+ * workspace OWNER/ADMIN, {@code ScopeResolver.requireProjectCurator} — which
+ * aligns it with every other project-content write (components, versions,
+ * sprints) and with the SPA's settings gate. {@code archive}/{@code unarchive}
+ * and member management stay <strong>MANAGER-only</strong>.
+ *
+ * <p>An <strong>archived</strong> project is frozen: {@code PATCH /{projectId}}
+ * returns <strong>409 "Project is archived"</strong>, the same answer every issue
+ * edit, sprint mutation and rank move already gives. That includes
+ * {@code boardMode}, which changes how the board and the backlog render;
+ * {@code unarchive} is the way back. Reads keep working.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects")

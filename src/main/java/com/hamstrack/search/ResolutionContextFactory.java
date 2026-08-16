@@ -9,6 +9,7 @@ import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.repository.ComponentRepository;
 import com.hamstrack.issue.repository.LabelRepository;
+import com.hamstrack.issue.repository.SprintRepository;
 import com.hamstrack.issue.repository.VersionRepository;
 import com.hamstrack.issue.service.FieldValueService;
 import com.hamstrack.issue.service.ProjectConfigService;
@@ -43,6 +44,7 @@ public class ResolutionContextFactory {
     private final LabelRepository labelRepository;
     private final ComponentRepository componentRepository;
     private final VersionRepository versionRepository;
+    private final SprintRepository sprintRepository;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectConfigService projectConfigService;
     private final FieldValueService fieldValueService;
@@ -100,6 +102,13 @@ public class ResolutionContextFactory {
         // link_type filter, not by name resolution.
         Map<String, List<UUID>> versionIds = new LinkedHashMap<>();
         Map<String, String> versionNames = new LinkedHashMap<>();
+        // Sprints (HD-22) follow components/versions exactly: PROJECT-scoped, so built
+        // from the VISIBLE PROJECT set only, and a name maps to a LIST of ids (two
+        // visible projects may each run a "Sprint 7"). COMPLETED sprints are excluded
+        // from name resolution — years of history would flood the namespace — but issues
+        // still carrying one match by id.
+        Map<String, List<UUID>> sprintIds = new LinkedHashMap<>();
+        Map<String, String> sprintNames = new LinkedHashMap<>();
         if (!visibleIds.isEmpty()) {   // an empty IN list is invalid in JPQL
             for (var row : componentRepository.findIdAndNameByProjectIds(visibleIds)) {
                 UUID componentId = (UUID) row[0];
@@ -112,6 +121,12 @@ public class ResolutionContextFactory {
                 String versionName = (String) row[1];
                 addId(versionIds, versionName, versionId);
                 versionNames.putIfAbsent(versionName.toLowerCase(Locale.ROOT), versionName);
+            }
+            for (var row : sprintRepository.findIdAndNameByProjectIds(visibleIds)) {
+                UUID sprintId = (UUID) row[0];
+                String sprintName = (String) row[1];
+                addId(sprintIds, sprintName, sprintId);
+                sprintNames.putIfAbsent(sprintName.toLowerCase(Locale.ROOT), sprintName);
             }
         }
         // Custom fields (HD-52): union of non-archived field_defs reachable by any
@@ -151,13 +166,14 @@ public class ResolutionContextFactory {
 
         return new ResolutionContext(actor, ws, visibleIds,
                 statusIds, typeIds, priorityIds, prioritiesByName, labelIds, componentIds,
-                versionIds, members,
+                versionIds, sprintIds, members,
                 List.copyOf(statusNames.values()),
                 List.copyOf(typeNames.values()),
                 List.copyOf(priorityNames.values()),
                 List.copyOf(labelNames.values()),
                 List.copyOf(componentNames.values()),
                 List.copyOf(versionNames.values()),
+                List.copyOf(sprintNames.values()),
                 customFields);
     }
 

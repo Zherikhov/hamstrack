@@ -16,6 +16,9 @@ import { FieldInput, FieldValueDisplay } from '../components/fields'
 import { LabelChip, LabelPicker } from '../components/labels'
 import { ComponentSelect, useProjectComponents } from '../components/projectComponents'
 import { VersionBadge, VersionPicker, useProjectVersions } from '../components/versions'
+import {
+  CLOSED_SPRINT_HINT, SprintPicker, isSprintClosed, useOpenSprints,
+} from '../components/sprints'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
 import { projectIssuesKeyPrefix } from '../lib/queryKeys'
@@ -83,6 +86,9 @@ function historyLabel(field: string) {
     priority: 'Priority', type: 'Type', assignee: 'Assignee', dueDate: 'Due date',
     parent: 'Parent', labels: 'Labels', component: 'Component',
     fixVersions: 'Fix versions', affectsVersions: 'Affects versions',
+    // HD-22 — a rank change deliberately writes NO history row (positional churn
+    // would drown the log); these two do.
+    sprint: 'Sprint', storyPoints: 'Story points',
   }
   return labels[field] ?? field
 }
@@ -233,6 +239,10 @@ export default function IssueDetail({
   // full-replacement PATCH, so an unchanged set skips the request entirely.
   const [versionRoleEditing, setVersionRoleEditing] = useState<'fix' | 'affects' | null>(null)
   const [versionDraft, setVersionDraft] = useState<string[]>([])
+
+  // Inline story-points edit (HD-22) — a string draft so an in-progress "1." or a
+  // blanked-out field are representable; `null` means "not editing".
+  const [pointsDraft, setPointsDraft] = useState<string | null>(null)
 
   // Inline title editing (HD-60 — the first inline field; the pattern the rest follow)
   const [titleEditing, setTitleEditing] = useState(false)
@@ -589,6 +599,45 @@ export default function IssueDetail({
     // Full replacement for THAT role only ([] clears it); the other role is
     // absent from the payload and therefore untouched.
     commitField(role === 'fix' ? { fixVersionIds: versionDraft } : { affectsVersionIds: versionDraft })
+  }
+
+  // ── Inline sprint + story points (HD-22) ──
+  // Sprints are project-scoped content with their own endpoint/key (never part of
+  // ProjectConfig), so like components and versions they are fetched here rather
+  // than threaded through the surface props.
+  const { data: sprintOptions = [] } = useOpenSprints(wsId, projectId)
+  // Hidden when the project plans no sprints AND this issue carries none —
+  // nothing to choose from, so no empty control (and no Scrum vocabulary on a
+  // pure-Kanban project).
+  const showSprintCell = sprintOptions.length > 0 || !!issue?.sprint
+  // Read-only once the sprint has completed — see the picker below.
+  const sprintClosed = isSprintClosed(issue?.sprint?.state)
+
+  /**
+   * Commit the inline estimate. Blank clears it (`clearStoryPoints` — a plain
+   * null can't be told apart from "not sent"); an unparseable or unchanged value
+   * writes nothing. The server independently rejects <0, >999 and >2 decimals
+   * with a 422, which surfaces through the shared save pipeline.
+   */
+  function commitStoryPoints() {
+    const draft = pointsDraft
+    setPointsDraft(null)
+    if (draft === null || !issue) return
+    const trimmed = draft.trim()
+    const current = issue.storyPoints ?? null
+    if (trimmed === '') {
+      if (current === null) return
+      commitField({ clearStoryPoints: true })
+      return
+    }
+    const parsed = Number(trimmed)
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      setMetaError('Story points must be a number between 0 and 999, with at most 2 decimals.')
+      return
+    }
+    setMetaError('')
+    if (current !== null && Math.abs(current - parsed) < 1e-9) return
+    commitField({ storyPoints: parsed })
   }
 
   // ── Inline description (HD-62) ──
@@ -1014,6 +1063,59 @@ export default function IssueDetail({
                   />
                 </div>
               )}
+
+              {/* Sprint (HD-22) — one per issue; blank returns it to the ranked
+                  backlog (clearSprint) and PRESERVES its rank. Only OPEN sprints
+                  are offered (assigning to a completed one is a 422). Once the
+                  issue's own sprint has COMPLETED the cell goes read-only: its
+                  membership is the sprint's record of what it delivered, and the
+                  server refuses to change it in either direction. */}
+              {showSprintCell && (
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Sprint</div>
+                  <SprintPicker
+                    wsId={wsId}
+                    projectId={projectId}
+                    ariaLabel="Sprint"
+                    value={issue.sprint?.id ?? ''}
+                    current={issue.sprint}
+                    emptyLabel="No sprint (backlog)"
+                    // A COMPLETED sprint's membership is a delivered fact: the
+                    // server refuses both `clearSprint` and a move to another
+                    // sprint with a 422, so the control is read-only rather than
+                    // a trap that always errors.
+                    disabled={sprintClosed}
+                    onChange={id => commitField(id ? { sprintId: id } : { clearSprint: true })}
+                  />
+                  {sprintClosed && (
+                    <div className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                      {CLOSED_SPRINT_HINT}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Story points (HD-22) — a native attribute now, not a custom
+                  field. Blank = UNESTIMATED, which is deliberately different from
+                  0 ("we didn't estimate it" vs "it's free"). */}
+              <div>
+                <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Story points</div>
+                <Input
+                  type="number"
+                  min={0}
+                  max={999}
+                  step={0.5}
+                  aria-label="Story points"
+                  placeholder="Unestimated"
+                  value={pointsDraft ?? (issue.storyPoints ?? '')}
+                  onChange={e => setPointsDraft(e.target.value)}
+                  onBlur={commitStoryPoints}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); commitStoryPoints() }
+                    else if (e.key === 'Escape') { e.preventDefault(); setPointsDraft(null) }
+                  }}
+                />
+              </div>
 
               {/* Due date — clearing the field clears the due date */}
               <div>

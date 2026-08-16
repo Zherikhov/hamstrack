@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.common.util.Points;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.search.parser.ast.Value;
 import org.springframework.stereotype.Component;
@@ -40,8 +41,9 @@ public class HqlValueResolver {
                     "parent resolution is handled by HqlParentResolver");
             case DATE, TIMESTAMP -> resolveDate(field, value, ctx);
             case TEXT -> new ResolvedValue.TextTerm(requireString(field, value));
-            case NUMBER -> throw new HqlSemanticException(
-                    "Field '" + field.name() + "' is not queryable in MVP", field.name());
+            // HD-22 §4.7: NUMBER went live with the native `storyPoints` column, replacing
+            // this branch's former "not queryable in MVP" throw.
+            case NUMBER -> resolveNumber(field, value);
         };
     }
 
@@ -75,6 +77,10 @@ public class HqlValueResolver {
             // resolves through a project the actor cannot see — and a name owned by two
             // visible projects maps to BOTH ids, matching issues in either.
             case "component" -> ctx.componentIdsByName();
+            // sprint (HD-22): built from the VISIBLE PROJECT set for the same reason as
+            // component — a name must never resolve through a project the actor cannot
+            // see — and a name run by two visible projects maps to BOTH ids.
+            case "sprint" -> ctx.sprintIdsByName();
             default -> throw new HqlSemanticException(
                     "Field '" + field.name() + "' is not yet queryable", field.name());
         };
@@ -172,6 +178,55 @@ public class HqlValueResolver {
         }
         throw new HqlSemanticException(
                 "No member matching '" + raw + "' in this workspace", field.name());
+    }
+
+    // ---- NUMBER (native numeric column — storyPoints, HD-22 §4.7) ----
+
+    /**
+     * Resolve a numeric operand for a native {@code NUMBER} field. Accepts a bare
+     * numeric literal ({@code storyPoints >= 5}) and, for convenience, a quoted one —
+     * both are parsed with {@link java.math.BigDecimal} so no precision is lost between
+     * the lexer's raw text and the {@code NUMERIC(5,2)} column.
+     *
+     * <p>A function call or an unparseable literal is a {@link HqlSemanticException}
+     * (422, field-anchored), never a silent zero.
+     *
+     * <p><strong>The operand is bounded to the field's own domain</strong> (security
+     * review L3). Parsing alone accepts {@code storyPoints > 1e999999999}, which
+     * PostgreSQL then rejects during parameter conversion (SQLSTATE 22003) — there is no
+     * generic handler for that, so a plain member gets a bare 500 plus an ERROR stack
+     * trace out of a filter that could never have matched a row. The bounds come from
+     * {@link Points}, the same constants {@code IssueService.requireValidStoryPoints}
+     * enforces on the write path, so the query and write domains cannot drift.
+     * {@code NUMBER}'s only member today is {@code storyPoints}; a future one must bring
+     * its own domain here rather than widen this check.
+     */
+    private ResolvedValue resolveNumber(FieldDescriptor field, Value value) {
+        String raw = switch (value) {
+            case Value.NumberLiteral n -> n.raw();
+            case Value.StringLiteral s -> s.value();
+            case Value.FunctionCall fn -> throw new HqlSemanticException(
+                    "Function '" + fn.name() + "()' is not valid for field '" + field.name() + "'",
+                    field.name());
+        };
+        java.math.BigDecimal parsed;
+        try {
+            parsed = new java.math.BigDecimal(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new HqlSemanticException(
+                    "Field '" + field.name() + "' expects a number", field.name());
+        }
+        if (!Points.inStoryPointRange(parsed)) {
+            throw new HqlSemanticException(
+                    "Field '" + field.name() + "' accepts values between 0 and "
+                            + Points.MAX_STORY_POINTS.toPlainString(), field.name());
+        }
+        if (!Points.hasStoryPointScale(parsed)) {
+            throw new HqlSemanticException(
+                    "Field '" + field.name() + "' allows at most "
+                            + Points.MAX_STORY_POINT_SCALE + " decimal places", field.name());
+        }
+        return new ResolvedValue.NumberValue(parsed);
     }
 
     // ---- DATE / TIMESTAMP (literal / now() / startOfWeek(), server UTC) ----

@@ -28,6 +28,11 @@ export interface Workspace {
   createdAt: string;
 }
 
+// Presentation switch (HD-22 §3.5), NOT a permission: the sprint API works
+// identically in both modes. SCRUM scopes the board to the active sprint and
+// shows the sprint header; KANBAN is the pre-0.13.0 behaviour.
+export type BoardMode = 'KANBAN' | 'SCRUM';
+
 export interface Project {
   id: string;
   workspaceId: string;
@@ -36,6 +41,9 @@ export interface Project {
   description?: string;
   archived: boolean;
   myRole: 'MANAGER' | 'MEMBER' | 'VIEWER';
+  // Optional on the wire only for pre-0.13.0 servers / hand-built fixtures —
+  // every consumer reads it as `project.boardMode ?? 'KANBAN'`.
+  boardMode?: BoardMode;
   createdAt: string;
 }
 
@@ -226,6 +234,109 @@ export interface VersionUsage {
   unresolvedFixIssueCount: number;
 }
 
+// ── Sprints (HD-22 / HD-23 / HD-27) ─────────────────────────────────────────
+// Project-scoped iterations with a real lifecycle (FUTURE → ACTIVE → COMPLETED,
+// no re-open). Like components and versions they are project CONTENT, not bound
+// taxonomy: their own endpoints, their own query keys (`sprintsKey`), never part
+// of `ProjectConfig` — so starting a sprint does not invalidate the config every
+// board render depends on.
+
+export type SprintState = 'FUTURE' | 'ACTIVE' | 'COMPLETED';
+
+/** A sprint as embedded in an issue payload — enough to render the badge. */
+export interface SprintRef {
+  id: string;
+  name: string;
+  state: SprintState;
+}
+
+/** A full sprint row (planning sections, board header, pickers). */
+export interface Sprint extends SprintRef {
+  goal?: string | null;
+  /** 1-based, per project; drives the default name and the display order. */
+  sequence: number;
+  startAt?: string | null;
+  endAt?: string | null;
+  completedAt?: string | null;
+  /** ACTIVE + `endAt` only; negative = overdue, 0 = ends today, null otherwise. */
+  daysRemaining?: number | null;
+  issueCount: number;
+  doneIssueCount: number;
+  /** null in the story-points fallback design (§3.4) — every point UI degrades to hidden. */
+  points: number | null;
+  donePoints: number | null;
+  unestimatedCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Whole-section totals. ALWAYS computed over the entire section server-side,
+ * never over a truncated page — a truncated section still shows honest numbers.
+ */
+export interface SectionStats {
+  issueCount: number;
+  doneIssueCount: number;
+  points: number | null;
+  donePoints: number | null;
+  unestimatedCount: number;
+}
+
+/** Common shape of one planning section (the HD-79 truncation pattern). */
+export interface BacklogSectionBase {
+  issues: Issue[];
+  truncated: boolean;
+  totalAvailable: number;
+  stats: SectionStats;
+}
+
+export interface BacklogSprintSection extends BacklogSectionBase {
+  sprint: Sprint;
+}
+
+/** `GET …/backlog` — the whole planning view in one aggregate. */
+export interface BacklogView {
+  /** ACTIVE first, then FUTURE by sequence. */
+  sprints: BacklogSprintSection[];
+  backlog: BacklogSectionBase;
+  /** `app.agile.section-max-issues` — the per-section cap the server applied. */
+  sectionCap: number;
+  /**
+   * `app.agile.max-issues-per-bulk-move` — the largest `issueIds` a single bulk
+   * request may carry (400 above it). It is INDEPENDENT of `sectionCap` and by
+   * default smaller (100 vs 300), so any "move every issue" action driven by a
+   * rendered section MUST chunk by this number, never by the section size.
+   * Optional only so a response from a server that predates the field still
+   * types — consumers degrade to one issue per request rather than guessing a
+   * default (see `useSprintMutations`).
+   */
+  bulkMoveCap?: number;
+}
+
+/** `GET …/sprints/{id}/completion-preview` — the completion dialog's data source. */
+export interface SprintCompletionPreview {
+  totalIssueCount: number;
+  doneIssueCount: number;
+  unfinishedIssueCount: number;
+  totalPoints: number | null;
+  donePoints: number | null;
+  unfinishedPoints: number | null;
+  /** Legal "move the unfinished work to →" targets: FUTURE sprints of this project. */
+  targetCandidates: SprintRef[];
+}
+
+export type UnfinishedDisposition = 'BACKLOG' | 'SPRINT';
+
+/** `POST …/sprints/{id}/complete` — the reported outcome, shown as a summary. */
+export interface SprintCompletionResult {
+  sprint: Sprint;
+  completedIssueCount: number;
+  carriedOverIssueCount: number;
+  carriedOverToSprintId: string | null;
+  donePoints: number | null;
+  carriedOverPoints: number | null;
+}
+
 export interface Issue {
   id: string;
   number: number;
@@ -259,6 +370,17 @@ export interface Issue {
   // copies stay valid — every consumer reads them as `issue.fixVersions ?? []`.
   fixVersions?: VersionRef[];
   affectsVersions?: VersionRef[];
+  // The sprint this issue is committed to (HD-22), or null/absent when it sits
+  // in the ranked backlog. Read as `issue.sprint ?? undefined` so hand-built
+  // fixtures and locally-patched copies stay valid.
+  sprint?: SprintRef | null;
+  // Native estimate (HD-22 §3.4): 0…999 with at most 2 decimals. `null`/absent
+  // means UNESTIMATED — deliberately not 0 ("we didn't estimate it" and "it's
+  // free" are different statements).
+  storyPoints?: number | null;
+  // NOTE: `position` (the project-wide backlog/board rank) is deliberately NOT
+  // exposed by the API — placement is computed server-side from neighbour
+  // anchors, so the client can never invent or corrupt a rank value.
   fields: FieldValueEntry[];          // filled custom fields only
   version: number;
   createdAt: string;

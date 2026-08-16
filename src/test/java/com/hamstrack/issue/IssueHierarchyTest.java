@@ -504,18 +504,23 @@ class IssueHierarchyTest {
         var ctx = newProject();
         bindEngineeringFields(ctx);
         var cfg = json.readTree(configBody(ctx));
-        var storyPointsFieldId = fieldId(cfg, "story_points");
+        // `severity`, not `story_points`: HD-22 promoted story points to a NATIVE
+        // issues.story_points column and V11 ARCHIVED the seeded custom field, so it no
+        // longer appears in the project config. Any JSONB-backed field exercises the
+        // same Jackson 2/3 boundary this test is about.
+        var severityFieldId = fieldId(cfg, "severity");
 
         var story = createIssue(ctx, "Story", "story");
         long before = issueRepository.count();
         var resp = create(ctx, body(ctx, "Sub-task", "sub with field",
-                        parentField(story.id()), "\"fields\":{\"" + storyPointsFieldId + "\":5}"))
+                        parentField(story.id()), "\"fields\":{\"" + severityFieldId + "\":\"major\"}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.parentId").value(story.id()))
                 .andReturn().getResponse().getContentAsString();
         // The emitted body parses and carries the field value (JSONB round-trip).
         var node = json.readTree(resp);
-        assert node.get("fields").get(0).get("value").asInt() == 5 : "field value round-tripped";
+        assert node.get("fields").get(0).get("value").asText().equals("major")
+                : "field value round-tripped";
         assert issueRepository.count() == before + 1 : "exactly one issue created";
     }
 

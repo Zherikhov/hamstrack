@@ -47,6 +47,13 @@ import java.util.UUID;
  *                          match by id. Shared by {@code fixVersion} and
  *                          {@code affectsVersion} — the role is applied by the
  *                          compiler's {@code link_type} filter, not by resolution
+ * @param sprintIdsByName   lowercase sprint name → sprint ids across the
+ *                          <em>visible projects</em> only (HD-22 §4.7). Sprints are
+ *                          project-owned, so two visible projects may each run a
+ *                          "Sprint 7" and the name maps to BOTH ids. COMPLETED sprints
+ *                          are excluded from name resolution — years of history would
+ *                          flood the namespace and a name resolving to 40 ids is
+ *                          useless — but issues still carrying one match by id
  * @param statusNames       distinct status display names reachable by visible
  *                          projects, original casing (for the {@code /schema}
  *                          picklist); {@code typeNames}/{@code priorityNames} likewise
@@ -60,6 +67,9 @@ import java.util.UUID;
  *                          projects, original casing, de-duplicated
  *                          case-insensitively (for the {@code /schema}
  *                          {@code VERSION} picklist)
+ * @param sprintNames       open sprint display names across the visible projects,
+ *                          original casing, de-duplicated case-insensitively (for the
+ *                          {@code /schema} {@code SPRINT} picklist)
  * @param customFieldsByKey non-archived custom fields (M2) reachable by any visible
  *                          project, keyed by their machine {@code key} (== HQL field
  *                          name). System field names always win — a key here is only
@@ -77,6 +87,7 @@ public record ResolutionContext(
         Map<String, List<UUID>> labelIdsByName,
         Map<String, List<UUID>> componentIdsByName,
         Map<String, List<UUID>> versionIdsByName,
+        Map<String, List<UUID>> sprintIdsByName,
         List<Member> members,
         List<String> statusNames,
         List<String> typeNames,
@@ -84,6 +95,7 @@ public record ResolutionContext(
         List<String> labelNames,
         List<String> componentNames,
         List<String> versionNames,
+        List<String> sprintNames,
         Map<String, CustomFieldMeta> customFieldsByKey
 ) {
     /** A workspace member's identity for USER_REF resolution. */

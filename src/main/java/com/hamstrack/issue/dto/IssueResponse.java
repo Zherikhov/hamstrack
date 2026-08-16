@@ -39,6 +39,13 @@ public record IssueResponse(
         // roles in one query) by VersionService.versionsByIssue.
         List<VersionRef> fixVersions,
         List<VersionRef> affectsVersions,
+        // HD-22 — the sprint this issue is committed to, or null = the backlog. A
+        // ToOne: it rides the existing LEFT JOIN FETCH blocks, so it needs no batch
+        // loader. NOTE: `position` (the shared backlog/board rank) is deliberately NOT
+        // exposed — it is server-written only and the client never needs its value.
+        SprintRef sprint,
+        // HD-22 — native story-point estimate; null = unestimated (never 0).
+        java.math.BigDecimal storyPoints,
         List<FieldValueResponse> fields,
         int version,
         Instant createdAt,
@@ -91,6 +98,11 @@ public record IssueResponse(
                 labels == null ? List.of() : labels,
                 ComponentRef.of(i.getComponent()),
                 v.fixVersions(), v.affectsVersions(),
+                SprintRef.of(i.getSprint()),
+                // NUMERIC(5,2) comes back as 5.00; §7 pins point values as trailing-zero
+                // stripped JSON numbers (and Points.normalize also stops 100 from
+                // serializing as 1E+2). Null stays null — that is "unestimated".
+                com.hamstrack.common.util.Points.normalize(i.getStoryPoints()),
                 FieldValueResponse.of(fieldValues),
                 i.getVersion(),
                 i.getCreatedAt(), i.getUpdatedAt(),

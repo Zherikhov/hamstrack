@@ -2,9 +2,13 @@ package com.hamstrack.common.seed;
 
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.config.AppProperties;
+import com.hamstrack.issue.dto.AddIssuesToSprintRequest;
 import com.hamstrack.issue.dto.CreateComponentRequest;
 import com.hamstrack.issue.dto.CreateIssueRequest;
 import com.hamstrack.issue.dto.CreateLabelRequest;
+import com.hamstrack.issue.dto.CreateSprintRequest;
+import com.hamstrack.issue.dto.SprintInsertPosition;
+import com.hamstrack.issue.dto.StartSprintRequest;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
 import com.hamstrack.issue.entity.Status;
@@ -14,8 +18,11 @@ import com.hamstrack.issue.dto.CreateVersionRequest;
 import com.hamstrack.issue.dto.ReleaseVersionRequest;
 import com.hamstrack.issue.entity.VersionLinkType;
 import com.hamstrack.issue.repository.ComponentRepository;
+import com.hamstrack.issue.repository.SprintRepository;
 import com.hamstrack.issue.repository.VersionRepository;
+import com.hamstrack.issue.service.SprintService;
 import com.hamstrack.issue.service.VersionService;
+import com.hamstrack.project.entity.BoardMode;
 import com.hamstrack.issue.repository.FieldDefRepository;
 import com.hamstrack.issue.repository.FieldSetRepository;
 import com.hamstrack.issue.repository.IssueRepository;
@@ -39,6 +46,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -77,6 +85,8 @@ public class DemoDataService {
     private final ComponentRepository componentRepository;
     private final VersionService versionService;
     private final VersionRepository versionRepository;
+    private final SprintService sprintService;
+    private final SprintRepository sprintRepository;
     private final ProjectRepository projectRepository;
     private final IssueRepository issueRepository;
 
@@ -250,6 +260,14 @@ public class DemoDataService {
         } catch (RuntimeException e) {
             log.warn("Demo component seeding skipped for project {}: {}", projectId, e.toString());
         }
+        // …and for the agile showcase (HD-22 §4.8): a running sprint, a planned one and
+        // story points, so 0.13.0's headline feature is visible on first login instead
+        // of an empty Backlog page.
+        try {
+            seedDemoSprints(user, wsId, projectId);
+        } catch (RuntimeException e) {
+            log.warn("Demo sprint seeding skipped for project {}: {}", projectId, e.toString());
+        }
         // …and for the starter versions (HD-32 §3.9). Deliberately LAST — see
         // seedDemoVersions: releasing one of them clears the persistence context.
         try {
@@ -275,16 +293,14 @@ public class DemoDataService {
         projectRepository.save(project);
 
         var json = JsonNodeFactory.instance;
-        var storyPoints = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("story_points").orElse(null);
+        // NOTE (HD-22 §3.4): the `story_points` custom field is deliberately NOT seeded
+        // any more — V11 promoted it to the native issues.story_points column and
+        // ARCHIVED the field def, so writing a value here would either fail validation
+        // or resurrect a retired field. Story points are seeded in seedDemoSprints.
         var severity = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("severity").orElse(null);
         var environment = fieldDefRepository.findByScopeWorkspaceIdIsNullAndScopeProjectIdIsNullAndKey("environment").orElse(null);
 
         // issue numbers follow the creation order above
-        if (storyPoints != null) {
-            setField(project.getId(), 8, storyPoints.getId(), json.numberNode(5));
-            setField(project.getId(), 15, storyPoints.getId(), json.numberNode(3));
-            setField(project.getId(), 16, storyPoints.getId(), json.numberNode(8));
-        }
         if (severity != null) {
             setField(project.getId(), 5, severity.getId(), json.textNode("major"));
             setField(project.getId(), 9, severity.getId(), json.textNode("minor"));
@@ -449,6 +465,109 @@ public class DemoDataService {
         }
     }
 
+    /**
+     * The agile showcase (HD-22 §4.8): the demo project is switched to
+     * {@code boardMode = SCRUM}, gets one <strong>ACTIVE</strong> sprint ("Sprint 1",
+     * started 5 days ago and ending in 9) holding 8 of the seeded issues, one
+     * <strong>FUTURE</strong> sprint ("Sprint 2") holding 3, and leaves the rest ranked
+     * in the backlog. Story points (1/2/3/5/8) are spread over the committed work so the
+     * point sums and the completion report show something real.
+     *
+     * <p>Created through {@link SprintService} so normalization, the name-uniqueness
+     * rules, the open-sprint cap and the start lifecycle apply exactly as for
+     * user-created sprints. Everything cascades away with the workspace, so the
+     * documented test-mode reset block needs no change.
+     *
+     * <p><strong>Why the pre-check instead of relying on the caller's catch</strong>
+     * (same reasoning as {@link #seedDemoLabels} / {@link #seedDemoComponents}): the
+     * whole seed shares ONE transaction, and a {@code DataIntegrityViolationException}
+     * escaping {@code SprintService.create} would mark it rollback-only — by then the
+     * outer best-effort catch can no longer recover and the commit would still blow up
+     * with {@code UnexpectedRollbackException}, so first-login seeding would fail forever.
+     *
+     * <p><strong>Why the start is the LAST statement here:</strong>
+     * {@code SprintService.start} flips the state with a conditional bulk UPDATE whose
+     * {@code @Modifying} carries {@code clearAutomatically} (it must re-read the row),
+     * which {@code em.clear()}s the persistence context. The paired
+     * {@code flushAutomatically} writes every pending insert first, so nothing is lost —
+     * but every entity this method still holds is detached afterwards. The issues must
+     * therefore be assigned and estimated BEFORE the sprint starts. (Sprint membership
+     * does not require an ACTIVE sprint, so nothing is lost by that ordering.)
+     */
+    private void seedDemoSprints(com.hamstrack.auth.entity.User user, UUID wsId, UUID projectId) {
+        var project = projectRepository.findById(projectId).orElseThrow();
+        // Scrum mode: otherwise the release's headline feature is invisible on first
+        // login (open question 9). issue_seq is updatable = false, so saving the project
+        // here cannot clobber the native issue counter.
+        project.setBoardMode(BoardMode.SCRUM);
+        projectRepository.save(project);
+
+        var sprintIds = new LinkedHashMap<String, UUID>();
+        record Spec(String name, String goal) {}
+        for (var spec : List.of(
+                new Spec("Sprint 1", "Ship the account settings epic and clear the top bugs"),
+                new Spec("Sprint 2", "Mobile groundwork and the backup/restore drill"))) {
+            var existing = sprintRepository.findByProjectAndNameIgnoreCase(project, spec.name());
+            sprintIds.put(spec.name(), existing
+                    .map(com.hamstrack.issue.entity.Sprint::getId)
+                    .orElseGet(() -> sprintService.create(user, wsId, projectId,
+                            new CreateSprintRequest(spec.name(), spec.goal(), null, null)).id()));
+        }
+
+        // Issue numbers follow the creation order in seedOnFirstLogin above. A Fibonacci
+        // -ish spread, and two issues left unestimated on purpose so `unestimatedCount`
+        // is non-zero and the UI's "n unestimated" hint is exercised.
+        setStoryPoints(project, 3, "3");
+        setStoryPoints(project, 4, "5");
+        setStoryPoints(project, 5, "2");
+        setStoryPoints(project, 8, "5");
+        setStoryPoints(project, 9, "3");
+        setStoryPoints(project, 10, "2");
+        setStoryPoints(project, 11, "1");
+        setStoryPoints(project, 13, "8");
+        setStoryPoints(project, 14, "3");
+
+        // Sprint 1 mixes DONE and in-flight work, so completing it reports a real
+        // done-vs-carried-over split; Sprint 2 is the planned next iteration.
+        addToSprint(user, wsId, projectId, project, sprintIds.get("Sprint 1"), 3, 4, 5, 8, 9, 10, 11, 12);
+        addToSprint(user, wsId, projectId, project, sprintIds.get("Sprint 2"), 13, 14, 15);
+
+        // LAST statement of this method: clears the persistence context (see above).
+        var running = sprintIds.get("Sprint 1");
+        if (running != null) {
+            var now = OffsetDateTime.now(ZoneOffset.UTC);
+            sprintService.start(user, wsId, projectId, running,
+                    new StartSprintRequest(now.minusDays(5), now.plusDays(9), null));
+        }
+    }
+
+    /**
+     * Estimate one already-seeded issue. Goes through the managed entity rather than a
+     * bulk UPDATE: these issues were created earlier in THIS transaction, so a bulk
+     * update would leave the L1 copies stale (CLAUDE.md).
+     */
+    private void setStoryPoints(com.hamstrack.project.entity.Project project, long number, String points) {
+        issueRepository.findByProjectAndNumber(project, number).ifPresent(issue -> {
+            issue.setStoryPoints(new java.math.BigDecimal(points));
+            issueRepository.save(issue);
+        });
+    }
+
+    /** Put a batch of already-seeded issues into one sprint, addressed by their numbers. */
+    private void addToSprint(com.hamstrack.auth.entity.User user, UUID wsId, UUID projectId,
+                             com.hamstrack.project.entity.Project project, UUID sprintId,
+                             long... numbers) {
+        if (sprintId == null) return;
+        var ids = new ArrayList<UUID>(numbers.length);
+        for (long number : numbers) {
+            issueRepository.findByProjectAndNumber(project, number)
+                    .ifPresent(issue -> ids.add(issue.getId()));
+        }
+        if (ids.isEmpty()) return;
+        sprintService.addIssues(user, wsId, projectId, sprintId,
+                new AddIssuesToSprintRequest(ids, SprintInsertPosition.BOTTOM));
+    }
+
     /** Link one already-seeded issue to one version in the given role. */
     private void linkVersions(com.hamstrack.project.entity.Project project, long number,
                               VersionLinkType linkType, UUID versionId) {
@@ -494,11 +613,12 @@ public class DemoDataService {
                                      String type, String status, String priority,
                                      String title, String description,
                                      UUID assigneeId, UUID parentId, LocalDate dueDate) {
-        // labelIds/componentId/fix+affectsVersionIds = null: all are attached afterwards,
-        // once they exist (seedDemoLabels / seedDemoComponents / seedDemoVersions)
+        // labelIds/componentId/fix+affectsVersionIds/sprintId/storyPoints = null: all are
+        // attached afterwards, once they exist (seedDemoLabels / seedDemoComponents /
+        // seedDemoSprints / seedDemoVersions)
         return new CreateIssueRequest(title, description,
                 typeIds.get(type), statusIds.get(status),
                 prioIds.get(priority), assigneeId, parentId, dueDate,
-                null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
     }
 }

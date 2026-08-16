@@ -49,6 +49,7 @@ vi.mock('../admin/AdminFieldsPage', () => ({ default: () => <div /> }))
 vi.mock('../admin/AdminWorkflowsPage', () => ({ default: () => <div /> }))
 vi.mock('./ProjectBindingsPage', () => ({ default: () => <div>Bindings page</div> }))
 vi.mock('./ProjectComponentsPage', () => ({ default: () => <div>Components page</div> }))
+vi.mock('./ProjectBoardSettingsPage', () => ({ default: () => <div>Board settings page</div> }))
 
 function renderArea(initialPath = `/w/${WS_ID}/p/${PROJECT_ID}/settings`) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -150,6 +151,21 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
 
     ws.resolve(workspace('MEMBER'))
     expect(await screen.findByText('Board page')).toBeTruthy()
+  })
+
+  // 0.13.0 review (security-officer L5): `PATCH …/projects/{id}` stopped echoing a
+  // hardcoded MANAGER and now returns the caller's REAL project role, which the
+  // Board tab writes straight into `['project', ws, p]` with setQueryData. For a
+  // workspace OWNER/ADMIN who is not a project member that role is VIEWER — so a
+  // guard reading the project role alone would throw the curator out of the very
+  // page they just saved on. The predicate must stay the curator one.
+  it('keeps a workspace OWNER in the area when the project role echoes back VIEWER', async () => {
+    apiGetProjectMock.mockResolvedValue(project('VIEWER'))
+    apiGetWorkspaceMock.mockResolvedValue(workspace('OWNER'))
+    renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/board`)
+
+    expect(await screen.findByText('Board settings page')).toBeTruthy()
+    expect(screen.queryByText('Board page')).toBeNull()
   })
 
   it('routes the Components tab to ProjectComponentsPage for a curator', async () => {

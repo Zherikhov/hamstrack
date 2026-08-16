@@ -4,6 +4,7 @@ import com.hamstrack.issue.entity.Component;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueType;
 import com.hamstrack.issue.entity.Priority;
+import com.hamstrack.issue.entity.Sprint;
 import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.StatusCategory;
 import com.hamstrack.issue.entity.VersionLinkType;
@@ -25,6 +26,15 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
     Optional<Issue> findByProjectAndNumber(Project project, long number);
 
     Optional<Issue> findByIdAndProject(UUID id, Project project);
+
+    /**
+     * Resolve a batch of issue ids <em>within</em> one project (bulk sprint moves). Ids
+     * from another project or another tenant simply don't come back, so the caller's
+     * size check turns them into a 422 without disclosing anything.
+     */
+    @Query("SELECT i FROM Issue i WHERE i.project = :project AND i.id IN :ids")
+    List<Issue> findAllByIdInAndProject(@Param("ids") Collection<UUID> ids,
+                                        @Param("project") Project project);
 
     long countByProject(Project project);
 
@@ -176,6 +186,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
            "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
            "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
            "                           AND vl.linkType = :fixType)) " +
+           "AND (:sprintId IS NULL OR i.sprint.id = :sprintId) " +
+           "AND (:noSprint = false OR i.sprint IS NULL) " +
            "ORDER BY i.position ASC, i.createdAt DESC")
     List<Issue> findByProjectFilteredCapped(
             @Param("project") Project project,
@@ -188,6 +200,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("requiredMatches") long requiredMatches,
             @Param("fixVersionId") UUID fixVersionId,
             @Param("fixType") VersionLinkType fixType,
+            @Param("sprintId") UUID sprintId,
+            @Param("noSprint") boolean noSprint,
             Pageable pageable);
 
     // Filtered count for the board's totalAvailable (same predicate, no fetch/order).
@@ -201,7 +215,9 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
            "                         WHERE il.issue = i AND il.label.id IN :labelIds) >= :requiredMatches) " +
            "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
            "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
-           "                           AND vl.linkType = :fixType))")
+           "                           AND vl.linkType = :fixType)) " +
+           "AND (:sprintId IS NULL OR i.sprint.id = :sprintId) " +
+           "AND (:noSprint = false OR i.sprint IS NULL)")
     long countByProjectFiltered(
             @Param("project") Project project,
             @Param("statusId") UUID statusId,
@@ -212,7 +228,9 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("labelCount") int labelCount,
             @Param("requiredMatches") long requiredMatches,
             @Param("fixVersionId") UUID fixVersionId,
-            @Param("fixType") VersionLinkType fixType);
+            @Param("fixType") VersionLinkType fixType,
+            @Param("sprintId") UUID sprintId,
+            @Param("noSprint") boolean noSprint);
 
     // Paged variant for the backlog (the board uses the full-list method above).
     // excludeDone applies the backlog's "not in a DONE-category status" filter
@@ -235,6 +253,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
            "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
            "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
            "                           AND vl.linkType = :fixType)) " +
+           "AND (:sprintId IS NULL OR i.sprint.id = :sprintId) " +
+           "AND (:noSprint = false OR i.sprint IS NULL) " +
            "AND (:excludeDone = false OR i.status.category <> :doneCategory)",
            countQuery = "SELECT count(i) FROM Issue i " +
            "WHERE i.project = :project " +
@@ -247,6 +267,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
            "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
            "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
            "                           AND vl.linkType = :fixType)) " +
+           "AND (:sprintId IS NULL OR i.sprint.id = :sprintId) " +
+           "AND (:noSprint = false OR i.sprint IS NULL) " +
            "AND (:excludeDone = false OR i.status.category <> :doneCategory)")
     Page<Issue> findByProjectFilteredPaged(
             @Param("project") Project project,
@@ -259,6 +281,8 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("requiredMatches") long requiredMatches,
             @Param("fixVersionId") UUID fixVersionId,
             @Param("fixType") VersionLinkType fixType,
+            @Param("sprintId") UUID sprintId,
+            @Param("noSprint") boolean noSprint,
             @Param("excludeDone") boolean excludeDone,
             @Param("doneCategory") StatusCategory doneCategory,
             Pageable pageable);
@@ -311,4 +335,319 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
                                            @Param("projectIds") Collection<UUID> projectIds,
                                            @Param("projectKey") String projectKey,
                                            @Param("number") long number);
+
+    // ---- Sprints & backlog rank (HD-22, agile-sprints-proposal §4.6) ----
+    //
+    // A "section" is (project, sprint) where a NULL sprint IS the backlog. Sections
+    // share ONE rank space (issues.position): sprint_id is a FILTER, not a separate
+    // order, so ranks interleave across sections on purpose — moving an issue out of a
+    // sprint keeps its relative place in the backlog.
+    //
+    // Every method takes the resolved Project/Sprint entity (never a bare id), so the
+    // tenant boundary is carried by the argument type itself.
+
+    /**
+     * The project's highest rank — {@code IssueService.create} appends at
+     * {@code maxPosition + RANK_STEP} so a newly filed issue lands at the BOTTOM of
+     * the backlog (filing an issue is not a priority statement). Served by
+     * {@code idx_issues_project_position}. Returns 0 for an empty project.
+     */
+    @Query("SELECT coalesce(max(i.position), 0) FROM Issue i WHERE i.project = :project")
+    long maxPosition(@Param("project") Project project);
+
+    /**
+     * Highest / lowest rank inside ONE section — the append target of a bulk
+     * "move to sprint (BOTTOM / TOP)". A NULL {@code sprintId} means the backlog
+     * section; the predicate spells that out rather than relying on
+     * {@code = NULL} never matching.
+     */
+    @Query("SELECT coalesce(max(i.position), 0) FROM Issue i WHERE i.project = :project "
+            + "AND ((:sprintId IS NULL AND i.sprint IS NULL) OR i.sprint.id = :sprintId)")
+    long maxPositionInSection(@Param("project") Project project, @Param("sprintId") UUID sprintId);
+
+    @Query("SELECT coalesce(min(i.position), 0) FROM Issue i WHERE i.project = :project "
+            + "AND ((:sprintId IS NULL AND i.sprint IS NULL) OR i.sprint.id = :sprintId)")
+    long minPositionInSection(@Param("project") Project project, @Param("sprintId") UUID sprintId);
+
+    /**
+     * The row immediately BELOW a given rank inside one section (smallest position
+     * strictly greater), excluding the issue being moved — the missing "before"
+     * neighbour when a drag only supplied {@code afterIssueId}. Index-served by
+     * {@code idx_issues_sprint} / {@code idx_issues_project_position}; the caller
+     * passes a {@code PageRequest.of(0, 1)}.
+     */
+    @Query("SELECT i FROM Issue i WHERE i.project = :project "
+            + "AND ((:sprintId IS NULL AND i.sprint IS NULL) OR i.sprint.id = :sprintId) "
+            + "AND i.position > :position AND i.id <> :excludeId "
+            + "ORDER BY i.position ASC")
+    List<Issue> findNextInSection(@Param("project") Project project,
+                                  @Param("sprintId") UUID sprintId,
+                                  @Param("position") long position,
+                                  @Param("excludeId") UUID excludeId,
+                                  Pageable pageable);
+
+    /** The row immediately ABOVE a given rank inside one section — the mirror of {@link #findNextInSection}. */
+    @Query("SELECT i FROM Issue i WHERE i.project = :project "
+            + "AND ((:sprintId IS NULL AND i.sprint IS NULL) OR i.sprint.id = :sprintId) "
+            + "AND i.position < :position AND i.id <> :excludeId "
+            + "ORDER BY i.position DESC")
+    List<Issue> findPreviousInSection(@Param("project") Project project,
+                                      @Param("sprintId") UUID sprintId,
+                                      @Param("position") long position,
+                                      @Param("excludeId") UUID excludeId,
+                                      Pageable pageable);
+
+    /**
+     * One planning section's rows, capped by the {@link Pageable} (the service passes
+     * {@code cap + 1} to detect truncation in one query) and fetch-joining exactly the
+     * ToOne block the board list already does, so a section stays ONE query instead of
+     * 1 + ~6N. Ordering is the canonical rank order and is NOT taken from the Pageable.
+     *
+     * <p>{@code excludeDone} is the backlog section's "hide done work" switch; sprint
+     * sections always pass {@code false} — a sprint's DONE issues are its record of
+     * what it delivered.
+     */
+    @Query("SELECT i FROM Issue i " +
+           "LEFT JOIN FETCH i.type " +
+           "LEFT JOIN FETCH i.status " +
+           "LEFT JOIN FETCH i.priority " +
+           "LEFT JOIN FETCH i.assignee " +
+           "LEFT JOIN FETCH i.reporter " +
+           "LEFT JOIN FETCH i.component " +
+           "LEFT JOIN FETCH i.sprint " +
+           "WHERE i.project = :project " +
+           "AND ((:sprintId IS NULL AND i.sprint IS NULL) OR i.sprint.id = :sprintId) " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
+           "AND (:componentId IS NULL OR i.component.id = :componentId) " +
+           "AND (:labelCount = 0 OR (SELECT count(DISTINCT il.label.id) FROM IssueLabel il " +
+           "                         WHERE il.issue = i AND il.label.id IN :labelIds) >= :requiredMatches) " +
+           "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
+           "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
+           "                           AND vl.linkType = :fixType)) " +
+           "AND (:excludeDone = false OR i.status.category <> :doneCategory) " +
+           "ORDER BY i.position ASC, i.createdAt DESC")
+    List<Issue> findSectionIssues(
+            @Param("project") Project project,
+            @Param("sprintId") UUID sprintId,
+            @Param("statusId") UUID statusId,
+            @Param("assigneeId") UUID assigneeId,
+            @Param("priorityId") UUID priorityId,
+            @Param("componentId") UUID componentId,
+            @Param("labelIds") Collection<UUID> labelIds,
+            @Param("labelCount") int labelCount,
+            @Param("requiredMatches") long requiredMatches,
+            @Param("fixVersionId") UUID fixVersionId,
+            @Param("fixType") VersionLinkType fixType,
+            @Param("excludeDone") boolean excludeDone,
+            @Param("doneCategory") StatusCategory doneCategory,
+            Pageable pageable);
+
+    /**
+     * <strong>ONE grouped stats query for the ENTIRE planning view</strong> (§4.6) —
+     * never one per section. Grouped by {@code i.sprint.id}, where the NULL group IS
+     * the backlog, and carrying the same filter predicate the sections do.
+     *
+     * <p>Rows: {@code (sprintId, count, doneCount, points, donePoints, unestimated,
+     * unestimatedDone)}. Both the "done" and the "done-only" aggregates come back so
+     * the backlog section can derive its {@code includeDone = false} numbers by
+     * subtraction instead of paying a second query — the totals stay honest even when
+     * the section is truncated, because this query never sees the cap.
+     *
+     * <p>{@code sprintIds} must be non-empty (an empty {@code IN} list is invalid in
+     * JPQL); the caller substitutes a sentinel UUID no row can carry, which leaves only
+     * the NULL/backlog group.
+     */
+    @Query("SELECT i.sprint.id, count(i), " +
+           "  sum(case when i.status.category = :done then 1 else 0 end), " +
+           "  sum(i.storyPoints), " +
+           "  sum(case when i.status.category = :done then i.storyPoints end), " +
+           "  sum(case when i.storyPoints is null then 1 else 0 end), " +
+           "  sum(case when i.storyPoints is null and i.status.category = :done then 1 else 0 end) " +
+           "FROM Issue i " +
+           "WHERE i.project = :project " +
+           "AND (i.sprint IS NULL OR i.sprint.id IN :sprintIds) " +
+           "AND (:statusId IS NULL OR i.status.id = :statusId) " +
+           "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
+           "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
+           "AND (:componentId IS NULL OR i.component.id = :componentId) " +
+           "AND (:labelCount = 0 OR (SELECT count(DISTINCT il.label.id) FROM IssueLabel il " +
+           "                         WHERE il.issue = i AND il.label.id IN :labelIds) >= :requiredMatches) " +
+           "AND (:fixVersionId IS NULL OR EXISTS (SELECT 1 FROM IssueVersionLink vl " +
+           "                         WHERE vl.issue = i AND vl.version.id = :fixVersionId " +
+           "                           AND vl.linkType = :fixType)) " +
+           "GROUP BY i.sprint.id")
+    List<Object[]> planningStats(
+            @Param("project") Project project,
+            @Param("sprintIds") Collection<UUID> sprintIds,
+            @Param("statusId") UUID statusId,
+            @Param("assigneeId") UUID assigneeId,
+            @Param("priorityId") UUID priorityId,
+            @Param("componentId") UUID componentId,
+            @Param("labelIds") Collection<UUID> labelIds,
+            @Param("labelCount") int labelCount,
+            @Param("requiredMatches") long requiredMatches,
+            @Param("fixVersionId") UUID fixVersionId,
+            @Param("fixType") VersionLinkType fixType,
+            @Param("done") StatusCategory done);
+
+    /**
+     * Unfiltered per-sprint roll-up for a batch of sprints in ONE grouped query — the
+     * {@code GET /sprints} page's counters and the completion preview (the
+     * {@code VersionService.progress} pattern). Same row shape as
+     * {@link #planningStats}.
+     *
+     * <p><strong>Callers must chunk</strong> ({@code UsageCounts.rowsIn}): the
+     * {@code IN} list binds one JDBC parameter per sprint, and PostgreSQL rejects a
+     * statement above 65 535 parameters outright.
+     */
+    @Query("SELECT i.sprint.id, count(i), " +
+           "  sum(case when i.status.category = :done then 1 else 0 end), " +
+           "  sum(i.storyPoints), " +
+           "  sum(case when i.status.category = :done then i.storyPoints end), " +
+           "  sum(case when i.storyPoints is null then 1 else 0 end), " +
+           "  sum(case when i.storyPoints is null and i.status.category = :done then 1 else 0 end) " +
+           "FROM Issue i WHERE i.sprint IN :sprints GROUP BY i.sprint.id")
+    List<Object[]> statsBySprints(@Param("sprints") Collection<Sprint> sprints,
+                                  @Param("done") StatusCategory done);
+
+    /** Issues currently in a sprint — the delete guard ("still holds issues" → 409 without force). */
+    long countBySprint(Sprint sprint);
+
+    /**
+     * The {@code (id, number)} pairs (not the entities) of a sprint's unfinished issues
+     * — what a completion would move, the {@code issue_history} write list and the SSE
+     * fan-out list afterwards.
+     *
+     * <p>Deliberately a scalar projection: materializing the entities here and then
+     * running the bulk UPDATE below would leave those managed copies stale, and flushing
+     * them later would write the pre-move {@code sprint_id} back (the documented
+     * "bulk JPQL UPDATE desyncs already-loaded entities" trap). Nothing enters the L1
+     * cache, so the bulk update is safe — the history rows are written against
+     * {@code getReferenceById} proxies, which never load the row either.
+     */
+    @Query("SELECT i.id, i.number FROM Issue i WHERE i.sprint = :sprint AND i.status.category <> :done "
+            + "ORDER BY i.position ASC")
+    List<Object[]> findUnfinishedRefsBySprint(@Param("sprint") Sprint sprint,
+                                              @Param("done") StatusCategory done);
+
+    /**
+     * The {@code (id, number)} pairs of EVERY issue currently in a sprint — the
+     * force-delete path's history/event list, read before {@link #clearSprint} detaches
+     * them. A scalar projection for the same reason as
+     * {@link #findUnfinishedRefsBySprint}: nothing must enter the L1 cache ahead of the
+     * bulk UPDATE that follows.
+     */
+    @Query("SELECT i.id, i.number FROM Issue i WHERE i.sprint = :sprint ORDER BY i.position ASC")
+    List<Object[]> findRefsBySprint(@Param("sprint") Sprint sprint);
+
+    /**
+     * Move every UNFINISHED issue of a completing sprint to {@code target}
+     * ({@code null} = the backlog). DONE issues deliberately keep their
+     * {@code sprint_id} — that is the sprint's record of what it delivered — and the
+     * rank is NOT rewritten, so carried-over items keep their relative order (§4.5).
+     *
+     * <p>Plain {@code @Modifying}: the caller has only read scalar {@code (id, number)}
+     * pairs (see {@link #findUnfinishedRefsBySprint}), so there are no managed {@code Issue}
+     * copies to desync and nothing to clear. Adding {@code clearAutomatically} here
+     * would risk discarding the transaction's other pending writes for no benefit.
+     */
+    @Modifying
+    @Query("UPDATE Issue i SET i.sprint = :target WHERE i.sprint = :sprint "
+            + "AND i.status.category <> :done")
+    int moveUnfinishedOutOfSprint(@Param("sprint") Sprint sprint,
+                                  @Param("target") Sprint target,
+                                  @Param("done") StatusCategory done);
+
+    /**
+     * Detach every issue from a sprint that is about to be deleted (§4.3 trap). The FK
+     * is {@code ON DELETE SET NULL (sprint_id)}, which clears the column behind JPA's
+     * back — a managed, now-stale {@code Issue} flushed later in the same transaction
+     * would write the old id back (the {@code issue_seq}-clobber class of bug), so the
+     * detach is done explicitly and first.
+     *
+     * <p>{@code clearAutomatically} evicts any {@code Issue} this transaction may have
+     * loaded so a later read sees the null; {@code flushAutomatically} writes pending
+     * changes first so this bulk UPDATE can't discard them. Safe in
+     * {@code SprintService.delete}, which has no other pending inserts — do NOT reuse
+     * this shape in a method that does.
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("UPDATE Issue i SET i.sprint = null WHERE i.sprint = :sprint")
+    int clearSprint(@Param("sprint") Sprint sprint);
+
+    /**
+     * Opt this transaction OUT of the {@code set_updated_at()} trigger (V11 §3.3.4)
+     * before a bulk rank rewrite: a re-spacing is not an edit, and stamping every issue
+     * in the project as "just updated" would poison Home / My work / {@code ORDER BY
+     * updated}.
+     *
+     * <p>{@code set_config(..., is_local = true)} IS {@code SET LOCAL}: it is reverted
+     * at COMMIT/ROLLBACK and therefore cannot leak back into the pooled connection. The
+     * name and the value are compile-time constants — no user input reaches the GUC.
+     *
+     * <p><strong>Transaction-wide, not statement-wide.</strong> The guard stays on until
+     * the transaction ends, so any bulk/native UPDATE that ran after it would silently
+     * lose its {@code updated_at} stamp too. Callers must therefore pair it with
+     * {@link #restoreUpdatedAtForThisTransaction()} immediately after the rewrite it
+     * covers, and must run inside a transaction — a plain {@code SELECT} forces none of
+     * its own, and on a non-transactional (or auto-commit) path {@code SET LOCAL}
+     * degrades to a no-op with no error. {@code IssueRankService.resolve} is
+     * {@code Propagation.MANDATORY} for exactly that reason.
+     */
+    @Query(value = "SELECT set_config('hamstrack.skip_updated_at', 'on', true)", nativeQuery = true)
+    String suppressUpdatedAtForThisTransaction();
+
+    /**
+     * Turn the {@code set_updated_at()} guard back ON for the rest of this transaction —
+     * the mandatory counterpart of {@link #suppressUpdatedAtForThisTransaction()}.
+     *
+     * <p>Without it the opt-out would live until COMMIT, so a bulk or native UPDATE
+     * added later in the same transaction (a future feature, not today's code) would
+     * silently stop stamping {@code updated_at}. Scoping the suppression to the one
+     * statement that needs it keeps that from ever becoming a debugging session.
+     */
+    @Query(value = "SELECT set_config('hamstrack.skip_updated_at', 'off', true)", nativeQuery = true)
+    String restoreUpdatedAtForThisTransaction();
+
+    /**
+     * Whole-project rank rebalance (§3.3.4) — run when a drag's gap is exhausted
+     * ({@code before.position - after.position <= 1}, i.e. ~26 successive midpoints
+     * into the SAME gap). Renumbers every issue of the project in ONE native statement
+     * at {@code row_number() * RANK_STEP}, preserving the existing order exactly.
+     *
+     * <p><strong>Native and deliberately outside JPA:</strong> it must not touch
+     * {@code version} (so it cannot invalidate anybody's optimistic lock on an unrelated
+     * edit) and must not touch {@code updated_at} (hence the
+     * {@link #suppressUpdatedAtForThisTransaction()} call that has to precede it in the
+     * same transaction).
+     *
+     * <p>{@code clearAutomatically} is required — the caller has already materialized
+     * the moved issue and its anchors, and their positions are now stale; it re-reads
+     * them immediately afterwards and retries the midpoint exactly once.
+     * {@code flushAutomatically} pairs with it so the clear cannot discard pending
+     * writes. This is why the rebalance runs BEFORE any entity mutation in the rank
+     * transaction (the documented "clearAutomatically wipes pending inserts" trap).
+     *
+     * <p>Cost: {@code O(issues in project)} in one statement — milliseconds at our scale
+     * and rare. Past ~200k issues in one project this should become a
+     * neighbourhood-scoped renumber; recorded, not built. {@code IssueRankService}
+     * throttles it per project so a member cannot drive one rewrite per handful of
+     * cheap requests.
+     *
+     * <p><strong>Tenancy:</strong> the outer {@code UPDATE} repeats
+     * {@code project_id = :projectId} even though the join to {@code ranked} already
+     * implies it. It is the one statement in this feature where the tenant boundary
+     * would otherwise be inherited rather than stated, and an explicit predicate cannot
+     * be lost to a future edit of the subquery.
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query(value = """
+            UPDATE issues SET position = ranked.rn * :step
+              FROM (SELECT id, row_number() OVER (ORDER BY position ASC, created_at DESC) AS rn
+                      FROM issues WHERE project_id = :projectId) ranked
+             WHERE issues.id = ranked.id AND issues.project_id = :projectId
+            """, nativeQuery = true)
+    int rebalancePositions(@Param("projectId") UUID projectId, @Param("step") long step);
 }

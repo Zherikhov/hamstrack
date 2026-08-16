@@ -108,6 +108,20 @@ vi.mock('../api', () => ({
   // HD-32: the (server-side) fix-version filter and the drawer's version cells
   // read the project's versions through this one.
   versionsApi: { list: vi.fn(async () => []) },
+  // HD-27: the board reads `boardMode` off the project (and the curator
+  // predicate off the workspace role) to decide Kanban vs Scrum. This fixture
+  // stays KANBAN, so every assertion below describes the unchanged board.
+  apiGetProject: vi.fn(async () => ({
+    id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
+    archived: false, myRole: 'MANAGER', boardMode: 'KANBAN',
+    createdAt: '2026-01-01T00:00:00Z',
+  })),
+  apiGetWorkspace: vi.fn(async () => ({
+    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z',
+  })),
+  // …and the sprint sections/header from this group (unused in KANBAN, but a
+  // mocked module must expose every imported binding).
+  sprintsApi: { list: vi.fn(async () => ({ content: [], page: 0, size: 200, totalElements: 0, totalPages: 0, hasNext: false })) },
 }))
 
 beforeAll(() => {

@@ -3,6 +3,7 @@ package com.hamstrack.issue.dto;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.constraints.Size;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
@@ -52,6 +53,19 @@ public record UpdateIssueRequest(
         // app.classification.max-version-links-per-issue, enforced after de-duplication.
         @Size(max = 100) List<UUID> fixVersionIds,
         @Size(max = 100) List<UUID> affectsVersionIds,
+        // Sprint (HD-22) is a nullable SCALAR, so it follows the assigneeId /
+        // clearAssignee convention rather than the labels one: a non-null id sets it,
+        // clearSprint: true returns the issue to the backlog, absent = unchanged. A
+        // foreign/unknown id is a 422 "Unknown sprint"; a COMPLETED sprint is a 422 too.
+        // clearSprint is a boxed Boolean for the same Jackson-3 reason as the flags above.
+        UUID sprintId,
+        Boolean clearSprint,
+        // Story points (HD-22 §3.4), same nullable-scalar convention: a number sets it,
+        // clearStoryPoints: true marks the issue unestimated again. 0…999 with at most
+        // 2 decimals — 422 otherwise. A change writes one `storyPoints` history row; a
+        // no-op writes none.
+        BigDecimal storyPoints,
+        Boolean clearStoryPoints,
         // Partial: only listed field ids change; JSON null clears a value
         Map<UUID, JsonNode> fields,
         // Optimistic lock check — optional so clients that don't send it keep working
@@ -64,5 +78,7 @@ public record UpdateIssueRequest(
         clearDueDate = clearDueDate != null && clearDueDate;
         clearParent = clearParent != null && clearParent;
         clearComponent = clearComponent != null && clearComponent;
+        clearSprint = clearSprint != null && clearSprint;
+        clearStoryPoints = clearStoryPoints != null && clearStoryPoints;
     }
 }

@@ -36,6 +36,18 @@ public class Project extends BaseEntity {
     @Column(name = "archived_at")
     private Instant archivedAt;
 
+    /**
+     * Kanban vs Scrum (HD-22 §3.5) — a presentation switch, never a permission: the
+     * sprint API behaves identically either way. Written through
+     * {@code PATCH …/projects/{projectId}} by a project curator, read on
+     * {@code ProjectResponse} (already fetched by NavRail and both settings areas, so
+     * it costs no new request on the hot path). VARCHAR(10) + Java enum, never a PG
+     * ENUM type.
+     */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "board_mode", nullable = false, length = 10)
+    private BoardMode boardMode = BoardMode.KANBAN;
+
     // Project-scoped issue counter. Maintained ONLY by the atomic native
     // UPDATE ... RETURNING in ProjectRepository.incrementAndGetIssueSeq —
     // updatable=false keeps JPA from ever writing it, so a stale managed

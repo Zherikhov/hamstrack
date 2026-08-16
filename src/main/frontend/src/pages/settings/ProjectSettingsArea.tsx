@@ -9,6 +9,7 @@ import AdminIssueTypesPage from '../admin/AdminIssueTypesPage'
 import AdminFieldsPage from '../admin/AdminFieldsPage'
 import AdminWorkflowsPage from '../admin/AdminWorkflowsPage'
 import ProjectBindingsPage from './ProjectBindingsPage'
+import ProjectBoardSettingsPage from './ProjectBoardSettingsPage'
 import ProjectComponentsPage from './ProjectComponentsPage'
 
 /**
@@ -62,6 +63,8 @@ export default function ProjectSettingsArea() {
     // Components are project content (HD-31), not bound taxonomy — but their
     // curation belongs with the rest of the project's settings.
     { to: `${settingsBase}/components`, label: 'Components', end: false },
+    // Kanban ⇄ Scrum (HD-27). A per-project presentation switch, not taxonomy.
+    { to: `${settingsBase}/board`, label: 'Board', end: false },
   ]
 
   // Curator = project MANAGER, or an OWNER/ADMIN of the enclosing workspace
@@ -107,6 +110,7 @@ export default function ProjectSettingsArea() {
             <Route path="priorities" element={<AdminPrioritiesPage />} />
             <Route path="fields" element={<AdminFieldsPage />} />
             <Route path="components" element={<ProjectComponentsPage />} />
+            <Route path="board" element={<ProjectBoardSettingsPage />} />
             <Route path="*" element={<Navigate to={settingsBase} replace />} />
           </Routes>
         </AdminApiProvider>

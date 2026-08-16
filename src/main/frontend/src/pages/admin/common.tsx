@@ -175,6 +175,14 @@ export function InheritedBadge({ scope }: { scope: 'GLOBAL' | 'WORKSPACE' | 'PRO
   )
 }
 
+/**
+ * The shared dialog shell (admin consoles, project settings, the sprint
+ * lifecycle dialogs). The panel — not the backdrop — carries `role="dialog"` +
+ * `aria-modal="true"` and is named by its own `title`, matching the precedent in
+ * `CommandPalette`/`ShortcutsHelp` (both name themselves with `aria-label`), so
+ * every modal in the app looks the same to a screen reader and is findable via
+ * `[role="dialog"]`.
+ */
 export function Modal({ title, onClose, children, width = 440 }: {
   title: string; onClose: () => void; children: ReactNode; width?: number
 }) {
@@ -182,7 +190,10 @@ export function Modal({ title, onClose, children, width = 440 }: {
     <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,27,25,0.55)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }}
          onClick={onClose}>
-      <div style={{ background: 'white', borderRadius: 'var(--radius-lg)', width,
+      <div role="dialog"
+           aria-modal="true"
+           aria-label={title}
+           style={{ background: 'white', borderRadius: 'var(--radius-lg)', width,
                     border: '1px solid var(--color-border)', boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
                     maxHeight: '85vh', overflowY: 'auto' }}
            onClick={e => e.stopPropagation()}>

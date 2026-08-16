@@ -35,6 +35,10 @@ export interface BoardFilters {
   // HD-32 — a single version id, matched against FIX links only (an AFFECTS
   // link is a different question and deliberately doesn't match).
   fixVersionId?: string
+  // HD-22/HD-27 — the Scrum board scopes itself to the ACTIVE sprint by adding
+  // `?sprintId=` to the very same request. It therefore has to join the key, or
+  // the Kanban and Scrum caches would overwrite each other under one entry.
+  sprintId?: string
 }
 
 /**
@@ -59,6 +63,10 @@ function serializeBoardFilters(filters: string | BoardFilters): string {
   }
   if (f.componentId) parts.push(`component:${f.componentId}`)
   if (f.fixVersionId) parts.push(`fixVersion:${f.fixVersionId}`)
+  // Appended LAST so every pre-0.13.0 key stays byte-identical — an unselected
+  // sprint must still resolve to the 2-arg `boardIssuesKey(ws, p)` entry the
+  // create dialog reads (the HD-86/87 white-screen class of bug).
+  if (f.sprintId) parts.push(`sprint:${f.sprintId}`)
   return parts.join('|')
 }
 
@@ -94,6 +102,69 @@ export function backlogIssuesKeyPrefix(
 ) {
   return [ISSUES_KEY_ROOT, wsId, projectId, 'backlog'] as const
 }
+
+/**
+ * Prefix covering ONLY the board's list entries — lets a backlog rank move
+ * refresh the board (which shares the rank as its vertical order) without
+ * nuking the planning view the user is currently dragging in.
+ */
+export function boardIssuesKeyPrefix(
+  wsId: string | undefined,
+  projectId: string | undefined,
+) {
+  return [ISSUES_KEY_ROOT, wsId, projectId, 'board'] as const
+}
+
+/**
+ * The HD-23 planning aggregate (`GET …/backlog`; value shape: `BacklogView`).
+ *
+ * Its own marker segment, distinct from the legacy paginated `'backlog'` one —
+ * the two value shapes must never share an entry. It DOES live under
+ * `projectIssuesKeyPrefix`, so creating an issue (which lands at the bottom of
+ * the ranked backlog) still refreshes the planning view; fine-grained rank
+ * moves instead patch the affected sections in place (see `useBacklogView`).
+ */
+export function backlogViewKey(
+  wsId: string | undefined,
+  projectId: string | undefined,
+  filters: BacklogViewFilters = {},
+) {
+  const parts = [serializeBoardFilters(filters)].filter(Boolean)
+  // The planning view offers two dimensions the board doesn't: a status select
+  // (the board's columns ARE the statuses) and the show-done toggle. Both change
+  // the response, so both have to change the key.
+  if (filters.statusId) parts.push(`status:${filters.statusId}`)
+  if (filters.includeDone) parts.push('includeDone')
+  return [ISSUES_KEY_ROOT, wsId, projectId, 'backlogView', parts.join('|')] as const
+}
+
+/** The board filters plus the planning view's own two dimensions. */
+export interface BacklogViewFilters extends BoardFilters {
+  statusId?: string
+  includeDone?: boolean
+}
+
+/**
+ * One project's sprint list. Sprints are project CONTENT, not bound taxonomy
+ * (HD-22 §3.6) — their own key namespace, so starting a sprint never
+ * invalidates `['projectConfig', …]`, which every board render depends on.
+ *
+ * `state` narrows the fetch (the pickers want the open ones, the Scrum board the
+ * ACTIVE one) and joins the key so those never share a cache entry.
+ */
+export function sprintsKey(
+  wsId: string | undefined,
+  projectId: string | undefined,
+  state?: SprintStateFilter,
+) {
+  const states = state === undefined ? [] : (Array.isArray(state) ? [...state] : [state])
+  return ['sprints', wsId, projectId, states.sort().join(',')] as const
+}
+
+/** Repeatable `state=` filter, in the shape `sprintsApi.list` accepts. */
+export type SprintStateFilter =
+  | 'FUTURE' | 'ACTIVE' | 'COMPLETED'
+  | ('FUTURE' | 'ACTIVE' | 'COMPLETED')[]
 
 /** Invalidation prefix covering every issue list of one project. */
 export function projectIssuesKeyPrefix(
