@@ -1,6 +1,7 @@
 import { Navigate, NavLink, Route, Routes, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { apiGetWorkspace, makeAdminApi } from '../../api'
+import { canOpenWorkspaceSettings, usePermissions } from '../../hooks/usePermissions'
 import { AdminApiProvider } from '../admin/AdminApiContext'
 import type { AdminScopeValue } from '../admin/AdminApiContext'
 import AdminStatusesPage from '../admin/AdminStatusesPage'
@@ -48,7 +49,11 @@ export default function WorkspaceSettingsArea() {
     keyPrefix: ['ws-admin', wsId],
   }
 
-  if (!isLoading && workspace && workspace.myRole === 'MEMBER') {
+  // The permission strings the server itself checks, not a role name — and the
+  // same function the palette's "Workspace settings" row and the workspace
+  // overview's button apply, so no surface can offer a door this one refuses.
+  const permissions = usePermissions(wsId)
+  if (!isLoading && !permissions.isLoading && workspace && !canOpenWorkspaceSettings(permissions)) {
     return <Navigate to={`/w/${wsId}`} replace />
   }
 

@@ -4,6 +4,8 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { hqlAssigneeIs, hqlTextContains } from '../../hql'
+import { canOpenProjectSettings, canOpenWorkspaceSettings } from '../../hooks/usePermissions'
+import type { Permissions } from '../../hooks/usePermissions'
 import type { Project, SavedFilter, SearchResultRow, User, Workspace, WorkspaceMember } from '../../types'
 
 /**
@@ -12,11 +14,18 @@ import type { Project, SavedFilter, SearchResultRow, User, Workspace, WorkspaceM
  * (§5.1/§5.2) and the row shapes are unit-testable in isolation, and the palette
  * component stays a thin renderer.
  *
- * Availability is resolved from data the app has ALREADY cached (`Project.myRole`
- * from `['projects', wsId]`, `Workspace.myRole` from `['workspaces']`,
- * `user.systemRole` from the auth store) — never an extra request just to decide
- * whether to draw a row. These are affordances only; the server re-enforces
- * every one of them.
+ * Availability is resolved from data the app has ALREADY cached — never an extra
+ * request just to decide whether to draw a row. These are affordances only; the
+ * server re-enforces every one of them.
+ *
+ * **Permissions arrive as an argument, not as a hook** (HD-116/HD-123 S5). This
+ * builder is pure, so it has no hook context; that is exactly why the palette
+ * kept its own copy of the project-settings predicate (`myRole === 'MANAGER'`)
+ * long after the rail and the settings area had been widened, and why HD-116 was
+ * filed as a second ticket for the same bug. The fix is not "be careful on both
+ * surfaces": `input.permissions` carries the server's own answer, and the two
+ * doors this palette opens are gated by the same shared functions the pages
+ * themselves call, so a divergent predicate is no longer expressible here.
  */
 
 export type CommandKind =
@@ -138,6 +147,15 @@ export interface CommandInput {
   /** Name of that workspace — shown in the Issues section header so scope is explicit. */
   wsName?: string
   currentProject: { wsId: string; projectId: string; name?: string } | null
+  /**
+   * The caller's effective permissions for the palette's workspace AND its
+   * current project, composed by the palette component from the cached
+   * `['workspaces']` / `['projects', wsId]` entries (the two scopes' key spaces
+   * are disjoint, so one object is unambiguous). Unknown ⇒ denies ⇒ the row is
+   * not offered, which is the right way round for a conditionally-mounted row:
+   * it can pop in, it can never flash in and then vanish.
+   */
+  permissions: Permissions
   projects: Project[]
   workspaces: Workspace[]
   filters: SavedFilter[]
@@ -159,7 +177,7 @@ const searchPath = (wsId: string, hql: string) => `/w/${wsId}/search?q=${encodeU
  * resolves persisted ids against exactly this list.
  */
 export function buildStaticCommands(input: CommandInput): Command[] {
-  const { user, wsId, currentProject: cur, projects, workspaces } = input
+  const { user, wsId, currentProject: cur, projects, permissions } = input
   const out: Command[] = []
 
   // ── Actions ────────────────────────────────────────────────────────────────
@@ -252,8 +270,11 @@ export function buildStaticCommands(input: CommandInput): Command[] {
     })
   }
 
-  // Project settings — MANAGER only, read off the cached project list.
-  if (cur && projects.find(p => p.id === cur.projectId)?.myRole === 'MANAGER') {
+  // Project settings — HD-116: the SAME function the rail's Settings link and
+  // the settings area itself apply. This row used to require project MANAGER
+  // while both of those admitted the wider curator predicate, so a workspace
+  // admin was offered no way in from here either.
+  if (cur && canOpenProjectSettings(permissions)) {
     const projectName = projects.find(p => p.id === cur.projectId)?.name ?? cur.name
     out.push({
       id: 'nav.projectSettings',
@@ -265,11 +286,10 @@ export function buildStaticCommands(input: CommandInput): Command[] {
     })
   }
 
-  // Workspace settings — OWNER/ADMIN only (a MEMBER is redirected server-side).
-  // The role must be KNOWN: while `['workspaces']` is still loading we show
-  // nothing rather than flashing a row the user may not be allowed to use.
-  const myWsRole = wsId ? workspaces.find(w => w.id === wsId)?.myRole : undefined
-  if (wsId && myWsRole && myWsRole !== 'MEMBER') {
+  // Workspace settings — the same function the area's own guard applies. The
+  // answer must be KNOWN: an unresolved permission set denies, so nothing is
+  // flashed that the area would then bounce them out of.
+  if (wsId && canOpenWorkspaceSettings(permissions)) {
     out.push({
       id: 'nav.wsSettings',
       kind: 'nav', section: 'nav',

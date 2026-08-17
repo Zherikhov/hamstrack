@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import NavRail from './NavRail'
 import { useAuthStore } from '../auth'
+import { PROJECT_ADMIN_PERMISSIONS } from '../test/permissions'
 import type { Project, ProjectDelivery, User } from '../types'
 
 /**
@@ -24,7 +25,8 @@ const ME: User = { id: 'u-me', email: 'me@example.com', displayName: 'Me Myself'
 
 const BASE: Project = {
   id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-  archived: false, myRole: 'MANAGER', createdAt: '2026-01-01T00:00:00Z',
+  archived: false, myRole: 'MANAGER', myPermissions: PROJECT_ADMIN_PERMISSIONS,
+  createdAt: '2026-01-01T00:00:00Z',
 }
 
 let project: Project = BASE

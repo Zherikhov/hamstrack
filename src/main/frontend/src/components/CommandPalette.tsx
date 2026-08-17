@@ -10,6 +10,7 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
+import { permissionsFrom } from '../hooks/usePermissions'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { getLastWorkspaceId, getRecentProjects } from '../recentProjects'
 import { getUiPrefs, setUiPref, PALETTE_RECENTS_MAX } from '../uiPrefs'
@@ -209,11 +210,24 @@ function PalettePanel() {
   // ── Build ───────────────────────────────────────────────────────────────────
   const wsName = workspaces?.find(w => w.id === wsId)?.name
 
+  // The registry is a pure builder with no hook context, so the permissions it
+  // gates on are composed HERE and threaded in (HD-116). Both carriers are
+  // entries the palette has already fetched — no request is spent to decide
+  // whether to draw a row, and an entry that has not arrived denies.
+  const permissions = useMemo(
+    () => permissionsFrom([
+      workspaces?.find(w => w.id === wsId),
+      cur ? projects?.find(p => p.id === cur.projectId) : undefined,
+    ]),
+    [workspaces, wsId, projects, cur],
+  )
+
   const input: CommandInput = useMemo(() => ({
     user,
     wsId,
     wsName,
     currentProject: cur,
+    permissions,
     projects: projects ?? [],
     workspaces: workspaces ?? [],
     filters: filters ?? [],
@@ -222,7 +236,7 @@ function PalettePanel() {
     query: trimmed,
     fastPath,
     issuesState,
-  }), [user, wsId, wsName, cur, projects, workspaces, filters, members, search.data, trimmed, fastPath, issuesState])
+  }), [user, wsId, wsName, cur, permissions, projects, workspaces, filters, members, search.data, trimmed, fastPath, issuesState])
 
   const staticCommands = useMemo(() => buildStaticCommands(input), [input])
   const dynamicCommands = useMemo(() => buildDynamicCommands(input), [input])

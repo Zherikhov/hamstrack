@@ -8,6 +8,9 @@ import { sprintsApi, versionsApi } from '../api'
 import { boardIssuesKey } from '../lib/queryKeys'
 import type { CreateIssuePreset } from '../uiStore'
 import type { BoardIssues, Issue, ProjectDelivery } from '../types'
+import {
+  PROJECT_CONTRIBUTOR_PERMISSIONS, PROJECT_VIEWER_PERMISSIONS,
+} from '../test/permissions'
 
 // HD-70: the board's per-column quick-add opens the create dialog with a
 // preset status ({ projectId, statusId }). The Status select must honour that
@@ -40,18 +43,18 @@ const mockState = vi.hoisted(() => ({
   // path-specific inputs this form offers — never whether it happens to have
   // sprints or versions yet. Rides the project list the dialog already fetches.
   delivery: { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' } as ProjectDelivery,
+  // HD-123 §14.3: the project picker offers only the projects that grant
+  // `issue.create`, so the LIST is a fixture like everything else here. The
+  // default is one project the actor may file in — what every test above
+  // assumes when it names `p1`.
+  projects: [] as Record<string, unknown>[],
 }))
 
 vi.mock('../api', () => ({
   apiListWorkspaces: vi.fn(async () => [
     { id: 'w1', name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z' },
   ]),
-  apiListProjects: vi.fn(async () => [
-    {
-      id: 'p1', workspaceId: 'w1', name: 'Proj', key: 'PR', archived: false,
-      myRole: 'MANAGER', delivery: mockState.delivery, createdAt: '2026-01-01T00:00:00Z',
-    },
-  ]),
+  apiListProjects: vi.fn(async () => mockState.projects.map(p => ({ ...p, delivery: mockState.delivery }))),
   apiGetProjectConfig: vi.fn(async () => ({
     statuses: STATUSES,
     transitions: [],
@@ -79,7 +82,17 @@ beforeEach(() => {
   mockState.issueTypes = [TASK]
   mockState.board = { issues: [], truncated: false, totalAvailable: 0, cap: 500 }
   mockState.delivery = { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' }
+  mockState.projects = [project('p1', 'Proj', 'PR', PROJECT_CONTRIBUTOR_PERMISSIONS)]
 })
+
+/** One row of `GET /workspaces/{ws}/projects`, with its own permission set. */
+function project(id: string, name: string, key: string, myPermissions: string[], archived = false) {
+  return {
+    id, workspaceId: 'w1', name, key, archived,
+    myRole: 'MEMBER', myPermissions,
+    createdAt: '2026-01-01T00:00:00Z',
+  }
+}
 
 function wrapper({ children }: { children: ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -240,5 +253,73 @@ describe('CreateIssueModal spends no request to decide what to offer (HD-102)', 
     await waitFor(() => expect(sprintsApi.list).toHaveBeenCalled())
     // …and releases being off still costs nothing.
     expect(versionsApi.list).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * **HD-123 S5 §14.3 — the project picker offers only what the server would accept.**
+ *
+ * `issue.create` is per project, and a workspace member routinely holds it in some
+ * projects and not others (a Viewer or Commenter in one team's project is the
+ * ordinary case, not an exotic one). The filter is a *per-row* question — each
+ * project row carries its own `myPermissions` — which is why it is answered with
+ * the pure `permissionsFrom([p])` builder rather than a hook: one hook per row is
+ * both wrong and impossible.
+ *
+ * The empty state matters as much as the filter: "you may file in nothing here"
+ * and "there is nothing here" are different facts, and a dialog that showed an
+ * empty select with no explanation is the "nothing happens" failure §14.1 exists
+ * to stop.
+ */
+describe('CreateIssueModal project picker (HD-123 §14.3)', () => {
+  /** Open the Project listbox and read what it offers. */
+  async function options() {
+    const trigger = screen.getByLabelText('Project')
+    await userEvent.click(trigger)
+    const rows = screen.queryAllByRole('option').map(o => o.textContent)
+    await userEvent.keyboard('{Escape}')
+    return rows
+  }
+
+  it('offers a project the actor may file in, and hides one they may not', async () => {
+    mockState.projects = [
+      project('p1', 'Mine', 'PR', PROJECT_CONTRIBUTOR_PERMISSIONS),
+      project('p2', 'Read only', 'RO', PROJECT_VIEWER_PERMISSIONS),
+    ]
+    render(<CreateIssueModal wsId="w1" onClose={() => {}} />, { wrapper })
+
+    await screen.findByLabelText('Project')
+    expect(await options()).toEqual(['PR — Mine'])
+    // …and the one that is hidden is hidden for the RIGHT reason: no notice,
+    // because the actor can still file somewhere.
+    expect(screen.queryByText(/don’t have permission to create issues/)).toBeNull()
+  })
+
+  it('excludes an archived project even when the actor holds the grant', async () => {
+    mockState.projects = [
+      project('p1', 'Mine', 'PR', PROJECT_CONTRIBUTOR_PERMISSIONS),
+      project('p2', 'Old', 'OLD', PROJECT_CONTRIBUTOR_PERMISSIONS, true),
+    ]
+    render(<CreateIssueModal wsId="w1" onClose={() => {}} />, { wrapper })
+
+    await screen.findByLabelText('Project')
+    expect(await options()).toEqual(['PR — Mine'])
+  })
+
+  it('says WHY the picker is empty — no permission anywhere', async () => {
+    mockState.projects = [project('p2', 'Read only', 'RO', PROJECT_VIEWER_PERMISSIONS)]
+    render(<CreateIssueModal wsId="w1" onClose={() => {}} />, { wrapper })
+
+    expect(await screen.findByText(
+      'You don’t have permission to create issues in any project in this workspace.',
+    )).toBeInTheDocument()
+    expect(await options()).toEqual([])
+  })
+
+  it('…and distinguishes that from a workspace with no projects at all', async () => {
+    mockState.projects = []
+    render(<CreateIssueModal wsId="w1" onClose={() => {}} />, { wrapper })
+
+    expect(await screen.findByText('No projects in this workspace yet.')).toBeInTheDocument()
   })
 })

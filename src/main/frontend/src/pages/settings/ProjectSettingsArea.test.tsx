@@ -3,39 +3,44 @@ import { render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import ProjectSettingsArea from './ProjectSettingsArea'
-import type { Project, Workspace } from '../../types'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS,
+  PROJECT_CURATOR_BYPASS_PERMISSIONS, PROJECT_VIEWER_PERMISSIONS,
+} from '../../test/permissions'
+import type { Project } from '../../types'
 
 // HD-31 changed this area's access guard, and a bad guard is a silent lockout:
-// the server's `ScopeResolver.requireProjectCurator` lets a project MANAGER *or* a
-// workspace OWNER/ADMIN curate a project's components, so the client-side UX guard
-// has to admit exactly the same set — and, just as importantly, it must WAIT for
-// both lookups before redirecting. The pre-HD-31 guard read only the project role
-// and bounced anyone whose `myRole !== 'MANAGER'`, which would throw a workspace
-// admin out of a page the API happily serves them.
+// the server let a project MANAGER *or* a workspace OWNER/ADMIN curate a
+// project's components, so the client-side UX guard had to admit exactly the
+// same set — and, just as importantly, wait for both lookups before redirecting.
+// The pre-HD-31 guard read only the project role and bounced anyone whose
+// `myRole !== 'MANAGER'`, throwing a workspace admin out of a page the API
+// happily serves them.
 //
-// What is asserted here is the guard's truth table plus the loading race, not the
-// tab markup.
+// HD-123 S5 removes the second lookup and the hand-written predicate together.
+// The guard now calls `canOpenProjectSettings` — the same function the rail's
+// Settings link and the command palette call — over the permission strings the
+// server itself checks, and the workspace bypass arrives already folded into the
+// project response. So the truth table below is expressed in PERMISSIONS, and
+// the loading race is about one query rather than two.
+//
+// What is asserted here is the guard's truth table plus that race, not the tab
+// markup.
 
 const WS_ID = 'w1'
 const PROJECT_ID = 'p1'
 
-function project(myRole: Project['myRole']): Project {
+function project(myPermissions: string[], myRole = 'MEMBER'): Project {
   return {
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Apollo', key: 'AP',
-    archived: false, myRole, createdAt: '2026-08-10T09:00:00Z',
+    archived: false, myRole, myPermissions, createdAt: '2026-08-10T09:00:00Z',
   }
 }
 
-function workspace(myRole: Workspace['myRole']): Workspace {
-  return { id: WS_ID, name: 'Acme', slug: 'acme', myRole, createdAt: '2026-08-10T09:00:00Z' }
-}
-
 const apiGetProjectMock = vi.fn<() => Promise<Project>>()
-const apiGetWorkspaceMock = vi.fn<() => Promise<Workspace>>()
 
 vi.mock('../../api', () => ({
   apiGetProject: () => apiGetProjectMock(),
-  apiGetWorkspace: () => apiGetWorkspaceMock(),
   // The area hands this to the admin pages through AdminApiContext; the pages
   // themselves are stubbed below, so it only has to exist.
   makeAdminApi: () => ({}),
@@ -80,13 +85,11 @@ function deferred<T>() {
 
 beforeEach(() => {
   apiGetProjectMock.mockReset()
-  apiGetWorkspaceMock.mockReset()
 })
 
-describe('ProjectSettingsArea — curator guard (HD-31)', () => {
-  it('admits a project MANAGER and offers the Components tab', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+describe('ProjectSettingsArea — permission guard (HD-31 / HD-123 S5)', () => {
+  it('admits a project admin and offers the Components tab', async () => {
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_ADMIN_PERMISSIONS, 'MANAGER'))
     renderArea()
 
     expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
@@ -95,79 +98,78 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
     expect(screen.queryByText('Board page')).toBeNull()
   })
 
-  it.each([['OWNER'], ['ADMIN']] as const)(
-    'admits a workspace %s who is not a project MANAGER (the server-side bypass)',
-    async role => {
-      // The exact shape that used to be bounced: the project role is not MANAGER,
-      // only the workspace role entitles them.
-      apiGetProjectMock.mockResolvedValue(project('MEMBER'))
-      apiGetWorkspaceMock.mockResolvedValue(workspace(role))
-      renderArea()
+  it('admits a workspace admin who holds only the curator bypass here', async () => {
+    // The exact shape that used to be bounced, and the exact shape the server
+    // sends: no project role of their own (`myRole` still reads VIEWER), plus
+    // `project.curate.all`'s implied grants.
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_CURATOR_BYPASS_PERMISSIONS, 'VIEWER'))
+    renderArea()
 
-      expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
-      expect(screen.queryByText('Board page')).toBeNull()
-    },
-  )
+    expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
+    expect(screen.queryByText('Board page')).toBeNull()
+  })
 
-  it('redirects a plain project MEMBER of a workspace they do not administer', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MEMBER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+  it('admits a taxonomy-only grant — the door is a disjunction, not one key', async () => {
+    apiGetProjectMock.mockResolvedValue(project(['project.taxonomy.manage']))
+    renderArea()
+
+    expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
+    expect(screen.queryByText('Board page')).toBeNull()
+  })
+
+  it('redirects a contributor', async () => {
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_CONTRIBUTOR_PERMISSIONS))
     renderArea()
 
     expect(await screen.findByText('Board page')).toBeTruthy()
     expect(screen.queryByRole('link', { name: 'Components' })).toBeNull()
   })
 
-  it('redirects a project VIEWER', async () => {
-    apiGetProjectMock.mockResolvedValue(project('VIEWER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+  it('redirects a viewer', async () => {
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_VIEWER_PERMISSIONS, 'VIEWER'))
     renderArea()
 
     expect(await screen.findByText('Board page')).toBeTruthy()
   })
 
-  it('does not redirect while the workspace role is still loading', async () => {
-    // The race the guard has to survive: the project lookup resolves first and says
-    // "not a MANAGER", but the workspace lookup — which may still say OWNER/ADMIN —
-    // has not come back yet. Redirecting here would bounce a legitimate curator out
-    // of their own settings page on a slow connection, non-deterministically.
-    const ws = deferred<Workspace>()
-    apiGetProjectMock.mockResolvedValue(project('MEMBER'))
-    apiGetWorkspaceMock.mockReturnValue(ws.promise)
+  it('does not redirect while the permissions are still loading', async () => {
+    // The race the guard has to survive. `can(...)` is false while the answer is
+    // unknown — deliberately, so a gate never widens on missing data — which
+    // means "denied" and "not asked yet" are the same boolean. Redirecting on it
+    // would bounce a legitimate curator out of their own settings page on a slow
+    // connection, non-deterministically. `isLoading` is what tells the two apart.
+    const p = deferred<Project>()
+    apiGetProjectMock.mockReturnValue(p.promise)
     renderArea()
 
-    // The project query has resolved (its name is on screen) …
-    expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
-    // … and nothing has navigated away.
+    // Nothing has navigated away while the answer is outstanding.
     expect(screen.queryByText('Board page')).toBeNull()
 
-    ws.resolve(workspace('ADMIN'))
+    p.resolve(project(PROJECT_CURATOR_BYPASS_PERMISSIONS, 'VIEWER'))
     await waitFor(() => expect(screen.getByRole('link', { name: 'Components' })).toBeTruthy())
     expect(screen.queryByText('Board page')).toBeNull()
   })
 
-  it('redirects only once BOTH lookups have answered "not a curator"', async () => {
-    const ws = deferred<Workspace>()
-    apiGetProjectMock.mockResolvedValue(project('MEMBER'))
-    apiGetWorkspaceMock.mockReturnValue(ws.promise)
+  it('redirects once the answer actually arrives and says no', async () => {
+    const p = deferred<Project>()
+    apiGetProjectMock.mockReturnValue(p.promise)
     renderArea()
 
-    expect(await screen.findByRole('heading', { name: 'Apollo' })).toBeTruthy()
     expect(screen.queryByText('Board page')).toBeNull()
 
-    ws.resolve(workspace('MEMBER'))
+    p.resolve(project(PROJECT_CONTRIBUTOR_PERMISSIONS))
     expect(await screen.findByText('Board page')).toBeTruthy()
   })
 
-  // 0.13.0 review (security-officer L5): `PATCH …/projects/{id}` stopped echoing a
-  // hardcoded MANAGER and now returns the caller's REAL project role, which the
-  // Board tab writes straight into `['project', ws, p]` with setQueryData. For a
-  // workspace OWNER/ADMIN who is not a project member that role is VIEWER — so a
-  // guard reading the project role alone would throw the curator out of the very
-  // page they just saved on. The predicate must stay the curator one.
-  it('keeps a workspace OWNER in the area when the project role echoes back VIEWER', async () => {
-    apiGetProjectMock.mockResolvedValue(project('VIEWER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('OWNER'))
+  // 0.13.0 review (security-officer L5): `PATCH …/projects/{id}` returns the
+  // caller's REAL project role, which the Delivery tab writes straight into
+  // `['project', ws, p]` with setQueryData. For a workspace OWNER/ADMIN who is
+  // not a project member that role is VIEWER — so a guard reading the role would
+  // throw the curator out of the very page they just saved on. Reading
+  // `myPermissions` instead makes that failure unexpressible: the same response
+  // that says VIEWER carries the curator grants.
+  it('keeps a workspace admin in the area when the project role echoes back VIEWER', async () => {
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_CURATOR_BYPASS_PERMISSIONS, 'VIEWER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`)
 
     expect(await screen.findByText('Delivery settings page')).toBeTruthy()
@@ -179,8 +181,7 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   // carried — so it must REDIRECT, not fall through to the area's catch-all
   // (which would drop the user on Taxonomy with no explanation).
   it('redirects the retired /settings/board path to the Delivery tab', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_ADMIN_PERMISSIONS, 'MANAGER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/board`)
 
     expect(await screen.findByText('Delivery settings page')).toBeTruthy()
@@ -194,8 +195,7 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   // area's catch-all would ALSO render a page — Taxonomy — and an old bookmark
   // silently landing on an unrelated tab is the failure this route prevents.
   it('lands the old /settings/board URL on /settings/delivery itself', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_ADMIN_PERMISSIONS, 'MANAGER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/board`)
 
     expect(await screen.findByText('Delivery settings page')).toBeTruthy()
@@ -208,8 +208,7 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   // to Taxonomy, so the test above is proving a dedicated route rather than a
   // coincidence of ordering.
   it('still sends an unknown settings path to Taxonomy', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_ADMIN_PERMISSIONS, 'MANAGER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/no-such-tab`)
 
     expect(await screen.findByText('Bindings page')).toBeTruthy()
@@ -219,8 +218,7 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   })
 
   it('routes the Delivery tab to the delivery page', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_ADMIN_PERMISSIONS, 'MANAGER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`)
 
     expect(await screen.findByText('Delivery settings page')).toBeTruthy()
@@ -228,8 +226,7 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   })
 
   it('routes the Components tab to ProjectComponentsPage for a curator', async () => {
-    apiGetProjectMock.mockResolvedValue(project('MEMBER'))
-    apiGetWorkspaceMock.mockResolvedValue(workspace('ADMIN'))
+    apiGetProjectMock.mockResolvedValue(project(PROJECT_CURATOR_BYPASS_PERMISSIONS))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/components`)
 
     expect(await screen.findByText('Components page')).toBeTruthy()

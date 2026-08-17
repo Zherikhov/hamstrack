@@ -4,23 +4,36 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import NavRail from './NavRail'
 import { useAuthStore } from '../auth'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS,
+  PROJECT_CURATOR_BYPASS_PERMISSIONS, PROJECT_VIEWER_PERMISSIONS,
+  WORKSPACE_ADMIN_PERMISSIONS,
+} from '../test/permissions'
 import type { Project, User, Workspace } from '../types'
 
 /**
- * HD-98 — the rail's **Settings** link must admit exactly the set the server does.
+ * HD-98, and its HD-123 S5 replacement — the rail's **Settings** link must admit
+ * exactly the set the server does.
  *
- * `ScopeResolver.requireProjectCurator` is "project MANAGER *or* workspace
- * OWNER/ADMIN", and `ProjectSettingsArea` already guards on that pair. The rail
- * read only `project.myRole === 'MANAGER'`, so a workspace admin who was a plain
- * project member had no link at all — the page served them fine, they just could
- * not find it. That is the worst shape of an authorization mismatch: not a leak,
- * but a feature that silently does not exist for the people who own the workspace.
+ * The original bug: the rail read `project.myRole === 'MANAGER'` while
+ * `ScopeResolver.requireProjectCurator` (and `ProjectSettingsArea`) admitted
+ * "project MANAGER *or* workspace OWNER/ADMIN", so a workspace admin who was a
+ * plain project member had no link at all — the page served them fine, they just
+ * could not find it. That is the worst shape of an authorization mismatch: not a
+ * leak, but a feature that silently does not exist for the people who own the
+ * workspace.
  *
- * <p>The second half of the ticket is a REQUEST-SHAPE promise, and it is asserted
- * here rather than assumed: the fix must not put a `GET /workspaces/{id}` behind
- * every board render. `useIsProjectCurator`'s `needsRole` flag exists to skip that
- * lookup whenever the PROJECT role already settles the question — so a MANAGER
- * must produce no such request at all.
+ * <p>S5 removes the class rather than the instance. The rail no longer has a
+ * predicate to get wrong: it asks `canOpenProjectSettings` over the permission
+ * strings the server itself checks, and so do the settings area and the command
+ * palette. The fixtures below are therefore permission SETS, and the workspace
+ * admin case is expressed the way the server expresses it — a project response
+ * whose `myRole` still reads VIEWER, carrying the `project.curate.all` bypass.
+ *
+ * <p>The second half of the ticket is a REQUEST-SHAPE promise, and S5 makes it
+ * unconditional: the gate must not put a `GET /workspaces/{id}` behind any board
+ * render, for any actor, because the project response already carries the
+ * workspace bypass folded in. It is asserted here rather than assumed.
  *
  * <p>Which is why this file drives the REAL api layer over a stubbed `fetch`
  * instead of mocking `../api`: with the module mocked, "no request was made" can
@@ -33,21 +46,24 @@ const WS_ID = 'w1'
 const PROJECT_ID = 'p1'
 const ME: User = { id: 'u-me', email: 'me@example.com', displayName: 'Me Myself' }
 
-function project(myRole: Project['myRole']): Project {
+function project(myPermissions: string[], myRole = 'MEMBER'): Project {
   return {
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Apollo', key: 'AP',
-    archived: false, myRole, createdAt: '2026-08-10T09:00:00Z',
+    archived: false, myRole, myPermissions, createdAt: '2026-08-10T09:00:00Z',
   }
 }
 
-function workspace(myRole: Workspace['myRole']): Workspace {
-  return { id: WS_ID, name: 'Acme', slug: 'acme', myRole, createdAt: '2026-08-10T09:00:00Z' }
+function workspace(): Workspace {
+  return {
+    id: WS_ID, name: 'Acme', slug: 'acme', myRole: 'ADMIN',
+    myPermissions: WORKSPACE_ADMIN_PERMISSIONS, createdAt: '2026-08-10T09:00:00Z',
+  }
 }
 
 /** Every path the component actually asked the network for, in order. */
 let requested: string[] = []
-let projectRole: Project['myRole'] = 'MEMBER'
-let workspaceRole: Workspace['myRole'] = 'MEMBER'
+let projectPermissions: string[] = PROJECT_CONTRIBUTOR_PERMISSIONS
+let projectRole = 'MEMBER'
 
 const realFetch = globalThis.fetch
 
@@ -71,17 +87,19 @@ beforeAll(() => {
 beforeEach(() => {
   localStorage.clear()
   requested = []
+  projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
   projectRole = 'MEMBER'
-  workspaceRole = 'MEMBER'
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
 
   globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const path = url.replace(/^https?:\/\/[^/]+/, '')
     requested.push(path)
-    if (path === `/api/workspaces/${WS_ID}/projects/${PROJECT_ID}`) return json(project(projectRole))
-    if (path === `/api/workspaces/${WS_ID}`) return json(workspace(workspaceRole))
-    if (path === '/api/workspaces') return json([workspace(workspaceRole)])
+    if (path === `/api/workspaces/${WS_ID}/projects/${PROJECT_ID}`) {
+      return json(project(projectPermissions, projectRole))
+    }
+    if (path === `/api/workspaces/${WS_ID}`) return json(workspace())
+    if (path === '/api/workspaces') return json([workspace()])
     // An unexpected call must be loud, not an empty 200 that quietly changes a gate.
     throw new Error(`unstubbed request: ${path}`)
   }) as unknown as typeof fetch
@@ -106,66 +124,65 @@ function renderRail() {
 
 const settingsLink = () => screen.queryByRole('link', { name: 'Settings' })
 
-/** The rail is up and both role lookups have settled — safe to assert an ABSENCE. */
+/** The rail is up and the project lookup has settled — safe to assert an ABSENCE. */
 async function railSettled() {
   await screen.findByRole('link', { name: 'Board' })
   await waitFor(() => expect(requested).toContain(`/api/workspaces/${WS_ID}/projects/${PROJECT_ID}`))
   await waitFor(() => expect(screen.getByTitle('Apollo')).toBeInTheDocument())
 }
 
-describe('NavRail — Settings follows requireProjectCurator (HD-98)', () => {
-  it('shows Settings to a workspace OWNER who is only a project MEMBER', async () => {
-    projectRole = 'MEMBER'
-    workspaceRole = 'OWNER'
+describe('NavRail — Settings follows the project-settings permissions (HD-98 / HD-123)', () => {
+  it('shows Settings to a workspace admin with only the curator bypass in this project', async () => {
+    // Byte-for-byte the server's answer for a workspace OWNER/ADMIN who has no
+    // `project_members` row: `myRole` reads VIEWER, and the permissions carry
+    // `project.curate.all`'s implied grants. The pre-S5 rail hid the link here.
+    projectRole = 'VIEWER'
+    projectPermissions = PROJECT_CURATOR_BYPASS_PERMISSIONS
     renderRail()
 
     expect(await screen.findByRole('link', { name: 'Settings' }))
       .toHaveAttribute('href', `/w/${WS_ID}/p/${PROJECT_ID}/settings`)
   })
 
-  it('shows Settings to a workspace ADMIN who is only a project MEMBER', async () => {
-    projectRole = 'MEMBER'
-    workspaceRole = 'ADMIN'
-    renderRail()
-
-    expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
-  })
-
-  it('still shows Settings to a project MANAGER — without asking for the workspace', async () => {
+  it('shows Settings to a project admin — and asks the network for no workspace at all', async () => {
     projectRole = 'MANAGER'
-    // A workspace role that would NOT grant curation on its own, so the link can
-    // only be coming from the project role.
-    workspaceRole = 'MEMBER'
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS
     renderRail()
 
     expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
 
-    // The `needsRole` guard: the project role already settles it, so the extra
-    // per-board round trip must never leave the client. Give any stray request a
-    // chance to happen before declaring it absent.
+    // The request-shape promise, now unconditional: the project response already
+    // carries the workspace bypass, so the gate never costs a second round trip
+    // — for anyone. Give a stray request a chance before declaring it absent.
     await waitFor(() => expect(requested).toContain(`/api/workspaces/${WS_ID}/projects/${PROJECT_ID}`))
     await new Promise(r => setTimeout(r, 30))
     expect(requested).not.toContain(`/api/workspaces/${WS_ID}`)
   })
 
-  it('hides Settings from a plain member of both the project and the workspace', async () => {
-    projectRole = 'MEMBER'
-    workspaceRole = 'MEMBER'
+  it('shows Settings on a taxonomy-only grant — the door is a disjunction, not one key', async () => {
+    projectPermissions = ['project.taxonomy.manage']
+    renderRail()
+
+    expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
+  })
+
+  it('hides Settings from a contributor, and from a viewer', async () => {
+    projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
     renderRail()
 
     await railSettled()
-    // …and the workspace lookup DID run here — otherwise the absence below would
-    // just be "the answer has not arrived yet".
-    await waitFor(() => expect(requested).toContain(`/api/workspaces/${WS_ID}`))
     expect(settingsLink()).toBeNull()
     // The universal sections are unaffected by the gate.
     expect(screen.getByRole('link', { name: 'Board' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Backlog' })).toBeInTheDocument()
+    // …and the absence is a real answer, not a pending one: the project response
+    // that produced it is the same one the rail's title came from.
+    expect(PROJECT_VIEWER_PERMISSIONS).toHaveLength(0)
   })
 
-  it('draws no Settings link before the roles are known', async () => {
-    projectRole = 'MEMBER'
-    workspaceRole = 'OWNER'
+  it('draws no Settings link before the permissions are known', async () => {
+    projectRole = 'MANAGER'
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS
     let release!: () => void
     const held = new Promise<void>(r => { release = r })
     const stubbed = globalThis.fetch
@@ -177,8 +194,8 @@ describe('NavRail — Settings follows requireProjectCurator (HD-98)', () => {
     renderRail()
 
     // Board/Backlog are unconditional, so the rail HAS rendered — the gate simply
-    // has no answer yet, and an optimistic link would be a flash of a control the
-    // user may not be allowed to use.
+    // has no answer yet. A conditionally-mounted item stays unmounted while
+    // loading (§14.1), so it can pop in but can never flash in and then vanish.
     await screen.findByRole('link', { name: 'Board' })
     expect(settingsLink()).toBeNull()
 

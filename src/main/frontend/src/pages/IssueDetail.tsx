@@ -20,6 +20,7 @@ import {
   CLOSED_SPRINT_HINT, SprintBadge, SprintPicker, formatPoints, isSprintClosed,
 } from '../components/sprints'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
+import { useProjectPermissions } from '../hooks/usePermissions'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
 import { projectIssuesKeyPrefix } from '../lib/queryKeys'
@@ -419,7 +420,11 @@ export default function IssueDetail({
 
   // ── Inline title ──
   function startTitleEdit() {
-    if (!issue) return
+    // Backstop for every inline editor's entry point (HD-123 S5). The
+    // affordances are also withdrawn below, but a guard here means no keyboard
+    // path, no stale handler and no later caller can open an editor whose only
+    // possible outcome is a 403.
+    if (!issue || !canEditIssue) return
     setTitleDraft(issue.title)
     setTitleEditing(true)
   }
@@ -443,7 +448,7 @@ export default function IssueDetail({
 
   // ── Delete ──
   async function handleDelete() {
-    if (!issue) return
+    if (!issue || !canDeleteIssue) return
     setMenuOpen(false)
     if (!window.confirm(`Delete ${issue.key}? This cannot be undone.`)) return
     await apiDeleteIssue(wsId, projectId, issueNumber)
@@ -482,7 +487,7 @@ export default function IssueDetail({
   }
 
   async function handlePostComment() {
-    if (!commentBody.trim()) return
+    if (!commentBody.trim() || !canComment) return
     setPostingComment(true)
     try {
       const c = await apiCreateComment(wsId, projectId, issueNumber, commentBody.trim())
@@ -505,7 +510,9 @@ export default function IssueDetail({
   // Upload one or many files sequentially; each is appended as it lands, and
   // per-file failures are collected so one bad file doesn't sink the rest.
   async function uploadFiles(files: File[]) {
-    if (files.length === 0) return
+    // Guards the button AND the whole-panel file drop, which has no button to
+    // disable — the drop zone is the second door onto the same effect.
+    if (files.length === 0 || !canAttach) return
     setFileError('')
     setUploading(true)
     const errors: string[] = []
@@ -529,7 +536,7 @@ export default function IssueDetail({
 
   // Whole-panel drag-and-drop — only reacts to OS file drags (not issue-card DnD).
   function isFileDrag(e: React.DragEvent) {
-    return e.dataTransfer.types.includes('Files')
+    return canAttach && e.dataTransfer.types.includes('Files')
   }
   function handleDragOver(e: React.DragEvent) {
     if (!isFileDrag(e)) return
@@ -621,6 +628,7 @@ export default function IssueDetail({
   // ── Inline labels (HD-30) ──
   const issueLabels = issue?.labels ?? []
   function startLabelsEdit() {
+    if (!canEditIssue) return
     setLabelDraft(issueLabels.map(l => l.id))
     setLabelsEditing(true)
   }
@@ -640,6 +648,24 @@ export default function IssueDetail({
   // Free: the entry is already cached by the nav rail on every project page.
   const { iterations, releases, estimation } = useProjectDelivery(wsId, projectId)
 
+  // ── Permissions (HD-123 S5, §14.3) ──
+  // Issue detail is where the catalog's field-group split earns its keep: the
+  // most-asked-for boundary is "may change status" vs "may edit the fields", and
+  // the second is "may comment" without either. Each control below asks its own
+  // grant, and never a role. Ownership is computed HERE, at the call site, and
+  // handed to `canOwn` — the hook never guesses who owns what.
+  const permissions = useProjectPermissions(wsId, projectId)
+  const isReporter = !!issue && !!user && issue.reporter.id === user.id
+  /** Every field that is not covered by a more specific grant below. */
+  const canEditIssue = permissions.canOwn('issue.edit', isReporter)
+  const canTransition = permissions.can('issue.transition')
+  const canAssign = permissions.can('issue.assign')
+  /** §6.5's second door: `sprintId` on a PATCH is `sprint.assign`, not `issue.edit`. */
+  const canAssignSprint = permissions.can('sprint.assign')
+  const canDeleteIssue = permissions.canOwn('issue.delete', isReporter)
+  const canComment = permissions.can('comment.create')
+  const canAttach = permissions.can('attachment.create')
+
   // ── Inline versions (HD-32) ──
   // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
   // it isn't threaded through the surface props like statuses/priorities are);
@@ -652,6 +678,7 @@ export default function IssueDetail({
   const showAffectsVersionCell = releases || affectsVersions.length > 0
 
   function startVersionsEdit(role: 'fix' | 'affects') {
+    if (!canEditIssue) return
     setVersionDraft((role === 'fix' ? fixVersions : affectsVersions).map(v => v.id))
     setVersionRoleEditing(role)
   }
@@ -710,6 +737,7 @@ export default function IssueDetail({
 
   // ── Inline description (HD-62) ──
   function startDescEdit() {
+    if (!canEditIssue) return
     setDescDraft(issue?.description ?? '')
     setDescPreview(false)
     setDescEditing(true)
@@ -738,6 +766,7 @@ export default function IssueDetail({
   const isDiscreteField = (t: FieldType) => t === 'SELECT' || t === 'USER' || t === 'DATE' || t === 'CHECKBOX'
 
   function startEditField(f: ProjectField) {
+    if (!canEditIssue) return
     setAddFieldOpen(false)
     setFieldDraft(fieldValues[f.id])
     setEditingFieldId(f.id)
@@ -905,6 +934,10 @@ export default function IssueDetail({
           </span>
         ))}
         <div className="flex items-center gap-1">
+          {/* The overflow menu holds exactly one item today, so without the
+              permission it has nothing to open — a conditionally-mounted control
+              stays unmounted while the answer is unknown (§14.1). */}
+          {canDeleteIssue && (
           <div className="relative" ref={menuRef}>
             <button
               onClick={() => setMenuOpen(o => !o)}
@@ -935,6 +968,7 @@ export default function IssueDetail({
               </div>
             )}
           </div>
+          )}
           {onClose && (
             <button onClick={onClose} className="cursor-pointer p-1 hover:opacity-60 transition-opacity">
               <X size={16} style={{ color: 'var(--color-text-muted)' }} />
@@ -1035,12 +1069,13 @@ export default function IssueDetail({
           />
         ) : (
           <h2
-            tabIndex={0}
+            tabIndex={canEditIssue ? 0 : undefined}
             onClick={startTitleEdit}
             onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); startTitleEdit() } }}
-            className="text-base font-semibold leading-snug rounded-md px-2 py-1 -mx-2 cursor-text outline-none transition-colors hover:bg-[var(--color-surface-2)] focus:bg-[var(--color-surface-2)]"
+            className={`text-base font-semibold leading-snug rounded-md px-2 py-1 -mx-2 outline-none transition-colors${
+              canEditIssue ? ' cursor-text hover:bg-[var(--color-surface-2)] focus:bg-[var(--color-surface-2)]' : ''}`}
             style={{ color: 'var(--color-text)' }}
-            title="Click to edit"
+            title={canEditIssue ? 'Click to edit' : undefined}
           >
             {issue?.title}
           </h2>
@@ -1058,7 +1093,7 @@ export default function IssueDetail({
               {/* Status — only legal workflow transitions are offered */}
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Status</div>
-                <Select value={issue.status.id} onChange={e => commitField({ statusId: e.target.value })}>
+                <Select value={issue.status.id} disabled={!canTransition} onChange={e => commitField({ statusId: e.target.value })}>
                   <option value={issue.status.id}>
                     <StatusBadge name={issue.status.name} category={issue.status.category} color={issue.status.color} />
                   </option>
@@ -1075,7 +1110,7 @@ export default function IssueDetail({
               {/* Priority */}
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Priority</div>
-                <Select value={issue.priority.id} onChange={e => commitField({ priorityId: e.target.value })}>
+                <Select value={issue.priority.id} disabled={!canEditIssue} onChange={e => commitField({ priorityId: e.target.value })}>
                   {priorities.map(p => (
                     <option key={p.id} value={p.id}><PriorityBadge priority={p} /></option>
                   ))}
@@ -1089,7 +1124,7 @@ export default function IssueDetail({
               {/* Type — guarded against stranding the current parent */}
               <div>
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Type</div>
-                <Select value={issue.type.id} onChange={e => changeType(e.target.value)}>
+                <Select value={issue.type.id} disabled={!canEditIssue} onChange={e => changeType(e.target.value)}>
                   {issueTypes.map(t => (
                     <option key={t.id} value={t.id}>
                       <span style={{ color: t.color }}>{t.name}</span>
@@ -1103,6 +1138,7 @@ export default function IssueDetail({
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Assignee</div>
                 <Select
                   value={issue.assignee?.id ?? ''}
+                  disabled={!canAssign}
                   onChange={e => commitField(e.target.value ? { assigneeId: e.target.value } : { clearAssignee: true })}
                 >
                   <option value="">Unassigned</option>
@@ -1127,6 +1163,7 @@ export default function IssueDetail({
                     components={componentOptions}
                     value={issue.component?.id ?? ''}
                     current={issue.component}
+                    disabled={!canEditIssue}
                     onChange={id => commitField(id ? { componentId: id } : { clearComponent: true })}
                   />
                 </div>
@@ -1160,7 +1197,7 @@ export default function IssueDetail({
                     // server refuses both `clearSprint` and a move to another
                     // sprint with a 422, so the control is read-only rather than
                     // a trap that always errors.
-                    disabled={sprintClosed}
+                    disabled={sprintClosed || !canAssignSprint}
                     onChange={id => commitField(id ? { sprintId: id } : { clearSprint: true })}
                   />
                   {sprintClosed && (
@@ -1192,6 +1229,7 @@ export default function IssueDetail({
                     step={0.5}
                     aria-label="Story points"
                     placeholder="Unestimated"
+                    disabled={!canEditIssue}
                     value={pointsDraft ?? (issue.storyPoints ?? '')}
                     onChange={e => setPointsDraft(e.target.value)}
                     onBlur={commitStoryPoints}
@@ -1208,6 +1246,7 @@ export default function IssueDetail({
                 <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Due date</div>
                 <Input
                   type="date"
+                  disabled={!canEditIssue}
                   value={issue.dueDate ?? ''}
                   onChange={e => commitField(e.target.value ? { dueDate: e.target.value } : { clearDueDate: true })}
                 />
@@ -1219,6 +1258,7 @@ export default function IssueDetail({
                   <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Parent</div>
                   <Select
                     value={issue.parentId ?? ''}
+                    disabled={!canEditIssue}
                     onChange={e => { setMetaError(''); commitField(e.target.value ? { parentId: e.target.value } : { clearParent: true }) }}
                   >
                     <option value="">No parent</option>
@@ -1260,15 +1300,18 @@ export default function IssueDetail({
                 ) : (
                   <div
                     onClick={startLabelsEdit}
-                    className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
-                    title="Click to edit"
+                    className={`rounded-md px-2 py-1 -mx-2 transition-colors${
+                      canEditIssue ? ' cursor-pointer hover:bg-[var(--color-surface-2)]' : ''}`}
+                    title={canEditIssue ? 'Click to edit' : undefined}
                   >
                     {issueLabels.length > 0 ? (
                       <div className="flex items-center gap-1 flex-wrap">
                         {issueLabels.map(l => <LabelChip key={l.id} label={l} />)}
                       </div>
                     ) : (
-                      <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>Add labels…</span>
+                      <span className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+                        {canEditIssue ? 'Add labels…' : 'None'}
+                      </span>
                     )}
                   </div>
                 )}
@@ -1291,7 +1334,7 @@ export default function IssueDetail({
                     versions={fixVersions}
                     editing={versionRoleEditing === 'fix'}
                     draft={versionDraft}
-                    readOnly={!releases}
+                    readOnly={!releases || !canEditIssue}
                     onDraftChange={setVersionDraft}
                     onStart={() => startVersionsEdit('fix')}
                     onCommit={() => commitVersions('fix')}
@@ -1310,7 +1353,7 @@ export default function IssueDetail({
                     versions={affectsVersions}
                     editing={versionRoleEditing === 'affects'}
                     draft={versionDraft}
-                    readOnly={!releases}
+                    readOnly={!releases || !canEditIssue}
                     onDraftChange={setVersionDraft}
                     onStart={() => startVersionsEdit('affects')}
                     onCommit={() => commitVersions('affects')}
@@ -1333,7 +1376,7 @@ export default function IssueDetail({
               >
                 <div className="flex items-center justify-between">
                   <SectionHeading>Fields</SectionHeading>
-                  {fields.some(f => fieldValues[f.id] === undefined) && (
+                  {canEditIssue && fields.some(f => fieldValues[f.id] === undefined) && (
                     <div className="relative" ref={addMenuRef}>
                       <button
                         onClick={() => setAddFieldOpen(o => !o)}
@@ -1400,8 +1443,9 @@ export default function IssueDetail({
                           ) : (
                             <div
                               onClick={() => startEditField(f)}
-                              className="cursor-pointer rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
-                              title="Click to edit"
+                              className={`rounded-md px-2 py-1 -mx-2 transition-colors${
+                                canEditIssue ? ' cursor-pointer hover:bg-[var(--color-surface-2)]' : ''}`}
+                              title={canEditIssue ? 'Click to edit' : undefined}
                             >
                               <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{f.name}</div>
                               <FieldValueDisplay field={f} value={fieldValues[f.id]!} members={members} />
@@ -1475,12 +1519,13 @@ export default function IssueDetail({
             ) : issue.description ? (
               <div
                 onClick={startDescEdit}
-                className="rounded-md px-2 py-1 -mx-2 cursor-text transition-colors hover:bg-[var(--color-surface-2)]"
-                title="Click to edit"
+                className={`rounded-md px-2 py-1 -mx-2 transition-colors${
+                  canEditIssue ? ' cursor-text hover:bg-[var(--color-surface-2)]' : ''}`}
+                title={canEditIssue ? 'Click to edit' : undefined}
               >
                 <Markdown>{issue.description}</Markdown>
               </div>
-            ) : (
+            ) : canEditIssue ? (
               <button
                 onClick={startDescEdit}
                 className="text-sm text-left cursor-text rounded-md px-2 py-1 -mx-2 transition-colors hover:bg-[var(--color-surface-2)]"
@@ -1488,6 +1533,12 @@ export default function IssueDetail({
               >
                 Add a description…
               </button>
+            ) : (
+              // Rule: a control is withdrawn, a VALUE never is — and "there is
+              // no description" is itself a value worth stating.
+              <p className="text-sm px-2 py-1 -mx-2" style={{ color: 'var(--color-text-muted)' }}>
+                No description.
+              </p>
             )}
           </div>
         )}
@@ -1574,7 +1625,11 @@ export default function IssueDetail({
                   </span>
                 </div>
               </div>
-              {user?.id === a.uploadedById && (
+              {/* `attachment.delete` — own-only reproduces today's rule exactly
+                  ("the person who uploaded it may remove it"); an unrestricted
+                  grant is the new moderation case, so this is `canOwn`, never a
+                  bare identity comparison. */}
+              {permissions.canOwn('attachment.delete', user?.id === a.uploadedById) && (
                 <button
                   onClick={() => handleDeleteAttachment(a.id)}
                   className="opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
@@ -1590,7 +1645,15 @@ export default function IssueDetail({
 
           <div>
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadFile} />
-            <Button variant="ghost" size="sm" onClick={() => fileInputRef.current?.click()} loading={uploading}>
+            {/* A permanent slot in the Files section: disabled, not removed. */}
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={!canAttach}
+              title={canAttach ? undefined : 'You don’t have permission to attach files to this issue'}
+              onClick={() => fileInputRef.current?.click()}
+              loading={uploading}
+            >
               <Paperclip size={13} /> Attach file
             </Button>
           </div>
@@ -1637,7 +1700,9 @@ export default function IssueDetail({
                     </div>
                     <Markdown>{item.comment.body}</Markdown>
                   </div>
-                  {user?.id === item.comment.authorId ? (
+                  {/* Own-only today; an unrestricted `comment.delete` grant is
+                      moderation, which is new in this model (§6.2). */}
+                  {permissions.canOwn('comment.delete', user?.id === item.comment.authorId) ? (
                     <button
                       onClick={() => handleDeleteComment(item.comment.id)}
                       className="opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer flex-shrink-0"
@@ -1696,8 +1761,12 @@ export default function IssueDetail({
         </div>
       </div>
 
-      {/* ── Sticky comment composer (HD-64) — always reachable at the bottom ── */}
-      {issue && (
+      {/* ── Sticky comment composer (HD-64) — always reachable at the bottom ──
+          `comment.create` is its own grant precisely so a role can read and
+          discuss without editing anything, and so a read-only account can do
+          neither. With it withheld the composer is not drawn at all: an inert
+          textarea at the foot of every issue is worse than an honest absence. */}
+      {issue && canComment && (
         <div className="flex-shrink-0 border-t p-3" style={{ borderColor: 'var(--color-border)', background: 'white' }}>
           <div className="flex items-center gap-2 mb-1">
             {!commentPreview && <MarkdownToolbar textareaRef={commentRef} value={commentBody} onChange={setCommentBody} />}

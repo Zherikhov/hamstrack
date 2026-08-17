@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { PROJECT_ADMIN_PERMISSIONS, WORKSPACE_ADMIN_PERMISSIONS } from '../test/permissions'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { fireEvent } from '@testing-library/react'
@@ -120,11 +121,12 @@ vi.mock('../api', async importOriginal => ({
   })),
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-    archived: false, myRole: 'MANAGER', delivery,
+    archived: false, myRole: 'MANAGER', myPermissions: PROJECT_ADMIN_PERMISSIONS, delivery,
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
-    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z',
+    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'OWNER', myPermissions: WORKSPACE_ADMIN_PERMISSIONS,
+    createdAt: '2026-01-01T00:00:00Z',
   })),
   labelsApi: { list: vi.fn(async () => []), create: vi.fn() },
   componentsApi: { list: vi.fn(async () => []), update: vi.fn() },

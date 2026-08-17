@@ -11,6 +11,7 @@ import { ComponentSelect, useProjectComponents } from './projectComponents'
 import { VersionPicker } from './versions'
 import { SprintPicker } from './sprints'
 import { deliveryOf } from '../hooks/useProjectDelivery'
+import { permissionsFrom } from '../hooks/usePermissions'
 import { Button, Input, Select, Textarea } from './ui'
 
 interface Props {
@@ -43,7 +44,13 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
     enabled: !!effectiveWsId,
   })
 
-  const active = projects.filter(p => !p.archived)
+  // HD-123 §14.3: the picker offers only projects that actually grant
+  // `issue.create`. Each row carries its own permission set, so this is a pure
+  // per-row question — and answering it HERE rather than at the rail's "New
+  // issue" button is deliberate: the button stays a permanent affordance and
+  // the reason is stated where the choice is made, instead of a control
+  // disappearing from the shell for reasons a user cannot see.
+  const active = projects.filter(p => !p.archived && permissionsFrom([p]).can('issue.create'))
 
   // A preset (create sub-task) pins the project to the parent's project.
   const [projectId, setProjectId] = useState(preset?.projectId ?? defaultProjectId ?? '')
@@ -352,7 +359,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             </Select>
             {projectsLoaded && active.length === 0 && (
               <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
-                No projects in this workspace yet.
+                {projects.some(p => !p.archived)
+                  ? 'You don’t have permission to create issues in any project in this workspace.'
+                  : 'No projects in this workspace yet.'}
               </p>
             )}
           </div>

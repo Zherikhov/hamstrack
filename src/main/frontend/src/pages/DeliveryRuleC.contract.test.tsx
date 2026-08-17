@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS } from '../test/permissions'
 import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -69,11 +70,12 @@ vi.mock('../api', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-    archived: false, myRole: state.curator ? 'MANAGER' : 'MEMBER', delivery: state.delivery,
+    archived: false, myRole: 'MEMBER', delivery: state.delivery,
+    myPermissions: state.curator ? PROJECT_ADMIN_PERMISSIONS : PROJECT_CONTRIBUTOR_PERMISSIONS,
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
-    id: WS_ID, name: 'WS', slug: 'ws', myRole: state.curator ? 'OWNER' : 'MEMBER',
+    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'MEMBER', myPermissions: [],
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiUpdateProject: vi.fn(),

@@ -34,10 +34,17 @@ export default function WorkspacesPage() {
     }
   }
 
+  /**
+   * DISPLAY ONLY — the one legitimate reader of `myRole` left in the SPA
+   * (HD-123 §5.3 keeps the field for exactly this). It titles a card; it decides
+   * nothing. A custom role arrives as its own name and is shown verbatim, which
+   * is why the fallback is the string itself rather than "Member".
+   */
   const roleLabel = (role: Workspace['myRole']) => {
     if (role === 'OWNER') return 'Owner'
     if (role === 'ADMIN') return 'Admin'
-    return 'Member'
+    if (role === 'MEMBER') return 'Member'
+    return role
   }
 
   return (

@@ -16,9 +16,10 @@ import { ColorField } from '../admin/AdminStatusesPage'
  * straight from the picker — so this page exists for the tag-soup cure, which is
  * exactly what a free-form namespace lacks in other trackers.
  *
- * Access: `WorkspaceSettingsArea` already redirects a plain MEMBER away
- * (`myRole === 'MEMBER'`), and the server independently enforces OWNER/ADMIN on
- * every mutating endpoint — this page adds no guard of its own.
+ * Access: `WorkspaceSettingsArea` already redirects anyone the workspace-settings
+ * permission set does not admit (HD-123 S5 — `canOpenWorkspaceSettings`, over the
+ * server's own `myPermissions` strings), and the server independently enforces
+ * `label.manage` on every mutating endpoint — this page adds no guard of its own.
  *
  * Its list deliberately uses its OWN query key (archived rows + usage counts)
  * so the pickers' lean `labelsKey(wsId)` cache entry stays lean; both live under

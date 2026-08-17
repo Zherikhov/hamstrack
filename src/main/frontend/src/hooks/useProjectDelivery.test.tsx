@@ -3,6 +3,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { deliveryOf, useProjectDelivery } from './useProjectDelivery'
+import { PROJECT_ADMIN_PERMISSIONS } from '../test/permissions'
 import type { Project, ProjectDelivery } from '../types'
 
 /**
@@ -31,6 +32,7 @@ const BASE: Omit<Project, 'delivery' | 'boardMode'> = {
   key: 'PR',
   archived: false,
   myRole: 'MANAGER',
+  myPermissions: PROJECT_ADMIN_PERMISSIONS,
   createdAt: '2026-01-01T00:00:00Z',
 }
 

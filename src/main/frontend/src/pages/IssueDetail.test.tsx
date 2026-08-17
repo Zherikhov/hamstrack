@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
+import { PROJECT_ADMIN_PERMISSIONS, WORKSPACE_ADMIN_PERMISSIONS } from '../test/permissions'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import IssueDetail from './IssueDetail'
 import { apiUpdateIssue, sprintsApi, versionsApi } from '../api'
+import { useAuthStore } from '../auth'
 import type {
-  Issue, IssueType, PriorityOption, ProjectDelivery, ProjectField, Sprint, Status, VersionRef,
+  Attachment, Comment, Issue, IssueType, PriorityOption, ProjectDelivery, ProjectField,
+  Sprint, Status, VersionRef,
 } from '../types'
 
 // HD-69: refinements to the merged Activity feed (HD-64).
@@ -75,6 +78,21 @@ let openSprints: Sprint[] = []
 // render in their editable form.
 const ALL_ON: ProjectDelivery = { board: 'SCRUM', releases: true, estimation: true, preset: 'CUSTOM' }
 let delivery: ProjectDelivery = ALL_ON
+/** The project's `myPermissions` — every inline editor's gate (HD-123 S5). */
+let projectPermissions: string[] = PROJECT_ADMIN_PERMISSIONS
+
+// HD-123 S5: the two LISTS whose rows are gated one by one, because ownership is
+// a property of the row and not of the page. Both default to what the rest of
+// this file has always assumed (no files; one comment, by the issue's reporter),
+// and the own-gate tests swap in a pair of rows with different owners.
+const MY_ID = 'u1'      // ISSUE.reporter.id, and the default comment's author
+const OTHER_ID = 'u2'
+const DEFAULT_COMMENTS: Comment[] = [{
+  id: 'c1', authorId: MY_ID, authorName: AUTHOR, body: COMMENT_BODY,
+  createdAt: '2026-08-11T13:45:00Z', updatedAt: '2026-08-11T13:45:00Z',
+}]
+let comments: Comment[] = DEFAULT_COMMENTS
+let attachments: Attachment[] = []
 
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
@@ -82,15 +100,10 @@ vi.mock('../api', () => ({
   apiUpdateIssue: vi.fn(),
   apiDeleteIssue: vi.fn(),
   apiListIssues: vi.fn(async () => ({ issues: [], truncated: false })),
-  apiListComments: vi.fn(async () => ({
-    content: [{
-      id: 'c1', authorId: 'u1', authorName: AUTHOR, body: COMMENT_BODY,
-      createdAt: '2026-08-11T13:45:00Z', updatedAt: '2026-08-11T13:45:00Z',
-    }],
-  })),
+  apiListComments: vi.fn(async () => ({ content: comments })),
   apiCreateComment: vi.fn(),
   apiDeleteComment: vi.fn(),
-  apiListAttachments: vi.fn(async () => []),
+  apiListAttachments: vi.fn(async () => attachments),
   apiUploadAttachment: vi.fn(),
   apiDownloadAttachment: vi.fn(),
   apiDeleteAttachment: vi.fn(),
@@ -113,13 +126,14 @@ vi.mock('../api', () => ({
   // already caches — `useProjectDelivery` reads that same entry.
   apiGetProject: vi.fn(async () => ({
     id: 'p1', workspaceId: 'w1', name: 'Proj', key: 'PR',
-    archived: false, myRole: 'MANAGER', delivery,
+    archived: false, myRole: 'MANAGER', myPermissions: projectPermissions, delivery,
     createdAt: '2026-01-01T00:00:00Z',
   })),
   // Only fetched when a caller asks for the curator role (this surface doesn't),
   // but a mocked module must still expose every imported binding.
   apiGetWorkspace: vi.fn(async () => ({
-    id: 'w1', name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z',
+    id: 'w1', name: 'WS', slug: 'ws', myRole: 'OWNER', myPermissions: WORKSPACE_ADMIN_PERMISSIONS,
+    createdAt: '2026-01-01T00:00:00Z',
   })),
   // HD-22: …and its Sprint cell offers the project's open sprints.
   sprintsApi: {
@@ -168,6 +182,9 @@ afterEach(() => {
   issueResponse = ISSUE
   openSprints = []
   delivery = ALL_ON
+  projectPermissions = PROJECT_ADMIN_PERMISSIONS
+  comments = DEFAULT_COMMENTS
+  attachments = []
   vi.mocked(apiUpdateIssue).mockReset()
 })
 
@@ -558,5 +575,194 @@ describe('IssueDetail spends no request to decide what to show (HD-102)', () => 
     await screen.findByText('Something to fix')
     expect(await screen.findByText('Sprint 7')).toBeInTheDocument()
     expect(sprintsApi.list).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * HD-123 S5 §14.3 — the issue surface is where the catalog's field-group split
+ * earns its keep, and where the **ownership modifier** is actually felt.
+ *
+ * `:own` is not a prefix of the unrestricted key (`"issue.edit:own"` ≠
+ * `"issue.edit"`), and the failure direction that matters is *widening*: a
+ * helper that read the own-only grant as unrestricted would hand every reporter
+ * an "edit anyone's issue" surface. So each own-gated control is asserted from
+ * both sides of the same grant — the actor who owns the object, and the one who
+ * does not — with nothing else changed between the two.
+ */
+describe('IssueDetail permission gates (HD-123 S5)', () => {
+  const REPORTER_ID = 'u1'   // ISSUE.reporter.id
+
+  /** Sign in as somebody — `null` for "not the reporter of this issue". */
+  function signIn(id: string) {
+    useAuthStore.setState({
+      user: { id, email: `${id}@example.com`, displayName: 'Someone' },
+      accessToken: 'test-token',
+      initialized: true,
+    })
+  }
+
+  afterEach(() => {
+    useAuthStore.setState({ user: null, accessToken: null, initialized: true })
+  })
+
+  it('withdraws the comment composer without `comment.create`, keeping the comments', async () => {
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS.filter(p => p !== 'comment.create')
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(screen.queryByRole('button', { name: 'Post' })).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText(/Add a comment/)).not.toBeInTheDocument()
+    // Rule B: a VALUE is never withdrawn — the discussion is still readable.
+    expect(await screen.findByText(COMMENT_BODY)).toBeInTheDocument()
+  })
+
+  it('disables "Attach file" without `attachment.create`, rather than removing it', async () => {
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS.filter(p => p !== 'attachment.create')
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    const attach = screen.getByRole('button', { name: /Attach file/ })
+    expect(attach).toBeDisabled()
+    expect(attach).toHaveAttribute(
+      'title', 'You don’t have permission to attach files to this issue',
+    )
+  })
+
+  it('gives an own-only `issue.delete` grant to the reporter and to nobody else', async () => {
+    // The whole trap in one pair of assertions: the SAME grant string, and the
+    // answer differs only by who is looking. A `startsWith` test would have
+    // opened the menu in both.
+    projectPermissions = ['issue.delete:own']
+
+    signIn('u-somebody-else')
+    const other = render(
+      <IssueDetail wsId="w1" projectId="p1" issueNumber={7} issueTypes={[TYPE_TASK]}
+                   statuses={[STATUS_TODO]} transitions={[]} priorities={[PRIORITY]} fields={[]} />,
+      { wrapper },
+    )
+    await screen.findByText('Something to fix')
+    expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+    other.unmount()
+
+    signIn(REPORTER_ID)
+    renderDetail()
+    await screen.findByText('Something to fix')
+    expect(await screen.findByRole('button', { name: 'More actions' })).toBeInTheDocument()
+  })
+
+  it('does not treat an own-only `issue.edit` grant as permission to edit anyone’s issue', async () => {
+    projectPermissions = ['issue.edit:own']
+    signIn('u-somebody-else')
+    renderDetail()
+
+    const title = await screen.findByText('Something to fix')
+    await userEvent.click(title)
+    // No inline editor opened — the read view is still a heading, not an input.
+    expect(screen.queryByDisplayValue('Something to fix')).not.toBeInTheDocument()
+    expect(apiUpdateIssue).not.toHaveBeenCalled()
+  })
+
+  it('honours the same own-only grant for the reporter', async () => {
+    projectPermissions = ['issue.edit:own']
+    signIn(REPORTER_ID)
+    renderDetail()
+
+    await userEvent.click(await screen.findByText('Something to fix'))
+    expect(await screen.findByDisplayValue('Something to fix')).toBeInTheDocument()
+  })
+
+  // ── the per-ROW half of the same modifier ─────────────────────────────────
+  // Files and comments are the only surfaces where ownership varies *within one
+  // render*: two rows, same viewer, same grant, different owner. A gate written
+  // once per page (`canDelete` hoisted out of the map) or widened to a bare
+  // `startsWith` passes every assertion above and still hands a contributor a
+  // delete control on their colleague's file. So both lists are asserted with a
+  // mixed pair in a single render.
+
+  const MINE: Attachment = {
+    id: 'a-mine', filename: 'mine.txt', sizeBytes: 12, contentType: 'text/plain',
+    uploadedById: REPORTER_ID, uploadedByName: AUTHOR, createdAt: '2026-08-11T10:00:00Z',
+  }
+  const THEIRS: Attachment = {
+    ...MINE, id: 'a-theirs', filename: 'theirs.txt',
+    uploadedById: OTHER_ID, uploadedByName: HISTORIAN,
+  }
+
+  /** The action buttons of the file row whose filename is {@code name}. */
+  function fileRowButtons(name: string) {
+    const row = screen.getByText(name).closest('div.group')
+    expect(row).not.toBeNull()
+    // The filename itself is a button (it downloads), so a row with no delete
+    // affordance has exactly one.
+    return [...row!.querySelectorAll('button')]
+  }
+
+  it('offers `attachment.delete:own` on the uploader’s own file and on no other', async () => {
+    projectPermissions = ['attachment.delete:own']
+    attachments = [MINE, THEIRS]
+    signIn(REPORTER_ID)
+    renderDetail()
+
+    await screen.findByText('mine.txt')
+    expect(fileRowButtons('mine.txt')).toHaveLength(2)
+    expect(fileRowButtons('theirs.txt')).toHaveLength(1)
+  })
+
+  it('offers an UNRESTRICTED `attachment.delete` on both — the other direction', async () => {
+    // Without this the pair above would also pass on a build that read every
+    // grant as own-only: a narrowing, and just as wrong.
+    projectPermissions = ['attachment.delete']
+    attachments = [MINE, THEIRS]
+    signIn(REPORTER_ID)
+    renderDetail()
+
+    await screen.findByText('mine.txt')
+    expect(fileRowButtons('mine.txt')).toHaveLength(2)
+    expect(fileRowButtons('theirs.txt')).toHaveLength(2)
+  })
+
+  it('offers `comment.delete:own` on the author’s own comment and on no other', async () => {
+    projectPermissions = ['comment.delete:own']
+    comments = [
+      { ...DEFAULT_COMMENTS[0], id: 'c-mine', body: 'My own words' },
+      {
+        id: 'c-theirs', authorId: OTHER_ID, authorName: HISTORIAN, body: 'Somebody else’s words',
+        createdAt: '2026-08-11T14:00:00Z', updatedAt: '2026-08-11T14:00:00Z',
+      },
+    ]
+    signIn(MY_ID)
+    renderDetail()
+
+    await screen.findByText('My own words')
+    // One row is mine, one is not, and exactly one delete control is rendered.
+    expect(screen.getAllByRole('button', { name: 'Delete comment' })).toHaveLength(1)
+  })
+
+  it('offers a moderator the delete control on every comment', async () => {
+    projectPermissions = ['comment.delete']
+    comments = [
+      { ...DEFAULT_COMMENTS[0], id: 'c-mine', body: 'My own words' },
+      {
+        id: 'c-theirs', authorId: OTHER_ID, authorName: HISTORIAN, body: 'Somebody else’s words',
+        createdAt: '2026-08-11T14:00:00Z', updatedAt: '2026-08-11T14:00:00Z',
+      },
+    ]
+    signIn(MY_ID)
+    renderDetail()
+
+    await screen.findByText('My own words')
+    expect(screen.getAllByRole('button', { name: 'Delete comment' })).toHaveLength(2)
+  })
+
+  it('offers no delete control at all without the grant, on either list', async () => {
+    projectPermissions = []
+    attachments = [MINE, THEIRS]
+    comments = DEFAULT_COMMENTS
+    signIn(REPORTER_ID)
+    renderDetail()
+
+    await screen.findByText('mine.txt')
+    expect(fileRowButtons('mine.txt')).toHaveLength(1)
+    expect(screen.queryByRole('button', { name: 'Delete comment' })).not.toBeInTheDocument()
   })
 })

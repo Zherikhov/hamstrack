@@ -1,4 +1,4 @@
-import { useIsProjectCurator } from '../components/sprints'
+import { useProjectEntry } from '../components/sprints'
 import type { Project, ProjectDelivery } from '../types'
 
 /**
@@ -73,12 +73,6 @@ export function deliveryOf(project: Project | null | undefined): ProjectDelivery
 export interface ProjectDeliveryState extends ProjectDelivery {
   /** `board === 'SCRUM'` — sprints as a planning concept are on. */
   iterations: boolean
-  /**
-   * Project MANAGER *or* workspace OWNER/ADMIN, mirroring
-   * `ScopeResolver.requireProjectCurator`. Only meaningful when the hook was
-   * asked for it (`needsRole`), since the workspace half costs a second request.
-   */
-  isCurator: boolean
   project: Project | undefined
 }
 
@@ -86,16 +80,18 @@ export interface ProjectDeliveryState extends ProjectDelivery {
  * Reads the already-cached `['project', wsId, projectId]` entry (the nav rail and
  * both settings areas fetch it on every project page), so this costs no request.
  *
- * `needsRole` additionally resolves the workspace role — pass it only where a
- * curator-only control is actually rendered, so a plain member's board issues no
- * extra request.
+ * **Capabilities only.** It used to also return `isCurator` (with a `needsRole`
+ * flag to buy the extra workspace request that answer needed); HD-123 S5 moved
+ * every authorization question to `hooks/usePermissions`. Keeping the two apart
+ * matters beyond tidiness: a capability may never change what the API accepts
+ * (Rule A), while a permission is exactly a 403 — conflating them is how a
+ * hidden control starts being mistaken for a protected one.
  */
 export function useProjectDelivery(
   wsId: string | undefined,
   projectId: string | undefined,
-  options?: { needsRole?: boolean },
 ): ProjectDeliveryState {
-  const { project, isCurator } = useIsProjectCurator(wsId, projectId, options?.needsRole ?? false)
+  const { project } = useProjectEntry(wsId, projectId)
   const delivery = deliveryOf(project)
-  return { ...delivery, iterations: delivery.board === 'SCRUM', isCurator, project }
+  return { ...delivery, iterations: delivery.board === 'SCRUM', project }
 }

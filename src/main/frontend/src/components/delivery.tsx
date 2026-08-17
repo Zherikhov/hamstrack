@@ -464,15 +464,18 @@ export function ReversibleNotice({ capability }: { capability: DeliveryCapabilit
  * sprint" affordance it stands in for, so an off capability reads as an empty
  * slot to fill rather than as a missing feature.
  *
- * A non-curator gets `memberNote` and no control at all: they cannot change the
- * project, so offering them the verb would only teach them vocabulary their
- * project does not use.
+ * Someone who may not change the project gets `memberNote` and no control at
+ * all: offering them the verb would only teach them vocabulary their project
+ * does not use.
+ *
+ * `canEnable` is `project.edit` — turning a capability on IS a project edit
+ * (HD-123 S5). It was `isCurator` until permissions replaced the role predicate.
  */
 export function CapabilityOffState({
-  capability, isCurator, pending, disabled, error, onEnable,
+  capability, canEnable, pending, disabled, error, onEnable,
 }: {
   capability: DeliveryCapability
-  isCurator: boolean
+  canEnable: boolean
   pending?: boolean
   /** Archived project — frozen (409 server-side), but still discoverable. */
   disabled?: boolean
@@ -480,7 +483,7 @@ export function CapabilityOffState({
   onEnable: () => void
 }) {
   const copy = CAPABILITY[capability]
-  if (!isCurator) {
+  if (!canEnable) {
     return (
       <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>{copy.memberNote}</p>
     )

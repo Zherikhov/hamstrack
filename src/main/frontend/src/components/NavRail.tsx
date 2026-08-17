@@ -11,7 +11,7 @@ import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
 import { deliveryOf } from '../hooks/useProjectDelivery'
-import { useIsProjectCurator } from './sprints'
+import { canOpenProjectSettings, useProjectPermissions } from '../hooks/usePermissions'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { getLastWorkspaceId } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
@@ -93,22 +93,16 @@ export default function NavRail() {
     queryFn: () => apiGetProject(cur!.wsId, cur!.projectId),
     enabled: !!cur,
   })
-  // HD-98: the Settings link must use the SAME predicate the settings area (and
-  // the server's `requireProjectCurator`) applies — project MANAGER *or*
-  // workspace OWNER/ADMIN — otherwise a workspace admin can only reach project
-  // settings by typing the URL. `useIsProjectCurator` owns that predicate; its
-  // project lookup shares the query key above, so it costs no extra request.
-  //
-  // `needsRole` keeps the workspace-role GET off the wire for everyone whose
-  // PROJECT role already settles the question: a MANAGER is a curator outright,
-  // and before the project has loaded there is nothing to decide. Only a
-  // non-manager triggers it — once per workspace (30s-cached, same key the
-  // settings areas and the sprint helpers use), never per render.
-  const { isCurator } = useIsProjectCurator(
-    cur?.wsId,
-    cur?.projectId,
-    !!project && project.myRole !== 'MANAGER',
-  )
+  // HD-98/HD-123: the Settings link and the settings area now compare against
+  // the SAME server-supplied strings through the SAME function, so the two
+  // cannot express different predicates any more — which is what let a workspace
+  // admin hold the permission with no way in. The lookup shares the query key
+  // above (no extra request), and it needs no workspace role: the server folds
+  // the workspace curator bypass into the project's own permission set.
+  const projectPermissions = useProjectPermissions(cur?.wsId, cur?.projectId)
+  // Conditionally-mounted item, so the loading rule is "stay unmounted": it can
+  // pop in once the answer arrives, and can never flash in and then vanish.
+  const canOpenSettings = canOpenProjectSettings(projectPermissions)
   // HD-102: which project sections this project's way of working calls for. Read
   // off the entry above — the rail is the surface that CACHES it, so asking here
   // is free (and `useProjectDelivery` elsewhere then hits this same entry).
@@ -258,7 +252,7 @@ export default function NavRail() {
               <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em', color: MUTED, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 5, padding: '1px 5px' }}>SOON</span>
             </>}
           </div>
-          {isCurator && (
+          {canOpenSettings && (
             <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/settings`} icon={Settings} label="Settings" collapsed={collapsed} />
           )}
         </>

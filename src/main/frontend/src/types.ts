@@ -24,7 +24,22 @@ export interface Workspace {
   id: string;
   name: string;
   slug: string;
-  myRole: 'OWNER' | 'ADMIN' | 'MEMBER';
+  /**
+   * DISPLAY ONLY (HD-123 §5.3). The caller's workspace role as a label — the
+   * People table, the workspace card. **Never a UI gate:** `myRole === 'ADMIN'`
+   * cannot express a custom role, so a component that decides anything from it
+   * is wrong by construction. Widened from a literal union for exactly that
+   * reason — there is nothing here to switch on. Gate on `myPermissions` via
+   * `hooks/usePermissions`.
+   */
+  myRole: string;
+  /**
+   * The caller's effective WORKSPACE permissions as flat grant keys
+   * (`["workspace.edit", "label.manage:own"]`) — the only permitted input to a
+   * UI gate. Always sent (an empty array is a real answer); required here so a
+   * hand-built object cannot silently mean "unknown", which would deny.
+   */
+  myPermissions: string[];
   createdAt: string;
 }
 
@@ -68,7 +83,20 @@ export interface Project {
   key: string;
   description?: string;
   archived: boolean;
-  myRole: 'MANAGER' | 'MEMBER' | 'VIEWER';
+  /**
+   * DISPLAY ONLY (HD-123 §5.3) — see `Workspace.myRole`. It reports the caller's
+   * EXPLICIT project role and deliberately says `VIEWER` for a member who has no
+   * `project_members` row but inherits a full Contributor set from the project
+   * access default, so it is not even a faithful summary of what they may do.
+   * `myPermissions` is. Gate on `hooks/usePermissions`, never on this.
+   */
+  myRole: string;
+  /**
+   * The caller's effective PROJECT permissions as flat grant keys — the only
+   * permitted input to a UI gate. Already includes the workspace-level curator
+   * bypass (`project.curate.all`), so a project gate needs no workspace lookup.
+   */
+  myPermissions: string[];
   /**
    * @deprecated (HD-102) superseded by `delivery.board`, which carries the same
    * value. Read `delivery` instead — never both. The only place this mirror is
