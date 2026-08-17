@@ -1,17 +1,16 @@
 package com.hamstrack.workspace;
 
+import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import com.hamstrack.workspace.service.RoleCatalog;
@@ -66,9 +65,9 @@ class PermissionResolutionQueryCountTest {
     void resolvingPermissionsCostsTwoStatementsPerWorkspaceAndFourPerProject() {
         var actor = user();
         var ws = workspace(actor);
-        member(ws, actor, WorkspaceRole.OWNER);
+        member(ws, actor, "OWNER");
         var project = project(ws, actor);
-        projectMember(project, actor, ProjectRole.MANAGER);
+        projectMember(project, actor, "MANAGER");
 
         // Warm the role cache. The first resolution in a fresh process also loads the two
         // built-in roles (one statement each, permissions JOIN FETCHed) — bounded by the
@@ -93,7 +92,7 @@ class PermissionResolutionQueryCountTest {
         // default-role branch. It must not cost more: the default chain reads ids off rows
         // already in hand and resolves them through the cache.
         var noRow = user();
-        member(ws, noRow, WorkspaceRole.MEMBER);
+        member(ws, noRow, "MEMBER");
         workspaceAccess.resolveProject(noRow, ws.getId(), project.getId()); // warm
         long inherited = count(() -> workspaceAccess.resolveProject(noRow, ws.getId(), project.getId()));
         assert inherited == 4
@@ -108,7 +107,7 @@ class PermissionResolutionQueryCountTest {
     void checkingAPermissionAtACallSiteCostsNothing() {
         var actor = user();
         var ws = workspace(actor);
-        member(ws, actor, WorkspaceRole.OWNER);
+        member(ws, actor, "OWNER");
         var project = project(ws, actor);
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
 
@@ -157,11 +156,11 @@ class PermissionResolutionQueryCountTest {
         return workspaceRepository.save(w);
     }
 
-    private void member(Workspace ws, User user, WorkspaceRole role) {
+    private void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 
@@ -174,11 +173,11 @@ class PermissionResolutionQueryCountTest {
         return projectRepository.save(p);
     }
 
-    private void projectMember(Project project, User user, ProjectRole role) {
+    private void projectMember(Project project, User user, String role) {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, role));
         projectMemberRepository.save(m);
     }
 }

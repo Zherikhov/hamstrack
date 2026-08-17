@@ -53,11 +53,12 @@ import java.util.UUID;
  * grow. Authorization is then free at the call site — a handler that checks six
  * permissions costs exactly what one that checks none costs.
  *
- * <p><strong>Not folded in here (yet):</strong> the admin delegated-scope
- * {@code ScopeResolver}, which deliberately returns <em>403</em> for a member without the
- * required role. S3 absorbs it: keeping two authorization services after this epic would
- * recreate the exact condition — two predicates for one question — that HD-123 exists to
- * remove (§10.4).
+ * <p><strong>It is now the only one.</strong> The admin delegated-scope
+ * {@code ScopeResolver} was deleted in HD-126 (S3): its three methods are
+ * {@code workspace.taxonomy.manage}, {@code project.taxonomy.manage} and the curator set
+ * {@code Permission.projectCuration()}, all checked through this class. Keeping two
+ * authorization services would have recreated the exact condition — two predicates for
+ * one question — that HD-123 exists to remove (§10.4). Do not add a second one.
  */
 @Service
 @RequiredArgsConstructor
@@ -312,7 +313,7 @@ public class WorkspaceAccessService {
      *       {@link Permission#projectCuration()}. <strong>This is the one the built-in
      *       Owner and Admin hold</strong>, and it is today's implicit workspace-admin
      *       bypass made explicit (§17.2) — the same four permissions
-     *       {@code ScopeResolver.requireProjectCurator} lets them through today, and not
+     *       {@code ScopeResolver.requireProjectCurator} let them through before HD-126, and not
      *       one more;</li>
      *   <li>{@link Permission#PROJECT_ADMINISTER_ALL} → every project permission. Held by
      *       no built-in; grantable to a custom role in S4.</li>

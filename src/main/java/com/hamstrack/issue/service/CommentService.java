@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.event.CommentAdded;
 import com.hamstrack.common.event.CommentDeleted;
 import com.hamstrack.common.event.CommentUpdated;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.dto.CommentResponse;
 import com.hamstrack.issue.dto.CreateCommentRequest;
 import com.hamstrack.issue.entity.CommentMention;
@@ -40,9 +41,19 @@ public class CommentService {
     private final NotificationService notificationService;
     private final ApplicationEventPublisher eventPublisher;
 
+    /**
+     * <strong>Permission: {@code comment.create}</strong> (HD-126 S3, §10.2). This was
+     * <em>ungated entirely</em> until S3 — any workspace member could comment on any issue
+     * in any project — so it is the first gate a project Viewer meets here. Δ-free for
+     * every built-in that could comment before: Contributor and Commenter both hold it.
+     */
     @Transactional
     public CommentResponse create(User actor, UUID workspaceId, UUID projectId, long issueNumber, CreateCommentRequest req) {
-        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
+        var ctx = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber);
+        // Permission first, project state second (§10.3.6): a 403 must never depend on
+        // whether the project happens to be archived.
+        ctx.permissions().require(Permission.COMMENT_CREATE);
+        var issue = ctx.issue();
         requireNotArchived(issue);
         var comment = new IssueComment();
         comment.setIssue(issue);
@@ -64,15 +75,26 @@ public class CommentService {
         return PageResponse.of(commentRepository.findForIssueWithAuthor(issue, pageable).map(CommentResponse::of));
     }
 
+    /**
+     * <strong>Permission: {@code comment.edit}, own-only and never grantable
+     * unrestricted</strong> (HD-126 S3, §10.2, §17.3). Putting words in someone else's
+     * mouth is not a capability this product ships at any role, so the catalog entry is
+     * {@code Own.REQUIRED} and even {@code project.administer.all} yields only the
+     * own-only grant. Editing another person's comment therefore 403s for <em>everyone</em>,
+     * exactly as it does today — the difference is that the refusal now says which
+     * permission it wanted instead of being a bare, detail-less FORBIDDEN.
+     */
     @Transactional
     public CommentResponse update(User actor, UUID workspaceId, UUID projectId, long issueNumber,
                                   UUID commentId, CreateCommentRequest req) {
-        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
-        requireNotArchived(issue);
+        var ctx = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = ctx.issue();
+        // The comment has to be read before the permission can be evaluated — ownership is
+        // a property of it — but the check still precedes the project-state check (§10.3.6)
+        // and every mutation.
         var comment = findCommentOnIssue(commentId, issue);
-        if (!comment.getAuthor().getId().equals(actor.getId())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-        }
+        ctx.permissions().require(Permission.COMMENT_EDIT, isAuthor(comment, actor));
+        requireNotArchived(issue);
         comment.setBody(req.body());
         commentRepository.save(comment);
 
@@ -86,18 +108,43 @@ public class CommentService {
         return CommentResponse.of(comment);
     }
 
+    /**
+     * <strong>Permission: {@code comment.delete} — own, or unrestricted</strong>
+     * (HD-126 S3, §10.2, §10.3.5).
+     *
+     * <p><strong>This is the epic's one accepted widening, and it becomes real here.</strong>
+     * Until S3 the rule was authorship alone, so <em>nobody</em> could delete another
+     * person's comment — not a project admin, not a workspace owner. The built-in Project
+     * admin holds {@code comment.delete} unrestricted, so from this slice on they can, and
+     * that is moderation: the most-requested comment permission, and the only cell
+     * {@code BuiltInRoleSeedParityTest} declares as an intended divergence. It needs a
+     * release note the day it ships.
+     *
+     * <p>Note the asymmetry with {@link #update}: <em>deleting</em> someone's comment is
+     * moderation, <em>editing</em> it is impersonation, so only the first is grantable
+     * unrestricted (§17.3). A workspace Owner/Admin with no {@code project_members} row
+     * still cannot moderate — {@code project.curate.all} does not carry
+     * {@code comment.delete}.
+     */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID commentId) {
-        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
-        requireNotArchived(issue);
+        var ctx = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = ctx.issue();
         var comment = findCommentOnIssue(commentId, issue);
-        if (!comment.getAuthor().getId().equals(actor.getId())) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-        }
+        ctx.permissions().require(Permission.COMMENT_DELETE, isAuthor(comment, actor));
+        requireNotArchived(issue);
         comment.setDeletedAt(Instant.now());
         commentRepository.save(comment);
 
         eventPublisher.publishEvent(new CommentDeleted(workspaceId, projectId, issueNumber));
+    }
+
+    /**
+     * Ownership of a comment (§6.4) is its <strong>author</strong> — computed here and
+     * never by {@code PermissionSet}, which knows nothing about domain objects.
+     */
+    private boolean isAuthor(IssueComment comment, User actor) {
+        return comment.getAuthor().getId().equals(actor.getId());
     }
 
     /**

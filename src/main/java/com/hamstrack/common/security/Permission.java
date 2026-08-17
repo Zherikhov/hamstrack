@@ -61,8 +61,8 @@ public enum Permission {
 
     /**
      * The workspace-scoped catalog &amp; sets and the project-binding matrix
-     * ({@code /api/workspaces/{ws}/admin/**}). Today's
-     * {@code ScopeResolver.requireWorkspaceAdmin}.
+     * ({@code /api/workspaces/{ws}/admin/**}). Replaced the deleted
+     * {@code ScopeResolver.requireWorkspaceAdmin} in HD-126 (S3).
      */
     WORKSPACE_TAXONOMY_MANAGE("workspace.taxonomy.manage", RoleScope.WORKSPACE),
 
@@ -353,7 +353,7 @@ public enum Permission {
      * is the <em>only</em> place a workspace OWNER/ADMIN bypasses the project role today.
      * Adding an entry here widens what every Owner and Admin in every install may do
      * without being a project member; do it only with the same deliberation as a seed
-     * change, and make {@code PermissionParityTest} agree first.
+     * change, and make {@code BuiltInRoleSeedParityTest} agree first.
      */
     public static Set<Permission> projectCuration() {
         return PROJECT_CURATION;

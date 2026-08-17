@@ -2,6 +2,9 @@ package com.hamstrack.workspace.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.event.WorkspaceMemberRemoved;
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.common.security.PermissionSet;
+import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.issue.entity.IssueHistory;
 import com.hamstrack.issue.repository.IssueHistoryRepository;
 import com.hamstrack.issue.repository.IssueRepository;
@@ -11,10 +14,10 @@ import com.hamstrack.workspace.dto.WorkspaceMemberResponse;
 import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.CannotRemoveSelfException;
-import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
 import com.hamstrack.workspace.exception.LastWorkspaceOwnerException;
+import com.hamstrack.workspace.exception.OwnerIsNotGrantableException;
+import com.hamstrack.workspace.exception.WorkspaceGrantCeilingException;
 import com.hamstrack.workspace.exception.WorkspaceMemberNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceInviteRepository;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -74,12 +77,12 @@ import java.util.UUID;
  *       because who did a thing does not change because they left.</li>
  * </ul>
  *
- * <p><strong>Authorization is the {@code WorkspaceRole} ladder, deliberately</strong>, not
- * the new {@code workspace.member.manage} permission. HD-124 (S1) shipped the permission
- * catalog dark; enforcement moves in HD-126 (S3), which sweeps every gate at once. Writing
- * this one against a permission nothing enforces yet would look like protection and be
- * none. The three guards below are public precisely so S3 re-points them instead of
- * writing a second copy of the last-Owner rule somewhere else.
+ * <p><strong>Authorization is {@code workspace.member.manage} plus the §11.2 grant
+ * ceiling</strong> (HD-126, S3). It was the {@code WorkspaceRole} ordinal ladder until
+ * this slice, deliberately: HD-124 shipped the catalog dark, and writing these against a
+ * permission nothing enforced yet would have looked like protection and been none. The
+ * three guards below were public for exactly this moment — S3 changed what they ask, not
+ * how many places ask it, so there is still one copy of the last-Owner rule.
  *
  * <p><strong>Tenancy.</strong> Both mutations resolve through
  * {@link WorkspaceAccessService#requireMember}, so an unknown workspace and a caller who
@@ -103,10 +106,6 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 @Slf4j
-// HD-123 S1: the WorkspaceRole ordinal ladder is a documented legacy bridge here, exactly
-// as in WorkspaceService — the built-in role keys ARE the enum names, so the gates behave
-// identically to every other workspace-scoped gate in the product today. S3 deletes it.
-@SuppressWarnings("deprecation")
 public class WorkspaceMemberService {
 
     private final WorkspaceAccessService workspaceAccess;
@@ -133,42 +132,45 @@ public class WorkspaceMemberService {
                                               UpdateWorkspaceMemberRequest req) {
         // ---- reads first (the @Version rule): resolve, then judge, then mutate ----
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
-        var actorRole = roleCatalog.view(ctx.membership().getRole().getId()).asWorkspaceRole();
         // Before the lock, so an unauthorized caller never takes one.
-        requireMemberAdmin(actorRole);
+        requireMemberAdmin(ctx.permissions());
+        // 422 for a role key this build cannot assign — resolved before the lock for the
+        // same reason, and before the target is read so a bad key never depends on who it
+        // was aimed at.
+        var requested = roleCatalog.requireAssignable(RoleScope.WORKSPACE, req.role());
 
         // THEN the owner-set lock, unconditionally and before the target is read — see
         // lockOwners for why deciding whether to lock from an unlocked read is the bug.
         var owners = lockOwners(ctx.workspace());
 
         var target = requireMembership(ctx.workspace(), userId);
-        var currentRole = roleCatalog.view(target.getRole().getId()).asWorkspaceRole();
+        var currentRole = roleCatalog.view(target.getRole().getId());
 
         // The ceiling applies to BOTH ends of the edit. Only checking the new role would
         // let an ADMIN demote an OWNER — which is not "granting a role above your own",
         // but is the same privilege escalation by the other door.
-        requireWithinGrantCeiling(actorRole, currentRole);
-        requireWithinGrantCeiling(actorRole, req.role());
+        requireWithinGrantCeiling(ctx, currentRole);
+        requireWithinGrantCeiling(ctx, requested);
         // "Does this edit cost the workspace an owner?" is asked of the request and the
         // LOCKED set, not of the role read above: promoting to OWNER can never remove one,
         // and anything else must not land on the last one. Self-DEMOTION is deliberately
         // allowed (unlike self-removal) — an owner stepping down while another owner exists
         // is an ordinary handover, and this guard refuses the case that would orphan the
         // workspace whoever asks.
-        if (req.role() != WorkspaceRole.OWNER) {
+        if (!requested.isBuiltIn(BuiltInRoles.WORKSPACE_OWNER)) {
             requireNotLastOwner(owners, userId);
         }
 
         // ---- mutation, immediately before the save ----
-        target.setRole(roleCatalog.reference(req.role()));
+        target.setRole(roleCatalog.reference(requested.id()));
         memberRepository.save(target);
         // The only record this mutation leaves. There is no audit table yet (a follow-up
         // ticket), and unlike a removal a role change touches no other row, so without this
         // line "who made this account an admin last Tuesday" is unanswerable after the fact.
         // Ids only — no emails or display names, so the line is safe to ship to Loki.
         log.info("workspace.member.role_changed workspace={} actor={} target={} from={} to={}",
-                ctx.workspace().getId(), actor.getId(), userId, currentRole, req.role());
-        return WorkspaceMemberResponse.of(target, req.role());
+                ctx.workspace().getId(), actor.getId(), userId, currentRole.key(), requested.key());
+        return WorkspaceMemberResponse.of(target, requested.key());
     }
 
     /**
@@ -180,9 +182,8 @@ public class WorkspaceMemberService {
         // ---- reads first ----
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
         var workspace = ctx.workspace();
-        var actorRole = roleCatalog.view(ctx.membership().getRole().getId()).asWorkspaceRole();
         // Before the lock, so an unauthorized caller never takes one.
-        requireMemberAdmin(actorRole);
+        requireMemberAdmin(ctx.permissions());
 
         // THEN the owner-set lock, unconditionally and before the target is read — see
         // lockOwners for why deciding whether to lock from an unlocked read is the bug.
@@ -190,8 +191,8 @@ public class WorkspaceMemberService {
 
         var target = requireMembership(workspace, userId);
         var targetUser = target.getUser();
-        var targetRole = roleCatalog.view(target.getRole().getId()).asWorkspaceRole();
-        requireWithinGrantCeiling(actorRole, targetRole);
+        var targetRole = roleCatalog.view(target.getRole().getId());
+        requireWithinGrantCeiling(ctx, targetRole);
         // Deliberately BEFORE the self-check: a sole owner deleting themselves trips both
         // rules, and "promote another member to owner first" is the more actionable of the
         // two answers — it is also the answer a future leave-workspace endpoint must give
@@ -223,41 +224,59 @@ public class WorkspaceMemberService {
         // all when the member held no assigned work — so this is the only place that can
         // answer "who removed this person, and when". Ids only, safe for Loki.
         log.info("workspace.member.removed workspace={} actor={} target={} role={} unassignedIssues={}",
-                workspace.getId(), actor.getId(), userId, targetRole, assignedRefs.size());
+                workspace.getId(), actor.getId(), userId, targetRole.key(), assignedRefs.size());
     }
 
     // ============================================================ guards
     //
-    // Public and separately callable on purpose: HD-126 (S3) re-expresses each of these
+    // Public and separately callable on purpose: HD-126 (S3) re-expressed each of these
     // against the permission model, and the one thing that must not happen is a second
     // implementation of the last-Owner rule living next to this one and disagreeing with
-    // it. There is one copy; S3 changes what it asks, not how many places ask it.
+    // it. There is one copy; S3 changed what it asks, not how many places ask it.
 
     /**
-     * May this caller administer membership at all? Today: workspace ADMIN or above — the
-     * same gate {@code WorkspaceService.inviteMember} has always applied, which is why
-     * that method now calls this rather than repeating it. S3 replaces the body with
-     * {@code permissions().require(WORKSPACE_MEMBER_MANAGE)}.
+     * May this caller administer membership at all? <strong>{@code workspace.member.manage}</strong>
+     * (§10.1) — the same gate {@code WorkspaceService.inviteMember} applies, which is why
+     * that method calls this rather than repeating it. Δ-free: the built-in Owner and
+     * Admin hold it and Member does not, which is exactly the {@code isAtLeast(ADMIN)}
+     * this replaced.
      */
-    public void requireMemberAdmin(WorkspaceRole actorRole) {
-        if (!actorRole.isAtLeast(WorkspaceRole.ADMIN)) {
-            throw new InsufficientWorkspaceRoleException();
-        }
+    public void requireMemberAdmin(PermissionSet actorPermissions) {
+        actorPermissions.require(Permission.WORKSPACE_MEMBER_MANAGE);
     }
 
     /**
-     * The grant ceiling (roles-permissions-proposal §11.2): nobody may act on, or hand
-     * out, a role stronger than their own. An ADMIN can therefore manage MEMBERs and other
-     * ADMINs but never an OWNER, and only an OWNER can mint another OWNER — which is how
-     * ownership is handed over.
+     * The grant ceiling (roles-permissions-proposal §11.2): nobody may hand out — or act
+     * on a member holding — a role that grants something they do not hold themselves.
      *
-     * <p>Note the one asymmetry with the invite path, which additionally refuses OWNER
-     * outright: you do not <em>invite</em> a stranger as an owner, but you do promote a
-     * colleague to one. That extra rule stays where it belongs, at the invite call site.
+     * <p><strong>Expressed on permission SETS, like the project twin</strong>
+     * ({@code ProjectService.requireWithinGrantCeiling}), because the ordinal ladder this
+     * used to compare no longer exists and a custom role has no ordinal.
+     * {@link PermissionSet#firstNotCovered} compares width per grant, so an own-only
+     * holder can never mint an unrestricted one.
+     *
+     * <p><strong>Plus one rule sets cannot express: the built-in Owner.</strong>
+     * Owner and Admin are seeded with <em>identical</em> permission sets on purpose (V13:
+     * "Owner is a guardrail on assignment, not a bigger role"), so set containment alone
+     * would let an Admin demote or remove an Owner — a real widening over
+     * {@code isAtLeast}, and the escalation §11.1 exists to prevent, since the demoted
+     * Owner cannot be restored by anyone but an Owner. So handing out or acting on the
+     * built-in Owner role additionally requires <em>being</em> a built-in Owner. It keys
+     * on the role id, not the key string: once S4 ships the editor a workspace may own a
+     * custom role keyed {@code OWNER}, and that role is not this guardrail.
+     *
+     * <p>Note the one asymmetry with the invite path, which additionally refuses Owner
+     * outright even for an Owner: you do not <em>invite</em> a stranger as an owner, but
+     * you do promote a colleague to one. That extra rule stays where it belongs, at the
+     * invite call site.
      */
-    public void requireWithinGrantCeiling(WorkspaceRole actorRole, WorkspaceRole role) {
-        if (!actorRole.isAtLeast(role)) {
-            throw new InsufficientWorkspaceRoleException();
+    public void requireWithinGrantCeiling(WorkspaceContext ctx, RoleView role) {
+        ctx.permissions().firstNotCovered(role.permissions()).ifPresent(missing -> {
+            throw new WorkspaceGrantCeilingException(role.name(), missing);
+        });
+        if (role.isBuiltIn(BuiltInRoles.WORKSPACE_OWNER)
+                && !ctx.workspaceRole().isBuiltIn(BuiltInRoles.WORKSPACE_OWNER)) {
+            throw new OwnerIsNotGrantableException();
         }
     }
 
@@ -293,8 +312,8 @@ public class WorkspaceMemberService {
      * are rare by nature — a human changing somebody's role or offboarding them. It is not a
      * hot path and it must not be optimised back into a conditional lock.
      *
-     * <p>Keyed by the built-in Owner role <em>id</em>, not the enum, so it outlives S3's
-     * deletion of {@link WorkspaceRole}. A workspace with no owners at all (only reachable
+     * <p>Keyed by the built-in Owner role <em>id</em>, not by a role name, which is what
+     * let it outlive S3's deletion of the role enum. A workspace with no owners at all (only reachable
      * from pre-existing bad data) locks nothing and serialises nothing — it is already in the
      * state this guard exists to prevent, and cannot be pushed further into it.
      */

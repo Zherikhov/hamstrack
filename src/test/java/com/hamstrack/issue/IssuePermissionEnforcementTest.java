@@ -3,8 +3,6 @@ package com.hamstrack.issue;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -21,11 +19,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <strong>HD-125 (S2) — the project-scoped permissions actually bite</strong>
  * (roles-permissions-proposal §15, criteria 4–8).
  *
- * <p>{@code PermissionParityTest} proves the mapping did not change anyone's verdict.
- * This proves the other half, which parity cannot: that the new predicates are wired into
- * the HTTP surface at all, and with the shapes §10.3 specifies — per-field gating on
- * {@code PATCH /issues/{n}}, every door of {@code sprint.assign}, and the target-side
- * {@code issue.assignable} check with its 422.
+ * <p>{@code BuiltInRoleSeedParityTest} proves the built-in role <strong>seed</strong>
+ * reproduces the pre-HD-123 verdict at every call site. It cannot prove any of them is
+ * <em>reached</em>: it asks the resolver what a role grants and never makes a request. This
+ * file is the other half, and the two are deliberately separate — that the permission is
+ * wired into the HTTP surface at all, and with the shapes §10.3 specifies: per-field gating
+ * on {@code PATCH /issues/{n}}, every door of {@code sprint.assign}, the target-side
+ * {@code issue.assignable} check with its 422, and (HD-126) permission before project state.
  *
  * <p>The actors are built-in roles wherever a built-in expresses the case (a Viewer holds
  * nothing; a Commenter holds no {@code sprint.assign}) and a one-off custom role where no
@@ -51,7 +51,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
         var issue = createIssue(ctx, "Filed by the owner");
         long number = issue.get("number").asLong();
         var neighbour = createIssue(ctx, "A rank anchor");
-        var viewer = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
 
         // ---- every read still works: v1 gates writes, never visibility (§3) ----
         mockMvc.perform(get(ctx.issuesBase() + "/" + number)
@@ -99,7 +99,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
     void onlyTheFieldsThatActuallyChangeAreGated() throws Exception {
         var ctx = newProject();
         long number = createIssue(ctx, "Original").get("number").asLong();
-        var viewer = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
         var unchangedStatus = ctx.todoStatusId();
 
         // A whole-form patch in which NOTHING changes needs no permission at all — even
@@ -264,13 +264,63 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
         return titles;
     }
 
+    // ================================ §10.3.6 — permission first, project state second
+
+    /**
+     * <strong>An archived project must not change which status code an authorization
+     * failure produces</strong> (§10.3.6, fixed in HD-126 S3).
+     *
+     * <p>{@code POST …/rank} ran {@code requireNotArchived} <em>between</em> its two
+     * permission checks: {@code issue.rank} first, then the state check, then the
+     * {@code sprint.assign} door. So an archived project answered 403 to someone missing
+     * {@code issue.rank} and <strong>409</strong> to someone missing only
+     * {@code sprint.assign} — the one converted endpoint where the answer depended on
+     * project state, which makes that state observable through the authorization answer and
+     * gives the same caller two different errors for the same missing grant.
+     *
+     * <p>The check now runs after both, so this asserts the pair together: on an archived
+     * project, both refusals are 403, and someone who holds both permissions gets the 409.
+     */
+    @Test
+    void anArchivedProjectNeverTurnsAPermissionFailureIntoAConflict() throws Exception {
+        var ctx = newProject();
+        var sprintId = createSprint(ctx, "Sprint 1");
+        long number = createIssue(ctx, "In the sprint").get("number").asLong();
+        addIssuesToSprint(ctx, ctx.token(), sprintId,
+                UUID.fromString(getIssue(ctx, number).get("id").asText())).andExpect(status().isOk());
+        var anchor = createIssue(ctx, "An anchor");
+
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
+        // issue.rank WITHOUT sprint.assign: the actor who used to get 409 here.
+        var ranker = actorWithCustomProjectRole(ctx, "archived-ranker", Permission.ISSUE_RANK);
+        archiveProject(ctx);
+
+        rank(ctx, viewer.token(), number, "{\"beforeIssueId\":\"" + anchor.get("id").asText() + "\"}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail", containsString("issue.rank")));
+        rank(ctx, ranker.token(), number, "{\"clearSprint\":true}")
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail", containsString("sprint.assign")));
+
+        // Holding both, the caller finally sees the project's state.
+        rank(ctx, ctx.token(), number, "{\"clearSprint\":true}")
+                .andExpect(status().isConflict());
+    }
+
+    private void archiveProject(Ctx ctx) throws Exception {
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .post("/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId() + "/archive")
+                        .header("Authorization", "Bearer " + ctx.token()))
+                .andExpect(status().isNoContent());
+    }
+
     // ================================ criterion 8 — issue.assignable (the TARGET)
 
     @Test
     void aTargetWhoMayNotBeGivenWorkIs422AndNotConfusedWithAStranger() throws Exception {
         var ctx = newProject();
         long number = createIssue(ctx, "Needs an owner").get("number").asLong();
-        var viewer = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
 
         // A real colleague who simply may not be assigned here: the caller is entitled to
         // ask, so the VALUE is what is refused — 422, with a message that does not
@@ -343,7 +393,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
     void anExistingAssignmentSurvivesAfterTheAssigneeLosesTheRight() throws Exception {
         var ctx = newProject();
         long number = createIssue(ctx, "Assigned early").get("number").asLong();
-        var worker = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var worker = actorWith(ctx, "MEMBER", "MEMBER");
 
         patchIssue(ctx, ctx.token(), number, "{\"assigneeId\":\"" + worker.user().getId() + "\"}")
                 .andExpect(status().isOk());
@@ -351,7 +401,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
         // The team decides this person no longer takes work here.
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
         var membership = projectMemberRepository.findByProjectAndUser(project, worker.user()).orElseThrow();
-        membership.setRole(roleCatalog.reference(ProjectRole.VIEWER));
+        membership.setRole(roleCatalog.reference(RoleScope.PROJECT, "VIEWER"));
         projectMemberRepository.save(membership);
 
         // Nothing is unassigned, and an unrelated edit that re-sends the same assignee
@@ -371,7 +421,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
 
     /** A workspace member holding a <em>built-in</em> project role by key. */
     private Actor actorWithBuiltInProjectRole(Ctx ctx, String key) throws Exception {
-        var actor = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var actor = actorWith(ctx, "MEMBER", null);
         var member = new ProjectMember();
         member.setProject(projectRepository.findById(ctx.projectId()).orElseThrow());
         member.setUser(actor.user());

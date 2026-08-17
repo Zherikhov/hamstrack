@@ -11,11 +11,17 @@ import org.springframework.http.HttpStatus;
  *
  * <p>Without it, {@code project.member.manage} is self-escalation to everything in two
  * calls — remove your own membership row, then add yourself back as Project admin — and
- * both calls pass their own gate. The workspace twin
- * ({@code WorkspaceMemberService.requireWithinGrantCeiling}) compares role ordinals
- * because workspace roles still form a ladder; this one compares <em>permission sets</em>
- * ({@code PermissionSet.firstNotCovered}), because a custom role has no ordinal and the
- * ladder is exactly what HD-123 removes.
+ * both calls pass their own gate.
+ *
+ * <p><strong>Both scopes compare permission sets</strong>
+ * ({@code PermissionSet.firstNotCovered}) since HD-126 (S3) — a custom role has no
+ * ordinal, and the ladder the workspace twin
+ * ({@code WorkspaceMemberService.requireWithinGrantCeiling}) used to compare is exactly
+ * what HD-123 removed. The one thing sets cannot express lives beside that twin rather
+ * than inside it: the built-in workspace Owner and Admin are seeded with identical sets on
+ * purpose, so "only an Owner may hand out Owner" is its own guardrail
+ * ({@code OwnerIsNotGrantableException}). There is no project-scoped equivalent, because
+ * no two built-in project roles hold the same set.
  *
  * <p>Behaviour-neutral until S4: today only the built-in Project admin holds
  * {@code project.member.manage}, and it holds every project permission, so its ceiling

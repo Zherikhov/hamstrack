@@ -16,8 +16,8 @@ import java.util.UUID;
  * {@code V15__drop_legacy_role_columns.sql} replayed against a REAL pre-V13 database —
  * <strong>the other half of the §8.4 no-op proof</strong>.
  *
- * <p>{@code PermissionParityTest} asserts that the new predicates agree with the old ones
- * <em>given a correctly migrated role</em>. It cannot assert the migration itself, because
+ * <p>{@code BuiltInRoleSeedParityTest} asserts that the built-in seed agrees with the old
+ * model <em>given a correctly migrated role</em>. It cannot assert the migration itself, because
  * V15 drops the legacy {@code role} columns, so after the upgrade there is no second
  * source of truth left to compare against. This test is that comparison, run at the one
  * moment it is still possible: with a pre-upgrade database in hand.

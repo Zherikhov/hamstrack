@@ -21,12 +21,13 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
-// HD-123 S1: the WorkspaceRole ordinal ladder is a documented legacy bridge here — the
-// built-in role keys ARE the enum names, so behaviour is byte-identical. S3 replaces the
-// two invite gates with workspace.member.manage + the grant-ceiling rule (§11.2) and
-// deletes the enum.
-@SuppressWarnings("deprecation")
 public class WorkspaceService {
+
+    /**
+     * The built-in workspace role key the creator is seeded with. A string since HD-126
+     * (S3) deleted the ordinal enum; it names a role, it does not rank one.
+     */
+    private static final String OWNER_KEY = "OWNER";
 
     private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceRepository workspaceRepository;
@@ -73,7 +74,7 @@ public class WorkspaceService {
         var member = new WorkspaceMember();
         member.setWorkspace(workspace);
         member.setUser(actor);
-        member.setRole(roleCatalog.reference(WorkspaceRole.OWNER));
+        member.setRole(roleCatalog.reference(RoleScope.WORKSPACE, OWNER_KEY));
         memberRepository.save(member);
 
         // No per-workspace taxonomy seeding since M1: statuses/types/priorities
@@ -94,7 +95,7 @@ public class WorkspaceService {
         }
 
         return WorkspaceResponse.of(
-                workspace, roleCatalog.builtIn(RoleScope.WORKSPACE, WorkspaceRole.OWNER.name()));
+                workspace, roleCatalog.builtIn(RoleScope.WORKSPACE, OWNER_KEY));
     }
 
     @Transactional(readOnly = true)
@@ -119,28 +120,41 @@ public class WorkspaceService {
     @Transactional(readOnly = true)
     public List<WorkspaceMemberResponse> listMembers(User actor, UUID workspaceId) {
         var workspace = workspaceAccess.requireMember(actor, workspaceId).workspace();
+        // Same rule as listForUser two methods up, and for a sharper reason: every row
+        // here is somebody ELSE's membership, so each role_id gets the scope+ownership
+        // assertion instead of a bare `view`. The legacy bridge used to throw for a
+        // non-built-in role, which made this fail closed by accident; `.key()` answers for
+        // anything, so a foreign or corrupt role_id would otherwise print another
+        // workspace's role name into the People tab once S4 ships custom roles.
         return memberRepository.findAllByWorkspaceWithUser(workspace).stream()
-                .map(m -> WorkspaceMemberResponse.of(m, roleCatalog.view(m.getRole().getId()).asWorkspaceRole()))
+                .map(m -> WorkspaceMemberResponse.of(m, workspaceAccess.requireRole(
+                        m.getRole().getId(), RoleScope.WORKSPACE, workspace.getId(),
+                        "workspace_members").key()))
                 .toList();
     }
 
+    /**
+     * <strong>Permission: {@code workspace.member.manage}, plus the §11.2 grant
+     * ceiling</strong> (HD-126 S3, §10.1). The ceiling is deliberately <em>not</em> a
+     * permission — it compares the role being handed out against the actor's own grants,
+     * which no single catalog entry can express — and it lives in
+     * {@code WorkspaceMemberService} so the invite path and the member-administration
+     * paths cannot drift apart. Same predicate, one copy.
+     */
     @Transactional
     public void inviteMember(User actor, UUID workspaceId, InviteMemberRequest req) {
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
         var workspace = ctx.workspace();
-        var actorMember = ctx.membership();
-        // HD-123 S1: the actor's role comes from the cached view of their roles row. The
-        // built-in keys ARE the enum names, so both gates below behave exactly as before.
-        var actorRole = roleCatalog.view(actorMember.getRole().getId()).asWorkspaceRole();
-        // HD-132: both gates now live in WorkspaceMemberService so the invite path and the
-        // member-administration paths cannot drift apart — same predicate, one copy.
-        memberService.requireMemberAdmin(actorRole);
-        // OWNER is never grantable via INVITE (you promote a colleague to owner, you do not
-        // invite a stranger as one) — the one rule that is specific to this call site.
-        if (req.role() == WorkspaceRole.OWNER) {
-            throw new InsufficientWorkspaceRoleException();
+        memberService.requireMemberAdmin(ctx.permissions());
+        // 422 for a role key this build cannot assign, before anything is judged about it.
+        var granted = roleCatalog.requireAssignable(RoleScope.WORKSPACE, req.role());
+        // OWNER is never grantable via INVITE — not even by an Owner (you promote a
+        // colleague to owner, you do not invite a stranger as one). The one rule specific
+        // to this call site; the ceiling's Owner guardrail is the weaker, general form.
+        if (granted.isBuiltIn(BuiltInRoles.WORKSPACE_OWNER)) {
+            throw new OwnerIsNotGrantableException();
         }
-        memberService.requireWithinGrantCeiling(actorRole, req.role());
+        memberService.requireWithinGrantCeiling(ctx, granted);
         // Check not already a member
         userRepository.findByEmail(req.email().toLowerCase()).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {
@@ -152,7 +166,7 @@ public class WorkspaceService {
         var invite = new WorkspaceInvite();
         invite.setWorkspace(workspace);
         invite.setEmail(req.email().toLowerCase());
-        invite.setRole(roleCatalog.reference(req.role()));
+        invite.setRole(roleCatalog.reference(granted.id()));
         invite.setTokenHash(TokenUtils.sha256(rawToken));
         invite.setInvitedBy(actor);
         invite.setExpiresAt(Instant.now().plusSeconds(7 * 24 * 3600)); // 7 days

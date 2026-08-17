@@ -9,7 +9,14 @@ import java.util.UUID;
  * The scope a delegated-admin operation acts at: global (both null),
  * workspace-scoped, or project-private. Threaded through the {@code Admin*Service}s
  * so one code path serves all three consoles — the controller resolves and
- * authorizes the scope (via {@link ScopeResolver}) and passes it here.
+ * authorizes the scope ({@code workspace.taxonomy.manage} /
+ * {@code project.taxonomy.manage}, through {@code WorkspaceAccessService}) and passes it
+ * here.
+ *
+ * <p><strong>This is not an authorization type</strong> and it survived HD-126's deletion
+ * of {@code ScopeResolver} for that reason: it is the <em>catalog scope</em> a
+ * delegated-admin write is stamped with and bounded by. Two different concepts that shared
+ * a package.
  *
  * <p>Rows are created stamped with {@link #stamp} and only rows the context
  * {@link #owns} may be edited/deleted, so a workspace admin can never touch a

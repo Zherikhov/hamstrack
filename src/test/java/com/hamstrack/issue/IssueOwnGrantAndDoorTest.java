@@ -3,10 +3,8 @@ package com.hamstrack.issue;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.RolePermission;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,10 +35,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <strong>HD-125 (S2), the three boundaries the built-in roles cannot express</strong>
  * (roles-permissions-proposal §6.4, §6.5, §10.3.3, §10.3.4).
  *
- * <p>{@code PermissionParityTest} proves the mapping moved nobody's verdict, and
- * {@code IssuePermissionEnforcementTest} proves the new predicates are wired to HTTP at
- * all. Neither can reach what is here, because each of these cases needs an actor holding
- * a combination <em>no built-in role ships</em>:
+ * <p>{@code BuiltInRoleSeedParityTest} proves the built-in <em>seed</em> moved nobody's
+ * verdict — it never makes a request — and {@code IssuePermissionEnforcementTest} proves
+ * the predicates are wired to HTTP at all. Neither can reach what is here, because each of
+ * these cases needs an actor holding a combination <em>no built-in role ships</em>, which
+ * puts it outside a table whose rows are all about built-ins:
  *
  * <ol>
  *   <li><strong>The {@code :own} boundary, end to end.</strong> Every built-in that holds
@@ -203,7 +202,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
     void anUnchangedFieldCarriedAlongDemandsNothing() throws Exception {
         var ctx = newProject();
         long number = createIssue(ctx, "Original").get("number").asLong();
-        var assignee = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var assignee = actorWith(ctx, "MEMBER", "MEMBER");
         // Set the two fields the whole-form patch will carry, as somebody who may.
         patchIssue(ctx, ctx.token(), number,
                 "{\"statusId\":\"" + doneStatusId(ctx) + "\",\"assigneeId\":\""
@@ -351,7 +350,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
     void issueAssignIsShutOnBothDoorsForAnActorWhoMayOtherwiseEdit() throws Exception {
         var ctx = newProject();
         long number = createIssue(ctx, "Unassigned").get("number").asLong();
-        var colleague = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var colleague = actorWith(ctx, "MEMBER", "MEMBER");
         var editor = actorWithCustomProjectRole(ctx, "no-assign",
                 grant(Permission.ISSUE_CREATE), grant(Permission.ISSUE_EDIT));
 
@@ -392,7 +391,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
         var ctx = newProject();
         long number = createIssue(ctx, "Needs an owner").get("number").asLong();
         // A colleague who may NOT be assigned here (a Viewer holds no issue.assignable).
-        var unassignable = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
+        var unassignable = actorWith(ctx, "MEMBER", "VIEWER");
         var editor = actorWithCustomProjectRole(ctx, "no-assign-order",
                 grant(Permission.ISSUE_CREATE), grant(Permission.ISSUE_EDIT));
 
@@ -446,7 +445,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
      * editor — and the role is workspace-owned, so it disappears with the fixture.
      */
     private Actor actorWithCustomProjectRole(Ctx ctx, String key, Grant... grants) throws Exception {
-        var actor = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var actor = actorWith(ctx, "MEMBER", null);
         var roleId = txTemplate.execute(status -> {
             var role = new Role();
             role.setWorkspaceId(ctx.wsId());

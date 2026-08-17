@@ -4,10 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.RolePermission;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import jakarta.persistence.EntityManager;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
@@ -130,7 +128,7 @@ public abstract class ComponentTestBase extends LabelTestBase {
     protected Ctx siblingProject(Ctx ctx) throws Exception {
         var ws = workspaceRepository.findById(ctx.wsId()).orElseThrow();
         var project = project(ws, ctx.owner());
-        projectMember(project, ctx.owner(), ProjectRole.MANAGER);
+        projectMember(project, ctx.owner(), "MANAGER");
         var configUrl = "/api/workspaces/" + ctx.wsId() + "/projects/" + project.getId() + "/config";
         var body = mockMvc.perform(get(configUrl).header("Authorization", "Bearer " + ctx.token()))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
@@ -142,7 +140,7 @@ public abstract class ComponentTestBase extends LabelTestBase {
      * explicit project role — {@code projectRole == null} means "member of the
      * workspace, not of the project", the case that must yield 403 rather than 404.
      */
-    protected Actor actorWith(Ctx ctx, WorkspaceRole wsRole, ProjectRole projectRole) throws Exception {
+    protected Actor actorWith(Ctx ctx, String wsRole, String projectRole) throws Exception {
         var u = user();
         var ws = workspaceRepository.findById(ctx.wsId()).orElseThrow();
         member(ws, u, wsRole);
@@ -167,7 +165,7 @@ public abstract class ComponentTestBase extends LabelTestBase {
      */
     protected Actor actorWithCustomProjectRole(Ctx ctx, String key, Permission... permissions)
             throws Exception {
-        var actor = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var actor = actorWith(ctx, "MEMBER", null);
         var roleId = txTemplate.execute(status -> {
             var role = new Role();
             role.setWorkspaceId(ctx.wsId());

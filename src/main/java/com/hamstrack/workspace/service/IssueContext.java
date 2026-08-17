@@ -5,7 +5,6 @@ import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 
 /**
  * The result of {@link WorkspaceAccessService#requireIssue}: workspace membership plus
@@ -22,11 +21,4 @@ public record IssueContext(Workspace workspace, WorkspaceMember membership,
                            Project project, Issue issue,
                            RoleView workspaceRole, PermissionSet workspacePermissions,
                            RoleView projectRole, PermissionSet permissions) {
-
-    /** Legacy bridge; see {@link WorkspaceContext#role()}. Deleted in S3. */
-    @Deprecated(since = "HD-123 S1")
-    @SuppressWarnings("deprecation")
-    public WorkspaceRole role() {
-        return workspaceRole.asWorkspaceRole();
-    }
 }

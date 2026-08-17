@@ -4,7 +4,6 @@ import com.hamstrack.common.security.PermissionSet;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 
 /**
  * The result of {@link WorkspaceAccessService#resolveProject}: workspace membership (as
@@ -34,15 +33,4 @@ public record ProjectContext(Workspace workspace, WorkspaceMember membership, Pr
                              RoleView workspaceRole, PermissionSet workspacePermissions,
                              RoleView projectRole, boolean explicitProjectRole,
                              PermissionSet permissions) {
-
-    /**
-     * The caller's role in the <em>enclosing workspace</em>, as the legacy ordinal enum.
-     * Legacy bridge for the not-yet-migrated call sites; see
-     * {@link WorkspaceContext#role()}. Deleted in S3.
-     */
-    @Deprecated(since = "HD-123 S1")
-    @SuppressWarnings("deprecation")
-    public WorkspaceRole role() {
-        return workspaceRole.asWorkspaceRole();
-    }
 }

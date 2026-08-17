@@ -24,13 +24,12 @@ import java.util.UUID;
  * (since M1), so workspace creation no longer seeds any issue types or statuses.
  *
  * <p><strong>Member administration</strong> ({@code PATCH}/{@code DELETE
- * /{id}/members/{userId}}) is gated on workspace ADMIN — today's mechanism, the
- * same one the invite path uses. HD-126 (S3) moves every workspace gate to
- * {@code workspace.member.manage} in one sweep; until then a permission-based gate
- * here would enforce nothing. Two rules apply to both verbs: the <em>grant
- * ceiling</em> (nobody may act on, or hand out, a role stronger than their own) and
- * the <em>last-Owner</em> guard (409 — a workspace must never lose its last owner,
- * including when an owner acts on themselves).
+ * /{id}/members/{userId}}) requires {@code workspace.member.manage} — the same
+ * permission the invite path checks (HD-126, S3). Two further rules apply to both verbs:
+ * the <em>grant ceiling</em> (§11.2 — nobody may hand out, or act on a member holding, a
+ * role that grants something they do not hold themselves, plus the built-in Owner
+ * guardrail) and the <em>last-Owner</em> guard (409 — a workspace must never lose its last
+ * owner, including when an owner acts on themselves).
  */
 @RestController
 @RequestMapping("/api/workspaces")

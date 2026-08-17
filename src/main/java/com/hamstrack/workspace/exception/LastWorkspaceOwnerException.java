@@ -14,8 +14,9 @@ import org.springframework.http.HttpStatus;
  * owner they lack a permission they demonstrably hold.
  *
  * <p>The guard lives in {@code WorkspaceMemberService.requireNotLastOwner} and is called
- * from both mutation paths; HD-126 (S3) re-points it at the permission model rather than
- * writing a second copy.
+ * from both mutation paths. It survived HD-126 (S3) unchanged because it was already keyed
+ * on the built-in Owner role <em>id</em> rather than on a role name — a permission model
+ * cannot express it, since Owner and Admin hold identical permission sets by design.
  */
 public class LastWorkspaceOwnerException extends AppException {
     public LastWorkspaceOwnerException() {

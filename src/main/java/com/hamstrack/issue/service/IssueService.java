@@ -762,12 +762,16 @@ public class IssueService {
     public IssueResponse rank(User actor, UUID workspaceId, UUID projectId, long number,
                               RankIssueRequest req) {
         var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
-        // Permission first, project state second (§10.3.6). The sprint door below cannot
-        // be checked here — it depends on the issue's current sprint — but it still runs
-        // before every mutation, including the rank service's rebalance.
+        // Permission first, project state second (§10.3.6) — for BOTH permissions this
+        // endpoint can require. The sprint door cannot be evaluated here because it
+        // depends on the issue's current sprint, so `requireNotArchived` waits until after
+        // it (below) rather than running between the two: an archived project answering
+        // 409 where every other converted site answers 403 would make the state of the
+        // project observable through the authorization answer, which is precisely what
+        // §10.3.6 forbids. Both checks still precede every mutation, including the rank
+        // service's rebalance.
         ctx.permissions().require(Permission.ISSUE_RANK);
         var project = ctx.project();
-        requireNotArchived(project);
 
         // ---- request shape: these are malformed requests, not business rejections ----
         if (req.sprintId() != null && req.clearSprint()) {
@@ -801,6 +805,11 @@ public class IssueService {
         if (sprintChanges) {
             // The third door (§6.5): moving between sections IS sprint assignment.
             ctx.permissions().require(Permission.SPRINT_ASSIGN);
+        }
+
+        // ---- every permission this request needs has now been checked; state next ----
+        requireNotArchived(project);
+        if (sprintChanges) {
             // A COMPLETED sprint's membership is a delivered fact: it can neither take a
             // new issue nor give one up (§4.5). Checked before any write happens.
             sprintService.requireDetachable(issue.getSprint());

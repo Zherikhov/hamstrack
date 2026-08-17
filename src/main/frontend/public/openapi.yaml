@@ -20,13 +20,17 @@ info:
     does not exist or you are not a member of its workspace. The API is
     unversioned while in beta; breaking changes are announced in release notes.
 
-    **Permissions** — inside a project, authorization is a permission check,
-    not a role comparison. `GET /permissions` is the catalog; `myPermissions`
-    on every workspace and project response is what the caller holds there
-    (advisory, for rendering only — the API is the enforcement boundary, and a
-    client that gates nothing is still safe). A project-scoped `403` names the
-    permission it wanted: `detail` reads `Requires permission: <key>`, always
-    the bare catalog key, never the `:own` form. The permissions a request's
+    **Permissions** — authorization is a permission check, not a role
+    comparison, at workspace scope as well as inside a project: the role enums
+    and the role ladder are gone, and the permission model is the only
+    authority. `GET /permissions` is the catalog; `myPermissions` on every
+    workspace and project response is what the caller holds there (advisory,
+    for rendering only — the API is the enforcement boundary, and a client that
+    gates nothing is still safe). A `403` names the permission it wanted:
+    `detail` reads `Requires permission: <key>`, always the bare catalog key,
+    never the `:own` form. Every `role` / `myRole` field is an **open role key
+    string**, not an enum — never switch exhaustively on one, and gate on
+    `myPermissions` instead. The permissions a request's
     own shape determines are checked **before** the project's state, so a
     caller who lacks one on an archived project gets `403`, not the
     `409 "Project is archived"`. A single request may need several — see
@@ -97,14 +101,23 @@ tags:
   - name: Issues
     description: Issues, addressed by project-scoped number
   - name: Comments
-    description: Issue comments
+    description: >-
+      Issue comments. Permission-gated since HD-126: `comment.create` (which
+      this surface had no gate for at all before), `comment.edit` (own-only at
+      every role — never grantable unrestricted) and `comment.delete` (own, or
+      unrestricted for the built-in project MANAGER, which is the new ability to
+      moderate somebody else's comment). Reading needs project access only.
   - name: Attachments
     description: Issue file attachments
   - name: Labels
     description: >-
       The workspace's label catalog — free-form colored tags reusable across
       every project of the workspace (content, not bound taxonomy: labels never
-      appear in a project's config)
+      appear in a project's config). Reads are open to workspace members;
+      creation needs `label.create`, and rename/recolor/describe versus
+      archive/unarchive/merge/delete are the two widths of one key —
+      `label.manage` own-only (labels you created) and `label.manage`
+      unrestricted respectively.
   - name: Components
     description: >-
       A project's component catalog — curated modules of one project with an
@@ -147,9 +160,20 @@ tags:
   - name: Delegated admin
     description: >-
       The same catalog/set/binding operations at a workspace scope
-      (/workspaces/{wsId}/admin, workspace OWNER/ADMIN) or a project scope
-      (/workspaces/{wsId}/projects/{pId}/admin, project MANAGER). Membership-based:
-      non-member 404, member without the role 403.
+      (/workspaces/{wsId}/admin, `workspace.taxonomy.manage` — the built-in
+      OWNER/ADMIN) or a project scope (/workspaces/{wsId}/projects/{pId}/admin,
+      `project.taxonomy.manage` — the built-in project MANAGER only, not the
+      workspace-wide curator set). Membership-based: a non-member of the
+      workspace, an unknown workspace and an unknown project are 404; a member
+      without the permission is 403, naming it.
+
+
+      **The project family now answers 403 where it used to answer 404** for a
+      workspace member who is not a project member — its workspace-scoped
+      sibling always answered 403 for the identical failure. Safe only because
+      the project is already listed to that caller by GET .../projects; the
+      tenancy rule is untouched, and a non-member of the WORKSPACE still gets
+      404.
 
 security:
   - bearerAuth: []
@@ -470,19 +494,37 @@ paths:
       tags: [Workspaces]
       summary: Change a member's workspace role
       description: |
-        Requires workspace `ADMIN`. `role` is the whole body and is required.
-        Setting the role a member already holds is an accepted no-op, not an
-        error, so re-sending the current value is safe.
+        Requires `workspace.member.manage` — held by the built-in `OWNER` and
+        `ADMIN` and not by `MEMBER`, which is exactly who could use this before.
+        There is no role *ladder* behind it any more: the role enums are gone
+        and the permission model is the only authority. `role` is the whole body
+        and is required (`400` when missing/blank, `422` when it is not an
+        assignable workspace role key). Setting the role a member already holds
+        is an accepted no-op, not an error, so re-sending the current value is
+        safe.
 
-        **Grant ceiling.** Nobody may hand out — or act on — a role stronger
-        than their own, and the check covers the target's *current* role as well
-        as the new one. An `ADMIN` can therefore manage `MEMBER`s and other
+        **Grant ceiling.** Nobody may hand out — or act on a member holding — a
+        role that grants a permission they do not hold themselves, and the check
+        covers the target's *current* role as well as the new one. It compares
+        **permission sets**, not role names (there is no ordering on roles to
+        compare), and an own-only grant never satisfies an unrestricted one. The
+        `403` names the offending permission.
+
+        **Owner guardrail.** On top of that sits one rule permission sets cannot
+        express: only an `OWNER` may hand out the `OWNER` role or administer a
+        member who holds it. `OWNER` and `ADMIN` are seeded with *identical*
+        permissions on purpose — ownership is a guardrail on assignment, not a
+        bigger role — so without this an `ADMIN` could promote themselves or
+        demote the real owner. An `ADMIN` therefore manages `MEMBER`s and other
         `ADMIN`s but can neither promote anyone to `OWNER` nor demote an existing
-        `OWNER`; both refusals are `403`. An `OWNER` **may** promote another
-        member to `OWNER` — that is how ownership is handed over. This differs on
-        purpose from `POST /workspaces/{workspaceId}/invites`, which refuses
-        `OWNER` outright: you promote a colleague to owner, you do not invite a
-        stranger as one.
+        one; an `OWNER` **may** promote another member to `OWNER`, which is how
+        ownership is handed over. This differs on purpose from
+        `POST /workspaces/{workspaceId}/invites`, which refuses `OWNER` outright
+        *even for an owner*: you promote a colleague to owner, you do not invite
+        a stranger as one.
+
+        For the built-in roles all of this behaves exactly as the old "never
+        above your own role" rule did; only the wording of the `403` changed.
 
         **Last owner.** A workspace must never end up without an `OWNER`, so
         demoting the final one returns `409` — whoever asks, including that owner
@@ -519,12 +561,14 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/LastWorkspaceOwner' }
+        '422': { $ref: '#/components/responses/UnknownRole' }
     delete:
       tags: [Workspaces]
       summary: Remove a member from the workspace
       description: |
-        Requires workspace `ADMIN`, under the same grant ceiling and last-owner
-        rules as the `PATCH` above (`403` / `409` respectively).
+        Requires `workspace.member.manage`, under the same grant ceiling and
+        Owner guardrail and the same last-owner rule as the `PATCH` above
+        (`403` / `409` respectively).
 
         **This is not account deletion.** A user is global and may belong to
         several workspaces; removal revokes access *here* only. In one
@@ -582,10 +626,14 @@ paths:
       tags: [Workspaces]
       summary: Invite a member by email
       description: |
-        Requires workspace `ADMIN`. The granted role must not exceed your own
-        and can never be `OWNER` — an existing member can still be promoted to
-        `OWNER` afterwards via `PATCH /workspaces/{workspaceId}/members/{userId}`.
-        The invite is bound to the invited email.
+        Requires `workspace.member.manage` — the same permission and the same
+        grant ceiling as `PATCH /workspaces/{workspaceId}/members/{userId}`, one
+        implementation shared by both so they cannot drift. The granted role
+        must not grant a permission the caller lacks, and can never be `OWNER`
+        *even for an owner* — an existing member can still be promoted to
+        `OWNER` afterwards via that `PATCH`. A role key this instance cannot
+        assign is `422 "Unknown role"`. The invite is bound to the invited
+        email.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -607,6 +655,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422': { $ref: '#/components/responses/UnknownRole' }
 
   /workspaces/accept-invite:
     post:
@@ -699,7 +748,12 @@ paths:
       tags: [Projects]
       summary: Create a project
       description: >-
-        Caller becomes project `MANAGER`. Key is unique per workspace.
+        Requires `project.create` — a **workspace**-scoped permission despite the
+        `project.` prefix (there is no project to scope it to yet). Every
+        built-in workspace role grants it, so every member can still open a
+        project exactly as before; it is its own key so that "only admins open
+        new projects" becomes expressible. Caller becomes project `MANAGER`. Key
+        is unique per workspace.
 
         The optional `delivery` object declares how the team will deliver, and it
         is **partial per member**: whatever you leave out takes the lean default
@@ -730,6 +784,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ProjectResponse' }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Project key already exists in the workspace
@@ -907,6 +962,19 @@ paths:
         **not** part of the workspace-wide curator set, so a workspace
         OWNER/ADMIN who is not a project member cannot use it). The user must
         already be a workspace member.
+
+
+        `role` is a project role **key** (`MANAGER`, `MEMBER`, `COMMENTER`,
+        `VIEWER`). Anything else — including a *workspace* role key such as
+        `ADMIN`, because scope is part of the question and `MEMBER` names a
+        different role in each scope — is `422 "Unknown role"`; a missing or
+        empty value is a `400`. The **grant ceiling** applies: you may not hand
+        out a project role that grants a project permission you do not hold
+        yourself (`403`, naming that permission).
+
+
+        **`VIEWER` is accepted but stored as `MEMBER`** — see the `ProjectRole`
+        schema. The response echoes what was stored.
       operationId: addProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -929,6 +997,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422': { $ref: '#/components/responses/UnknownRole' }
 
   /workspaces/{workspaceId}/projects/{projectId}/members/{userId}:
     delete:
@@ -1438,7 +1507,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
 
-  # ---- Delegated administration (workspace OWNER/ADMIN, project MANAGER) ----
+  # ---- Delegated administration (workspace.taxonomy.manage / project.taxonomy.manage) ----
 
   /workspaces/{workspaceId}/admin/statuses:
     get:
@@ -1446,7 +1515,8 @@ paths:
       summary: List workspace-scoped catalog (visible = global ∪ workspace)
       description: >-
         Workspace console. The full catalog/set surface of `/admin/**` is mirrored
-        under `/workspaces/{workspaceId}/admin/**` for workspace OWNER/ADMIN:
+        under `/workspaces/{workspaceId}/admin/**`, gated on
+        `workspace.taxonomy.manage` (the built-in OWNER/ADMIN):
         `statuses`, `priorities`, `issue-types`, `fields` (GET/POST, PATCH `/{id}`,
         POST `/{id}/archive|unarchive`, DELETE `/{id}` [`?replaceWithId=`; fields
         `?dropValues=`], GET `/{id}/usage`) and the sets `workflows`,
@@ -1530,12 +1600,20 @@ paths:
   /workspaces/{workspaceId}/projects/{projectId}/admin/bindings:
     get:
       tags: [Delegated admin]
-      summary: This project's bindings (project MANAGER)
+      summary: This project's bindings (project.taxonomy.manage)
       description: >-
         Project console. The catalog/set surface mirrors `/admin/**` under
-        `/workspaces/{workspaceId}/projects/{projectId}/admin/**` for the project
-        MANAGER — rows scoped PROJECT are editable; global/workspace rows are
-        inherited (read-only). This endpoint plus PATCH set the four bindings.
+        `/workspaces/{workspaceId}/projects/{projectId}/admin/**`, gated on
+        `project.taxonomy.manage` — the built-in project MANAGER only; it is not
+        part of the workspace-wide curator set, so a workspace OWNER/ADMIN with
+        no project membership row is refused. Rows scoped PROJECT are editable;
+        global/workspace rows are inherited (read-only). This endpoint plus PATCH
+        set the four bindings.
+
+
+        **A workspace member who is not a project member now gets 403 here, not
+        404** — see the `Delegated admin` tag description. A non-member of the
+        workspace still gets 404.
       operationId: projectAdminGetBindings
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1550,7 +1628,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     patch:
       tags: [Delegated admin]
-      summary: Set this project's bindings (project MANAGER)
+      summary: Set this project's bindings (project.taxonomy.manage)
       operationId: projectAdminUpdateBindings
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1929,6 +2007,14 @@ paths:
         (the same permission the sprint endpoints and `PATCH …/issues/{number}`
         check — one permission, every door).
 
+        **Both permissions are checked before the project's state.** `issue.rank`
+        first, `sprint.assign` as soon as the request is known to move the issue
+        between sections, and only then is an **archived** project refused with
+        `409`. So a caller missing either one gets the `403`, never the archive
+        conflict — the same ordering issue delete and attachment delete already
+        follow. The answer to "may you?" must not depend on the state of the
+        thing you are asking about.
+
         The client never sends a rank value — it sends the neighbours it dropped
         between (`afterIssueId` / `beforeIssueId`, both by **id**, while the
         moved issue travels by `number`), and the server computes the placement
@@ -2062,7 +2148,17 @@ paths:
     post:
       tags: [Comments]
       summary: Add a comment
-      description: '`@DisplayName` mentions notify the mentioned workspace members.'
+      description: >-
+        Requires `comment.create`. **This endpoint had no gate at all before** —
+        any workspace member could comment on any issue in any project. The
+        built-in project `MANAGER`, `MEMBER` and `COMMENTER` all grant it, so
+        everyone who could comment still can; what changed is that a project can
+        now have a role that reads but does not comment.
+
+
+        The permission is checked **before** the archived-project `409`, so a
+        caller without it sees the `403` on an archived project.
+        `@DisplayName` mentions notify the mentioned workspace members.
       operationId: createComment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2079,11 +2175,15 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CommentResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
     get:
       tags: [Comments]
       summary: List comments
-      description: Soft-deleted comments are excluded. Paginated, oldest first.
+      description: >-
+        Soft-deleted comments are excluded. Paginated, oldest first. Reading
+        needs nothing beyond project access — no permission.
       operationId: listComments
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2110,7 +2210,17 @@ paths:
     patch:
       tags: [Comments]
       summary: Edit a comment
-      description: Author only.
+      description: >-
+        Requires `comment.edit`, which is **own-only at every role** — it is the
+        one catalog entry that cannot be granted unrestricted, because putting
+        words in someone else's mouth is not a capability this product ships.
+        Even a project administrator holds only `comment.edit:own`. Editing
+        another person's comment is therefore a `403` for everybody, exactly as
+        before; what changed is that the refusal now names the permission
+        instead of being an empty `403` with no body.
+
+
+        Checked before the archived-project `409`.
       operationId: updateComment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2130,10 +2240,29 @@ paths:
               schema: { $ref: '#/components/schemas/CommentResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
     delete:
       tags: [Comments]
       summary: Delete a comment (soft)
-      description: Author only.
+      description: >-
+        Requires `comment.delete`, which honours the ownership modifier: the
+        built-in `MEMBER` and `COMMENTER` hold it **own-only** (your own
+        comments, as before) and the project `MANAGER` holds it
+        **unrestricted**.
+
+
+        **That unrestricted half is a new capability.** Until this release
+        nobody could delete another person's comment — not a project
+        administrator, not a workspace owner — because the only rule was
+        authorship. It is moderation, and it is deliberately the *opposite*
+        choice from `comment.edit`: deleting someone's comment is moderation,
+        editing it is impersonation. A workspace `OWNER`/`ADMIN` who is not a
+        member of the project does **not** get it — `comment.delete` is not part
+        of the workspace-wide curator set.
+
+
+        Soft delete (the comment leaves the list; attribution is kept). Checked
+        before the archived-project `409`.
       operationId: deleteComment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2144,6 +2273,7 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/ProjectArchived' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/attachments:
     post:
@@ -2333,9 +2463,12 @@ paths:
       tags: [Labels]
       summary: Rename / recolor / describe a label
       description: >-
-        Partial update — `null`/omitted fields are left unchanged. Allowed to a
-        workspace `OWNER`/`ADMIN` **or the label's own creator**; any other
-        member gets `403` (a non-member still gets `404`). A pure casing change
+        Partial update — `null`/omitted fields are left unchanged. Requires
+        `label.manage` **qualified by ownership**: the built-in workspace
+        OWNER/ADMIN hold it unrestricted and MEMBER holds it own-only, so a
+        member may still rename a label they created and nobody else's. Any
+        other member gets a `403` naming the key (a non-member still gets
+        `404`). A pure casing change
         keeps the label's unique slot; any other rename into an existing name
         (archived rows included) returns `409` with `existingId`.
       operationId: updateLabel
@@ -2365,7 +2498,10 @@ paths:
       tags: [Labels]
       summary: Delete a label
       description: >-
-        Workspace `OWNER`/`ADMIN` only. A label still attached to issues returns
+        Requires `label.manage` **unrestricted** (the built-in workspace
+        OWNER/ADMIN): the check is made with no ownership argument, so an
+        own-only grant can never satisfy it — a member may not delete even a
+        label they created. A label still attached to issues returns
         `409` unless `force=true`, which detaches it everywhere first (including
         issues in archived projects — the catalog row disappears either way).
         There is no remap-on-delete: use `POST …/merge` for that. Archiving is
@@ -2393,7 +2529,9 @@ paths:
       tags: [Labels]
       summary: Archive a label
       description: >-
-        Workspace `OWNER`/`ADMIN` only. Always allowed, even while the label is
+        Requires `label.manage` **unrestricted** (the built-in workspace
+        OWNER/ADMIN) — an own-only grant does not satisfy it, so a member cannot
+        archive even a label they created. Always allowed, even while the label is
         in use: it leaves every picker and the default catalog listing, existing
         attachments are preserved (and reported with `archived: true` on the
         issue), and it can no longer be added to an issue (`422`). The name slot
@@ -2416,7 +2554,8 @@ paths:
       tags: [Labels]
       summary: Restore an archived label
       description: >-
-        Workspace `OWNER`/`ADMIN` only. The row already owns its unique name
+        Requires `label.manage` **unrestricted** (the built-in workspace
+        OWNER/ADMIN). The row already owns its unique name
         slot, so this can never conflict.
       operationId: unarchiveLabel
       parameters:
@@ -2436,7 +2575,8 @@ paths:
       tags: [Labels]
       summary: Merge labels into this one
       description: >-
-        Workspace `OWNER`/`ADMIN` only. Every issue carrying one of `sourceIds`
+        Requires `label.manage` **unrestricted** (the built-in workspace
+        OWNER/ADMIN). Every issue carrying one of `sourceIds`
         ends up carrying the label in the path, duplicates collapse, and the
         source labels are **deleted**. The cure for tag soup. No per-issue
         history rows are written (a merge can touch thousands of issues) — this
@@ -2524,9 +2664,10 @@ paths:
       tags: [Components]
       summary: Create a component
       description: >-
-        Requires the **project curator** role — project `MANAGER`, or an
-        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
-        member); any other member gets `403`. The `name` is normalized
+        Requires `component.manage` / `version.manage` / `sprint.manage` as
+        applicable — granted by the built-in project `MANAGER` and, across every
+        project of their workspace, by an `OWNER`/`ADMIN` of it (who need not be
+        a project member); any other member gets a `403` naming the key. The `name` is normalized
         server-side (NFC, invisible control/format characters stripped,
         whitespace collapsed, max 80 chars after normalization) and is unique
         per **project** case-insensitively, archived components included — a
@@ -2596,7 +2737,8 @@ paths:
       tags: [Components]
       summary: Rename / re-lead / describe a component
       description: >-
-        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Same permission as the create/update endpoints above (built-in project
+        `MANAGER`, or a workspace `OWNER`/`ADMIN` across their workspace).
         Partial — `null`/omitted fields are left unchanged. A pure casing change
         keeps the component's unique slot; any other rename onto a taken name
         (archived rows included) is a `409`. `leadId` sets the lead and
@@ -2774,9 +2916,10 @@ paths:
       tags: [Versions]
       summary: Create a version
       description: >-
-        Requires the **project curator** role — project `MANAGER`, or an
-        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
-        member); any other member gets `403`. The `name` is normalized
+        Requires `component.manage` / `version.manage` / `sprint.manage` as
+        applicable — granted by the built-in project `MANAGER` and, across every
+        project of their workspace, by an `OWNER`/`ADMIN` of it (who need not be
+        a project member); any other member gets a `403` naming the key. The `name` is normalized
         server-side (NFC, invisible control/format characters stripped,
         whitespace collapsed, max 60 chars after normalization) and is unique
         per **project** case-insensitively, archived versions included — a
@@ -2846,7 +2989,8 @@ paths:
       tags: [Versions]
       summary: Rename / describe / re-plan a version
       description: >-
-        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Same permission as the create/update endpoints above (built-in project
+        `MANAGER`, or a workspace `OWNER`/`ADMIN` across their workspace).
         Partial — `null`/omitted fields are left unchanged. A pure casing change
         keeps the version's unique slot; any other rename onto a taken name
         (archived rows included) is a `409`. `releaseDate` is a nullable scalar:
@@ -3144,9 +3288,10 @@ paths:
       tags: [Sprints]
       summary: Create a sprint
       description: >-
-        Requires the **project curator** role — project `MANAGER`, or an
-        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
-        member); any other member gets `403`. Everything in the body is
+        Requires `component.manage` / `version.manage` / `sprint.manage` as
+        applicable — granted by the built-in project `MANAGER` and, across every
+        project of their workspace, by an `OWNER`/`ADMIN` of it (who need not be
+        a project member); any other member gets a `403` naming the key. Everything in the body is
         optional: a blank/absent `name` becomes `"Sprint {sequence}"`, which is
         why default names can never collide. The name is normalized server-side
         (NFC, invisible control/format characters stripped, whitespace
@@ -4269,16 +4414,26 @@ components:
     Forbidden:
       description: >-
         Authenticated and a member of the workspace, but missing a permission.
-        Every project-scoped operation names it: `detail` is
+        Every gated operation names it: `detail` is
         `Requires permission: <key>`, where `<key>` is a catalog key exactly as
         `GET /permissions` reports it (always the bare key — never the `:own`
         form, even where an own-only grant would have carried another object).
-        Non-membership and non-existence are `404`, never this. Two families
-        still answer the older wording instead of a key: workspace-scoped
-        checks and the delegated-admin endpoints
-        (`"Insufficient workspace permissions"` /
-        `"Insufficient project permissions"`), and a comment edit/delete by
-        someone other than the author (no `detail` at all).
+        Non-membership and non-existence are `404`, never this.
+
+
+        The old `"Insufficient workspace permissions"` /
+        `"Insufficient project permissions"` sentences are **gone**, and so is
+        the detail-less `403` a comment edit/delete used to return —
+        workspace-scoped checks, the delegated-admin endpoints and the comment
+        endpoints all name a key now. Match on the key, not on wording.
+
+
+        Two refusals deliberately do **not** name a permission, because a
+        permission is not what refused: the **grant ceiling** ("You cannot
+        assign or administer the role …, which includes `<key>` — a permission
+        you do not hold in this workspace") and the **Owner guardrail** ("Only
+        an Owner can assign the Owner role or administer another Owner"). Both
+        are `403`, both apply only to member administration.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4295,6 +4450,32 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+    UnknownRole:
+      description: >-
+        The `role` value cannot be assigned here — `detail` is
+        `Unknown role: <what you sent>`. Covers an unknown key, a key from the
+        **other** scope (`MANAGER` on a workspace endpoint, `OWNER` on a project
+        one), the wrong case (`owner`), and — once workspace-defined roles
+        exist — a role belonging to a workspace the caller cannot see.
+
+
+        **One answer for all of them, on purpose.** A `404` for a role that does
+        not exist here plus something else for nonsense would be an oracle:
+        probe with a role reference, learn from the status code whether it names
+        something real in a tenant you have no access to. So every unusable role
+        value gets the identical `422`, and `detail` only ever echoes what the
+        caller already sent. `400` would be wrong for the opposite reason — the
+        request is well-formed, it is the *value* that cannot be honoured, the
+        same shape as `"Unknown label"` or `"Unknown sprint"`.
+
+
+        A **missing, null or empty** `role` is still a `400` (ordinary
+        validation), and the endpoint's own permission is checked **before** the
+        value is resolved, so a caller who lacks it sees `403` even when the
+        role they sent was also nonsense.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
     LastWorkspaceOwner:
       description: >-
         The change would leave the workspace without an `OWNER`. `409` rather
@@ -4381,8 +4562,10 @@ components:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     ProjectArchived:
       description: >-
-        The project is archived — its component catalog and release plan are
-        frozen (every management call returns this; reads keep working)
+        The project is archived — its content is frozen (its component catalog,
+        release plan, issues and comments; every management call returns this,
+        reads keep working). A caller who *also* lacks the permission the call
+        needs gets the `403` instead: permission first, project state second.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4568,11 +4751,38 @@ components:
 
     WorkspaceRole:
       type: string
-      enum: [OWNER, ADMIN, MEMBER]
+      example: ADMIN
+      description: >-
+        A **workspace role key**. `OWNER`, `ADMIN` and `MEMBER` are the built-in
+        ones and are spelled exactly as they always were, so nothing that sends
+        or reads these values breaks.
+
+
+        **Deliberately not an `enum`.** The field is an open string because a
+        workspace will be able to define roles of its own, whose key travels in
+        exactly this field — a client that switches exhaustively, or generates a
+        closed union / enum deserializer from this schema, breaks the first time
+        it meets one. Display an unrecognized role; never decide with it. For
+        decisions use `myPermissions`.
+
+
+        A value this instance cannot assign is `422 "Unknown role"` (see the
+        `UnknownRole` response), never a silent fallback and never a `404`.
 
     ProjectRole:
       type: string
-      enum: [MANAGER, MEMBER, VIEWER]
+      example: MANAGER
+      description: >-
+        A **project role key**. `MANAGER`, `MEMBER`, `COMMENTER` and `VIEWER`
+        are the built-in ones. Open string rather than an `enum` for the same
+        reason as `WorkspaceRole` — do not switch exhaustively on it.
+
+
+        Two notes when **sending** one: `COMMENTER` is newly assignable (it was
+        rejected before), and `VIEWER` is accepted but **stored as `MEMBER`** —
+        the built-in role keyed `VIEWER` now grants nothing, whereas it used to
+        mean "no explicit row", which granted everything. The response echoes
+        what was stored, so this value does not round-trip.
 
     PermissionScope:
       type: string
@@ -4954,8 +5164,10 @@ components:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
           description: >-
-            The caller's workspace role. Fine to display; to decide what to
-            show, read `myPermissions` instead.
+            The caller's workspace role **key**. Fine to display; to decide what
+            to show, read `myPermissions` instead — this is an open string and
+            `myRole === 'ADMIN'` is not a question that can be answered
+            correctly for every member.
         myPermissions:
           allOf:
             - $ref: '#/components/schemas/MyPermissions'
@@ -4989,10 +5201,13 @@ components:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
           description: >-
-            The role the member should end up with. Required — a `PATCH` with
-            nothing to change is rejected with `400`. It must not exceed the
-            caller's own role, and neither may the member's current role.
-            Sending the role they already hold is an accepted no-op.
+            The role key the member should end up with. Required — a `PATCH`
+            with nothing to change (missing, `null` or empty) is rejected with
+            `400`, and a key this instance cannot assign with `422`. It must not
+            grant a permission the caller lacks, and neither may the member's
+            current role; the `OWNER` role additionally requires the caller to
+            be an owner. Sending the role they already hold is an accepted
+            no-op.
 
     CreateProjectRequest:
       type: object
@@ -5192,10 +5407,12 @@ components:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'
           description: >-
-            The caller's **explicit** project role — `VIEWER` when they have no
-            project membership row of their own, even where that member can in
-            fact do more than a viewer. Display only: `myPermissions` carries
-            the effective answer and is the field to gate on.
+            The caller's **explicit** project role **key** — `VIEWER` when they
+            have no project membership row of their own, even where that member
+            can in fact do more than a viewer. Display only, and an open string:
+            `myRole === 'MANAGER'` cannot express every role a member might
+            hold. `myPermissions` carries the effective answer and is the field
+            to gate on.
         myPermissions:
           allOf:
             - $ref: '#/components/schemas/MyPermissions'
@@ -5221,7 +5438,14 @@ components:
       required: [userId, role]
       properties:
         userId: { type: string, format: uuid }
-        role: { $ref: '#/components/schemas/ProjectRole' }
+        role:
+          allOf:
+            - $ref: '#/components/schemas/ProjectRole'
+          description: >-
+            The project role key to grant. Required (`400` when missing or
+            blank); a key this instance cannot assign in the **project** scope
+            is `422 "Unknown role"`. Bounded by the grant ceiling, and `VIEWER`
+            is stored as `MEMBER` — see the `ProjectRole` schema.
 
     IssueTypeResponse:
       type: object
@@ -5896,7 +6120,7 @@ components:
       type: object
       description: >-
         Body of `PATCH /workspaces/{workspaceId}/labels/{labelId}` — partial;
-        `null`/omitted means "leave unchanged". Workspace `OWNER`/`ADMIN` or the
+        `null`/omitted means "leave unchanged". Requires `label.manage` — the
         label's creator.
       properties:
         name: { type: string, maxLength: 200, description: 'New name if present — same normalization, 60-char limit and case-insensitive uniqueness as create (`409` + `existingId`; a pure casing change is allowed).' }
@@ -5974,7 +6198,8 @@ components:
       required: [name]
       description: >-
         Body of `POST /workspaces/{workspaceId}/projects/{projectId}/components`.
-        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Same permission as the create/update endpoints above (built-in project
+        `MANAGER`, or a workspace `OWNER`/`ADMIN` across their workspace).
       properties:
         name:
           type: string
@@ -6065,7 +6290,8 @@ components:
       required: [name]
       description: >-
         Body of `POST /workspaces/{workspaceId}/projects/{projectId}/versions`.
-        Project curator only (project `MANAGER` or workspace `OWNER`/`ADMIN`).
+        Same permission as the create/update endpoints above (built-in project
+        `MANAGER`, or a workspace `OWNER`/`ADMIN` across their workspace).
       properties:
         name:
           type: string

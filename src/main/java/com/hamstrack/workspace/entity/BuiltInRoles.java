@@ -1,9 +1,9 @@
 package com.hamstrack.workspace.entity;
 
 import com.hamstrack.common.security.RoleScope;
-import com.hamstrack.project.entity.ProjectRole;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -31,9 +31,10 @@ import java.util.UUID;
  * migration, a test fixture and a psql session is worth more than a sortable one.
  *
  * <p><strong>Keys are the legacy enum names on purpose.</strong> That is what makes
- * {@code myRole} wire-compatible with today's SPA across S1–S4, and what lets the ~42
- * not-yet-migrated call sites keep using {@code WorkspaceRole}/{@code ProjectRole} as a
- * bridge. Both enums are deleted in S3; this class outlives them, with the string keys.
+ * {@code myRole} wire-compatible with today's SPA across S1–S4. The two ordinal enums that
+ * used to own those names ({@code WorkspaceRole}/{@code ProjectRole}) were deleted in S3
+ * together with the last call site that ranked them; this class outlived them, and the keys
+ * are now plain strings — the wire values are byte-identical, and nothing ranks them.
  */
 public final class BuiltInRoles {
 
@@ -71,31 +72,32 @@ public final class BuiltInRoles {
     private BuiltInRoles() {
     }
 
-    /** The id of the built-in role with this key in this scope. */
+    /**
+     * The id of the built-in role with this key in this scope.
+     *
+     * @throws IllegalArgumentException for a key this build does not ship — a programming
+     *         error, never user input. Anything reachable from a request body goes through
+     *         {@link #find} instead, which lets the caller answer 422 "Unknown role"
+     *         (§12) rather than 500.
+     */
     public static UUID id(RoleScope scope, String key) {
-        var id = (scope == RoleScope.WORKSPACE ? WORKSPACE_BY_KEY : PROJECT_BY_KEY).get(key);
-        if (id == null) {
-            throw new IllegalArgumentException("No built-in " + scope + " role with key '" + key + "'");
-        }
-        return id;
+        return find(scope, key).orElseThrow(() -> new IllegalArgumentException(
+                "No built-in " + scope + " role with key '" + key + "'"));
     }
 
     /**
-     * Legacy bridge for the call sites that still speak {@link WorkspaceRole}. Deleted
-     * with the enum in S3.
+     * The built-in role with this key in this scope, if there is one — the lookup for
+     * <strong>user-supplied</strong> keys.
+     *
+     * <p>Scope is part of the question, not a hint: {@code MEMBER} names a built-in in
+     * <em>both</em> scopes and they are different roles, so a project endpoint resolving a
+     * key without its scope would happily assign the workspace Member role into
+     * {@code project_members.role_id} — the flat-{@code PermissionSet} hole §12 describes.
      */
-    @Deprecated(since = "HD-123 S1")
-    public static UUID id(WorkspaceRole role) {
-        return id(RoleScope.WORKSPACE, role.name());
-    }
-
-    /**
-     * Legacy bridge for the call sites that still speak {@link ProjectRole}. Deleted with
-     * the enum in S3.
-     */
-    @Deprecated(since = "HD-123 S1")
-    public static UUID id(ProjectRole role) {
-        return id(RoleScope.PROJECT, role.name());
+    public static Optional<UUID> find(RoleScope scope, String key) {
+        if (key == null) return Optional.empty();
+        return Optional.ofNullable(
+                (scope == RoleScope.WORKSPACE ? WORKSPACE_BY_KEY : PROJECT_BY_KEY).get(key));
     }
 
     /** All seven, for tests and for the seed-integrity assertions. */

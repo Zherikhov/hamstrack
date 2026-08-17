@@ -8,7 +8,6 @@ import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
@@ -16,7 +15,6 @@ import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.RoleRepository;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -48,7 +46,6 @@ import java.util.UUID;
         "app.demo.seed-on-first-login=false",
         "seed.admin.email="
 })
-@SuppressWarnings("deprecation") // the legacy bridges are the subject of half these tests
 class RoleSeamHardeningTest {
 
     @Autowired UserRepository userRepository;
@@ -64,66 +61,71 @@ class RoleSeamHardeningTest {
 
     @PersistenceContext EntityManager em;
 
-    // ============================================================ H1: the legacy bridges
+    // ============================================================ H1: the impostor role
 
     /**
-     * <strong>The privilege escalation S4 would otherwise ship.</strong>
-     * {@code roles_scope_key_uk} is {@code UNIQUE NULLS NOT DISTINCT (workspace_id, scope,
-     * key)}, so a workspace may legally own a role keyed {@code ADMIN} next to the built-in
-     * one. Give it <em>zero</em> permissions and it passes the §11.2 grant ceiling (which
-     * compares permission sets — the empty set is a subset of anything) and looks like the
-     * most harmless object in the system. Then every surviving legacy bridge computes
-     * {@code WorkspaceRole.valueOf("ADMIN").isAtLeast(ADMIN)} → <em>true</em>, and the
-     * holder is a workspace admin at all ~42 call sites S2/S3 have not converted yet.
+     * <strong>The privilege escalation S4 would otherwise ship — closed by construction in
+     * S3.</strong> {@code roles_scope_key_uk} is {@code UNIQUE NULLS NOT DISTINCT
+     * (workspace_id, scope, key)}, so a workspace may legally own a role keyed
+     * {@code ADMIN} next to the built-in one. Give it <em>zero</em> permissions and it
+     * passes the §11.2 grant ceiling (which compares permission sets — the empty set is
+     * covered by anything) and looks like the most harmless object in the system.
      *
-     * <p>{@code valueOf} alone cannot catch this: it throws only for a custom key that
-     * happens NOT to collide with an enum name, which is the harmless case. The check has
-     * to be on {@code builtIn}.
+     * <p>Until HD-126 the danger was the legacy bridges: any surviving
+     * {@code WorkspaceRole.valueOf("ADMIN").isAtLeast(ADMIN)} answered <em>true</em> for
+     * this role's holder. S3 deleted the bridges and both enums, so the escalation is now
+     * unrepresentable rather than merely guarded — but the <em>fixture</em> is still worth
+     * keeping, because what has to stay true is that an impostor grants exactly what its
+     * {@code role_permissions} rows say and not one thing more. This asserts that end to
+     * end, through the real resolver, at both scopes.
+     *
+     * <p>If a future slice reintroduces any key-to-privilege mapping — an
+     * {@code isAtLeast}, a {@code switch (role.key())}, a {@code Set.of("ADMIN","OWNER")}
+     * — this test is where it will surface.
      */
     @Test
     @Transactional
-    void aCustomRoleKeyedLikeABuiltInIsRefusedByTheLegacyBridges() {
+    void aCustomRoleKeyedLikeABuiltInGrantsOnlyWhatItActuallyHolds() {
         var ws = workspace();
+        var project = project(ws);
 
         var impostor = customRole(ws, RoleScope.WORKSPACE, "ADMIN", "Totally normal role");
         var view = roleCatalog.view(impostor.getId());
         assert view.permissions().isEmpty() : "fixture: the impostor is meant to grant nothing";
         assert !view.builtIn();
+        assert !view.isBuiltIn(BuiltInRoles.WORKSPACE_ADMIN)
+                : "a CUSTOM role keyed 'ADMIN' answered isBuiltIn(WORKSPACE_ADMIN). That check is "
+                  + "what the invite/role-change Owner guardrail keys on, and it must compare "
+                  + "identity, never the key string.";
 
-        try {
-            var got = view.asWorkspaceRole();
-            assert false
-                    : "asWorkspaceRole() answered " + got + " for a CUSTOM role keyed 'ADMIN'. "
-                      + "Every isAtLeast(ADMIN) call site that S2/S3 has not converted would now "
-                      + "treat its holder as a workspace admin, and the role grants nothing, so "
-                      + "the grant ceiling and the Roles screen both show it as harmless.";
-        } catch (IllegalStateException expected) {
-            assert expected.getMessage().contains(impostor.getId().toString())
-                    : "the refusal must name the role — it is the only clue an operator gets";
-        }
+        var actor = user();
+        var membership = new WorkspaceMember();
+        membership.setWorkspace(ws);
+        membership.setUser(actor);
+        membership.setRole(roleRepository.getReferenceById(impostor.getId()));
+        workspaceMemberRepository.save(membership);
+        workspaceMemberRepository.flush();
+
+        var ctx = workspaceAccess.requireMember(actor, ws.getId());
+        assert ctx.permissions().isEmpty()
+                : "a workspace member holding a zero-permission role keyed 'ADMIN' resolved to "
+                  + ctx.permissions().asWireStrings() + ". A role's KEY must never confer "
+                  + "anything — that is the escalation HD-123 deleted the ordinal ladder to "
+                  + "prevent, and it would open every workspace-scoped gate for its holder.";
 
         var projectImpostor = customRole(ws, RoleScope.PROJECT, "MANAGER", "Also normal");
-        try {
-            roleCatalog.view(projectImpostor.getId()).asProjectRole();
-            assert false
-                    : "asProjectRole() answered for a CUSTOM role keyed 'MANAGER'. That is "
-                      + "requireProjectAdmin, requireProjectCurator, IssueService.delete and "
-                      + "AttachmentService.delete, all opened by a role that grants nothing.";
-        } catch (IllegalStateException expected) {
-            // as required
-        }
-    }
+        var pm = new com.hamstrack.project.entity.ProjectMember();
+        pm.setProject(project);
+        pm.setUser(actor);
+        pm.setRole(roleRepository.getReferenceById(projectImpostor.getId()));
+        projectMemberRepository.save(pm);
+        projectMemberRepository.flush();
 
-    /** The built-ins must keep working — the bridges exist for them and S2/S3 still lean on them. */
-    @Test
-    @Transactional
-    void theBridgesStillAnswerForEveryBuiltIn() {
-        for (var role : WorkspaceRole.values()) {
-            assert roleCatalog.view(BuiltInRoles.id(role)).asWorkspaceRole() == role;
-        }
-        for (var role : ProjectRole.values()) {
-            assert roleCatalog.view(BuiltInRoles.id(role)).asProjectRole() == role;
-        }
+        var projectCtx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
+        assert projectCtx.permissions().isEmpty()
+                : "a project member holding a zero-permission role keyed 'MANAGER' resolved to "
+                  + projectCtx.permissions().asWireStrings() + " — project taxonomy, issue "
+                  + "deletion and attachment moderation, all opened by a name.";
     }
 
     // ====================================================== H3/T2: scope and ownership
@@ -140,7 +142,7 @@ class RoleSeamHardeningTest {
     @Transactional
     void aWorkspaceScopedRoleIsRefusedAsAProjectMembersRole() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var wrongScope = customRole(ws, RoleScope.WORKSPACE, "sneaky-lead", "Workspace-scoped");
@@ -178,7 +180,7 @@ class RoleSeamHardeningTest {
     @Transactional
     void theListEndpointsApplyTheSameScopeAssertionAsTheDetailEndpoints() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var wrongScope = customRole(ws, RoleScope.WORKSPACE, "list-sneaky", "Workspace-scoped");
@@ -203,7 +205,7 @@ class RoleSeamHardeningTest {
     @Transactional
     void theWorkspaceListAppliesTheSameScopeAssertionAsWorkspaceGet() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
 
         var wrongScope = customRole(ws, RoleScope.PROJECT, "ws-list-sneaky", "Project-scoped");
         em.flush();
@@ -227,7 +229,7 @@ class RoleSeamHardeningTest {
     void aForeignWorkspacesRoleIsRefusedAsAProjectMembersRole() {
         var ws = workspace();
         var other = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var foreign = customRole(other, RoleScope.PROJECT, "their-lead", "Another tenant's role");
@@ -254,7 +256,7 @@ class RoleSeamHardeningTest {
     @Transactional
     void aBadWorkspaceDefaultRoleFallsBackToContributorInsteadOfBeingHonoured() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var wrongScope = customRole(ws, RoleScope.WORKSPACE, "bad-default", "Workspace-scoped");
@@ -307,8 +309,8 @@ class RoleSeamHardeningTest {
     void projectContextRefusesAProjectFromAnotherWorkspace() {
         var ws = workspace();
         var other = workspace();
-        var actor = member(ws, WorkspaceRole.OWNER);
-        member(other, actor, WorkspaceRole.OWNER); // a member of both, so only the pairing is wrong
+        var actor = member(ws, "OWNER");
+        member(other, actor, "OWNER"); // a member of both, so only the pairing is wrong
         var foreignProject = project(other);
         em.flush();
 
@@ -389,15 +391,15 @@ class RoleSeamHardeningTest {
         return projectRepository.save(p);
     }
 
-    private User member(Workspace ws, WorkspaceRole role) {
+    private User member(Workspace ws, String role) {
         return member(ws, user(), role);
     }
 
-    private User member(Workspace ws, User user, WorkspaceRole role) {
+    private User member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
         return user;
     }

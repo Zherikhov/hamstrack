@@ -8,7 +8,6 @@ import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.BuiltInRoles;
@@ -17,7 +16,6 @@ import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.RolePermission;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
@@ -56,7 +54,6 @@ import java.util.UUID;
         "app.demo.seed-on-first-login=false",
         "seed.admin.email="
 })
-@SuppressWarnings("deprecation") // the legacy bridges are still how a fixture names a built-in
 class ProjectRoleResolutionTest {
 
     @Autowired UserRepository userRepository;
@@ -80,7 +77,7 @@ class ProjectRoleResolutionTest {
     @Transactional
     void noDefaultAnywhereMeansContributor() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
         em.flush();
 
@@ -104,7 +101,7 @@ class ProjectRoleResolutionTest {
     @Transactional
     void aProjectsOwnDefaultBeatsTheWorkspaceDefault() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var workspaceDefault = customRole(ws, RoleScope.PROJECT, "ws-default", Permission.ISSUE_CREATE);
@@ -131,7 +128,7 @@ class ProjectRoleResolutionTest {
     @Transactional
     void anExplicitMembershipBeatsEveryDefault() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
         var ignored = customRole(ws, RoleScope.PROJECT, "should-be-ignored", Permission.VERSION_MANAGE);
         ws.setDefaultProjectRoleId(ignored.getId());
@@ -159,7 +156,7 @@ class ProjectRoleResolutionTest {
     @Transactional
     void aBadProjectDefaultFallsBackToContributorAndDoesNotUseTheWorkspaceDefault() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var wrongScope = customRole(ws, RoleScope.WORKSPACE, "bad-project-default",
@@ -187,7 +184,7 @@ class ProjectRoleResolutionTest {
     void aForeignWorkspacesRoleAsAProjectDefaultFallsBackToContributor() {
         var ws = workspace();
         var other = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
 
         var foreign = customRole(other, RoleScope.PROJECT, "their-default", Permission.PROJECT_EDIT);
@@ -206,7 +203,7 @@ class ProjectRoleResolutionTest {
     @Transactional
     void aValidCustomProjectRoleIsHonouredAsTheDefault() {
         var ws = workspace();
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
         var readOnlyish = customRole(ws, RoleScope.PROJECT, "reporter-only", Permission.ISSUE_CREATE);
         ws.setDefaultProjectRoleId(readOnlyish.getId());
@@ -236,7 +233,7 @@ class ProjectRoleResolutionTest {
     void inAStrictWorkspaceAMemberWithNoProjectRowHoldsNothing() {
         var ws = workspace();
         ws.setProjectAccessMode(ProjectAccessMode.STRICT);
-        var actor = member(ws, WorkspaceRole.MEMBER);
+        var actor = member(ws, "MEMBER");
         var project = project(ws);
         em.flush();
 
@@ -262,7 +259,7 @@ class ProjectRoleResolutionTest {
     void strictDoesNotRevokeTheWorkspaceCuratorBypassNorWidenIt() {
         var ws = workspace();
         ws.setProjectAccessMode(ProjectAccessMode.STRICT);
-        var owner = member(ws, WorkspaceRole.OWNER);
+        var owner = member(ws, "OWNER");
         var project = project(ws);
         em.flush();
 
@@ -299,7 +296,7 @@ class ProjectRoleResolutionTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(actor);
-        m.setRole(roleCatalog.reference(WorkspaceRole.MEMBER));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, "MEMBER"));
         workspaceMemberRepository.save(m);
         workspaceMemberRepository.flush();
 
@@ -310,7 +307,7 @@ class ProjectRoleResolutionTest {
                 .has(Permission.PROJECT_CREATE)
                 : "fixture: the membership must resolve normally before its role is swapped";
 
-        m.setRole(roleCatalog.reference(ProjectRole.MANAGER)); // a PROJECT-scoped built-in
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, "MANAGER")); // a PROJECT-scoped built-in
         workspaceMemberRepository.save(m);
         workspaceMemberRepository.flush();
 
@@ -357,7 +354,7 @@ class ProjectRoleResolutionTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(actor);
-        m.setRole(roleCatalog.reference(WorkspaceRole.MEMBER));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, "MEMBER"));
         workspaceMemberRepository.save(m);
         projectMemberRow(project, actor, partiallyUnknown);
         em.flush();
@@ -407,12 +404,12 @@ class ProjectRoleResolutionTest {
         return projectRepository.save(p);
     }
 
-    private User member(Workspace ws, WorkspaceRole role) {
+    private User member(Workspace ws, String role) {
         var u = user();
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(u);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
         return u;
     }

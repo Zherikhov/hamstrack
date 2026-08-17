@@ -1,5 +1,6 @@
 package com.hamstrack.issue;
 
+import com.hamstrack.common.security.RoleScope;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
@@ -9,12 +10,10 @@ import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.storage.FileStorage;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.junit.jupiter.api.Test;
@@ -163,7 +162,7 @@ class AttachmentOversizeTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(WorkspaceRole.OWNER));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, "OWNER"));
         workspaceMemberRepository.save(m);
     }
 
@@ -180,7 +179,7 @@ class AttachmentOversizeTest {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(ProjectRole.MANAGER));
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, "MANAGER"));
         projectMemberRepository.save(m);
     }
 

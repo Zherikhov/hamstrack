@@ -1,6 +1,5 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -242,7 +241,7 @@ class SprintCompletionTest extends SprintTestBase {
         var sprintId = startedSprint(ctx, "Sprint 1");
         var issue = createIssue(ctx, "work", "\"storyPoints\":8");
         addIssuesToSprint(ctx, ctx.token(), sprintId, idOf(issue)).andExpect(status().isOk());
-        var member = addMember(ctx, WorkspaceRole.MEMBER);
+        var member = addMember(ctx, "MEMBER");
 
         var preview = json.readTree(completionPreview(ctx, member.token(), sprintId)
                 .andExpect(status().isOk())

@@ -41,7 +41,7 @@ import java.util.UUID;
  * V14 rewrites every pre-upgrade {@code project_members.role = 'VIEWER'} row to the
  * built-in Contributor, because a legacy VIEWER row granted <em>everything</em>
  * ({@code isAtLeast(VIEWER)} is true for all three legacy roles). The migration test proves
- * the rewrite lands on the id {@code …012}; {@link PermissionParityTest}'s
+ * the rewrite lands on the id {@code …012}; {@link BuiltInRoleSeedParityTest}'s
  * {@code P_VIEWER_MIGRATED} archetype proves a Contributor keeps every legacy verdict.
  * Neither knows that {@code …012} <em>is</em> Contributor — that link is what
  * {@link #theRoleAPreUpgradeViewerIsMigratedToGrantsExactlyTodaysAbilities()} closes.
@@ -163,7 +163,7 @@ class RoleIdsMatchMigrationTest {
     /**
      * The link between the two halves of the §8.4 no-op proof. V15's migration test proves
      * a legacy {@code VIEWER} row is rewritten to the role id {@code …012};
-     * {@code PermissionParityTest} proves a Contributor keeps every legacy verdict. Only
+     * {@code BuiltInRoleSeedParityTest} proves a Contributor keeps every legacy verdict. Only
      * this says that {@code …012} is Contributor, and that Contributor is also the fallback
      * a member with no project row inherits — i.e. that the migrated Viewer and the
      * never-added member land on the same, correct set.

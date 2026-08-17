@@ -1,5 +1,9 @@
 package com.hamstrack.workspace;
 
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.workspace.entity.Role;
+import com.hamstrack.workspace.entity.RolePermission;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
@@ -11,13 +15,11 @@ import com.hamstrack.issue.entity.Component;
 import com.hamstrack.issue.repository.ComponentRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceInvite;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceInviteRepository;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
@@ -40,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -112,6 +115,10 @@ class WorkspaceMemberManagementTest {
     @Autowired WorkspaceInviteRepository inviteRepository;
     @Autowired SseRegistry sseRegistry;
     @Autowired PasswordEncoder passwordEncoder;
+    // The custom-role fixtures below (the set half of the grant ceiling) — RoleRepository
+    // exposes no save() until S4, so they are written through the EntityManager.
+    @Autowired jakarta.persistence.EntityManager entityManager;
+    @Autowired org.springframework.transaction.support.TransactionTemplate txTemplate;
 
     private final ObjectMapper json = new ObjectMapper();
 
@@ -120,9 +127,9 @@ class WorkspaceMemberManagementTest {
     @Test
     void ownerChangesAMembersRole() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
 
-        patchMember(ws, ws.ownerToken(), member.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, ws.ownerToken(), member.getId(), "ADMIN")
                 .andExpect(status().isOk());
 
         assertThat(roleOf(ws, member)).isEqualTo("ADMIN");
@@ -132,9 +139,9 @@ class WorkspaceMemberManagementTest {
     @Test
     void settingTheSameRoleIsANoOp() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
 
-        patchMember(ws, ws.ownerToken(), member.getId(), WorkspaceRole.MEMBER)
+        patchMember(ws, ws.ownerToken(), member.getId(), "MEMBER")
                 .andExpect(status().isOk());
 
         assertThat(roleOf(ws, member)).isEqualTo("MEMBER");
@@ -144,8 +151,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void adminRemovesAMember() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var member = addMember(ws, "MEMBER", "Mia");
 
         deleteMember(ws, login(admin), member.getId())
                 .andExpect(status().isNoContent());
@@ -161,7 +168,7 @@ class WorkspaceMemberManagementTest {
     void theLastOwnerCannotBeDemoted() throws Exception {
         var ws = newWorkspace();
 
-        patchMember(ws, ws.ownerToken(), ws.owner().getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, ws.ownerToken(), ws.owner().getId(), "ADMIN")
                 .andExpect(status().isConflict());
 
         assertThat(roleOf(ws, ws.owner())).isEqualTo("OWNER");
@@ -182,7 +189,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void aSecondOwnerMakesTheFirstRemovable() throws Exception {
         var ws = newWorkspace();
-        var coOwner = addMember(ws, WorkspaceRole.OWNER, "Otto");
+        var coOwner = addMember(ws, "OWNER", "Otto");
 
         deleteMember(ws, ws.ownerToken(), coOwner.getId())
                 .andExpect(status().isNoContent());
@@ -195,7 +202,7 @@ class WorkspaceMemberManagementTest {
     void theLastOwnerCanStillBeGivenTheSameRoleBack() throws Exception {
         var ws = newWorkspace();
 
-        patchMember(ws, ws.ownerToken(), ws.owner().getId(), WorkspaceRole.OWNER)
+        patchMember(ws, ws.ownerToken(), ws.owner().getId(), "OWNER")
                 .andExpect(status().isOk());
     }
 
@@ -204,10 +211,10 @@ class WorkspaceMemberManagementTest {
     @Test
     void anAdminCannotPromoteAnyoneToOwner() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var member = addMember(ws, "MEMBER", "Mia");
 
-        patchMember(ws, login(admin), member.getId(), WorkspaceRole.OWNER)
+        patchMember(ws, login(admin), member.getId(), "OWNER")
                 .andExpect(status().isForbidden());
 
         assertThat(roleOf(ws, member)).isEqualTo("MEMBER");
@@ -217,10 +224,10 @@ class WorkspaceMemberManagementTest {
     @Test
     void anAdminCannotDemoteAnOwner() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
-        addMember(ws, WorkspaceRole.OWNER, "Otto"); // so the last-Owner guard is not what refuses
+        var admin = addMember(ws, "ADMIN", "Ada");
+        addMember(ws, "OWNER", "Otto"); // so the last-Owner guard is not what refuses
 
-        patchMember(ws, login(admin), ws.owner().getId(), WorkspaceRole.MEMBER)
+        patchMember(ws, login(admin), ws.owner().getId(), "MEMBER")
                 .andExpect(status().isForbidden());
 
         assertThat(roleOf(ws, ws.owner())).isEqualTo("OWNER");
@@ -229,8 +236,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void anAdminCannotRemoveAnOwner() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
-        addMember(ws, WorkspaceRole.OWNER, "Otto");
+        var admin = addMember(ws, "ADMIN", "Ada");
+        addMember(ws, "OWNER", "Otto");
 
         deleteMember(ws, login(admin), ws.owner().getId())
                 .andExpect(status().isForbidden());
@@ -241,9 +248,9 @@ class WorkspaceMemberManagementTest {
     @Test
     void anOwnerCanMintAnotherOwner() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
 
-        patchMember(ws, ws.ownerToken(), member.getId(), WorkspaceRole.OWNER)
+        patchMember(ws, ws.ownerToken(), member.getId(), "OWNER")
                 .andExpect(status().isOk());
 
         assertThat(roleOf(ws, member)).isEqualTo("OWNER");
@@ -255,16 +262,16 @@ class WorkspaceMemberManagementTest {
     @Test
     void aPlainMemberCannotAdministerMembership() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
-        var other = addMember(ws, WorkspaceRole.MEMBER, "Moe");
+        var member = addMember(ws, "MEMBER", "Mia");
+        var other = addMember(ws, "MEMBER", "Moe");
         var token = login(member);
 
-        patchMember(ws, token, other.getId(), WorkspaceRole.ADMIN).andExpect(status().isForbidden());
+        patchMember(ws, token, other.getId(), "ADMIN").andExpect(status().isForbidden());
         deleteMember(ws, token, other.getId()).andExpect(status().isForbidden());
 
         // …including on themselves: self-removal ("leave workspace") is deliberately NOT
         // this endpoint, so the admin gate refuses it rather than quietly doubling as one.
-        patchMember(ws, token, member.getId(), WorkspaceRole.ADMIN).andExpect(status().isForbidden());
+        patchMember(ws, token, member.getId(), "ADMIN").andExpect(status().isForbidden());
         deleteMember(ws, token, member.getId()).andExpect(status().isForbidden());
         assertThat(workspaceMemberRepository.existsByWorkspaceAndUser(ws.workspace(), member)).isTrue();
     }
@@ -276,10 +283,10 @@ class WorkspaceMemberManagementTest {
     @Test
     void aNonMemberGets404IndistinguishableFromAnUnknownWorkspace() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
         var outsider = newWorkspace(); // owner of an entirely different tenant
 
-        patchMember(ws, outsider.ownerToken(), member.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, outsider.ownerToken(), member.getId(), "ADMIN")
                 .andExpect(status().isNotFound());
         deleteMember(ws, outsider.ownerToken(), member.getId())
                 .andExpect(status().isNotFound());
@@ -312,10 +319,10 @@ class WorkspaceMemberManagementTest {
         assertThat(detail(known)).doesNotContain(strangerInAnotherTenant.getEmail());
 
         // PATCH is the same oracle if it answers differently — it must not.
-        var patchKnown = patchMember(ws, ws.ownerToken(), strangerInAnotherTenant.getId(), WorkspaceRole.ADMIN)
+        var patchKnown = patchMember(ws, ws.ownerToken(), strangerInAnotherTenant.getId(), "ADMIN")
                 .andExpect(status().isNotFound())
                 .andReturn().getResponse().getContentAsString();
-        var patchUnknown = patchMember(ws, ws.ownerToken(), UUID.randomUUID(), WorkspaceRole.ADMIN)
+        var patchUnknown = patchMember(ws, ws.ownerToken(), UUID.randomUUID(), "ADMIN")
                 .andExpect(status().isNotFound())
                 .andReturn().getResponse().getContentAsString();
 
@@ -329,7 +336,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void aSecondDeleteIsACleanNotFound() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
 
         deleteMember(ws, ws.ownerToken(), member.getId()).andExpect(status().isNoContent());
         deleteMember(ws, ws.ownerToken(), member.getId()).andExpect(status().isNotFound());
@@ -344,14 +351,14 @@ class WorkspaceMemberManagementTest {
     @Test
     void removalUnassignsWorkTidiesLeadershipAndLeavesHistoryAlone() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia Departing");
-        projectMember(ws.project(), member, ProjectRole.MEMBER);
+        var member = addMember(ws, "MEMBER", "Mia Departing");
+        projectMember(ws.project(), member, "MEMBER");
         var memberToken = login(member);
 
         // A second workspace the SAME account belongs to — the cross-tenant control.
         var other = newWorkspace();
-        member(other.workspace(), member, WorkspaceRole.MEMBER);
-        projectMember(other.project(), member, ProjectRole.MEMBER);
+        member(other.workspace(), member, "MEMBER");
+        projectMember(other.project(), member, "MEMBER");
         var elsewhere = createIssue(other, other.ownerToken(), "Work elsewhere",
                 "\"assigneeId\":\"" + member.getId() + "\"");
 
@@ -436,8 +443,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void aDepartedComponentLeadIsKeptAndAutoAssignSkipsThem() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia Departing");
-        projectMember(ws.project(), member, ProjectRole.MEMBER);
+        var member = addMember(ws, "MEMBER", "Mia Departing");
+        projectMember(ws.project(), member, "MEMBER");
 
         var component = new Component();
         component.setWorkspace(ws.workspace());
@@ -482,7 +489,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void removingAMemberWithNoAssignedWorkWritesNoHistory() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
         var number = createIssue(ws, ws.ownerToken(), "Unrelated");
 
         deleteMember(ws, ws.ownerToken(), member.getId()).andExpect(status().isNoContent());
@@ -508,10 +515,10 @@ class WorkspaceMemberManagementTest {
     void removalIsContainedToTheWorkspaceItWasIssuedIn() throws Exception {
         var here = newWorkspace();
         var there = newWorkspace();
-        var member = addMember(here, WorkspaceRole.MEMBER, "Mia Departing");
-        member(there.workspace(), member, WorkspaceRole.MEMBER);
-        projectMember(here.project(), member, ProjectRole.MEMBER);
-        projectMember(there.project(), member, ProjectRole.MEMBER);
+        var member = addMember(here, "MEMBER", "Mia Departing");
+        member(there.workspace(), member, "MEMBER");
+        projectMember(here.project(), member, "MEMBER");
+        projectMember(there.project(), member, "MEMBER");
 
         var assignedHere = createIssue(here, here.ownerToken(), "Work here",
                 "\"assigneeId\":\"" + member.getId() + "\"");
@@ -553,8 +560,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void anAttachmentKeepsItsUploaderAfterTheyAreRemoved() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia Departing");
-        projectMember(ws.project(), member, ProjectRole.MEMBER);
+        var member = addMember(ws, "MEMBER", "Mia Departing");
+        projectMember(ws.project(), member, "MEMBER");
         var memberToken = login(member);
         var number = createIssue(ws, ws.ownerToken(), "Has an attachment");
 
@@ -596,8 +603,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void aTokenMintedBeforeRemovalStopsWorkingImmediately() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia Departing");
-        projectMember(ws.project(), member, ProjectRole.MEMBER);
+        var member = addMember(ws, "MEMBER", "Mia Departing");
+        projectMember(ws.project(), member, "MEMBER");
         var token = login(member);
 
         // Anchor: the token works while the membership exists.
@@ -625,19 +632,19 @@ class WorkspaceMemberManagementTest {
     @Test
     void aDemotionBitesOnTheNextRequestWithTheSameToken() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
-        var bystander = addMember(ws, WorkspaceRole.MEMBER, "Moe");
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var bystander = addMember(ws, "MEMBER", "Moe");
         var adminToken = login(admin);
 
         // Anchor: the token administers membership while the role backs it.
-        patchMember(ws, adminToken, bystander.getId(), WorkspaceRole.MEMBER)
+        patchMember(ws, adminToken, bystander.getId(), "MEMBER")
                 .andExpect(status().isOk());
 
-        patchMember(ws, ws.ownerToken(), admin.getId(), WorkspaceRole.MEMBER)
+        patchMember(ws, ws.ownerToken(), admin.getId(), "MEMBER")
                 .andExpect(status().isOk());
 
         // Same token, no re-login, no waiting for a cache to expire.
-        patchMember(ws, adminToken, bystander.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, adminToken, bystander.getId(), "ADMIN")
                 .andExpect(status().isForbidden());
         deleteMember(ws, adminToken, bystander.getId())
                 .andExpect(status().isForbidden());
@@ -648,18 +655,18 @@ class WorkspaceMemberManagementTest {
     @Test
     void aPromotionBitesOnTheNextRequestWithTheSameToken() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
-        var bystander = addMember(ws, WorkspaceRole.MEMBER, "Moe");
+        var member = addMember(ws, "MEMBER", "Mia");
+        var bystander = addMember(ws, "MEMBER", "Moe");
         var token = login(member);
 
         // Anchor: as a plain member the token cannot administer membership.
-        patchMember(ws, token, bystander.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, token, bystander.getId(), "ADMIN")
                 .andExpect(status().isForbidden());
 
-        patchMember(ws, ws.ownerToken(), member.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, ws.ownerToken(), member.getId(), "ADMIN")
                 .andExpect(status().isOk());
 
-        patchMember(ws, token, bystander.getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, token, bystander.getId(), "ADMIN")
                 .andExpect(status().isOk());
         assertThat(roleOf(ws, bystander)).isEqualTo("ADMIN");
     }
@@ -667,40 +674,392 @@ class WorkspaceMemberManagementTest {
     // ============================================================ request body
 
     /**
-     * A role the enum does not know is a client error, not a 500 and — much worse — not a
-     * silent fall-through to some default role. Jackson rejects the value before the
-     * handler runs, and the membership must be exactly as it was.
+     * A role this build cannot assign is a client error, not a 500 and — much worse — not a
+     * silent fall-through to some default role. The membership must be exactly as it was.
+     *
+     * <p><strong>422, not 400, since HD-126 (S3).</strong> {@code role} was a
+     * {@code WorkspaceRole} enum and Jackson rejected an unknown value with 400 before the
+     * handler ran; the enum is deleted (it cannot name a custom role, which S4 ships), so
+     * the field is a key string validated by {@code RoleCatalog.requireAssignable}. 422
+     * "Unknown role" is §12's verdict for every role reference that cannot be honoured —
+     * and it has to be, because the same path will shortly resolve role <em>ids</em>: if a
+     * foreign workspace's role id answered 404 and a nonsense one answered something else,
+     * the pair would be an oracle for which role ids exist in other tenants.
      */
     @Test
-    void anUnknownRoleIsACleanBadRequest() throws Exception {
+    void anUnknownRoleIsACleanUnprocessableContent() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
 
         patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"SUPERUSER\"}")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnprocessableContent());
+        // Keys are exact: a lowercase one is not "the same role, casually written".
         patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"owner\"}")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnprocessableContent());
+        // …and neither is a PROJECT-scoped built-in key. Scope is part of the question:
+        // MEMBER names a different role in each scope, and a PermissionSet does not
+        // remember which one its grants came from (§12).
+        patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"MANAGER\"}")
+                .andExpect(status().isUnprocessableContent());
 
         assertThat(roleOf(ws, member)).isEqualTo("MEMBER");
     }
 
     /**
      * {@code role} is the whole body, so an omitted or null one is a client bug — 400 from
-     * {@code @NotNull}, never an accepted no-op and never an NPE-shaped 500.
+     * {@code @NotBlank}, never an accepted no-op and never an NPE-shaped 500.
      */
     @Test
     void aMissingOrNullRoleIsACleanBadRequest() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.ADMIN, "Ada");
+        var member = addMember(ws, "ADMIN", "Ada");
 
         patchRaw(ws, ws.ownerToken(), member.getId(), "{}")
                 .andExpect(status().isBadRequest());
         patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":null}")
                 .andExpect(status().isBadRequest());
+        patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"\"}")
+                .andExpect(status().isBadRequest());
         patchRaw(ws, ws.ownerToken(), member.getId(), "")
                 .andExpect(status().isBadRequest());
 
         assertThat(roleOf(ws, member)).isEqualTo("ADMIN");
+    }
+
+    // ============================================================ HD-126 (S3)
+
+    /**
+     * <strong>The gate is {@code workspace.member.manage} now</strong> (§10.1), not the
+     * {@code WorkspaceRole} ladder — and the 403 says so, which the ladder's
+     * "InsufficientWorkspaceRole" never did.
+     *
+     * <p>The ceiling is a <em>different</em> refusal from the permission, and this asserts
+     * both, because collapsing them is how "you cannot do this at all" and "you cannot do
+     * this to <em>that</em> person" become one unactionable message.
+     */
+    @Test
+    void theRefusalsNameWhatActuallyRefused() throws Exception {
+        var ws = newWorkspace();
+        var member = addMember(ws, "MEMBER", "Mia");
+        var admin = addMember(ws, "ADMIN", "Ada");
+        addMember(ws, "OWNER", "Otto"); // so the last-Owner guard is not what refuses
+
+        // No permission at all → names the permission.
+        var noPermission = patchMember(ws, login(member), admin.getId(), "MEMBER")
+                .andExpect(status().isForbidden())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(detail(noPermission)).contains("workspace.member.manage");
+
+        // Permission held, ceiling refuses → says so, and does NOT name a permission the
+        // caller does hold. Owner and Admin are seeded with IDENTICAL sets on purpose
+        // ("Owner is a guardrail on assignment, not a bigger role"), so set containment
+        // alone cannot refuse this and the built-in-Owner guardrail is what does.
+        var ceiling = patchMember(ws, login(admin), ws.owner().getId(), "MEMBER")
+                .andExpect(status().isForbidden())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(detail(ceiling)).containsIgnoringCase("owner");
+        assertThat(detail(ceiling)).doesNotContain("workspace.member.manage");
+
+        assertThat(roleOf(ws, ws.owner())).isEqualTo("OWNER");
+    }
+
+    /**
+     * The invite path and the member-administration paths share one implementation of the
+     * gate and the ceiling ({@code WorkspaceMemberService}), so they cannot drift — with
+     * one deliberate asymmetry: an invite refuses Owner <em>even for an Owner</em>. You
+     * promote a colleague to owner; you do not invite a stranger as one.
+     */
+    @Test
+    void invitingSharesTheGateAndRefusesOwnerEvenForAnOwner() throws Exception {
+        var ws = newWorkspace();
+        var member = addMember(ws, "MEMBER", "Mia");
+
+        var refused = invitePost(ws, login(member), "someone@example.com", "MEMBER")
+                .andExpect(status().isForbidden())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(detail(refused)).contains("workspace.member.manage");
+
+        // An OWNER may mint another Owner through PATCH (asserted above) but not here.
+        invitePost(ws, ws.ownerToken(), "owner-to-be@example.com", "OWNER")
+                .andExpect(status().isForbidden());
+        // …and an unusable role key is 422 here for the same reason it is on PATCH.
+        invitePost(ws, ws.ownerToken(), "someone@example.com", "SUPERUSER")
+                .andExpect(status().isUnprocessableContent());
+        // The ordinary case still works.
+        invitePost(ws, ws.ownerToken(), "someone@example.com", "ADMIN")
+                .andExpect(status().isCreated());
+    }
+
+    private ResultActions invitePost(Ws ws, String token, String email, String role) throws Exception {
+        return mockMvc.perform(post("/api/workspaces/" + ws.workspace().getId() + "/invites")
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"email\":\"" + email + "\",\"role\":\"" + role + "\"}"));
+    }
+
+    // ================================================ HD-126 audit: the Owner ceiling, every path
+
+    /**
+     * <strong>The Owner-vs-Admin ceiling has to hold on every door at once</strong>, because
+     * V13 seeds workspace Owner and Admin with <em>identical</em> permission sets ("Owner is a
+     * guardrail on assignment, not a bigger role"). Set containment therefore cannot separate
+     * them at all — {@code firstNotCovered} returns empty in both directions — and the only
+     * thing standing between an Admin and an Owner is the built-in-Owner guardrail keyed on the
+     * role id. One unguarded path is the whole rule.
+     *
+     * <p>The paths, and the anchor for each: an Admin may administer ordinary members (so a
+     * blanket 403 cannot be what passes this test), and may not touch an Owner or mint one —
+     * by promotion, by demotion, by removal or by invitation.
+     *
+     * <p><strong>Including remove-then-invite</strong>, the laundering route: removing somebody
+     * is allowed, so if the invite door did not carry the same rule an Admin could remove a
+     * member and invite them straight back as an Owner — an Owner they could then never
+     * demote, and who could demote them. Two legal steps composing into the escalation neither
+     * one permits.
+     */
+    @Test
+    void theOwnerGuardrailHoldsOnEveryMembershipPathIncludingRemoveThenInvite() throws Exception {
+        var ws = newWorkspace();
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var adminToken = login(admin);
+        var coOwner = addMember(ws, "OWNER", "Otto"); // so last-Owner is never what refuses
+        var member = addMember(ws, "MEMBER", "Mia");
+
+        // ---- ANCHOR: this Admin really can administer ordinary membership ----
+        patchMember(ws, adminToken, member.getId(), "ADMIN").andExpect(status().isOk());
+        patchMember(ws, adminToken, member.getId(), "MEMBER").andExpect(status().isOk());
+
+        // ---- promotion ----
+        patchMember(ws, adminToken, member.getId(), "OWNER").andExpect(status().isForbidden());
+        // ---- demotion, on BOTH owners (the workspace creator and a promoted one) ----
+        patchMember(ws, adminToken, ws.owner().getId(), "MEMBER").andExpect(status().isForbidden());
+        patchMember(ws, adminToken, coOwner.getId(), "MEMBER").andExpect(status().isForbidden());
+        // ---- removal ----
+        deleteMember(ws, adminToken, coOwner.getId()).andExpect(status().isForbidden());
+        // ---- invitation ----
+        invitePost(ws, adminToken, "owner-by-invite@example.com", "OWNER")
+                .andExpect(status().isForbidden());
+
+        // ---- the laundering route: remove, then invite back one rung higher ----
+        deleteMember(ws, adminToken, member.getId()).andExpect(status().isNoContent());
+        invitePost(ws, adminToken, member.getEmail(), "OWNER")
+                .andExpect(status().isForbidden());
+        // …while the legitimate re-invite still works, so the rule is about OWNER and not
+        // about re-inviting.
+        invitePost(ws, adminToken, member.getEmail(), "ADMIN")
+                .andExpect(status().isCreated());
+
+        // Nothing moved: both owners still owners, and no owner was minted.
+        assertThat(roleOf(ws, ws.owner())).isEqualTo("OWNER");
+        assertThat(roleOf(ws, coOwner)).isEqualTo("OWNER");
+        assertThat(roleOf(ws, admin)).isEqualTo("ADMIN");
+    }
+
+    /**
+     * The guardrail is keyed on the built-in Owner's <strong>role id</strong>, never on the
+     * key string {@code "OWNER"} — and this is the test that says so out loud, because
+     * {@code roles_scope_key_uk} is {@code UNIQUE NULLS NOT DISTINCT}, so once S4 ships the
+     * role editor a workspace may own a role of its own keyed {@code OWNER}.
+     *
+     * <p>A string-keyed guardrail would break in the dangerous direction <em>and</em> the
+     * annoying one: a workspace could mint an unremovable "OWNER" that no Admin may ever
+     * administer (a permanent backdoor account, since the custom role need grant nothing),
+     * and the real guardrail would still be bypassable by any other key. Here the custom
+     * role grants strictly less than an Admin holds, so the ceiling has nothing to refuse and
+     * the edit must go through.
+     */
+    @Test
+    void aCustomRoleMerelyKeyedOwnerIsNotTheOwnerGuardrail() throws Exception {
+        var ws = newWorkspace();
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var impostor = addMember(ws, "MEMBER", "Imo");
+
+        // A workspace-owned role that calls itself OWNER and grants one ordinary permission.
+        assignCustomRole(ws, impostor, "OWNER", grant(Permission.PROJECT_CREATE, false));
+
+        patchMember(ws, login(admin), impostor.getId(), "MEMBER")
+                .andExpect(status().isOk());
+        assertThat(roleOf(ws, impostor)).isEqualTo("MEMBER");
+    }
+
+    // ================================================ HD-126 audit: the set half of the ceiling
+
+    /**
+     * <strong>The other half of §11.2, which no built-in pair can exercise.</strong> Owner and
+     * Admin hold the same 8 workspace permissions and Member's grants are a strict subset, so
+     * {@code firstNotCovered} never fires between built-ins — every ceiling refusal the suite
+     * has seen so far came from the built-in-Owner guardrail. If the set comparison were
+     * deleted outright, all of those tests would still pass.
+     *
+     * <p>{@code project.administer.all} is the one catalog entry <em>no</em> built-in is
+     * seeded with (V13: seeding it would silently open five project-MANAGER-only gates for
+     * every workspace admin in every install), which makes it the only permission a custom
+     * role can hold that puts it above an Owner. So it is also the proof that the ceiling is
+     * about grants and not about rank: the workspace <em>Owner</em> is refused too.
+     */
+    @Test
+    void theSetCeilingRefusesARoleWiderThanTheActorEvenForAnOwner() throws Exception {
+        var ws = newWorkspace();
+        var admin = addMember(ws, "ADMIN", "Ada");
+        var wideMember = addMember(ws, "MEMBER", "Wilma");
+        assignCustomRole(ws, wideMember, "program-manager",
+                grant(Permission.PROJECT_ADMINISTER_ALL, false));
+
+        for (var token : new String[]{login(admin), ws.ownerToken()}) {
+            var refused = patchMember(ws, token, wideMember.getId(), "MEMBER")
+                    .andExpect(status().isForbidden())
+                    .andReturn().getResponse().getContentAsString();
+            assertThat(detail(refused))
+                    .as("the ceiling must name the grant that refused, not 'insufficient role'")
+                    .contains(Permission.PROJECT_ADMINISTER_ALL.key());
+            // …and it is the SET, not the Owner guardrail, that spoke.
+            assertThat(detail(refused)).doesNotContain("Only an Owner");
+
+            deleteMember(ws, token, wideMember.getId()).andExpect(status().isForbidden());
+        }
+        assertThat(workspaceMemberRepository.existsByWorkspaceAndUser(ws.workspace(), wideMember))
+                .isTrue();
+    }
+
+    /**
+     * Width is compared <em>per grant</em>: an own-only holder may hand out the own-only form
+     * and never the unrestricted one. Without that, a role holding {@code label.manage:own}
+     * (which every plain workspace Member holds) plus {@code workspace.member.manage} could
+     * mint an Admin holding {@code label.manage} unrestricted — self-escalation by proxy, one
+     * promotion away.
+     *
+     * <p>The pair is the whole assertion: granting built-in <em>Member</em> (own-only
+     * {@code label.manage}) must succeed for the same actor that is refused built-in Admin.
+     * Only one of the two is a statement about width.
+     */
+    @Test
+    void anOwnOnlyHolderCannotMintAnUnrestrictedGrant() throws Exception {
+        var ws = newWorkspace();
+        var narrowAdmin = addMember(ws, "MEMBER", "Nadia");
+        var target = addMember(ws, "MEMBER", "Mia");
+        // Everything the built-in Admin holds, EXCEPT that label.manage is narrowed to their
+        // own labels. Deliberately the whole set minus one width: {@code firstNotCovered}
+        // walks the catalog in order and reports the first gap, so a fixture missing other
+        // permissions would be refused for one of those instead and would prove nothing about
+        // own-vs-unrestricted.
+        assignCustomRole(ws, narrowAdmin, "membership-clerk",
+                grant(Permission.WORKSPACE_EDIT, false),
+                grant(Permission.WORKSPACE_MEMBER_MANAGE, false),
+                grant(Permission.WORKSPACE_ROLE_MANAGE, false),
+                grant(Permission.WORKSPACE_TAXONOMY_MANAGE, false),
+                grant(Permission.PROJECT_CREATE, false),
+                grant(Permission.PROJECT_CURATE_ALL, false),
+                grant(Permission.LABEL_CREATE, false),
+                grant(Permission.LABEL_MANAGE, true));
+        var token = login(narrowAdmin);
+
+        // ANCHOR: the same-width grant goes through — built-in Member holds label.manage:own.
+        patchMember(ws, token, target.getId(), "MEMBER").andExpect(status().isOk());
+
+        var refused = patchMember(ws, token, target.getId(), "ADMIN")
+                .andExpect(status().isForbidden())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(detail(refused))
+                .as("an own-only holder minting an UNRESTRICTED grant must be refused, naming it")
+                .contains(Permission.LABEL_MANAGE.key());
+        assertThat(roleOf(ws, target)).isEqualTo("MEMBER");
+    }
+
+    // ================================================ HD-126 audit: 422 "Unknown role"
+
+    /**
+     * <strong>Every unusable role reference gets one answer, and the answer says nothing
+     * about which roles exist where.</strong> §12's reason for 422 over 404 is that the same
+     * code path will shortly resolve role <em>ids</em>: if a key belonging to another
+     * workspace answered differently from one that exists nowhere, the pair would be an
+     * oracle for another tenant's role catalog.
+     *
+     * <p>S4 has not shipped the role editor, so the foreign role is written straight to the
+     * table — which is exactly the state the upgrade will produce, and the state that makes
+     * the comparison meaningful today rather than after the leak is reachable.
+     */
+    @Test
+    void everyUnusableRoleKeyIsTheSame422AndNamesNothingItShouldNot() throws Exception {
+        var ws = newWorkspace();
+        var member = addMember(ws, "MEMBER", "Mia");
+
+        // A custom role that exists — in SOMEBODY ELSE's workspace.
+        var elsewhere = newWorkspace();
+        var foreignHolder = addMember(elsewhere, "MEMBER", "Fay");
+        assignCustomRole(elsewhere, foreignHolder, "FOREIGN_KEY_ROLE",
+                grant(Permission.PROJECT_CREATE, false));
+
+        var foreign = detail(patchRaw(ws, ws.ownerToken(), member.getId(),
+                "{\"role\":\"FOREIGN_KEY_ROLE\"}")
+                .andExpect(status().isUnprocessableContent())
+                .andReturn().getResponse().getContentAsString());
+        var ghost = detail(patchRaw(ws, ws.ownerToken(), member.getId(),
+                "{\"role\":\"GHOST_KEY_ROLE\"}")
+                .andExpect(status().isUnprocessableContent())
+                .andReturn().getResponse().getContentAsString());
+
+        // Identical but for the key the caller sent back — which is theirs already.
+        assertThat(foreign.replace("FOREIGN_KEY_ROLE", "X"))
+                .as("a key that exists in another workspace must be indistinguishable from one "
+                    + "that exists nowhere — otherwise this endpoint enumerates other tenants' roles")
+                .isEqualTo(ghost.replace("GHOST_KEY_ROLE", "X"));
+        assertThat(foreign).doesNotContain(elsewhere.workspace().getId().toString());
+
+        // The same one answer for a wrong-case key, a wrong-SCOPE built-in key, and a value
+        // that is not a key at all but is still a well-formed string.
+        for (var key : new String[]{"SUPERUSER", "owner", "MANAGER", "COMMENTER", "123"}) {
+            var body = detail(patchRaw(ws, ws.ownerToken(), member.getId(),
+                    "{\"role\":" + json.writeValueAsString(key) + "}")
+                    .andExpect(status().isUnprocessableContent())
+                    .andReturn().getResponse().getContentAsString());
+            assertThat(body).isEqualTo(ghost.replace("GHOST_KEY_ROLE", key));
+        }
+
+        // A body whose `role` is not a string at all is a malformed REQUEST, not an unusable
+        // value: 400, and still never a 500 and never a silent fall-through to a default.
+        for (var raw : new String[]{"{\"role\":[\"OWNER\"]}", "{\"role\":{\"key\":\"OWNER\"}}",
+                "{\"role\":\"   \"}"}) {
+            patchRaw(ws, ws.ownerToken(), member.getId(), raw)
+                    .andExpect(status().isBadRequest());
+        }
+
+        assertThat(roleOf(ws, member)).isEqualTo("MEMBER");
+        // …and the invite door answers identically, since it shares requireAssignable.
+        var invited = detail(invitePost(ws, ws.ownerToken(), "x@example.com", "GHOST_KEY_ROLE")
+                .andExpect(status().isUnprocessableContent())
+                .andReturn().getResponse().getContentAsString());
+        assertThat(invited).isEqualTo(ghost);
+    }
+
+    // ================================================ custom-role fixture (no editor until S4)
+
+    private static RolePermission grant(Permission permission, boolean ownOnly) {
+        return new RolePermission(permission, ownOnly);
+    }
+
+    /**
+     * Give {@code user} a <strong>workspace-owned custom role</strong> with exactly these
+     * grants. Written through the {@link jakarta.persistence.EntityManager} because
+     * {@code RoleRepository} deliberately exposes no {@code save} until S4 — and needed here
+     * because no built-in pair can exercise the set half of the grant ceiling at all.
+     */
+    private void assignCustomRole(Ws ws, User user, String key, RolePermission... grants) {
+        var roleId = txTemplate.execute(status -> {
+            var role = new Role();
+            role.setWorkspaceId(ws.workspace().getId());
+            role.setScope(RoleScope.WORKSPACE);
+            role.setKey(key);
+            role.setName(key);
+            role.setBuiltIn(false);
+            role.setPermissions(new LinkedHashSet<>(java.util.List.of(grants)));
+            entityManager.persist(role);
+            entityManager.flush();
+            return role.getId();
+        });
+        var membership = workspaceMemberRepository
+                .findByWorkspaceAndUser(ws.workspace(), user).orElseThrow();
+        membership.setRole(roleCatalog.reference(roleId));
+        workspaceMemberRepository.save(membership);
     }
 
     // ============================================================ revoking the ways back in
@@ -718,16 +1077,16 @@ class WorkspaceMemberManagementTest {
     @Test
     void removalRevokesLeftoverInvitesSoTheRemovedMemberCannotWalkBackIn() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
         var memberToken = login(member);
 
         // A pending invite for them in THIS workspace (a re-send that was never accepted),
         // an accepted one (the historical record of how they joined), and a pending one in
         // ANOTHER tenant that this removal must not touch.
-        var pending = invite(ws.workspace(), member.getEmail(), WorkspaceRole.ADMIN, false);
-        var accepted = invite(ws.workspace(), member.getEmail(), WorkspaceRole.MEMBER, true);
+        var pending = invite(ws.workspace(), member.getEmail(), "ADMIN", false);
+        var accepted = invite(ws.workspace(), member.getEmail(), "MEMBER", true);
         var elsewhere = newWorkspace();
-        var foreign = invite(elsewhere.workspace(), member.getEmail(), WorkspaceRole.MEMBER, false);
+        var foreign = invite(elsewhere.workspace(), member.getEmail(), "MEMBER", false);
 
         deleteMember(ws, ws.ownerToken(), member.getId()).andExpect(status().isNoContent());
 
@@ -755,7 +1114,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void anAdminCannotRemoveThemselves() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
+        var admin = addMember(ws, "ADMIN", "Ada");
         var token = login(admin);
 
         deleteMember(ws, token, admin.getId())
@@ -768,7 +1127,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void anOwnerWithACoOwnerStillCannotRemoveThemselves() throws Exception {
         var ws = newWorkspace();
-        addMember(ws, WorkspaceRole.OWNER, "Otto");
+        addMember(ws, "OWNER", "Otto");
 
         deleteMember(ws, ws.ownerToken(), ws.owner().getId())
                 .andExpect(status().isUnprocessableContent());
@@ -784,9 +1143,9 @@ class WorkspaceMemberManagementTest {
     @Test
     void anOwnerMayStepDownWhileAnotherOwnerExists() throws Exception {
         var ws = newWorkspace();
-        addMember(ws, WorkspaceRole.OWNER, "Otto");
+        addMember(ws, "OWNER", "Otto");
 
-        patchMember(ws, ws.ownerToken(), ws.owner().getId(), WorkspaceRole.ADMIN)
+        patchMember(ws, ws.ownerToken(), ws.owner().getId(), "ADMIN")
                 .andExpect(status().isOk());
 
         assertThat(roleOf(ws, ws.owner())).isEqualTo("ADMIN");
@@ -810,7 +1169,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void aStaleConcurrentEditCannotSilentlyRestoreTheRemovedAssignee() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
+        var member = addMember(ws, "MEMBER", "Mia");
         var number = createIssue(ws, ws.ownerToken(), "Their work",
                 "\"assigneeId\":\"" + member.getId() + "\"");
         // What an editor who opened the issue BEFORE the removal is holding.
@@ -851,8 +1210,8 @@ class WorkspaceMemberManagementTest {
     @Test
     void removalClosesTheRemovedMembersLiveSseStreams() throws Exception {
         var ws = newWorkspace();
-        var member = addMember(ws, WorkspaceRole.MEMBER, "Mia");
-        var bystander = addMember(ws, WorkspaceRole.MEMBER, "Moe");
+        var member = addMember(ws, "MEMBER", "Mia");
+        var bystander = addMember(ws, "MEMBER", "Moe");
 
         var theirs = trackedEmitter(ws.workspace().getId(), member.getId());
         var bystanders = trackedEmitter(ws.workspace().getId(), bystander.getId());
@@ -867,7 +1226,7 @@ class WorkspaceMemberManagementTest {
     @Test
     void arefusedRemovalLeavesTheStreamAlone() throws Exception {
         var ws = newWorkspace();
-        var admin = addMember(ws, WorkspaceRole.ADMIN, "Ada");
+        var admin = addMember(ws, "ADMIN", "Ada");
         var owner = ws.owner();
 
         var ownersStream = trackedEmitter(ws.workspace().getId(), owner.getId());
@@ -887,7 +1246,7 @@ class WorkspaceMemberManagementTest {
                 .content(body));
     }
 
-    private ResultActions patchMember(Ws ws, String token, UUID userId, WorkspaceRole role) throws Exception {
+    private ResultActions patchMember(Ws ws, String token, UUID userId, String role) throws Exception {
         return mockMvc.perform(patch(members(ws) + "/" + userId)
                 .header("Authorization", "Bearer " + token)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -974,9 +1333,9 @@ class WorkspaceMemberManagementTest {
     private Ws newWorkspace() throws Exception {
         var owner = user("Owner");
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var body = mockMvc.perform(get("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/config")
                         .header("Authorization", "Bearer " + token))
@@ -984,7 +1343,7 @@ class WorkspaceMemberManagementTest {
         return new Ws(ws, project, owner, token, json.readTree(body));
     }
 
-    private User addMember(Ws ws, WorkspaceRole role, String displayName) {
+    private User addMember(Ws ws, String role, String displayName) {
         var u = user(displayName);
         member(ws.workspace(), u, role);
         return u;
@@ -1009,12 +1368,11 @@ class WorkspaceMemberManagementTest {
         return workspaceRepository.save(w);
     }
 
-    @SuppressWarnings("deprecation") // legacy role bridge — S3 deletes the enum
-    private void member(Workspace ws, User user, WorkspaceRole role) {
+    private void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 
@@ -1033,12 +1391,11 @@ class WorkspaceMemberManagementTest {
      * fishing an emailed token out of MailHog to produce the one state that matters (an
      * unaccepted row for someone who is already a member).
      */
-    @SuppressWarnings("deprecation") // legacy role bridge — S3 deletes the enum
-    private UUID invite(Workspace ws, String email, WorkspaceRole role, boolean accepted) {
+    private UUID invite(Workspace ws, String email, String role, boolean accepted) {
         var i = new WorkspaceInvite();
         i.setWorkspace(ws);
         i.setEmail(email.toLowerCase());
-        i.setRole(roleCatalog.reference(role));
+        i.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         i.setTokenHash(UUID.randomUUID().toString().replace("-", "")
                 + UUID.randomUUID().toString().replace("-", ""));
         i.setInvitedBy(ws.getCreatedBy());
@@ -1076,12 +1433,11 @@ class WorkspaceMemberManagementTest {
         return completed;
     }
 
-    @SuppressWarnings("deprecation") // legacy role bridge — S3 deletes the enum
-    private void projectMember(Project project, User user, ProjectRole role) {
+    private void projectMember(Project project, User user, String role) {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(roleCatalog.reference(role));
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, role));
         projectMemberRepository.save(m);
     }
 

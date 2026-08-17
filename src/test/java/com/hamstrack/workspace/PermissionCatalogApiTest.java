@@ -167,7 +167,7 @@ class PermissionCatalogApiTest extends LabelTestBase {
     private String actorInWorkspaceOnly(Ctx ctx) throws Exception {
         var u = user();
         var ws = workspaceRepository.findById(ctx.wsId()).orElseThrow();
-        member(ws, u, com.hamstrack.workspace.entity.WorkspaceRole.MEMBER);
+        member(ws, u, "MEMBER");
         return login(u);
     }
 

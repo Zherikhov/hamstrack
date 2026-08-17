@@ -1,6 +1,5 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -42,7 +41,7 @@ class LabelApiTest extends LabelTestBase {
     @Test
     void anyWorkspaceMemberCanCreateALabel() throws Exception {
         var ctx = newProject();
-        var plain = addMember(ctx, WorkspaceRole.MEMBER);
+        var plain = addMember(ctx, "MEMBER");
 
         postLabel(ctx, plain.token(), "{\"name\":\"self-serve\"}")
                 .andExpect(status().isCreated())
@@ -152,9 +151,9 @@ class LabelApiTest extends LabelTestBase {
     @Test
     void renameAndRecolorAllowedForAdminAndCreatorButNotAnotherPlainMember() throws Exception {
         var ctx = newProject();
-        var creator = addMember(ctx, WorkspaceRole.MEMBER);
-        var other = addMember(ctx, WorkspaceRole.MEMBER);
-        var admin = addMember(ctx, WorkspaceRole.ADMIN);
+        var creator = addMember(ctx, "MEMBER");
+        var other = addMember(ctx, "MEMBER");
+        var admin = addMember(ctx, "ADMIN");
         var id = createLabel(ctx, creator.token(), "owned-by-creator");
 
         // the creator (a plain MEMBER) may rename/recolor their own label
@@ -176,7 +175,7 @@ class LabelApiTest extends LabelTestBase {
     @Test
     void archiveUnarchiveMergeAndDeleteAreAdminOnly() throws Exception {
         var ctx = newProject();
-        var plain = addMember(ctx, WorkspaceRole.MEMBER);
+        var plain = addMember(ctx, "MEMBER");
         // Created BY the plain member — creator rights do not extend to curation.
         var mine = createLabel(ctx, plain.token(), "mine");
         var other = createLabel(ctx, "other");
@@ -191,7 +190,7 @@ class LabelApiTest extends LabelTestBase {
         assert listLabels(ctx, plain.token(), null).size() == 2;
 
         // and an ADMIN can do all four
-        var admin = addMember(ctx, WorkspaceRole.ADMIN);
+        var admin = addMember(ctx, "ADMIN");
         archiveLabel(ctx, admin.token(), mine).andExpect(status().isOk())
                 .andExpect(jsonPath("$.archived").value(true));
         unarchiveLabel(ctx, admin.token(), mine).andExpect(status().isOk())

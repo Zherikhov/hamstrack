@@ -1,6 +1,5 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -35,7 +34,7 @@ class ComponentAutoAssignTest extends ComponentTestBase {
     @Test
     void anIssueCreatedOnAnAutoAssignComponentGoesToTheLead() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         var component = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
 
@@ -56,8 +55,8 @@ class ComponentAutoAssignTest extends ComponentTestBase {
     @Test
     void anExplicitAssigneeAlwaysWins() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
-        var chosen = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
+        var chosen = addMember(ctx, "MEMBER");
         var component = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
 
@@ -71,7 +70,7 @@ class ComponentAutoAssignTest extends ComponentTestBase {
     @Test
     void autoAssignOffLeavesTheIssueUnassignedEvenWithALead() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         var component = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"leadId\":\"" + lead.user().getId() + "\"}");
 
@@ -92,7 +91,7 @@ class ComponentAutoAssignTest extends ComponentTestBase {
     @Test
     void aLeadWhoLeftTheWorkspaceIsSkippedSilentlyAndTheIssueIsStillCreated() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         var component = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
         removeFromWorkspace(ctx, lead.user());
@@ -106,8 +105,8 @@ class ComponentAutoAssignTest extends ComponentTestBase {
     @Test
     void autoAssignNeverFiresOnUpdate() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
-        var other = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
+        var other = addMember(ctx, "MEMBER");
         var component = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
 

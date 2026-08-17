@@ -2,6 +2,7 @@ package com.hamstrack.issue.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.ClassificationProperties;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.dto.CreateLabelRequest;
 import com.hamstrack.issue.dto.LabelRef;
 import com.hamstrack.issue.dto.LabelResponse;
@@ -17,8 +18,6 @@ import com.hamstrack.issue.exception.LabelNotFoundException;
 import com.hamstrack.issue.repository.IssueLabelRepository;
 import com.hamstrack.issue.repository.LabelRepository;
 import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.entity.WorkspaceRole;
-import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import com.hamstrack.workspace.service.WorkspaceContext;
 import lombok.RequiredArgsConstructor;
@@ -51,14 +50,18 @@ import java.util.UUID;
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
  * {@link WorkspaceAccessService#requireMember} — a missing workspace and a
  * non-member both yield <strong>404</strong>, never 403. 403 is reserved for a
- * <em>member without the curation role</em>. Label lookups always go through
+ * <em>member without the permission</em>. Label lookups always go through
  * {@code findByIdAndWorkspace}: a foreign id is a 404 on a direct read and a
  * <strong>422</strong> "Unknown label" inside an issue payload (an invalid field
  * value, leaking nothing about the other tenant).
  *
- * <p><strong>Permissions (§3.3):</strong> read + create = any workspace member
- * (self-serve tagging is the whole point); rename/recolor/describe = OWNER/ADMIN or
- * the label's {@code created_by}; archive/unarchive/merge/delete = OWNER/ADMIN.
+ * <p><strong>Permissions (§3.3, HD-126 S3):</strong> reads are open to every workspace
+ * member; create = {@code label.create}; rename/recolor/describe =
+ * {@code label.manage} <em>qualified by ownership</em> ({@link #requireEditor});
+ * archive/unarchive/merge/delete = {@code label.manage} <em>unrestricted</em>
+ * ({@link #requireCurator}). One catalog key, two arities — and the built-in workspace
+ * Member's own-only grant is what preserves "may rename the label I made, may not
+ * archive it" without splitting the catalog.
  *
  * <p>Labels are <em>content</em>, not bound taxonomy: nothing here touches
  * {@code ProjectConfigService} or {@code ProjectConfigResponse} (§3.2).
@@ -120,15 +123,21 @@ public class LabelService {
     }
 
     /**
-     * Any workspace member may create a label (§3.3 — the flagged design assumption).
-     * Because creation is self-serve, the catalog is bounded by
+     * <strong>Permission: {@code label.create}</strong> (HD-126 S3, §10.1). Δ-free — the
+     * built-in workspace Member holds it, so label creation stays self-serve (§3.3 — the
+     * flagged design assumption); it is its own catalog entry so that a workspace which
+     * wants a curated tag vocabulary can now say so.
+     *
+     * <p>Because creation is self-serve, the catalog is bounded by
      * {@code app.classification.max-labels-per-workspace} (422 when full): without it
      * a single member could grow an unbounded workspace catalog, which every
      * {@code /search}, {@code /schema} and picker load then has to resolve.
      */
     @Transactional
     public LabelResponse create(User actor, UUID workspaceId, CreateLabelRequest req) {
-        var ws = workspaceAccess.requireMember(actor, workspaceId).workspace();
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        ctx.permissions().require(Permission.LABEL_CREATE);
+        var ws = ctx.workspace();
 
         String name = requireValidName(req.name());
         String color = req.color() != null ? requireValidColor(req.color()) : colorForName(name);
@@ -549,19 +558,35 @@ public class LabelService {
         }
     }
 
-    /** Archive / unarchive / merge / delete are workspace OWNER/ADMIN only (§3.3). */
+    /**
+     * Archive / unarchive / merge / delete — <strong>{@code label.manage} with
+     * <em>no</em> ownership argument</strong> (HD-126 S3, §10.1).
+     *
+     * <p>The missing argument is the whole design, not an omission.
+     * {@code PermissionSet.require(permission)} is satisfied only by an
+     * <em>unrestricted</em> grant, so the built-in workspace Member — who holds
+     * {@code label.manage} <em>own-only</em> so that {@link #requireEditor} keeps letting
+     * them rename what they made — can never reach these four. That is today's rule
+     * exactly: a member may rename the label they created, and may not archive it.
+     * Passing {@code isOwn} here would hand every workspace member archive/merge/delete
+     * over their own labels, which is the one way to get this pair wrong.
+     */
     private void requireCurator(WorkspaceContext ctx) {
-        if (!ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
-            throw new InsufficientWorkspaceRoleException();
-        }
+        ctx.permissions().require(Permission.LABEL_MANAGE);
     }
 
-    /** Rename / recolor / describe: OWNER/ADMIN, or the label's own creator (§3.3). */
+    /**
+     * Rename / recolor / describe — <strong>{@code label.manage} qualified by ownership</strong>
+     * (HD-126 S3, §10.1, §6.4). Ownership of a label is its {@code created_by}, computed
+     * here and never by {@code PermissionSet}.
+     *
+     * <p>Replaces an admin-bypass-then-creator-fallback that answered the same for every
+     * actor: OWNER/ADMIN hold the unrestricted grant, Member holds the own-only one.
+     */
     private void requireEditor(WorkspaceContext ctx, User actor, Label label) {
-        if (ctx.role().isAtLeast(WorkspaceRole.ADMIN)) return;
         var creator = label.getCreatedBy();
-        if (creator != null && creator.getId().equals(actor.getId())) return;
-        throw new InsufficientWorkspaceRoleException();
+        boolean isOwn = creator != null && creator.getId().equals(actor.getId());
+        ctx.permissions().require(Permission.LABEL_MANAGE, isOwn);
     }
 
     private LabelNameConflictException duplicate(Label existing) {

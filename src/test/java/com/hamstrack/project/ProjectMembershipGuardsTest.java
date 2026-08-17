@@ -2,9 +2,7 @@ package com.hamstrack.project;
 
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.SprintTestBase;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.workspace.entity.BuiltInRoles;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -52,7 +50,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
     @Test
     void addingAViewerWritesContributorUntilTheDtoTakesARoleId() throws Exception {
         var ctx = newProject();
-        var newcomer = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var newcomer = actorWith(ctx, "MEMBER", null);
 
         addMember(ctx, ctx.token(), newcomer.user().getId(), "VIEWER")
                 .andExpect(status().isCreated())
@@ -92,7 +90,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 Permission.COMMENT_CREATE, Permission.COMMENT_EDIT, Permission.COMMENT_DELETE,
                 Permission.ATTACHMENT_CREATE, Permission.ATTACHMENT_DELETE,
                 Permission.SPRINT_ASSIGN);
-        var newcomer = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var newcomer = actorWith(ctx, "MEMBER", null);
 
         // Handing out a role they themselves hold is fine.
         addMember(ctx, lead.token(), newcomer.user().getId(), "MEMBER")
@@ -100,7 +98,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
 
         // Handing out MANAGER is not: it includes permissions they do not hold, and the
         // 403 names the first of them rather than saying "insufficient role".
-        var other = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var other = actorWith(ctx, "MEMBER", null);
         addMember(ctx, lead.token(), other.user().getId(), "MANAGER")
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("cannot grant")));
@@ -145,7 +143,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("default role")));
 
         // The mirror: promoting somebody else to the default by deleting their narrow row.
-        var narrow = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var narrow = actorWith(ctx, "MEMBER", null);
         addMember(ctx, lead.token(), narrow.user().getId(), "MEMBER")
                 .andExpect(status().isForbidden());   // Contributor > the lead's own set
 
@@ -172,7 +170,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("last administrator")));
 
         // With a second administrator in place, either of them may go.
-        var second = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MANAGER);
+        var second = actorWith(ctx, "MEMBER", "MANAGER");
         removeMember(ctx, ctx.token(), ctx.owner().getId())
                 .andExpect(status().isNoContent());
         removeMember(ctx, second.token(), second.user().getId())

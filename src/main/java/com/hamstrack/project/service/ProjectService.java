@@ -33,6 +33,16 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ProjectService {
 
+    /**
+     * The built-in project role keys this service names. Strings since HD-126 (S3) deleted
+     * the ordinal {@code ProjectRole} enum — they are role <em>identities</em>, used for
+     * assignment and for the {@code myRole} wire value, and never ranked. The one place
+     * ranking would be tempting (the grant ceiling) compares permission sets instead.
+     */
+    private static final String PROJECT_ADMIN_KEY = "MANAGER";
+    private static final String CONTRIBUTOR_KEY = "MEMBER";
+    private static final String VIEWER_KEY = "VIEWER";
+
     private final WorkspaceAccessService workspaceAccess;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
@@ -42,9 +52,20 @@ public class ProjectService {
     /** HD-123: project memberships carry a {@code roles} row; views come from the cache. */
     private final RoleCatalog roleCatalog;
 
+    /**
+     * <strong>Permission: {@code project.create}</strong> (HD-126 S3, §10.1) — a
+     * <em>workspace</em>-scoped permission despite the {@code project.} prefix, because
+     * there is no project to scope it to yet.
+     *
+     * <p>Δ-free: the built-in workspace Member holds it, so every workspace member can
+     * still create a project exactly as before. It exists as a permission because "only
+     * admins open new projects" is a policy a workspace can now express without an
+     * ordinal ladder — the first thing a custom role will be used for.
+     */
     @Transactional
     public ProjectResponse create(User actor, UUID workspaceId, CreateProjectRequest req) {
         var ws = workspaceAccess.requireMember(actor, workspaceId);
+        ws.permissions().require(Permission.PROJECT_CREATE);
         var workspace = ws.workspace();
         // Normalize once and use the same value for the uniqueness check and the
         // insert — otherwise a future relaxed key pattern could 500 on the unique
@@ -67,12 +88,12 @@ public class ProjectService {
         var member = new ProjectMember();
         member.setProject(project);
         member.setUser(actor);
-        member.setRole(roleCatalog.reference(ProjectRole.MANAGER));
+        member.setRole(roleCatalog.reference(RoleScope.PROJECT, PROJECT_ADMIN_KEY));
         projectMemberRepository.save(member);
         metrics.projectCreated();
 
-        var managerRole = roleCatalog.builtIn(RoleScope.PROJECT, ProjectRole.MANAGER.name());
-        return ProjectResponse.of(project, ProjectRole.MANAGER,
+        var managerRole = roleCatalog.builtIn(RoleScope.PROJECT, PROJECT_ADMIN_KEY);
+        return ProjectResponse.of(project, PROJECT_ADMIN_KEY,
                 workspaceAccess.effectiveProjectPermissions(ws.permissions(), managerRole));
     }
 
@@ -203,9 +224,20 @@ public class ProjectService {
      */
     @Transactional(readOnly = true)
     public List<ProjectMemberResponse> listMembers(User actor, UUID workspaceId, UUID projectId) {
-        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
-        return projectMemberRepository.findAllByProjectWithUser(project).stream()
-                .map(m -> ProjectMemberResponse.of(m, roleCatalog.view(m.getRole().getId()).asProjectRole()))
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        // The RESOLVED workspace id, not the path variable — same value here, but this is the
+        // one that has been through the tenancy check.
+        var ownerWorkspaceId = ctx.workspace().getId();
+        // Every row here belongs to SOMEBODY ELSE, so each role_id goes through the same
+        // scope+ownership assertion `list` and the detail path apply (H3/T2) rather than
+        // being dereferenced with a bare `view`. Until HD-126 the legacy bridge threw for
+        // any non-built-in role and that was the accidental guard; `.key()` answers for
+        // anything, so once S4 ships custom roles a foreign or corrupt `project_members
+        // .role_id` would render another workspace's role name straight into the People
+        // tab. Free on a warm cache — no query per row.
+        return projectMemberRepository.findAllByProjectWithUser(ctx.project()).stream()
+                .map(m -> ProjectMemberResponse.of(m, workspaceAccess.requireRole(
+                        m.getRole().getId(), RoleScope.PROJECT, ownerWorkspaceId, "project_members").key()))
                 .toList();
     }
 
@@ -213,7 +245,7 @@ public class ProjectService {
      * Add an explicit project membership.
      *
      * <p><strong>{@code VIEWER} is written as Contributor</strong> (HD-125 review, M1).
-     * {@code AddProjectMemberRequest.role} is still the legacy {@code ProjectRole}, and
+     * {@code AddProjectMemberRequest.role} is still the legacy role <em>key</em>, and
      * the built-in role keyed {@code VIEWER} <em>changes meaning</em> under HD-123: it
      * granted everything (the fallback for "no row at all", §2.2) and now grants nothing.
      * Writing it verbatim would make this unchanged, still-documented endpoint mint
@@ -302,16 +334,19 @@ public class ProjectService {
 
     // ---- membership guards ----
 
-    /** What a requested legacy {@code ProjectRole} actually becomes on disk — see {@link #addMember}. */
-    @SuppressWarnings("deprecation")
-    private static ProjectRole storedRole(ProjectRole requested) {
-        return requested == ProjectRole.VIEWER ? ProjectRole.MEMBER : requested;
+    /** What a requested role key actually becomes on disk — see {@link #addMember}. */
+    private static String storedRole(String requested) {
+        return VIEWER_KEY.equals(requested) ? CONTRIBUTOR_KEY : requested;
     }
 
-    /** The built-in role {@link #storedRole} names, as a view carrying its permission set. */
-    @SuppressWarnings("deprecation")
-    private RoleView assignableRole(ProjectRole requested) {
-        return roleCatalog.builtIn(RoleScope.PROJECT, storedRole(requested).name());
+    /**
+     * The built-in role {@link #storedRole} names, as a view carrying its permission set.
+     * A key this build cannot assign is <strong>422 "Unknown role"</strong>, not a 500 —
+     * the DTO carries a free-form string since the enum was deleted, so validating it is
+     * this method's job (§12).
+     */
+    private RoleView assignableRole(String requested) {
+        return roleCatalog.requireAssignable(RoleScope.PROJECT, storedRole(requested));
     }
 
     /**
@@ -371,28 +406,25 @@ public class ProjectService {
     }
 
     /**
-     * The caller's <em>explicit</em> project role, or {@link ProjectRole#VIEWER} when they
-     * have no {@code project_members} row — the wire value of
-     * {@code ProjectResponse.myRole}, and <strong>nothing else</strong>: since HD-123 S2
-     * no authorization decision in this class reads a role at all.
+     * The caller's <em>explicit</em> project role key, or {@code "VIEWER"} when they have
+     * no {@code project_members} row — the wire value of {@code ProjectResponse.myRole},
+     * and <strong>nothing else</strong>: since HD-123 S2 no authorization decision in this
+     * class reads a role at all.
      *
      * <p>It is deliberately NOT the effective role of §5.2: reporting the inherited
      * Contributor here would flip {@code myRole} from {@code "VIEWER"} to {@code "MEMBER"}
-     * for every workspace member without an explicit row, which is a wire change in a
-     * slice that is supposed to have none. {@code myPermissions} carries the effective
-     * answer instead, and S5 retires this field's role in gating altogether.
+     * for every workspace member without an explicit row, which is a wire change this epic
+     * promised not to make. {@code myPermissions} carries the effective answer instead.
      */
-    @SuppressWarnings("deprecation")
-    private ProjectRole legacyRole(ProjectContext ctx) {
-        return ctx.explicitProjectRole() ? ctx.projectRole().asProjectRole() : ProjectRole.VIEWER;
+    private String legacyRole(ProjectContext ctx) {
+        return ctx.explicitProjectRole() ? ctx.projectRole().key() : VIEWER_KEY;
     }
 
     /** {@link #legacyRole(ProjectContext)} from an already-batched membership row. */
-    @SuppressWarnings("deprecation")
-    private ProjectRole legacyRole(ProjectMember explicit) {
+    private String legacyRole(ProjectMember explicit) {
         return explicit == null
-                ? ProjectRole.VIEWER
-                : roleCatalog.view(explicit.getRole().getId()).asProjectRole();
+                ? VIEWER_KEY
+                : roleCatalog.view(explicit.getRole().getId()).key();
     }
 
     /**

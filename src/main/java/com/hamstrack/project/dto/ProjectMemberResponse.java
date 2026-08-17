@@ -1,7 +1,6 @@
 package com.hamstrack.project.dto;
 
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -11,16 +10,17 @@ public record ProjectMemberResponse(
         String email,
         String displayName,
         String avatarUrl,
-        ProjectRole role,
+        String role,
         Instant joinedAt
 ) {
     /**
-     * @param role the member's role as the legacy enum. Passed in rather than read off
-     *     {@code m.getRole()} because that is now a {@code roles} row, and translating it
-     *     needs the cached catalog the caller already has (HD-123 S1). S4 replaces this
-     *     field with the role's id + display name so a custom role can be shown.
+     * @param role the member's role <em>key</em> — the same strings the deleted
+     *     {@code ProjectRole} enum serialised as. Passed in rather than read off
+     *     {@code m.getRole()} because that is a {@code roles} row and translating it needs
+     *     the cached catalog the caller already has. S4 adds the role's id + display name
+     *     beside it so a custom role can be shown.
      */
-    public static ProjectMemberResponse of(ProjectMember m, ProjectRole role) {
+    public static ProjectMemberResponse of(ProjectMember m, String role) {
         var u = m.getUser();
         return new ProjectMemberResponse(
                 u.getId(), u.getEmail(), u.getDisplayName(), u.getAvatarUrl(),
