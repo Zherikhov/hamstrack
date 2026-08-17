@@ -156,6 +156,36 @@ Two surfaces share one body:
 - `pages/IssueSidePanel.tsx` — the **right drawer** over Board/Backlog (still used; `BoardPage` opens it on card click, drawer animation cited HD-56).
 - `pages/IssueFullPage.tsx` — the **full page** at route `/w/:wsId/p/:projectId/issues/:number` (`ParamKeyed`) for deep-linking/sharing; reuses the same `IssueDetail` body and the same config+issue endpoints (**no new backend surface**; 404s identically). Its "Back to board" navigates with `state.openIssue = number`, which reopens that issue's drawer on the board.
 
+## Agile: sprints, Scrum board & backlog ranking (release 0.13.0, epic HD-4, V11)
+
+Sprints with a `FUTURE → ACTIVE → COMPLETED` lifecycle (**no re-open**), a rank-ordered backlog, and a board that can scope to the active sprint. Spec: `docs/design/agile-sprints-proposal.md`.
+
+- **Rank is `issues.position`**, not a new column — `position` was already the `ORDER BY` key of every issue list, so a second rank column would have left the board ordered by one and the backlog by the other. Spaced by `RANK_STEP` (2^26); the server computes midpoints from neighbour anchors (`afterIssueId`/`beforeIssueId`), the client never sends a rank, and `position` is not exposed in `IssueResponse`.
+- **Rebalance**: when a gap is exhausted, one native whole-project renumber runs with `SET LOCAL hamstrack.skip_updated_at = 'on'` (V11 replaced the shared `set_updated_at()` trigger function with a GUC-guarded version), so it stamps neither `updated_at` nor `@Version`. Throttled per project — 429 with `Retry-After` — because ~26 cheap drags otherwise let any member force unbounded full-table rewrites.
+- **Story points were promoted** from the V1-seeded `story_points` custom field to a native `issues.story_points NUMERIC(5,2)`; V11 backfills, deletes the migrated `issue_field_values` rows and archives the field def. Reason: the system-default field set is "No fields", so on a stock install nobody could enter points and the epic's point-sum criterion would have shipped dead.
+- **One ACTIVE sprint per project** is enforced by a partial unique index, not a JVM check; start/complete are conditional bulk UPDATEs arbitrated on affected-row count, so a double click is a 409 rather than a silently-idempotent destructive move.
+- `projects.board_mode` (`KANBAN | SCRUM`) shipped here as a presentation switch — later subsumed by the delivery model below.
+
+## Delivery capabilities — Kanban / Scrum / Releases (HD-95, V12)
+
+The model that answers "what does the app do differently depending on how a team delivers?". Spec: `docs/design/delivery-paths-proposal.md`. Implemented as seven slices, HD-102…HD-108.
+
+**Not a three-way choice.** A project stores three independent capabilities — `board` (`KANBAN|SCRUM`, the existing `board_mode` column), `releases`, `estimation` — and the server derives a display label (`KANBAN` / `SCRUM` / `RELEASES` / `CUSTOM`). Releases are orthogonal to the board: a team can run Scrum *and* ship versions, which a three-way enum makes unrepresentable, and which is also the only shape that can classify projects that already exist on upgrade. The UI still presents three named cards.
+
+Three rules do the work, and every future surface is checked against them:
+
+- **A — capabilities gate the UI, never the API.** No status code anywhere depends on a capability. A project with `releases` off still accepts and returns version data; a hidden control is not a permission. Enforced by construction: the capability accessors are read in exactly two places, both DTO mappers.
+- **B — controls are gated, values never are.** With a capability off, existing values still render read-only, with a visible reason. This is what makes switching provably non-destructive.
+- **C — the bootstrap invariant.** Every capability has an enabling affordance visible *while it is off*, and first use turns it on with a reversible notice. Rule C exists because of a real production bug: V11 defaulted every pre-existing project to Kanban and the Backlog hid both sprint-creation entry points until a sprint existed, so there was no way to create a first sprint at all. C makes that class of dead end impossible rather than patching one screen.
+
+Other decisions worth knowing:
+
+- **Two opposite default policies, deliberately.** New projects start lean (Kanban, releases and estimation off); every project existing at V12 keeps everything it had, and becomes `SCRUM` if it already owned a sprint — 163 real projects took that path. An upgrade must never take away what a team already had.
+- **`preset` is derived and rejected on write** (400), so a client cannot echo back the `delivery` object it read from a GET — it must strip `preset` first.
+- **`boardMode` remains as a deprecated mirror**; sending it with a conflicting `delivery.board` is a 400.
+- **Search: suggestions narrow, resolution never does.** `/search/schema` and `/search/suggest` omit fields and picklist names for capabilities that are off, but a hidden field still compiles and runs — a saved filter must not break because somebody flipped a toggle. Consequence for integrators: the *suggested* set is no longer the *resolvable* set.
+- **Retired-key alias**: `story_points` resolves to the native `storyPoints`, placed **after** custom-field lookup so it can never shadow a tenant's own field of that key (`RetiredFieldAliases`, deliberately not a `FieldRegistry` entry).
+
 ## Phase 3 API surface
 
 The user-facing REST reference lives in `docs/api-cloud.md` / `docs/api-dc.md` and `src/main/frontend/public/openapi.yaml`. Quick internal map (roles in parens):
