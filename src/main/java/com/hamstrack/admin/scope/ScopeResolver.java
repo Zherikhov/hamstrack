@@ -75,7 +75,17 @@ public class ScopeResolver {
     }
 
     /**
-     * Project whose <em>content catalog</em> (components, versions — HD-6 §3.3) the
+     * <strong>No production call sites since HD-125 (S2).</strong> All 16 of them —
+     * {@code ProjectService.update}, {@code ComponentService} ×4, {@code VersionService}
+     * ×6, {@code SprintService} ×5 — now check {@code project.edit} /
+     * {@code component.manage} / {@code version.manage} / {@code sprint.manage} instead,
+     * which is exactly this predicate spelled out ({@code Permission.projectCuration()},
+     * held workspace-wide by the built-in Owner/Admin as {@code project.curate.all}). It
+     * survives only as {@code PermissionParityTest}'s "today" column — the harness invokes
+     * the real bean rather than transcribing it — and dies with this class in S3 (§10.4).
+     * Do not add a caller.
+     *
+     * <p>Project whose <em>content catalog</em> (components, versions — HD-6 §3.3) the
      * actor may curate: a project <strong>MANAGER</strong>, <em>or</em> an
      * OWNER/ADMIN of the enclosing workspace who may not be a project member at all.
      *

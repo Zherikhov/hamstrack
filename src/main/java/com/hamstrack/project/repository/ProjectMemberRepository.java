@@ -4,7 +4,9 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.workspace.entity.Workspace;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -36,6 +38,28 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, UU
     List<ProjectMember> findAllByProjectWithUser(Project project);
 
     boolean existsByProjectAndUser(Project project, User user);
+
+    /**
+     * The project's members holding one role, <strong>locked for the rest of the
+     * transaction</strong> — the last-administrator guard's read
+     * ({@code ProjectService.removeMember}).
+     *
+     * <p>Straight from the HD-132 workspace twin, including its lesson: the lock is taken
+     * <em>unconditionally and first</em>, never decided from an unlocked read of the
+     * target's role, because that decision is itself the stale read the lock exists to
+     * prevent — two concurrent removals would each see two admins and each remove one.
+     * {@code ORDER BY m.id} so concurrent transactions take the rows in the same order and
+     * deadlock instead of interleaving. Rows, not {@code count(*)}: Postgres will not
+     * attach {@code FOR UPDATE} to an aggregate, and a project has a handful of admins.
+     *
+     * <p>Keyed by role <em>id</em> rather than by the legacy enum so it outlives S3 — the
+     * caller passes {@code BuiltInRoles.PROJECT_MANAGER} today and, once a custom role can
+     * carry {@code project.member.manage}, whichever role ids that rule then names.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT m FROM ProjectMember m WHERE m.project = :project AND m.role.id = :roleId "
+            + "ORDER BY m.id")
+    List<ProjectMember> lockAllByProjectAndRoleId(Project project, UUID roleId);
 
     /**
      * One membership query for a whole project list ({@code ProjectService.list}), which

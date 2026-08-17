@@ -20,6 +20,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -161,6 +162,56 @@ public class WorkspaceAccessService {
                 ws.workspaceRole(), ws.permissions(),
                 projectRole, explicit.isPresent(),
                 effectiveProjectPermissions(ws.permissions(), projectRole));
+    }
+
+    /**
+     * The project-scoped permissions of <strong>somebody other than the caller</strong>,
+     * within an already-resolved project. Empty when that person is not a member of the
+     * workspace at all.
+     *
+     * <p>Exists for exactly one permission — {@link Permission#ISSUE_ASSIGNABLE}, the only
+     * entry in the catalog that is about being a <em>subject</em> rather than acting
+     * (§6.3). {@code issue.assign} is checked against the actor, through the
+     * {@link ProjectContext} resolved once per request; {@code issue.assignable} has to be
+     * evaluated against the <em>target</em>, whose roles no per-request resolution can
+     * know in advance. That asymmetry is the whole point of the permission, and it is why
+     * this is not a violation of Rule P1 (§5.1): it answers a question about a different
+     * person, not a second answer to the same question about the caller.
+     *
+     * <p><strong>Never throws for a stranger.</strong> A user who is not a workspace
+     * member yields {@link Optional#empty()}, so the caller can answer with its own
+     * value-level error (a 422 "Unknown assignee") rather than a 404 that would tell a
+     * member which user ids exist in other tenants. Costs two indexed lookups, and only
+     * on a request that actually names an assignee.
+     *
+     * <p><strong>Nor for a corrupt row belonging to the subject.</strong>
+     * {@link #requireRole} throws {@link WorkspaceNotFoundException} when a {@code role_id}
+     * fails the scope/ownership assertion — correct when it is the <em>caller's</em> row
+     * (fail closed, they get nothing), catastrophic here: one bad {@code project_members}
+     * row would turn every assignee-carrying request in the workspace into "workspace not
+     * found", for everybody, because of somebody else's data. The row is still logged at
+     * ERROR by {@code requireRole}; this degrades the <em>subject</em> to "holds nothing",
+     * which the callers read as "cannot be assigned". Fail-closed in the direction that
+     * refuses one field value instead of the whole tenant.
+     */
+    @Transactional(readOnly = true)
+    public Optional<PermissionSet> projectPermissionsOf(User subject, ProjectContext ctx) {
+        var workspace = ctx.workspace();
+        return workspaceMemberRepository.findByWorkspaceAndUser(workspace, subject)
+                .map(membership -> {
+                    try {
+                        var workspaceRole = requireRole(membership.getRole().getId(),
+                                RoleScope.WORKSPACE, workspace.getId(), "workspace_members");
+                        var projectRole = projectMemberRepository
+                                .findByProjectAndUser(ctx.project(), subject)
+                                .map(m -> requireRole(m.getRole().getId(),
+                                        RoleScope.PROJECT, workspace.getId(), "project_members"))
+                                .orElseGet(() -> defaultProjectRole(workspace, ctx.project()));
+                        return effectiveProjectPermissions(workspaceRole.permissions(), projectRole);
+                    } catch (WorkspaceNotFoundException e) {
+                        return PermissionSet.empty();
+                    }
+                });
     }
 
     /**

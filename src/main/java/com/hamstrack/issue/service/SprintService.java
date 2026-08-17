@@ -1,10 +1,10 @@
 package com.hamstrack.issue.service;
 
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.AgileProperties;
 import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.event.IssueUpdated;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.util.Points;
 import com.hamstrack.issue.dto.AddIssuesToSprintRequest;
 import com.hamstrack.issue.dto.CompleteSprintRequest;
@@ -64,20 +64,30 @@ import java.util.UUID;
  * lifecycle, bulk issue assignment and the completion report.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#resolveProject} (reads, issue-level writes) or
- * {@link ScopeResolver#requireProjectCurator} (lifecycle writes) — a missing
- * workspace, a missing project and a non-member all yield <strong>404</strong>, never
- * 403. 403 is reserved for a <em>member without the curation role</em>. Sprint lookups
- * always go through {@code findByIdAndProject}: a foreign id is a 404 on a direct read
- * and a <strong>422</strong> "Unknown sprint" inside an issue payload (an invalid
- * field value, leaking nothing about the other tenant).
+ * {@link WorkspaceAccessService#resolveProject} — a missing workspace, a missing
+ * project and a non-member all yield <strong>404</strong>, never 403. 403 is reserved
+ * for a <em>member without the permission</em>, and by construction it can only reach
+ * someone whose membership is already proved. Sprint lookups always go through
+ * {@code findByIdAndProject}: a foreign id is a 404 on a direct read and a
+ * <strong>422</strong> "Unknown sprint" inside an issue payload (an invalid field value,
+ * leaking nothing about the other tenant).
  *
- * <p><strong>Permissions (§3.2):</strong> read = any project member; create / rename /
- * re-plan / delete / start / complete = project MANAGER <em>or</em> workspace
- * OWNER/ADMIN. Putting <em>items into</em> a sprint (and ranking them) is ordinary
- * planning work the whole team does at a planning meeting, so it only needs the
- * issue-edit tier — requiring MANAGER to drag would make the backlog read-only for
- * most of the team and kill the feature.
+ * <p><strong>Permissions (§3.2, HD-123 §10.2):</strong> read = any project member;
+ * create / rename / re-plan / delete / start / complete =
+ * {@link Permission#SPRINT_MANAGE} (built-in project MANAGER, plus a workspace
+ * OWNER/ADMIN through {@link Permission#PROJECT_CURATE_ALL}). Putting <em>items into</em>
+ * a sprint is {@link Permission#SPRINT_ASSIGN}, a separate and deliberately wider grant:
+ * planning is ordinary work the whole team does at a planning meeting, and requiring
+ * MANAGER to drag would make the backlog read-only for most of the team.
+ *
+ * <p><strong>The double door (§6.5):</strong> {@code sprint.assign} guards three
+ * endpoints, not one — {@link #addIssues}, {@link #removeIssue} <em>and</em>
+ * {@code PATCH /issues/{n}} / {@code POST /issues/{n}/rank} when the body carries
+ * {@code sprintId}/{@code clearSprint} (enforced in {@code IssueService}). A permission
+ * that guards one door and not the other is not a permission.
+ *
+ * <p>The {@code board} delivery capability is a rendering hint and never a check: a
+ * KANBAN project still accepts {@code POST /sprints} (delivery Rule A).
  *
  * <p>Sprints are <em>content</em>, not bound taxonomy: nothing here touches
  * {@code ProjectConfigService} or {@code ProjectConfigResponse} (§3.6), so a sprint
@@ -89,7 +99,6 @@ import java.util.UUID;
 public class SprintService {
 
     private final WorkspaceAccessService workspaceAccess;
-    private final ScopeResolver scopeResolver;
     private final SprintRepository sprintRepository;
     private final IssueRepository issueRepository;
     private final IssueHistoryRepository historyRepository;
@@ -185,7 +194,10 @@ public class SprintService {
     @Transactional
     public SprintResponse create(User actor, UUID workspaceId, UUID projectId,
                                  CreateSprintRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
 
         // ---- all reads + validation first (CLAUDE.md: mutate-then-query double-writes) ----
@@ -243,7 +255,10 @@ public class SprintService {
     @Transactional
     public SprintResponse update(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                                  UpdateSprintRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
 
@@ -307,7 +322,10 @@ public class SprintService {
     @Transactional
     public SprintResponse start(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                                 StartSprintRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
 
@@ -367,7 +385,10 @@ public class SprintService {
     @Transactional
     public SprintCompletionResult complete(User actor, UUID workspaceId, UUID projectId,
                                            UUID sprintId, CompleteSprintRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
 
@@ -448,7 +469,10 @@ public class SprintService {
      */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, UUID sprintId, boolean force) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
 
@@ -489,8 +513,10 @@ public class SprintService {
     // ================================================================ issue membership
 
     /**
-     * Put a batch of issues into a sprint (§4.4) — the issue-edit tier, NOT curator:
-     * putting items into a sprint is ordinary planning work the whole team does.
+     * Put a batch of issues into a sprint (§4.4) — {@link Permission#SPRINT_ASSIGN}, NOT
+     * {@link Permission#SPRINT_MANAGE}: putting items into a sprint is ordinary planning
+     * work the whole team does, and the built-in Contributor holds it. One of the three
+     * doors that permission guards (§6.5).
      *
      * <p>An issue already in the target sprint is a <strong>no-op</strong>: no history
      * row, no {@code @Version} bump, no event. Assigning to a COMPLETED sprint is a 422
@@ -500,14 +526,20 @@ public class SprintService {
      * one mid-sprint is allowed (a scope change is a real event).
      *
      * <p>The moved issues are re-ranked to the TOP or BOTTOM of the target section,
-     * keeping their relative order among themselves. Positions are mutated on the
-     * managed entities and saved — never a bulk JPQL UPDATE, which would desync the
-     * copies we just loaded to write history from.
+     * keeping their relative order among themselves — <strong>if the actor holds
+     * {@link Permission#ISSUE_RANK}</strong>; otherwise each issue keeps the rank it
+     * already had, exactly as {@link #removeIssue} does. {@code issues.position} is the
+     * project-wide backlog rank, so re-ranking under {@code sprint.assign} alone would be
+     * a back door onto {@code issue.rank}. Positions are mutated on the managed entities
+     * and saved — never a bulk JPQL UPDATE, which would desync the copies we just loaded
+     * to write history from.
      */
     @Transactional
     public SprintResponse addIssues(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                                     AddIssuesToSprintRequest req) {
-        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_ASSIGN);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
         requireAssignable(sprint);
@@ -547,11 +579,24 @@ public class SprintService {
         for (var issue : changing) {
             requireDetachable(issue.getSprint());
         }
+        // The re-rank is a SEPARATE permission (HD-125 review, M2). `issues.position` is
+        // the PROJECT-WIDE backlog rank, not a per-sprint one, so writing it here under
+        // `sprint.assign` alone would make `issue.rank` bypassable in two calls: add to a
+        // sprint with position=TOP, then remove — removeIssue preserves the rank — and the
+        // issue returns to the backlog carrying a position computed from that sprint's
+        // bounds. Repeat with different anchor sprints to walk it anywhere, which defeats
+        // exactly the policy the permission exists to express ("developers must not
+        // reprioritise the backlog"). An actor without `issue.rank` may still move issues
+        // in and out of sprints; their rank is simply PRESERVED, which is already the
+        // contract removeIssue keeps. Δ-free today: Contributor holds both.
+        boolean mayRank = ctx.permissions().has(Permission.ISSUE_RANK);
         // The anchor rank is read BEFORE any mutation, so the section's current bounds
-        // are not polluted by this batch's own writes.
-        long base = req.position() == SprintInsertPosition.TOP
-                ? issueRepository.minPositionInSection(project, sprintId)
-                : issueRepository.maxPositionInSection(project, sprintId);
+        // are not polluted by this batch's own writes — and not read at all when nothing
+        // will be written with it.
+        long base = !mayRank ? 0
+                : req.position() == SprintInsertPosition.TOP
+                        ? issueRepository.minPositionInSection(project, sprintId)
+                        : issueRepository.maxPositionInSection(project, sprintId);
 
         // ---- then mutate ----
         var history = new ArrayList<IssueHistory>(changing.size());
@@ -560,9 +605,11 @@ public class SprintService {
             history.add(makeHistory(issue, actor, "sprint",
                     issue.getSprint() == null ? null : issue.getSprint().getName(), sprint.getName()));
             issue.setSprint(sprint);
-            issue.setPosition(req.position() == SprintInsertPosition.TOP
-                    ? base - (long) IssueRankService.RANK_STEP * (changing.size() - k)
-                    : base + (long) IssueRankService.RANK_STEP * (k + 1));
+            if (mayRank) {
+                issue.setPosition(req.position() == SprintInsertPosition.TOP
+                        ? base - (long) IssueRankService.RANK_STEP * (changing.size() - k)
+                        : base + (long) IssueRankService.RANK_STEP * (k + 1));
+            }
         }
         issueRepository.saveAll(changing);
         historyRepository.saveAll(history);
@@ -575,7 +622,7 @@ public class SprintService {
     }
 
     /**
-     * Take one issue out of a sprint (§4.4) — the issue-edit tier, like
+     * Take one issue out of a sprint (§4.4) — {@link Permission#SPRINT_ASSIGN}, like
      * {@link #addIssues}. The rank is <strong>preserved</strong>, so the issue keeps its
      * relative place in the backlog it returns to.
      *
@@ -591,7 +638,9 @@ public class SprintService {
     @Transactional
     public void removeIssue(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                             UUID issueId) {
-        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.SPRINT_ASSIGN);
+        var project = ctx.project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
         var issue = issueRepository.findByIdAndProject(issueId, project)

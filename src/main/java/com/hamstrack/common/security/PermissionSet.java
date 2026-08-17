@@ -7,6 +7,7 @@ import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 /**
@@ -155,6 +156,35 @@ public final class PermissionSet {
     /** Whether this grants {@code permission} either unrestricted or own-only. */
     public boolean hasAtAll(Permission permission) {
         return unrestricted.contains(permission) || ownOnly.contains(permission);
+    }
+
+    /**
+     * The first grant in {@code other} that this set does <strong>not</strong> cover, in
+     * catalog order — {@link Optional#empty()} when this set is at least as wide as
+     * {@code other} everywhere.
+     *
+     * <p>This is the <strong>grant ceiling</strong> of §11.2 expressed on permission sets
+     * rather than on a role ladder: nobody may hand out a role holding something they do
+     * not hold themselves, which is what stops {@code project.member.manage} (or
+     * {@code workspace.member.manage}) from being self-escalation to everything. A role
+     * ladder could express it with {@code isAtLeast}; custom roles have no ladder, so the
+     * comparison has to be set containment.
+     *
+     * <p>Width is compared per grant, not just presence: an own-only grant in
+     * {@code other} is covered by an own-only grant here, but an <em>unrestricted</em>
+     * grant in {@code other} is not covered by an own-only one here — otherwise a role
+     * holding {@code comment.delete:own} could mint one holding it unrestricted.
+     *
+     * <p>Returns the offending permission rather than a boolean so the 403 can name it:
+     * "you cannot grant this role, it includes {@code issue.delete}" is actionable where
+     * "insufficient role" is not.
+     */
+    public Optional<Permission> firstNotCovered(PermissionSet other) {
+        for (var p : Permission.values()) {
+            if (other.unrestricted.contains(p) && !unrestricted.contains(p)) return Optional.of(p);
+            if (other.ownOnly.contains(p) && !hasAtAll(p)) return Optional.of(p);
+        }
+        return Optional.empty();
     }
 
     public boolean isEmpty() {

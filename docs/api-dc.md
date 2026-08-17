@@ -180,12 +180,12 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 |---|---|
 | `400` | Malformed request or failed validation |
 | `401` | Missing/expired/invalid access token |
-| `403` | Authenticated but not allowed (e.g. insufficient role) |
+| `403` | Authenticated and a member, but missing a [permission](#permissions) — project-scoped failures name it in `detail` |
 | `404` | Not found — or not a member of the containing workspace |
 | `409` | Conflict: stale `version`, duplicate name/key, resource in use |
 | `413` | Attachment exceeds the per-file size limit (default 20 MB) or the servlet upload ceiling (default 25 MB) |
 | `415` | Attachment file extension is not in the allow-list |
-| `422` | Semantically invalid reference (unknown status/type/assignee, workflow-forbidden transition) |
+| `422` | Semantically invalid reference (unknown status/type/assignee, a user who [may not be assigned](#assignability--a-422-not-a-403) in this project, workflow-forbidden transition) |
 | `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
 
 ### Rate limits
@@ -216,7 +216,7 @@ One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank
 | Edit / delete a comment | comment author |
 | Delete an attachment | uploader or project `MANAGER` |
 
-The table is the human summary; the machine-readable form of the same idea is [permissions](#permissions) — `GET /permissions` for the catalog, and `myPermissions` on each workspace and project response for what the caller actually holds.
+The table is the human summary; the machine-readable form of the same idea is [permissions](#permissions) — `GET /permissions` for the catalog, and `myPermissions` on each workspace and project response for what the caller actually holds. Inside a project the server no longer compares roles at all: it checks a permission, and the `403` [names the one that was missing](#what-a-403-says). The table above still describes who holds what, because the roles listed in it are the built-in ones — but write clients against permission keys, which are stable, rather than against role names.
 
 ## Permissions
 
@@ -291,9 +291,49 @@ const canEditAnyBroken = perms.some((p) => p.startsWith('issue.edit'));
 
 That failure widens rather than narrows, which is why it is worth stating plainly. Keys never contain a `:`, so the suffix is unambiguous if you do need to split — but equality against the two full strings is the safer test.
 
+### What a `403` says
+
+Every project-scoped operation — project settings and membership, [components](#components), [versions](#versions), [sprints](#sprints--backlog), [issues](#issues) and [attachments](#attachments) — resolves to a permission check, and the failure **names the permission that was missing**:
+
+```json
+{ "type": "about:blank", "title": "Forbidden", "status": 403,
+  "detail": "Requires permission: sprint.manage" }
+```
+
+- **`detail` is `Requires permission: <key>`**, where `<key>` is a catalog key exactly as [`GET /permissions`](#the-catalog--get-permissions) reports it. A client can look up what the caller was missing instead of inferring it from the endpoint, which is precisely how you diagnose a control that was rendered but should not have been.
+- **The key is always the bare form, never `:own`.** A `403` on an object you do not own reads `Requires permission: issue.edit` even where an `issue.edit:own` grant would have carried a different object.
+- **`403` still means "a member who is not allowed".** A missing workspace, a missing project or a non-member is a `404`, exactly as before — a permission failure never reveals, and never hides, existence.
+- Treat the sentence as human-readable text and the **key inside it** as the machine-readable part: keys are the permanent wire contract, the wording around them is not.
+
+Two families of `403` do not carry a key yet and are worth recognizing: workspace-scoped checks (invites, member management, [labels](#labels)) and the [delegated admin](#delegated-administration) endpoints answer `"Insufficient workspace permissions"` / `"Insufficient project permissions"`, and a [comment](#comments) edit or delete by someone other than the author answers a bare `403` with no `detail` at all. Both will converge on the shape above; neither changes which callers succeed.
+
+**Permission first, project state second.** The permissions a request's own shape determines are checked **before** the project's state, so a caller who lacks the permission on an **archived** project gets the `403`, not the `409 "Project is archived"`. This is a deliberate behavior change — [deleting an issue](#issues) and [deleting an attachment](#attachments) used to report the archive conflict first — and the rule is: the answer to "may you?" must never depend on the state of the thing you are asking about.
+
+**One request, several permissions.** A request that changes several things needs a permission for each of them; `PATCH …/issues/{number}` is the main case (see [Issues](#issues)). Only fields that are **present and actually changing** are checked, so a whole-form `PATCH` that moves one field does not need rights over everything else it echoes back. When several are missing, the `403` names the **first** in catalog order — fixing that grant can surface the next one, so re-try after a grant change rather than reading the first message as the complete list.
+
+### Assignability — a `422`, not a `403`
+
+`issue.assign` and `issue.assignable` are checked against **different people**, and integrators should not read them as a pair:
+
+| Permission | Held by | Question |
+|---|---|---|
+| `issue.assign` | the **caller** | may *you* set or clear an assignee at all |
+| `issue.assignable` | the **target user** | may *that person* be given work in this project |
+
+Failing the first is a `403` naming `issue.assign`. Failing the second is **not** a permission failure of the caller's — they were entitled to make the request, the *value* they sent is invalid — so it answers `422`:
+
+```json
+{ "type": "about:blank", "title": "Unprocessable Content", "status": 422,
+  "detail": "That user cannot be assigned in this project" }
+```
+
+That sentence is deliberately different from `"Unknown assignee"`, the `422` for a user id that belongs to nobody in the workspace: a member is never told a colleague does not exist. Both mean "pick someone else"; only distinguish them if you surface distinct copy.
+
+Assignability is validated **only on a new assignment**. Nothing is unassigned when a user loses `issue.assignable` — existing assignees keep rendering everywhere, and re-saving an issue whose assignee is unchanged never `422`s. A [component](#components) auto-assign lead who lacks the permission is skipped silently and the issue is filed unassigned, rather than failing a create over somebody else's role.
+
 ### `myPermissions` is not an authorization boundary
 
-It tells a client what to render. It does not decide anything: the API performs its own check on every request, whatever the client drew. A call the caller may not make fails identically whether the button was hidden or not, and hiding a control is a UX decision, never a security control. Equally, `myRole` is display metadata — on a project it reports the caller's **explicit** project role (`VIEWER` when they have no project membership row of their own, even where that member can in fact do more), so it can be narrower than the truth. Gate on `myPermissions`.
+It is **advisory, for rendering only — the API is the enforcement boundary.** It does not decide anything: the API performs its own check on every request, whatever the client drew. A call the caller may not make fails identically whether the button was hidden or not, and hiding a control is a UX decision, never a security control. The corollary is worth stating for integrators: **a client that gates nothing is still safe** — ignoring `myPermissions` entirely costs you a friendlier UI and a few avoidable `403`s, never an escalation. Use it to avoid dead ends, not to enforce them. Equally, `myRole` is display metadata — on a project it reports the caller's **explicit** project role (`VIEWER` when they have no project membership row of their own, even where that member can in fact do more), so it can be narrower than the truth. Gate on `myPermissions`.
 
 ## Instance metadata
 
@@ -431,12 +471,12 @@ That third `404` case is about the **membership**, never about the account: an u
 | `POST` | `/workspaces/{wsId}/projects` | member | Create (`{"name", "key", "description?", "delivery?"}`); key is 1–10 chars `A-Z0-9`, unique per workspace. `201` |
 | `GET` | `/workspaces/{wsId}/projects?includeArchived=false` | member | List projects |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | curator | Update `name` / `description` / `delivery` (and the deprecated `boardMode`) |
-| `POST` | `/workspaces/{wsId}/projects/{projectId}/archive` | `MANAGER` | Archive (read-only afterwards). `204` |
-| `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `MANAGER` | Restore. `204` |
-| `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members |
-| `POST` | `/workspaces/{wsId}/projects/{projectId}/members` | `MANAGER` | Add a workspace member (`{"userId", "role"}`). `201` |
-| `DELETE` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `MANAGER` | Remove a member. `204` |
+| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | `project.edit` | Update `name` / `description` / `delivery` (and the deprecated `boardMode`) |
+| `POST` | `/workspaces/{wsId}/projects/{projectId}/archive` | `project.archive` | Archive (read-only afterwards). `204` |
+| `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `project.archive` | Restore. `204` |
+| `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members — **any workspace member**, no permission required |
+| `POST` | `/workspaces/{wsId}/projects/{projectId}/members` | `project.member.manage` | Add a workspace member (`{"userId", "role"}`). `201` |
+| `DELETE` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `project.member.manage` | Remove a member. `204` |
 
 ```json
 // project shape
@@ -458,9 +498,11 @@ That third `404` case is about the **membership**, never about the account: an u
 
 Every project response — create, list, get and update — carries [`myPermissions`](#permissions): the caller's effective **project-scoped** permissions in that project, including any they hold through their workspace role rather than a project membership. It is always present, and it can be **wider than `myRole` suggests** — `myRole` reports only the caller's explicit project membership row, and reads `VIEWER` when they have none. Gate on `myPermissions`; display `myRole`.
 
-**Update permission.** `PATCH …/projects/{projectId}` needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member); any other member gets `403`. This is wider than it used to be: the endpoint was `MANAGER`-only until `boardMode` joined it, and it now matches every other project-content write ([components](#components), [versions](#versions), [sprints](#sprints--backlog)). Archiving, unarchiving and member management stay `MANAGER`-only.
+**Update permission.** `PATCH …/projects/{projectId}` needs [`project.edit`](#permissions) — held by a project `MANAGER` and, across every project of their workspace, by a workspace `OWNER`/`ADMIN` who need not be a project member; any other member gets a [`403` naming it](#what-a-403-says). That is the same permission every other project-content write asks for ([components](#components), [versions](#versions), [sprints](#sprints--backlog) have their own `*.manage` keys with the identical holders). Archiving (`project.archive`) and member management (`project.member.manage`) are **not** part of that set, so they remain the project `MANAGER`'s alone.
 
-**Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `delivery` too, which changes how the board, the backlog, the rail and the issue detail render. Unarchive it first (`POST …/unarchive`, `MANAGER`-only); reads keep working throughout.
+**Listing members needs nothing but membership.** `GET …/projects/{projectId}/members` is open to **any workspace member**, project member or not — the assignee picker, mention autocomplete and a People view all need it, and the workspace member list is already open the same way. Its old gate admitted everyone, so no caller's result changed.
+
+**Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `delivery` too, which changes how the board, the backlog, the rail and the issue detail render. Unarchive it first (`POST …/unarchive`, `project.archive`); reads keep working throughout. A caller who lacks the permission **and** hits an archived project gets the `403`, not this `409` — [permission first, project state second](#what-a-403-says).
 
 ### Delivery capabilities
 
@@ -499,7 +541,7 @@ curl -X POST $BASE/workspaces/$WS/projects \
 
 That project comes back with `board: "SCRUM"`, `estimation: true`, `releases: false` and the derived `preset: "SCRUM"`.
 
-**Changing them later.** `PATCH …/projects/{projectId}` takes the same object, equally partial per member: `{"delivery": {"releases": true}}` turns releases on and leaves `board` and `estimation` untouched, and omitting `delivery` entirely leaves all three alone (renaming a project never quietly re-leans it). Setting a capability to the value it already has is a no-op that still returns `200` with the current state. The call needs the **project curator** role (above) and returns `409` on an archived project; there is no confirmation step and no `409` for "you still have unreleased versions" — confirmations are a UI affordance. **Switching destroys nothing**: no issue's sprint is cleared, no version link removed, no story-point value erased, and re-enabling a capability restores full function immediately with no further action.
+**Changing them later.** `PATCH …/projects/{projectId}` takes the same object, equally partial per member: `{"delivery": {"releases": true}}` turns releases on and leaves `board` and `estimation` untouched, and omitting `delivery` entirely leaves all three alone (renaming a project never quietly re-leans it). Setting a capability to the value it already has is a no-op that still returns `200` with the current state. The call needs `project.edit` (above) and returns `409` on an archived project; there is no confirmation step and no `409` for "you still have unreleased versions" — confirmations are a UI affordance. **Switching destroys nothing**: no issue's sprint is cleared, no version link removed, no story-point value erased, and re-enabling a capability restores full function immediately with no further action.
 
 `board` is a closed set on both endpoints — an unknown value is a `400`, never a silent fall-through; `null`/omitted leaves the current value.
 
@@ -654,14 +696,14 @@ curl -s "$BASE/workspaces/$WS/projects/$PROJ/issues?sprintId=$SPRINT" \
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | member | Create. `201` |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/issues` | `issue.create` | Create. `201` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues?statusId=&assigneeId=&priorityId=&componentId=&labelId=&labelMatch=&fixVersionId=&sprintId=&noSprint=&excludeDone=&page=&size=` | member | List with optional filters — **dual shape** (see above) |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Get one |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/children` | member | Direct children of the issue, in board order |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/history?page=&size=` | member | Field-level change history (paginated, oldest first) |
-| `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | member | Partial update with optimistic locking |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | member | Move the issue in the backlog/board [rank](#sprints--backlog), optionally into or out of a sprint |
-| `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `MANAGER` | Delete issue + comments + attachments. `204` |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | per field | Partial update with optimistic locking — see [Permissions on issue writes](#permissions-on-issue-writes) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | `issue.rank` | Move the issue in the backlog/board [rank](#sprints--backlog), optionally into or out of a sprint (`sprint.assign` as well when it does) |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/issues/{number}` | `issue.delete` | Delete issue + comments + attachments. `204` |
 
 **Create** — `title`, `typeId` and `statusId` are required (the type must be offered by the project's type set, the status must belong to the project's [workflow](#project-configuration)); `priorityId` must be offered by the project's priority set and defaults to the set's default when omitted; `parentId` links the issue to a parent in the same project — rejected with `422` if the parent is unknown, in another project, or its type's [hierarchy level](#project-configuration) is not strictly greater than this issue's type level; `assigneeId` must be a workspace member. `fields` carries custom field values keyed by field id (value shapes per [field type](#project-configuration)) — required fields of the project's field set must be present, fields outside the set or archived are rejected with `422`. `labelIds` attaches workspace [labels](#labels) (duplicates are de-duped); an unknown, foreign-workspace or archived label id — or more than `MAX_LABELS_PER_ISSUE` distinct ids (20 by default) — is rejected with `422`. `componentId` files the issue under a [component](#components) of this project; an unknown, foreign-project or archived component is a `422`, and when the component has auto-assign the lead may become the assignee (see [auto-assign](#components)). `fixVersionIds` and `affectsVersionIds` link [versions](#versions) of this project in the two independent roles — "ships in" and "is broken in"; an unknown, foreign-project or archived version, or more than `MAX_VERSION_LINKS_PER_ISSUE` distinct ids (20 by default) **per link type**, is a `422` (linking an already-*released* version is allowed on purpose). `sprintId` files the issue straight into a [sprint](#sprints--backlog) of this project — an unknown, foreign-project or *completed* sprint is a `422`, and omitting it means the backlog. `storyPoints` is the native estimate: `0`–`999` with at most 2 decimals (`422` otherwise), where `null`/omitted means **unestimated**, which is deliberately not the same as `0`. A new issue is always appended to the **bottom** of the ranked backlog:
 
@@ -737,6 +779,26 @@ curl -X PATCH $BASE/workspaces/$WS/projects/$PROJ/issues/18 \
 
 Custom field changes appear with the field's display name in `field` and human-readable values (option labels rather than ids, user display names, `yes`/`no` for checkboxes). A [label](#labels) change is recorded once under `labels`, with the label names before and after comma-joined (a label **merge** deliberately writes no per-issue history — it can touch thousands of issues). A [component](#components) change is recorded under `component` with the old and new component names (a forced component **delete** writes no per-issue history either, for the same reason). [Version](#versions) changes are recorded per role, under `fixVersions` and `affectsVersions`, with the names before and after comma-joined — and, for the same "one request must stay bounded" reason, a version **delete** (forced or remapped) and a release-time `moveUnresolvedToVersionId` write no per-issue history. A [sprint](#sprints--backlog) change is recorded under `sprint` with the old and new sprint names (`null` when there is none), and a story-point change under `storyPoints` — while a **rank** change writes nothing at all, because positional churn would drown the log.
 
+### Permissions on issue writes
+
+Issue writes are gated per action, not per endpoint, and each `403` [names the permission it wanted](#what-a-403-says):
+
+| Request | Permissions checked |
+|---|---|
+| `POST …/issues` | `issue.create`; **plus** `issue.assign` when the body carries `assigneeId`, **plus** `sprint.assign` when it carries `sprintId` |
+| `PATCH …/issues/{number}` | `issue.edit` for ordinary fields, `issue.transition` for `statusId`, `issue.assign` for the assignee, `sprint.assign` for the sprint — any combination, in one request |
+| `POST …/issues/{number}/rank` | `issue.rank`; **plus** `sprint.assign` when the call also moves the issue into or out of a sprint |
+| `DELETE …/issues/{number}` | `issue.delete` (an `issue.delete:own` grant covers issues you **reported**) |
+
+**Only fields that are present *and actually changing* are checked.** Clients send whole-form patches, so a `PATCH` that echoes ten unchanged fields and moves the status needs `issue.transition` and nothing else — an unchanged value never costs a permission. Two details follow from that:
+
+- `issue.edit` covers everything without a more specific key: `title`, `description`, `typeId`, `priorityId`, `dueDate`, `labelIds`, `componentId`, `parentId`, `fixVersionIds`, `affectsVersionIds`, `storyPoints` and custom `fields`. An `issue.edit:own` grant satisfies it on issues you **reported**.
+- A non-empty `fields` map is checked on **presence**, not on change — re-sending a custom field value identical to the stored one still requires `issue.edit`. Send `fields` only when you mean to write it.
+
+**When more than one is missing, the `403` names the first in catalog order** — `issue.edit` → `issue.transition` → `issue.assign` → `sprint.assign`. Every check runs before the first mutation, so a rejected request changes nothing at all; and it runs before the archived-project `409` too, so on an archived project the permission failure is what you see.
+
+Assigning has a second half that is *not* about the caller: the target must hold `issue.assignable`, and failing that is a [`422`, not a `403`](#assignability--a-422-not-a-403).
+
 ## Comments
 
 | Method | Path | Auth | Description |
@@ -759,10 +821,12 @@ Listing is paginated (oldest first) — the [envelope](#conventions) wraps comme
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `…/issues/{number}/attachments` | member | Upload, `multipart/form-data` with a `file` field. `201` |
+| `POST` | `…/issues/{number}/attachments` | `attachment.create` | Upload, `multipart/form-data` with a `file` field. `201` |
 | `GET` | `…/issues/{number}/attachments` | member | List |
 | `GET` | `…/issues/{number}/attachments/{attachmentId}` | member | Download (binary, `Content-Disposition: attachment`) |
-| `DELETE` | `…/issues/{number}/attachments/{attachmentId}` | uploader / `MANAGER` | Delete file + metadata. `204` |
+| `DELETE` | `…/issues/{number}/attachments/{attachmentId}` | `attachment.delete` | Delete file + metadata. `204` |
+
+Deletion honours the [ownership modifier](#the-own-suffix): an `attachment.delete:own` grant covers the files **you** uploaded, the unrestricted grant covers anyone's — which is the project `MANAGER`'s reach, i.e. the previous "uploader or `MANAGER`" rule spelled out. The permission is checked **before** the archived-project `409`, so on an archived project a caller without it now sees the [`403`](#what-a-403-says).
 
 Uploads are validated in two ways: a **per-file size limit** (default 20 MB, `ATTACHMENT_MAX_FILE_SIZE` — `413 Payload Too Large` when exceeded; a separate, larger servlet ceiling `ATTACHMENT_MAX_UPLOAD_SIZE`, default 25 MB, rejects grossly oversized bodies) and a **file-extension allow-list** (`ATTACHMENT_ALLOWED_EXTENSIONS` — images, PDF, common Office/text formats and `zip` by default; a disallowed extension returns `415 Unsupported Media Type`). The stored/returned `contentType` is derived from the filename on the server; the client-supplied content type is ignored. See [Operator settings](#operator-settings-that-affect-the-api).
 
@@ -842,17 +906,17 @@ No per-issue history is written for a merge (it can touch thousands of issues) �
 
 Curated modules of a **single project** — "Billing", "Mobile app", "API" — each with an optional **lead** and an optional create-time **auto-assign**. Like labels they are *content*, not configuration: they never appear in a project's [config](#project-configuration). Unlike labels they are project-owned (two projects may each have their own "Billing") and only curators may edit the catalog. An issue carries at most one component.
 
-Reading needs project membership; writing needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
+Reading needs project membership; writing needs [`component.manage`](#permissions) — held by a project `MANAGER` and, across every project of their workspace, by a workspace `OWNER`/`ADMIN` who need not be a project member. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the permission, and [names it](#what-a-403-says).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/workspaces/{wsId}/projects/{pId}/components?includeArchived=false&withUsage=false` | member | The project's components, ordered by name |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/components` | curator | Create a component. `201` |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/components` | `component.manage` | Create a component. `201` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}` | curator | Rename / re-lead / describe / toggle auto-assign |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}/archive` | curator | Archive (allowed even while in use) |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}/unarchive` | curator | Restore an archived component |
-| `DELETE` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}?force=false` | curator | Delete. `204` |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}` | `component.manage` | Rename / re-lead / describe / toggle auto-assign |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}/archive` | `component.manage` | Archive (allowed even while in use) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}/unarchive` | `component.manage` | Restore an archived component |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}?force=false` | `component.manage` | Delete. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/components/{componentId}/usage` | member | `{"issueCount": 12}` |
 
 **List** — ordered by name (case-insensitive). Archived components are hidden unless `includeArchived=true`. `issueCount` is `null` unless you ask for `withUsage=true` (one grouped query for the whole list, so the picker doesn't pay for counts it won't show); it is also `null` on `GET …/components/{componentId}`, which is what the `/usage` endpoint is for:
@@ -897,27 +961,27 @@ An **archived** component holding the name produces the same `409` (`"An archive
 
 **Archived projects.** Every management call (create, update, archive, unarchive, delete) on a component of an **archived project** returns `409 "Project is archived"` — the catalog is frozen exactly as issue edits are. Reads keep working.
 
-**Using components** — set `componentId` when creating or updating an [issue](#issues) (`clearComponent: true` unsets it), filter the board/backlog with `?componentId=`, and query them in [HQL](#search-hql) as `component` (alias `components`). An issue's own component comes back in `IssueResponse.component` as `{id, name, archived}`, or `null`.
+**Using components** — set `componentId` when creating or updating an [issue](#issues) (`clearComponent: true` unsets it), filter the board/backlog with `?componentId=`, and query them in [HQL](#search-hql) as `component` (alias `components`). An issue's own component comes back in `IssueResponse.component` as `{id, name, archived}`, or `null`. **`component.manage` governs the catalog, not the assignment**: filing an issue under a component is an ordinary issue edit and needs [`issue.edit`](#permissions-on-issue-writes), never `component.manage`.
 
 ## Versions
 
 A **single project's** release plan — "2.4.0", "Sprint 12 release" — with a fully reversible lifecycle. Each version can be linked to issues in two independent roles: **fix** ("this change ships in that release") and **affects** ("this defect exists in that release"). Like labels and components they are *content*, not configuration: they never appear in a project's [config](#project-configuration). Two projects may each own a "2.4.0".
 
-Reading needs project membership; writing needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
+Reading needs project membership; writing needs [`version.manage`](#permissions) — held by a project `MANAGER` and, across every project of their workspace, by a workspace `OWNER`/`ADMIN` who need not be a project member. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the permission, and [names it](#what-a-403-says). As with components, the permission governs the **catalog**: linking a version to an issue is [`issue.edit`](#permissions-on-issue-writes).
 
 **The project's [delivery capabilities](#delivery-capabilities) change nothing here.** A project with `releases: false` still creates, lists, links and returns versions exactly as one with `releases: true` does — the capability hides the Releases page and the fix/affects pickers in the UI, and nothing else.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/workspaces/{wsId}/projects/{pId}/versions?includeArchived=false&includeReleased=true` | member | The project's release plan, in Releases-page order |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/versions` | curator | Create a version. `201` |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/versions` | `version.manage` | Create a version. `201` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}` | curator | Rename / describe / re-plan the date |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/release` | curator | Ship it (body optional) |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/unrelease` | curator | Undo a release (nothing is lost) |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/archive` | curator | Archive (allowed even while in use) |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/unarchive` | curator | Restore an archived version |
-| `DELETE` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}?force=false&remapToId=` | curator | Delete. `204` |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}` | `version.manage` | Rename / describe / re-plan the date |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/release` | `version.manage` | Ship it (body optional) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/unrelease` | `version.manage` | Undo a release (nothing is lost) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/archive` | `version.manage` | Archive (allowed even while in use) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/unarchive` | `version.manage` | Restore an archived version |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}?force=false&remapToId=` | `version.manage` | Delete. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/versions/{versionId}/usage` | member | Fix / affects / unresolved counts |
 
 **List** — ordered the way a release page reads: **unreleased first**, then by `releaseDate` ascending with undated versions last, then by name (case-insensitive). Archived versions are hidden unless `includeArchived=true`; released ones are **included by default** (`includeReleased=true` — a release page without its shipped releases is useless), so pass `includeReleased=false` for a "what is still open" picker. Unlike labels and components there is no `withUsage` flag: the three counters are **always** filled, because they cost one grouped query for the whole list.
@@ -994,7 +1058,9 @@ A **sprint** is one project's iteration — a time-box with a goal, a start and 
 
 **Story points** are a native issue attribute (`storyPoints` on every issue), not a custom field: `0`–`999` with at most 2 decimals, where `null` means **unestimated** — deliberately not the same as `0`, which is why the section totals report `unestimatedCount` separately.
 
-**Permissions.** Reads (sprint list/detail, completion preview, the backlog view) need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs the **project curator** role: project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint, taking them out and dragging them around is the ordinary **issue-edit** tier, because planning is teamwork and requiring `MANAGER` to drag would make the backlog read-only for most of the team. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
+**Permissions.** Reads (sprint list/detail, completion preview, the backlog view) need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs [`sprint.manage`](#permissions): a project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint and taking them out is a **separate** permission, `sprint.assign`, held by every ordinary contributor — planning is teamwork, and requiring the lifecycle permission to drag would make the backlog read-only for most of the team. Dragging within a section is `issue.rank`. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the permission, and [names it](#what-a-403-says).
+
+**`sprint.assign` guards every door.** The sprint endpoints are not the only way to move an issue between sections: `PATCH …/issues/{number}` with `sprintId`/`clearSprint` and `POST …/issues/{number}/rank` with a sprint change are checked against the same permission, so it cannot be bypassed with a different request shape.
 
 **The project's [delivery capabilities](#delivery-capabilities) change nothing here.** `board: KANBAN` does not close the sprint API and `estimation: false` does not reject `storyPoints` — every endpoint below behaves identically whatever a project has declared. A capability hides vocabulary in the UI; it is never a permission.
 
@@ -1003,17 +1069,17 @@ Four operator settings shape this area — `AGILE_SECTION_MAX_ISSUES`, `AGILE_MA
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/workspaces/{wsId}/projects/{pId}/sprints?state=&page=&size=` | member | The project's sprints — **always paginated** |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints` | curator | Create a `FUTURE` sprint. `201` |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints` | `sprint.manage` | Create a `FUTURE` sprint. `201` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}` | curator | Rename / re-goal / re-plan the dates |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/start` | curator | `FUTURE` → `ACTIVE` (body optional) |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}` | `sprint.manage` | Rename / re-goal / re-plan the dates |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/start` | `sprint.manage` | `FUTURE` → `ACTIVE` (body optional) |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/completion-preview` | member | What completing it would report |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/complete` | curator | `ACTIVE` → `COMPLETED` (body required) |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues` | member | Put a batch of issues into the sprint |
-| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues/{issueId}` | member | Take one issue out. `204` (idempotent); `422` for a completed sprint |
-| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}?force=false` | curator | Delete. `204` |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/complete` | `sprint.manage` | `ACTIVE` → `COMPLETED` (body required) |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues` | `sprint.assign` | Put a batch of issues into the sprint |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues/{issueId}` | `sprint.assign` | Take one issue out. `204` (idempotent); `422` for a completed sprint |
+| `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}?force=false` | `sprint.manage` | Delete. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/backlog?…&includeDone=false` | member | The whole planning view in one request |
-| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | member | Move an issue in the shared rank |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | `issue.rank` | Move an issue in the shared rank (`sprint.assign` too when it changes sprint) |
 
 **List** — always paginated (the [envelope](#conventions), default size 50): open sprints are capped, but completed ones accumulate for years. The order is `ACTIVE` first, then `FUTURE` by `sequence` ascending, then `COMPLETED` newest-first. `state` is a **repeatable** filter (`?state=ACTIVE&state=FUTURE`); omitting it returns every state. The counters are always filled — they cost one grouped query for the whole page, so there is nothing to opt out of:
 
@@ -1089,7 +1155,7 @@ This call is a **removal** path too: an issue joining the sprint leaves whicheve
 
 `DELETE …/sprints/{sprintId}/issues/{issueId}` takes one issue back out, preserving its rank. It is **idempotent**: removing an issue that is not in that sprint returns `204` as well, because the request expresses "this issue must not be in this sprint" and that is already true. An `issueId` that does not resolve **within the project** is still a `404`. A **`COMPLETED`** sprint is a `422` ("Sprint 'X' is completed"): its membership is the delivery record the completion already reported, so it is frozen on the removal side exactly as it is on the assignment side. The two rules coexist in that order — the idempotent check runs **first**, so an issue that is not in the sprint still gets `204`, completed or not.
 
-**Delete** — `DELETE …/sprints/{sprintId}` is curator-only and refuses an **ACTIVE** sprint with `409` ("complete it first"). A future or completed sprint that still holds issues is a `409` too unless you pass `force=true`, which detaches them first — their **rank is preserved**, so they keep their relative place in the backlog they return to. If another curator deleted the same sprint a moment earlier you get a `404` rather than a `500`: the row is removed by a conditional delete, so the loser of that race is told the sprint is gone — which it is, so treat it as success.
+**Delete** — `DELETE …/sprints/{sprintId}` needs `sprint.manage` and refuses an **ACTIVE** sprint with `409` ("complete it first"). A future or completed sprint that still holds issues is a `409` too unless you pass `force=true`, which detaches them first — their **rank is preserved**, so they keep their relative place in the backlog they return to. If another curator deleted the same sprint a moment earlier you get a `404` rather than a `500`: the row is removed by a conditional delete, so the loser of that race is told the sprint is gone — which it is, so treat it as success.
 
 **Archived projects.** Every sprint mutation (create, update, start, complete, delete, add/remove issues), every rank move and the project's own `PATCH …/projects/{pId}` on an **archived project** return `409 "Project is archived"`. Reads keep working.
 

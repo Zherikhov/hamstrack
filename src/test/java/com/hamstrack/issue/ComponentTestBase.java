@@ -1,11 +1,20 @@
 package com.hamstrack.issue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.entity.ProjectRole;
+import com.hamstrack.workspace.entity.Role;
+import com.hamstrack.workspace.entity.RolePermission;
 import com.hamstrack.workspace.entity.WorkspaceRole;
+import jakarta.persistence.EntityManager;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.LinkedHashSet;
 import java.util.UUID;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -22,6 +31,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * fixtures live here.
  */
 public abstract class ComponentTestBase extends LabelTestBase {
+
+    @Autowired protected EntityManager entityManager;
+    @Autowired protected TransactionTemplate txTemplate;
 
     // ============================================================ component HTTP
 
@@ -138,6 +150,44 @@ public abstract class ComponentTestBase extends LabelTestBase {
             projectMember(projectRepository.findById(ctx.projectId()).orElseThrow(), u, projectRole);
         }
         return new Actor(u, login(u));
+    }
+
+    /**
+     * A workspace member holding a <strong>one-off custom project role</strong> granting
+     * exactly {@code permissions} — the fixture for every case no built-in expresses, of
+     * which HD-125 has several: {@code issue.rank} without {@code sprint.assign} (the
+     * third sprint door), {@code issue.create} without {@code issue.assign} (the create
+     * doors), {@code project.member.manage} without the rest of Project admin (the grant
+     * ceiling).
+     *
+     * <p>Written through the {@link EntityManager} because {@code RoleRepository}
+     * deliberately exposes no {@code save} until S4 ships the role editor — see its
+     * javadoc, which refuses unscoped writes on purpose. The role is workspace-owned, so
+     * it dies with the fixture's workspace.
+     */
+    protected Actor actorWithCustomProjectRole(Ctx ctx, String key, Permission... permissions)
+            throws Exception {
+        var actor = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var roleId = txTemplate.execute(status -> {
+            var role = new Role();
+            role.setWorkspaceId(ctx.wsId());
+            role.setScope(RoleScope.PROJECT);
+            role.setKey(key);
+            role.setName(key);
+            role.setBuiltIn(false);
+            var grants = new LinkedHashSet<RolePermission>();
+            for (var p : permissions) grants.add(new RolePermission(p, false));
+            role.setPermissions(grants);
+            entityManager.persist(role);
+            entityManager.flush();
+            return role.getId();
+        });
+        var member = new ProjectMember();
+        member.setProject(projectRepository.findById(ctx.projectId()).orElseThrow());
+        member.setUser(actor.user());
+        member.setRole(roleCatalog.reference(roleId));
+        projectMemberRepository.save(member);
+        return actor;
     }
 
     /** Remove a user's workspace membership (the "lead left the workspace" fixture). */

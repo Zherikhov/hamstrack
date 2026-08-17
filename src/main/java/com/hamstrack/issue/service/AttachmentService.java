@@ -5,15 +5,13 @@ import com.hamstrack.common.config.AttachmentProperties;
 import com.hamstrack.common.event.AttachmentAdded;
 import com.hamstrack.common.event.AttachmentDeleted;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.storage.FileStorage;
 import com.hamstrack.issue.dto.AttachmentResponse;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueAttachment;
 import com.hamstrack.issue.exception.AttachmentNotFoundException;
 import com.hamstrack.issue.repository.IssueAttachmentRepository;
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.project.repository.ProjectMemberRepository;
-import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,9 +39,6 @@ import java.util.UUID;
 public class AttachmentService {
 
     private final WorkspaceAccessService workspaceAccess;
-    private final ProjectMemberRepository projectMemberRepository;
-    /** HD-123 S1 bridge: translates a {@code roles} row back to the legacy enum. */
-    private final RoleCatalog roleCatalog;
     private final IssueAttachmentRepository attachmentRepository;
     private final FileStorage fileStorage;
     private final ApplicationEventPublisher eventPublisher;
@@ -83,7 +78,10 @@ public class AttachmentService {
         // Step 1 — short tx: resolve (tenant scoping) + persist the row, assemble the
         // response, and commit. The key is server-generated from the resolved ids.
         var reserved = txTemplate.execute(status -> {
-            var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
+            var ictx = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber);
+            // Permission first, project state second (§10.3.6).
+            ictx.permissions().require(Permission.ATTACHMENT_CREATE);
+            var issue = ictx.issue();
             requireNotArchived(issue);
 
             var filename = sanitizeFilename(file.getOriginalFilename());
@@ -173,15 +171,26 @@ public class AttachmentService {
                 fileStorage.open(meta.storageKey()));
     }
 
+    /**
+     * <strong>{@link Permission#ATTACHMENT_DELETE}, with the ownership modifier</strong>
+     * (§6.4): {@code own} = you uploaded the file, which is today's rule verbatim;
+     * the unrestricted grant is what the built-in project MANAGER holds, matching
+     * today's "uploader <em>or</em> project MANAGER".
+     *
+     * <p>Order matters twice. The attachment is resolved <em>before</em> the check
+     * because {@code isOwn} is a property of the object, not of the actor — and it is a
+     * 404-if-absent lookup scoped to an issue the caller can already read, so it
+     * discloses nothing. The archived-project 409 then runs <em>after</em> the
+     * permission (§10.3.6): a 403 must never depend on project state.
+     */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long issueNumber, UUID attachmentId) {
-        var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
-        requireNotArchived(issue);
+        var ictx = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber);
+        var issue = ictx.issue();
         var attachment = findAttachmentOnIssue(attachmentId, issue);
-        if (!attachment.getUploadedBy().getId().equals(actor.getId())
-                && !hasProjectRole(actor, issue, ProjectRole.MANAGER)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN);
-        }
+        boolean isUploader = attachment.getUploadedBy().getId().equals(actor.getId());
+        ictx.permissions().require(Permission.ATTACHMENT_DELETE, isUploader);
+        requireNotArchived(issue);
         attachmentRepository.delete(attachment);
         deleteFromStorageAfterCommit(attachment.getStorageKey());
 
@@ -246,22 +255,6 @@ public class AttachmentService {
         if (issue.getProject().isArchived()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Project is archived");
         }
-    }
-
-    /**
-     * <p>HD-123 S1: {@code project_members.role} is a {@code roles} row now, so the
-     * ordinal comparison reads the role's key through the cached view (0 queries). The
-     * predicate is unchanged. S2 replaces the whole thing with
-     * {@code ctx.permissions().require(ATTACHMENT_DELETE, isUploader)} — this is one of
-     * the two authorization sites in the codebase that bypass {@code ScopeResolver}
-     * entirely (the other is {@code LabelService.requireEditor}), which is exactly why it
-     * has its own row in {@code PermissionParityTest}.
-     */
-    @SuppressWarnings("deprecation")
-    private boolean hasProjectRole(User actor, Issue issue, ProjectRole required) {
-        return projectMemberRepository.findByProjectAndUser(issue.getProject(), actor)
-                .map(pm -> roleCatalog.view(pm.getRole().getId()).asProjectRole().isAtLeast(required))
-                .orElse(false);
     }
 
     // The attachment must belong to the issue resolved from the URL — a global findById

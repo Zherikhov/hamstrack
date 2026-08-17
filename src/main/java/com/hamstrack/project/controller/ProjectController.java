@@ -20,11 +20,14 @@ import java.util.UUID;
  *
  * <p><strong>Two mutation tiers</strong> since HD-22 (agile-sprints-proposal
  * §3.2): {@code PATCH /{projectId}} (name / description / {@code delivery})
- * takes the <em>project curator</em> — project MANAGER <strong>or</strong>
- * workspace OWNER/ADMIN, {@code ScopeResolver.requireProjectCurator} — which
+ * takes {@code project.edit} — the built-in project MANAGER, <strong>or</strong> a
+ * workspace OWNER/ADMIN through {@code project.curate.all} (HD-123 §10.2) — which
  * aligns it with every other project-content write (components, versions,
  * sprints) and with the SPA's settings gate. {@code archive}/{@code unarchive}
- * and member management stay <strong>MANAGER-only</strong>.
+ * ({@code project.archive}) and member management
+ * ({@code project.member.manage}) are <strong>not</strong> in that curator set,
+ * so they stay MANAGER-only. Listing members is open to any workspace member
+ * (§10.3.1): its old {@code requireRole(VIEWER)} gate passed for everybody.
  *
  * <p>An <strong>archived</strong> project is frozen: {@code PATCH /{projectId}}
  * returns <strong>409 "Project is archived"</strong>, the same answer every issue

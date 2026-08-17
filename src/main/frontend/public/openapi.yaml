@@ -20,6 +20,21 @@ info:
     does not exist or you are not a member of its workspace. The API is
     unversioned while in beta; breaking changes are announced in release notes.
 
+    **Permissions** — inside a project, authorization is a permission check,
+    not a role comparison. `GET /permissions` is the catalog; `myPermissions`
+    on every workspace and project response is what the caller holds there
+    (advisory, for rendering only — the API is the enforcement boundary, and a
+    client that gates nothing is still safe). A project-scoped `403` names the
+    permission it wanted: `detail` reads `Requires permission: <key>`, always
+    the bare catalog key, never the `:own` form. The permissions a request's
+    own shape determines are checked **before** the project's state, so a
+    caller who lacks one on an archived project gets `403`, not the
+    `409 "Project is archived"`. A single request may need several — see
+    `PATCH …/issues/{number}`, which checks only the fields that are present
+    *and actually changing* and names the first missing permission in catalog
+    order. Whether a *target user* may be assigned is not a permission failure
+    of the caller's: it answers `422` (see `issue.assignable`).
+
     **Errors** — every failure is an RFC 9457 problem document
     (`application/problem+json`). A request body that fails validation answers
     `400` with a `detail` naming the offending fields **and** an `errors` object
@@ -95,14 +110,19 @@ tags:
       A project's component catalog — curated modules of one project with an
       optional lead and an optional create-time auto-assign (content, not bound
       taxonomy: components never appear in a project's config). Reads are open
-      to project members; writes need project MANAGER or workspace OWNER/ADMIN.
+      to project members; writes need `component.manage` (the built-in project
+      MANAGER, or a workspace OWNER/ADMIN across their whole workspace).
+      Assigning a component to an issue is `issue.edit`, not `component.manage`
+      — the permission governs the catalog, not the link.
   - name: Versions
     description: >-
       A project's release plan — versions with a fully reversible
       release/un-release lifecycle, linked to issues as **fix** ("ships in") and
       **affects** ("broken in") versions (content, not bound taxonomy: versions
       never appear in a project's config). Reads are open to project members;
-      writes need project MANAGER or workspace OWNER/ADMIN.
+      writes need `version.manage` (the built-in project MANAGER, or a
+      workspace OWNER/ADMIN across their whole workspace). Linking a version to
+      an issue is `issue.edit`, not `version.manage`.
   - name: Sprints
     description: >-
       A project's iterations — a time-box with a one-way lifecycle
@@ -110,9 +130,10 @@ tags:
       per project), plus the project's planning view (`GET …/backlog`). Sprints
       are content, not bound taxonomy: they never appear in a project's config.
       Reads are open to project members; the lifecycle (create/edit/start/
-      complete/delete) needs project MANAGER or workspace OWNER/ADMIN, while
-      putting issues into a sprint and ranking them is the ordinary issue-edit
-      tier.
+      complete/delete) needs `sprint.manage` (the built-in project MANAGER, or
+      a workspace OWNER/ADMIN across their whole workspace), while putting
+      issues into a sprint is `sprint.assign` and ranking them is `issue.rank`
+      — everyday contributor permissions.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -753,12 +774,14 @@ paths:
       tags: [Projects]
       summary: Update name / description / delivery capabilities
       description: >-
-        Requires the **project curator** role — project `MANAGER`, **or** an
-        `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project
-        member); any other member gets `403`. This is **wider than it used to
-        be**: the endpoint was `MANAGER`-only before `boardMode` joined it, and
-        it now matches every other project-content write (components, versions,
-        sprints). `archive`/`unarchive` and member management stay
+        Requires `project.edit` — held by the built-in project `MANAGER` and,
+        across every project of their workspace, by an `OWNER`/`ADMIN` of the
+        enclosing workspace who need not be a project member; any other member
+        gets a `403` naming it. That is the same tier every other
+        project-content write asks for (components, versions, sprints have
+        their own `*.manage` keys with the identical holders), while
+        `archive`/`unarchive` (`project.archive`) and member management
+        (`project.member.manage`) are **not** in that set and stay
         `MANAGER`-only. Partial — omitted fields are left unchanged.
 
         `delivery` is partial **per member**: sending one capability leaves the
@@ -777,7 +800,9 @@ paths:
         which changes how the board, the backlog, the rail and the issue detail
         render — are as read-only as its issues, sprints and ranks, so this
         returns `409 "Project is archived"`. `POST …/unarchive` is the way back,
-        and it stays `MANAGER`-only.
+        and it stays `MANAGER`-only. Note the ordering: the permission is
+        checked **first**, so a caller who lacks `project.edit` on an archived
+        project gets the `403`, not this `409`.
       operationId: updateProject
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -825,7 +850,10 @@ paths:
     post:
       tags: [Projects]
       summary: Archive a project
-      description: Requires project `MANAGER`. Archived projects reject issue mutations.
+      description: >-
+        Requires `project.archive` (the built-in project `MANAGER`; not part of
+        the workspace-wide curator set). Archived projects reject issue
+        mutations.
       operationId: archiveProject
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -839,7 +867,7 @@ paths:
     post:
       tags: [Projects]
       summary: Restore an archived project
-      description: Requires project `MANAGER`.
+      description: Requires `project.archive`.
       operationId: unarchiveProject
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -853,6 +881,11 @@ paths:
     get:
       tags: [Projects]
       summary: List project members
+      description: >-
+        Open to **any workspace member**, project member or not — no permission
+        is required. The assignee picker, mention autocomplete and a People view
+        all need it, and the workspace member list is already open the same way.
+        (Its former role gate admitted everyone, so no caller's result changed.)
       operationId: listProjectMembers
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -869,7 +902,11 @@ paths:
     post:
       tags: [Projects]
       summary: Add a project member
-      description: Requires project `MANAGER`. The user must already be a workspace member.
+      description: >-
+        Requires `project.member.manage` (the built-in project `MANAGER`; it is
+        **not** part of the workspace-wide curator set, so a workspace
+        OWNER/ADMIN who is not a project member cannot use it). The user must
+        already be a workspace member.
       operationId: addProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -897,7 +934,7 @@ paths:
     delete:
       tags: [Projects]
       summary: Remove a project member
-      description: Requires project `MANAGER`.
+      description: Requires `project.member.manage`.
       operationId: removeProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1565,7 +1602,19 @@ paths:
       tags: [Issues]
       summary: Create an issue
       description: |
-        `assigneeId` must be a workspace member; `parentId` links a sub-task
+        Requires `issue.create` — **plus** `issue.assign` when the body carries
+        an `assigneeId`, and **plus** `sprint.assign` when it carries a
+        `sprintId`. All three are checked from the request shape alone, before
+        anything is read or written (and before the archived-project `409`), so
+        a rejected create changes nothing. A `403` names the first permission
+        that was missing.
+
+        `assigneeId` must be a workspace member **who holds `issue.assignable`
+        in this project**; a target who does not is a `422` ("That user cannot
+        be assigned in this project"), deliberately distinct from the `422` for
+        an unknown assignee. A component's auto-assign lead who lacks it is
+        skipped silently instead — the issue is filed unassigned rather than
+        failing over somebody else's role. `parentId` links a sub-task
         to a parent issue in the same project (rejected with `422` if unknown,
         in another project, or a hierarchy-level violation). The issue gets the
         next sequential project-scoped `number`. `labelIds` attaches workspace
@@ -1602,6 +1651,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/IssueResponse' }
         '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Project is archived
@@ -1754,6 +1804,21 @@ paths:
       tags: [Issues]
       summary: Update an issue
       description: |
+        **Multi-permission, per field.** One request can require `issue.edit`,
+        `issue.transition`, `issue.assign` and `sprint.assign` at once:
+        `statusId` needs `issue.transition`, the assignee needs `issue.assign`,
+        the sprint needs `sprint.assign`, and every other field (title,
+        description, type, priority, due date, labels, component, parent,
+        versions, story points, custom `fields`) needs `issue.edit` — which an
+        `issue.edit:own` grant satisfies on issues you **reported**. Only fields
+        that are **present and actually changing** are checked, so a whole-form
+        patch that moves one field does not need rights over the rest it echoes
+        back; a non-empty `fields` map is the one exception, checked on
+        presence rather than on change. When several are missing the `403`
+        names the **first** in catalog order (`issue.edit` → `issue.transition`
+        → `issue.assign` → `sprint.assign`). Every check runs before the first
+        mutation and before the archived-project `409`.
+
         Partial update — send any subset of fields plus the `version` you last
         read; a stale version returns `409` (omit `version` to skip the check —
         last-write-wins for the fields you send, though a competing commit
@@ -1809,6 +1874,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Stale `version` — the issue was modified by someone else, or the project is archived
@@ -1823,14 +1889,23 @@ paths:
             foreign-project / **completed** target sprint — or the issue's
             **current** sprint is `COMPLETED` and the request changes or clears
             it. A completed sprint's membership is frozen in both directions;
-            every other field of such an issue stays editable.
+            every other field of such an issue stays editable. Also **a new
+            assignee who lacks `issue.assignable` in this project** ("That user
+            cannot be assigned in this project") — validated only on an actual
+            change, so an issue whose assignee has since lost the permission
+            stays editable and is never unassigned.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
     delete:
       tags: [Issues]
       summary: Delete an issue
-      description: Requires project `MANAGER`. Removes comments and attachment files too.
+      description: >-
+        Requires `issue.delete`; an `issue.delete:own` grant covers issues you
+        **reported**. Removes comments and attachment files too. The permission
+        is checked **before** the project's state, so a caller without it on an
+        archived project now gets `403` where they used to get
+        `409 "Project is archived"`.
       operationId: deleteIssue
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1848,9 +1923,11 @@ paths:
       description: >-
         Re-ranks one issue in the project-wide order the board and the backlog
         **share**, optionally moving it into or out of a sprint in the same
-        request. Permission is the ordinary **issue-edit** tier (any workspace
-        member on a non-archived project), not curator: dragging items at a
-        planning meeting is teamwork.
+        request. Requires `issue.rank` — the everyday contributor tier, not the
+        sprint-lifecycle one: dragging items at a planning meeting is teamwork.
+        A request that also changes the sprint requires `sprint.assign` too
+        (the same permission the sprint endpoints and `PATCH …/issues/{number}`
+        check — one permission, every door).
 
         The client never sends a rank value — it sends the neighbours it dropped
         between (`afterIssueId` / `beforeIssueId`, both by **id**, while the
@@ -1895,6 +1972,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: >-
@@ -2072,7 +2150,8 @@ paths:
       tags: [Attachments]
       summary: Upload an attachment
       description: >-
-        `multipart/form-data` with a `file` field. A per-file size limit is enforced in-app
+        Requires `attachment.create`, checked before the archived-project
+        `409`. `multipart/form-data` with a `file` field. A per-file size limit is enforced in-app
         (default 20 MB; `413` when exceeded) in addition to the servlet hard ceiling
         (default 25 MB). The file extension must be in the allow-list (default: png, jpg, jpeg,
         gif, webp, bmp, svg, pdf, txt, csv, log, md, json, doc, docx, xls, xlsx, ppt, pptx, zip)
@@ -2100,6 +2179,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AttachmentResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '413':
           description: >-
@@ -2154,7 +2234,14 @@ paths:
     delete:
       tags: [Attachments]
       summary: Delete an attachment
-      description: Uploader or project `MANAGER`.
+      description: >-
+        Requires `attachment.delete`, with the ownership modifier: an
+        `attachment.delete:own` grant covers the files **you** uploaded, the
+        unrestricted grant covers anyone's (the built-in project `MANAGER`) —
+        which is the previous "uploader or `MANAGER`" rule spelled out. The
+        permission is checked **before** the project's state, so a caller
+        without it on an archived project now gets `403` where they used to get
+        `409 "Project is archived"`.
       operationId: deleteAttachment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -3346,8 +3433,12 @@ paths:
       tags: [Sprints]
       summary: Put a batch of issues into the sprint
       description: >-
-        The **issue-edit** tier, not curator: filling a sprint is ordinary
-        planning work the whole team does at a planning meeting. Issues are
+        Requires `sprint.assign` — deliberately separate from the
+        lifecycle's `sprint.manage`, because filling a sprint is ordinary
+        planning work the whole team does at a planning meeting. The same
+        permission guards the other two doors into sprint membership
+        (`PATCH …/issues/{number}` with `sprintId`/`clearSprint`, and
+        `POST …/issues/{number}/rank` with a sprint change). Issues are
         addressed by **id** here. An issue already in this sprint is a silent
         no-op (no history entry, no `version` bump, no event); the others are
         re-ranked to the `TOP` or `BOTTOM` of the sprint's section, keeping
@@ -3390,6 +3481,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: The project is archived
@@ -3415,7 +3507,7 @@ paths:
       tags: [Sprints]
       summary: Take one issue out of the sprint
       description: >-
-        The issue-edit tier, like the bulk add. The issue's **rank is
+        Requires `sprint.assign`, like the bulk add. The issue's **rank is
         preserved**, so it keeps its relative place in the backlog it returns
         to.
 
@@ -3441,6 +3533,7 @@ paths:
           schema: { type: string, format: uuid }
       responses:
         '204': { description: 'Removed — or already not in this sprint (idempotent)' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404':
           description: >-
             The workspace, project or sprint was not found (or the caller is not
@@ -4174,7 +4267,18 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     Forbidden:
-      description: Authenticated but not allowed (insufficient role)
+      description: >-
+        Authenticated and a member of the workspace, but missing a permission.
+        Every project-scoped operation names it: `detail` is
+        `Requires permission: <key>`, where `<key>` is a catalog key exactly as
+        `GET /permissions` reports it (always the bare key — never the `:own`
+        form, even where an own-only grant would have carried another object).
+        Non-membership and non-existence are `404`, never this. Two families
+        still answer the older wording instead of a key: workspace-scoped
+        checks and the delegated-admin endpoints
+        (`"Insufficient workspace permissions"` /
+        `"Insufficient project permissions"`), and a comment edit/delete by
+        someone other than the author (no `detail` at all).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4200,7 +4304,15 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     UnprocessableReference:
-      description: Unknown status/type/assignee/parent, or a workflow-forbidden transition
+      description: >-
+        Unknown status/type/assignee/parent, a workflow-forbidden transition,
+        or a target user who may not be assigned in this project
+        (`"That user cannot be assigned in this project"` — the target lacks
+        `issue.assignable`). The last one is deliberately a `422` and not a
+        `403`: the caller was entitled to make the request, the value they sent
+        is invalid. It is also deliberately a different sentence from
+        `"Unknown assignee"`, so a member is never told a colleague does not
+        exist.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }

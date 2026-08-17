@@ -29,9 +29,24 @@ import java.util.UUID;
  * part of "DEMO-42"), not by UUID. Updates use optimistic locking via the
  * {@code version} field (409 on a stale version) and status changes are
  * validated against configured workflow transitions. Comment edits/deletes
- * are author-only; attachment deletion is allowed to the uploader or a
- * project MANAGER. Deleting an issue requires MANAGER and removes stored
- * attachment blobs.
+ * are author-only.
+ *
+ * <p><strong>Authorization is per action, not per endpoint</strong> (HD-123 S2,
+ * §10.2): {@code issue.create} on POST — plus {@code issue.assign} /
+ * {@code sprint.assign} when the body carries an assignee or a sprint;
+ * {@code issue.rank} on the rank endpoint (and {@code sprint.assign} when it also
+ * changes section); {@code issue.delete} (ownership-capable: {@code own} = you
+ * reported it) on DELETE, which still removes stored attachment blobs;
+ * {@code attachment.create} / {@code attachment.delete} (ownership-capable:
+ * {@code own} = you uploaded it) on the attachment sub-resource. PATCH is
+ * <strong>multi-permission</strong>: {@code issue.edit} (ownership-capable),
+ * {@code issue.transition}, {@code issue.assign} and {@code sprint.assign}, checked
+ * only for fields actually present AND actually changing, all before the first
+ * mutation, with the first missing one named in the 403. Whether the assignment
+ * <em>target</em> may be given work is the other half ({@code issue.assignable}) and
+ * is a <strong>422</strong>, not a 403 — the caller was entitled to ask, the value is
+ * invalid. Permission first, project state second: a 403 never depends on whether the
+ * project happens to be archived.
  *
  * <p>Beyond its taxonomy an issue also carries <em>classification content</em>:
  * workspace {@code labels} (HD-30), one project {@code component} (HD-31) and the
