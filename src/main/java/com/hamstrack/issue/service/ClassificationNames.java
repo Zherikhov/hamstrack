@@ -1,6 +1,7 @@
 package com.hamstrack.issue.service;
 
 import java.text.Normalizer;
+import java.util.regex.Pattern;
 
 /**
  * Server-side name normalization shared by every classification primitive of the
@@ -33,14 +34,27 @@ public final class ClassificationNames {
 
     private ClassificationNames() {}
 
+    // PRECOMPILED on purpose (HD-90 follow-up). String.replaceAll recompiles its Pattern
+    // on every call, and this pipeline is no longer only a write-path concern: search
+    // keys every name→id map with SearchNames.key, so it runs once per catalog row on
+    // every /search, /schema and /suggest. Measured at 50k names, two String.replaceAll
+    // calls cost ~61ms vs ~43ms precompiled — a per-request tax multiplied by the label/
+    // component/version caps. The regexes and their order are UNCHANGED.
+    /**
+     * Control (Cc) and format (Cf) characters that are NOT whitespace. The whitespace
+     * ones (tab/newline/…) survive so {@link #SEPARATOR_RUN} turns them into a space
+     * instead of silently gluing two words together.
+     */
+    private static final Pattern INVISIBLES = Pattern.compile("[\\p{Cc}\\p{Cf}&&[^\\s]]");
+
+    /** Whitespace and Unicode-separator runs, collapsed to a single plain space. */
+    private static final Pattern SEPARATOR_RUN = Pattern.compile("[\\s\\p{Z}]+");
+
     /** Normalize a user-supplied display name; {@code null} → {@code ""}. */
     public static String normalize(String raw) {
         if (raw == null) return "";
         String nfc = Normalizer.normalize(raw, Normalizer.Form.NFC);
-        // Strip control (Cc) and format (Cf) characters that are NOT whitespace; the
-        // whitespace ones (tab/newline/…) survive so the collapse below turns them
-        // into a space instead of silently gluing two words together.
-        String stripped = nfc.replaceAll("[\\p{Cc}\\p{Cf}&&[^\\s]]", "");
-        return stripped.replaceAll("[\\s\\p{Z}]+", " ").strip();
+        String stripped = INVISIBLES.matcher(nfc).replaceAll("");
+        return SEPARATOR_RUN.matcher(stripped).replaceAll(" ").strip();
     }
 }

@@ -3,7 +3,6 @@ package com.hamstrack.search;
 import com.hamstrack.issue.entity.FieldType;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 
@@ -42,10 +41,19 @@ public record CustomFieldMeta(
         optionIdByLabel = optionIdByLabel == null ? Map.of() : Map.copyOf(optionIdByLabel);
     }
 
-    /** Resolve a user-supplied SELECT/MULTI_SELECT value (label or id) to its option id, or null. */
+    /**
+     * Resolve a user-supplied SELECT/MULTI_SELECT value (label or id) to its option id,
+     * or null. Keyed with {@link SearchNames} — the same function
+     * {@link ResolutionContextFactory} used to build {@code optionIdByLabel} — so a
+     * copy-pasted label with a trailing or non-breaking space still matches (HD-90).
+     */
     public String resolveOption(String labelOrId) {
         if (labelOrId == null) return null;
-        return optionIdByLabel.get(labelOrId.toLowerCase(Locale.ROOT));
+        String key = SearchNames.key(labelOrId);
+        // A blank-after-normalization operand is not a label anybody typed; never let it
+        // match a config row whose own label folded to "" (the caller renders a 422).
+        if (key.isEmpty()) return null;
+        return optionIdByLabel.get(key);
     }
 
     /** Option labels in insertion order (for the {@code /schema} picklist). */
