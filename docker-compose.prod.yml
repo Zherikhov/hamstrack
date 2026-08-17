@@ -1,5 +1,9 @@
 services:
   app:
+    # The owner's prod tracks `latest` on purpose (continuous deploy). If you are
+    # self-hosting, pin a release line instead — `:0.4` — or an exact version.
+    # `latest` moves on every main build AND on every stable release tag
+    # (HD-115), so it can jump mid-upgrade. See docs/self-hosting.md#upgrading.
     image: ghcr.io/${GITHUB_OWNER}/hamstrack:latest
     # All operator-facing config comes from .env — see .env.prod.example for the
     # full list. Defaults live in the app's application-{cloud,dc}.properties.

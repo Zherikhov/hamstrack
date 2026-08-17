@@ -2,18 +2,45 @@ name: Deploy to production
 
 # Owner-only: continuous deploy of the rolling `latest` image to the
 # hamstrack.com EC2 instance via AWS SSM (SSH port 22 is closed — see
-# docs/ops-prod-hardening.md §3). Fires after a successful Build on main.
-# Release-tag builds do NOT deploy here — prod already has that code from main.
+# docs/ops-prod-hardening.md §3). Fires after a successful Build on main AND
+# after a successful Build of a release tag (HD-115) — a tag build carries the
+# same code but a different LABEL, and the label is baked into the image, so
+# skipping it left prod serving `git describe` versions forever whenever the tag
+# was pushed after main. Both now publish `latest`, so either push order lands
+# the release on prod; see build.yml for the guard that stops a tag build from
+# moving `latest` backwards.
 # Forks won't deploy anywhere: without the AWS secrets this job just fails.
+#
+# `workflow_run` has no `tags:` filter — for a tag-triggered run `head_branch`
+# holds the TAG NAME, so the release-tag globs below (same shapes as build.yml's
+# push filter) are what lets those runs through. The job `if:` re-checks
+# everything that filter cannot express.
 on:
   workflow_run:
     workflows: ["Build"]
     types: [completed]
-    branches: [main]
+    branches: [main, "v[0-9]*", "[0-9]*"]
+
+# One deploy at a time. main and its release tag are separate concurrency groups
+# in build.yml (by design — cancelling either would cut this chain), so their
+# Builds can finish seconds apart and fire two deploys at the same host; two
+# concurrent `docker compose up -d` in /opt/hamstrack would fight. Queue instead
+# of cancelling: the second run re-pulls and is a no-op if `latest` did not move.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
 
 jobs:
   deploy:
-    if: github.event.workflow_run.conclusion == 'success'
+    # - success: never deploy a red build.
+    # - event push/workflow_dispatch: a `pull_request` Build can also carry
+    #   head_branch `main` (a fork PR from its own main), and must never deploy.
+    # - no `-` in the ref name: keeps pre-release tags (`v1.0.0-rc1`, `0.13.0-beta`)
+    #   off production. `main` has no dash, stable tags have none.
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch')
+      && !contains(github.event.workflow_run.head_branch, '-')
     runs-on: ubuntu-latest
 
     # AWS instance ids are not secret (useless without credentials), so it's
@@ -36,7 +63,7 @@ jobs:
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "hamstrack deploy ${{ github.event.workflow_run.head_sha }}" \
+            --comment "hamstrack deploy ${{ github.event.workflow_run.head_branch }} ${{ github.event.workflow_run.head_sha }}" \
             --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml pull && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d --remove-orphans && docker image prune -f"]' \
             --query 'Command.CommandId' --output text)
           echo "Command: $CMD_ID"
@@ -48,3 +75,20 @@ jobs:
             --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
             --output json
           [ -z "$FAILED" ]
+
+      # What prod actually reports once it is back up. The HD-115 bug was a
+      # WRONG LABEL on a right deployment, which nothing in this pipeline ever
+      # looked at — so it survived until someone opened the About dialog. Polled
+      # from the runner, not inside the SSM command, because `aws ssm wait
+      # command-executed` gives up after ~100s and a slow app restart would then
+      # fail an otherwise successful deploy. `continue-on-error` keeps this
+      # purely informational: a flaky curl must never red a good deploy.
+      - name: Report deployed version
+        continue-on-error: true
+        run: |
+          for i in $(seq 1 12); do
+            META=$(curl -fsS --max-time 10 https://hamstrack.com/api/meta) && break
+            sleep 10
+          done
+          echo "prod /api/meta → ${META:-unavailable}"
+          echo "prod \`/api/meta\` → \`${META:-unavailable}\`" >> "$GITHUB_STEP_SUMMARY"
