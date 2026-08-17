@@ -7,8 +7,9 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import BacklogPage from './BacklogPage'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
+import { versionsApi } from '../api'
 import type {
-  BacklogView, Issue, IssueType, PriorityOption, Sprint, Status, User,
+  BacklogView, Issue, IssueType, PriorityOption, ProjectDelivery, Sprint, Status, User,
 } from '../types'
 
 /**
@@ -91,8 +92,19 @@ const VIEW: BacklogView = {
   sectionCap: 300,
 }
 
+// HD-102: what the project DECLARES about how it delivers — the only thing this
+// page may consult to decide whether it speaks Scrum. Swappable per test.
+const SCRUM_DELIVERY: ProjectDelivery = {
+  board: 'SCRUM', releases: true, estimation: true, preset: 'CUSTOM',
+}
+let delivery: ProjectDelivery = SCRUM_DELIVERY
+
+// Swappable so the HD-102 block can describe a project with NO sprints at all —
+// the state the removed presence heuristic got wrong in production.
+let backlogView: BacklogView = VIEW
+
 const apiRankIssueMock = vi.fn(async () => B1)
-const apiGetBacklogViewMock = vi.fn(async () => structuredClone(VIEW))
+const apiGetBacklogViewMock = vi.fn(async () => structuredClone(backlogView))
 
 // The real module is kept and only the network functions this page touches are
 // replaced — a hand-listed façade would break on any unrelated new export.
@@ -108,7 +120,7 @@ vi.mock('../api', async importOriginal => ({
   })),
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-    archived: false, myRole: 'MANAGER', boardMode: 'SCRUM',
+    archived: false, myRole: 'MANAGER', delivery,
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
@@ -138,8 +150,11 @@ beforeAll(() => {
 
 beforeEach(() => {
   localStorage.clear()
+  delivery = SCRUM_DELIVERY
+  backlogView = VIEW
   apiRankIssueMock.mockClear()
   apiGetBacklogViewMock.mockClear()
+  vi.mocked(versionsApi.list).mockClear()
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
   useUiStore.setState({ createIssueOpen: false, createIssuePreset: undefined })
 })
@@ -319,5 +334,142 @@ describe('BacklogPage drag-and-drop (HD-23 §5.3)', () => {
       const keys = screen.getAllByText(/^PR-/).map(el => el.textContent)
       expect(keys.filter(k => k === B3.key)).toHaveLength(1)
     })
+  })
+})
+
+/**
+ * HD-102 — the Backlog asks the project's DECLARED delivery capabilities, never
+ * "does this project have sprints yet?".
+ *
+ * The heuristic these replace (`boardMode === 'SCRUM' || openSprints.length > 0`)
+ * is the one that shipped a production dead end: it hid BOTH sprint-creation
+ * entry points until a sprint existed, so a Kanban project could never create its
+ * first one. The other half of the rule matters just as much: turning sprint
+ * planning off must never make a RUNNING sprint disappear (Rule B, §5.2).
+ */
+describe('BacklogPage delivery capabilities (HD-102)', () => {
+  it('offers the sprint controls when the project declares iterations', async () => {
+    renderBacklog()
+    await backlogReady()
+
+    expect(screen.getByRole('button', { name: /new sprint/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create sprint/i })).toBeInTheDocument()
+  })
+
+  it('keeps a running sprint visible and read-only when iterations are off', async () => {
+    delivery = { ...SCRUM_DELIVERY, board: 'KANBAN' }
+    renderBacklog()
+    await backlogReady()
+
+    // Rule B: the sprint and its issues are still on screen…
+    expect(screen.getByText('Sprint 7')).toBeInTheDocument()
+    expect(screen.getByText(S1.title)).toBeInTheDocument()
+    // …with the reason stated…
+    expect(screen.getByText(/sprint planning off/i)).toBeInTheDocument()
+    // …and the one action a running sprint must never lose still offered.
+    expect(screen.getByRole('button', { name: /complete sprint/i })).toBeInTheDocument()
+
+    // Every planning CONTROL is gone (§5.2: controls are gated, values are not).
+    expect(screen.queryByRole('button', { name: /new sprint/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /create sprint/i })).toBeNull()
+
+    // …including the kebab's cross-section moves, in both directions.
+    await userEvent.click(screen.getByRole('button', { name: `Move ${B1.key}` }))
+    expect(await screen.findByRole('menuitem', { name: 'Move to top' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Sprint 7' })).toBeNull()
+  })
+
+  it('refuses a drag into a read-only sprint section without spending a request', async () => {
+    delivery = { ...SCRUM_DELIVERY, board: 'KANBAN' }
+    renderBacklog()
+    await backlogReady()
+
+    drag(B1, S1, 'above')
+
+    await new Promise(r => setTimeout(r, 0))
+    expect(apiRankIssueMock).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * HD-102 §5.3 Rule C, the negative half — **no surface may derive visibility
+ * from data presence.** These two cases are the exact pair the deleted heuristic
+ * (`boardMode === 'SCRUM' || openSprints.length > 0`) got wrong, and they are the
+ * shape of the production bug rather than a paraphrase of the new code:
+ *
+ *  • capability ON, ZERO sprints  ⇒ the sprint controls must be there anyway.
+ *    This is the dead end: the old rule hid BOTH creation entry points until a
+ *    sprint existed, so the first one could never be created from here.
+ *  • capability OFF, sprints PRESENT ⇒ no planning controls, even though the
+ *    data the old rule keyed on is sitting right there.
+ */
+describe('BacklogPage — visibility never follows the data (HD-102 Rule C)', () => {
+  const EMPTY_VIEW: BacklogView = {
+    sprints: [],
+    backlog: {
+      issues: [B1, B2, B3], truncated: false, totalAvailable: 3,
+      stats: { ...EMPTY_STATS, issueCount: 3, unestimatedCount: 3 },
+    },
+    sectionCap: 300,
+  }
+
+  it('offers sprint creation on an iterations project with ZERO sprints', async () => {
+    backlogView = EMPTY_VIEW
+    renderBacklog()
+    await screen.findByText(B1.title)
+
+    // Both entry points — the header button and the inline "create" affordance.
+    expect(await screen.findByRole('button', { name: /new sprint/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create sprint/i })).toBeInTheDocument()
+  })
+
+  it('offers none on a project that declares no iterations, sprints or not', async () => {
+    delivery = { ...SCRUM_DELIVERY, board: 'KANBAN' }
+    backlogView = EMPTY_VIEW
+    renderBacklog()
+    await screen.findByText(B1.title)
+
+    expect(screen.queryByRole('button', { name: /new sprint/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /create sprint/i })).toBeNull()
+    // …and the backlog rows offer no "move to a sprint" either.
+    await userEvent.click(screen.getByRole('button', { name: `Move ${B1.key}` }))
+    expect(await screen.findByRole('menuitem', { name: 'Move to top' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: /sprint/i })).toBeNull()
+  })
+})
+
+/**
+ * The other two Backlog rows of §6: the fix-version filter is `R`-gated and the
+ * per-section point sums are `E`-gated. Both are CONTROLS/aggregates, so neither
+ * has a Rule B half to preserve.
+ */
+describe('BacklogPage releases + estimation gating (HD-102 §6)', () => {
+  const fixVersionFilter = () => screen.queryByRole('button', { name: 'Filter by fix version' })
+
+  it('drops the fix-version filter, and its fetch, when releases are off', async () => {
+    delivery = { ...SCRUM_DELIVERY, releases: false }
+    renderBacklog()
+    await backlogReady()
+
+    expect(fixVersionFilter()).toBeNull()
+    expect(versionsApi.list).not.toHaveBeenCalled()
+  })
+
+  it('drops the per-section point sums when estimation is off', async () => {
+    delivery = { ...SCRUM_DELIVERY, estimation: false }
+    renderBacklog()
+    await backlogReady()
+
+    // The sections themselves are untouched — only the point aggregates go.
+    expect(screen.getByText('Sprint 7')).toBeInTheDocument()
+    expect(screen.queryByTitle('Story points done / committed')).toBeNull()
+    expect(screen.queryByText(/unestimated/i)).toBeNull()
+  })
+
+  it('keeps them when estimation is on', async () => {
+    renderBacklog()
+    await backlogReady()
+
+    expect(screen.getAllByTitle('Story points done / committed').length).toBeGreaterThan(0)
   })
 })

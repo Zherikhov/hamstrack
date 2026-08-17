@@ -1,11 +1,13 @@
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import IssueDetail from './IssueDetail'
-import { apiUpdateIssue } from '../api'
-import type { Issue, IssueType, PriorityOption, ProjectField, Sprint, Status } from '../types'
+import { apiUpdateIssue, sprintsApi, versionsApi } from '../api'
+import type {
+  Issue, IssueType, PriorityOption, ProjectDelivery, ProjectField, Sprint, Status, VersionRef,
+} from '../types'
 
 // HD-69: refinements to the merged Activity feed (HD-64).
 //  1. the filter defaults to Comments — history entries stay hidden until the
@@ -67,6 +69,13 @@ const SPRINT_FUTURE: Sprint = {
 }
 let openSprints: Sprint[] = []
 
+// HD-102: what the project DECLARES it does. Every path-specific cell below asks
+// this and nothing else — never "does this project have sprints/versions yet?".
+// Swappable per test; the default is a project that does all three, so the cells
+// render in their editable form.
+const ALL_ON: ProjectDelivery = { board: 'SCRUM', releases: true, estimation: true, preset: 'CUSTOM' }
+let delivery: ProjectDelivery = ALL_ON
+
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
   apiGetIssue: vi.fn(async () => issueResponse),
@@ -100,8 +109,19 @@ vi.mock('../api', () => ({
   componentsApi: { list: vi.fn(async () => []) },
   // HD-32: …and its Fix/Affects versions cells from the project's versions.
   versionsApi: { list: vi.fn(async () => []) },
-  // HD-22: …and its Sprint cell from the project's open sprints (none here, so
-  // the cell hides itself exactly as the Component/Version cells do).
+  // HD-102: the delivery capabilities ride the ProjectResponse the nav rail
+  // already caches — `useProjectDelivery` reads that same entry.
+  apiGetProject: vi.fn(async () => ({
+    id: 'p1', workspaceId: 'w1', name: 'Proj', key: 'PR',
+    archived: false, myRole: 'MANAGER', delivery,
+    createdAt: '2026-01-01T00:00:00Z',
+  })),
+  // Only fetched when a caller asks for the curator role (this surface doesn't),
+  // but a mocked module must still expose every imported binding.
+  apiGetWorkspace: vi.fn(async () => ({
+    id: 'w1', name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z',
+  })),
+  // HD-22: …and its Sprint cell offers the project's open sprints.
   sprintsApi: {
     list: vi.fn(async () => ({
       content: openSprints, page: 0, size: 200,
@@ -147,6 +167,7 @@ function renderDetail(fields: ProjectField[] = []) {
 afterEach(() => {
   issueResponse = ISSUE
   openSprints = []
+  delivery = ALL_ON
   vi.mocked(apiUpdateIssue).mockReset()
 })
 
@@ -279,11 +300,29 @@ describe('IssueDetail sprint cell (HD-22 / 0.13.0 freeze)', () => {
     return screen.queryByRole('button', { name: 'Sprint' })
   }
 
-  it('hides the cell entirely when the project plans no sprints and the issue has none', async () => {
+  it('hides the cell when the project does not plan iterations and the issue has none', async () => {
+    // HD-102 §6, `I ∨ value`: off and empty ⇒ absent. Note it is the CAPABILITY
+    // that decides, not the (empty) sprint list.
+    delivery = { ...ALL_ON, board: 'KANBAN' }
     renderDetail()
     await screen.findByText('Something to fix')
-    // Same rule as the Component/Version cells: nothing to choose from, no empty control.
     expect(sprintTrigger()).toBeNull()
+  })
+
+  it('renders the cell on an iterations project that has no sprints YET', async () => {
+    // The removed presence heuristic (`sprintOptions.length > 0`) hid the cell
+    // here — the same class of check that made the Backlog's first sprint
+    // uncreatable in production. A declared capability answers on its own.
+    openSprints = []
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    const trigger = await waitFor(() => {
+      const el = sprintTrigger()
+      expect(el).not.toBeNull()
+      return el!
+    })
+    expect(trigger).not.toBeDisabled()
   })
 
   it('offers the open sprints and clears with `clearSprint` — never both keys', async () => {
@@ -352,5 +391,172 @@ describe('IssueDetail sprint cell (HD-22 / 0.13.0 freeze)', () => {
     await userEvent.click(trigger)
     expect(screen.queryByRole('option', { name: 'Sprint 8' })).toBeNull()
     expect(apiUpdateIssue).not.toHaveBeenCalled()
+  })
+})
+
+// HD-102 Rule B (§5.2): CONTROLS are gated by a delivery capability, VALUES never
+// are. Turning a capability off must be provably non-destructive *and legible* —
+// an issue that belongs to a sprint in a project switched back to Kanban still
+// SHOWS that sprint, read-only, with the reason attached. Risk 4 in the proposal
+// calls this the easiest rule to skip, so each `∨ value` row of §6 is guarded.
+describe('IssueDetail delivery capabilities — Rule B (HD-102)', () => {
+  const V_240: VersionRef = { id: 'v1', name: '2.4.0', released: false, archived: false }
+  const V_231: VersionRef = { id: 'v2', name: '2.3.1', released: true, archived: false }
+
+  it('keeps a sprint visible, read-only, when the project stopped planning iterations', async () => {
+    delivery = { ...ALL_ON, board: 'KANBAN' }
+    issueResponse = {
+      ...ISSUE,
+      sprint: { id: SPRINT_ACTIVE.id, name: SPRINT_ACTIVE.name, state: 'ACTIVE' },
+    }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    // The value is still on screen…
+    expect(await screen.findByText('Sprint 7')).toBeInTheDocument()
+    // …the reason is stated, not merely hover-only…
+    expect(screen.getByText(/planning off/i)).toBeInTheDocument()
+    // …and the control is gone, so nothing can be changed from here.
+    expect(screen.queryByRole('button', { name: 'Sprint' })).toBeNull()
+    expect(apiUpdateIssue).not.toHaveBeenCalled()
+  })
+
+  it('hides the story-points input when estimation is off, but keeps an existing estimate', async () => {
+    delivery = { ...ALL_ON, estimation: false }
+    issueResponse = { ...ISSUE, storyPoints: 5 }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Story points')).toBeInTheDocument()
+    expect(screen.getByText('5')).toBeInTheDocument()
+    expect(screen.getByText(/estimation off/i)).toBeInTheDocument()
+    expect(screen.queryByLabelText('Story points')).toBeNull()   // the input itself
+  })
+
+  it('drops the story-points cell entirely when estimation is off and the issue has none', async () => {
+    delivery = { ...ALL_ON, estimation: false }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(screen.queryByText('Story points')).toBeNull()
+  })
+
+  it('keeps fix versions visible, read-only, when releases are off', async () => {
+    delivery = { ...ALL_ON, releases: false }
+    issueResponse = { ...ISSUE, fixVersions: [V_240] }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Fix versions')).toBeInTheDocument()
+    expect(screen.getByText('2.4.0')).toBeInTheDocument()
+    expect(screen.getByText(/releases off/i)).toBeInTheDocument()
+    // The role the issue carries NO value in is absent altogether.
+    expect(screen.queryByText('Affects versions')).toBeNull()
+
+    // Clicking the value opens no editor — it is a value, not a control.
+    await userEvent.click(screen.getByText('2.4.0'))
+    expect(screen.queryByRole('button', { name: /save/i })).toBeNull()
+    expect(apiUpdateIssue).not.toHaveBeenCalled()
+  })
+
+  it('offers the version cells on a releases project that has curated none yet', async () => {
+    // Again the anti-heuristic guard: `versionOptions.length > 0` used to decide
+    // this, so a brand-new releases project had nowhere to record a fix version.
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Add fix versions…')).toBeInTheDocument()
+  })
+
+  it('applies the same rule to AFFECTS versions — the other half of the `R` row', async () => {
+    // The two version roles share one component and one gate, so a regression in
+    // either direction would show up in exactly one of them.
+    delivery = { ...ALL_ON, releases: false }
+    issueResponse = { ...ISSUE, affectsVersions: [V_231] }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Affects versions')).toBeInTheDocument()
+    expect(screen.getByText('2.3.1')).toBeInTheDocument()
+    expect(screen.getByText(/releases off/i)).toBeInTheDocument()
+    // …and the empty role stays hidden, so "off + no value ⇒ absent" holds per
+    // ROLE, not per project.
+    expect(screen.queryByText('Fix versions')).toBeNull()
+
+    await userEvent.click(screen.getByText('2.3.1'))
+    expect(screen.queryByRole('button', { name: /save/i })).toBeNull()
+    expect(apiUpdateIssue).not.toHaveBeenCalled()
+  })
+
+  it('keeps a COMPLETED sprint readable when iterations are off — two reasons, one value', async () => {
+    // Both read-only reasons apply at once (the capability is off AND the sprint
+    // has completed). The value must survive the overlap: this is the state an
+    // issue delivered by a team that has since switched to Kanban sits in
+    // forever.
+    delivery = { ...ALL_ON, board: 'KANBAN' }
+    issueResponse = {
+      ...ISSUE, sprint: { id: 'sp-done', name: 'Sprint 6', state: 'COMPLETED' },
+    }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Sprint 6')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Sprint' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: 'Sprint' })).toBeNull()
+  })
+})
+
+/**
+ * HD-102 §12 — the eager fetches this slice DELETED (`useOpenSprints` and
+ * `useProjectVersions`, which IssueDetail ran unconditionally on every open) are
+ * gone because the capability answers the question the data used to. Their cost
+ * was real: two extra project-scoped requests per issue opened, on a surface the
+ * board opens on every card click.
+ *
+ * These assertions are the guard rail — a refactor that reintroduces "fetch it
+ * so we can decide whether to show it" fails here rather than quietly doubling
+ * the request count again.
+ */
+describe('IssueDetail spends no request to decide what to show (HD-102)', () => {
+  beforeEach(() => {
+    vi.mocked(sprintsApi.list).mockClear()
+    vi.mocked(versionsApi.list).mockClear()
+  })
+
+  it('fetches neither sprints nor versions on a project that does neither', async () => {
+    delivery = { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    await waitFor(() => expect(screen.queryByText('Sprint')).toBeNull())
+    expect(sprintsApi.list).not.toHaveBeenCalled()
+    expect(versionsApi.list).not.toHaveBeenCalled()
+  })
+
+  it('fetches no versions on a releases project until a version cell is opened', async () => {
+    // The picker fetches its own options; the page no longer prefetches them to
+    // decide whether the cell exists.
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Add fix versions…')).toBeInTheDocument()
+    expect(versionsApi.list).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByText('Add fix versions…'))
+    await waitFor(() => expect(versionsApi.list).toHaveBeenCalled())
+  })
+
+  it('fetches no sprints for an issue whose sprint is shown read-only', async () => {
+    // Rule B renders the badge off the issue's OWN `sprint` ref — there is
+    // nothing to choose from, so there is nothing to fetch.
+    delivery = { ...ALL_ON, board: 'KANBAN' }
+    issueResponse = {
+      ...ISSUE, sprint: { id: SPRINT_ACTIVE.id, name: SPRINT_ACTIVE.name, state: 'ACTIVE' },
+    }
+    renderDetail()
+
+    await screen.findByText('Something to fix')
+    expect(await screen.findByText('Sprint 7')).toBeInTheDocument()
+    expect(sprintsApi.list).not.toHaveBeenCalled()
   })
 })

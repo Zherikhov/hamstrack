@@ -33,6 +33,34 @@ export interface Workspace {
 // shows the sprint header; KANBAN is the pre-0.13.0 behaviour.
 export type BoardMode = 'KANBAN' | 'SCRUM';
 
+// The DERIVED label for a capability set (HD-102 §2.3). Computed server-side
+// from the three capabilities and never stored, never sent back in a request —
+// `delivery.preset` is rejected with a 400 on write.
+export type DeliveryPreset = 'KANBAN' | 'SCRUM' | 'RELEASES' | 'CUSTOM';
+
+/**
+ * How this team delivers (HD-102 §2.3) — the DECLARED capability set, and the
+ * single answer to "does this project do X?".
+ *
+ * Rule B (§5.2): these gate CONTROLS only. A value an issue already carries (a
+ * sprint, a fix version, a story-point estimate) is rendered whenever it exists,
+ * read-only, regardless of the capability — switching a capability off is
+ * provably non-destructive and must also be legible.
+ *
+ * Rule C (§5.3): no surface may infer a capability from the presence of data.
+ * `openSprints.length > 0` / `sprintOptions.length > 0` / `versionOptions.length
+ * > 0` are NOT answers to this question.
+ */
+export interface ProjectDelivery {
+  board: BoardMode;      // iterations: sprint sections, sprint-scoped board, sprint pickers
+  releases: boolean;     // versions: the Releases page and rail item, fix/affects pickers
+  estimation: boolean;   // story points: the points input and every point sum
+  preset: DeliveryPreset;
+}
+
+/** The write half — `preset` is derived and REJECTED on write, so it is absent. */
+export type ProjectDeliveryUpdate = Partial<Omit<ProjectDelivery, 'preset'>>;
+
 export interface Project {
   id: string;
   workspaceId: string;
@@ -41,9 +69,16 @@ export interface Project {
   description?: string;
   archived: boolean;
   myRole: 'MANAGER' | 'MEMBER' | 'VIEWER';
-  // Optional on the wire only for pre-0.13.0 servers / hand-built fixtures —
-  // every consumer reads it as `project.boardMode ?? 'KANBAN'`.
+  /**
+   * @deprecated (HD-102) superseded by `delivery.board`, which carries the same
+   * value. Read `delivery` instead — never both. The only place this mirror is
+   * still consulted is `deliveryOf()`, as the fallback for a response (or a
+   * hand-built fixture) that predates `delivery`.
+   */
   boardMode?: BoardMode;
+  // Optional on the wire only for pre-HD-102 responses / hand-built fixtures —
+  // every consumer goes through `deliveryOf()` / `useProjectDelivery`.
+  delivery?: ProjectDelivery;
   createdAt: string;
 }
 

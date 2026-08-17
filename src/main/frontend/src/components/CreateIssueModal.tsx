@@ -8,8 +8,9 @@ import { boardIssuesKey, projectIssuesKeyPrefix } from '../lib/queryKeys'
 import { FieldInput } from './fields'
 import { LabelPicker } from './labels'
 import { ComponentSelect, useProjectComponents } from './projectComponents'
-import { VersionPicker, useProjectVersions } from './versions'
-import { SprintPicker, useOpenSprints } from './sprints'
+import { VersionPicker } from './versions'
+import { SprintPicker } from './sprints'
+import { deliveryOf } from '../hooks/useProjectDelivery'
 import { Button, Input, Select, Textarea } from './ui'
 
 interface Props {
@@ -96,17 +97,19 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
   const createFields = (config?.fields ?? []).filter(f => f.showOnCreate)
 
   // Project components (HD-31) — non-archived only; own endpoint/key, never part
-  // of the project config.
+  // of the project config. NOT a delivery capability (§5.3): a component is a
+  // slice of one project's own work, not a way of working, so this control keeps
+  // its "nothing curated ⇒ no empty select" rule.
   const { data: componentOptions = [] } = useProjectComponents(effectiveWsId, effectiveProjectId)
 
-  // Project versions (HD-32) — non-archived only; own endpoint/key, never part
-  // of the project config. Both pickers read this one list.
-  const { data: versionOptions = [] } = useProjectVersions(effectiveWsId, effectiveProjectId)
-
-  // Project sprints (HD-22) — open ones only; own endpoint/key, never part of
-  // the project config. The cell hides itself when the project plans none, so a
-  // pure-Kanban project's create form grows no Scrum vocabulary.
-  const { data: sprintOptions = [] } = useOpenSprints(effectiveWsId, effectiveProjectId)
+  // HD-102 §6: which of the path-specific inputs this form offers is answered by
+  // the SELECTED project's declared capabilities — never by whether it happens to
+  // have sprints or versions yet. Read straight off the project list this dialog
+  // already fetched, so it costs no request and follows the project select
+  // instantly. Nothing here is a value (a create form has none), so this is pure
+  // control gating; Rule B has nothing to preserve.
+  const delivery = deliveryOf(projects.find(p => p.id === effectiveProjectId))
+  const iterations = delivery.board === 'SCRUM'
 
   // Option list for the Assignee picker and for USER-type custom fields
   const { data: members = [] } = useQuery({
@@ -406,43 +409,38 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             </div>
           )}
 
-          {/* Sprint + story points (HD-22). The Sprint select only appears once
-              the project actually plans iterations, so a pure-Kanban project's
-              form is unchanged. Leaving Sprint blank files the issue at the
-              BOTTOM of the ranked backlog; leaving points blank means
-              "unestimated", which is deliberately not 0. */}
-          {sprintOptions.length > 0 ? (
-            <div className="grid grid-cols-2 gap-3">
-              <SprintPicker
-                label="Sprint"
-                wsId={effectiveWsId}
-                projectId={effectiveProjectId}
-                value={sprintId}
-                onChange={setSprintId}
-                emptyLabel="Backlog"
-              />
-              <Input
-                label="Story points"
-                type="number"
-                min={0}
-                max={999}
-                step={0.5}
-                placeholder="Unestimated"
-                value={storyPoints}
-                onChange={e => setStoryPoints(e.target.value)}
-              />
+          {/* Sprint + story points (HD-22 / HD-102 §6). The Sprint select rides
+              the `board = SCRUM` capability and the points input the `estimation`
+              one — each hidden when its capability is off, so a Kanban project's
+              form carries no Scrum vocabulary and no permanently-empty number
+              field. They share a row when both are on. Leaving Sprint blank files
+              the issue at the BOTTOM of the ranked backlog; leaving points blank
+              means "unestimated", which is deliberately not 0. */}
+          {(iterations || delivery.estimation) && (
+            <div className={iterations && delivery.estimation ? 'grid grid-cols-2 gap-3' : undefined}>
+              {iterations && (
+                <SprintPicker
+                  label="Sprint"
+                  wsId={effectiveWsId}
+                  projectId={effectiveProjectId}
+                  value={sprintId}
+                  onChange={setSprintId}
+                  emptyLabel="Backlog"
+                />
+              )}
+              {delivery.estimation && (
+                <Input
+                  label="Story points"
+                  type="number"
+                  min={0}
+                  max={999}
+                  step={0.5}
+                  placeholder="Unestimated"
+                  value={storyPoints}
+                  onChange={e => setStoryPoints(e.target.value)}
+                />
+              )}
             </div>
-          ) : (
-            <Input
-              label="Story points"
-              type="number"
-              min={0}
-              max={999}
-              step={0.5}
-              placeholder="Unestimated"
-              value={storyPoints}
-              onChange={e => setStoryPoints(e.target.value)}
-            />
           )}
 
           {/* Parent picker — only for types with a tier exactly one level above.
@@ -486,10 +484,12 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
           ))}
 
           {/* Fix version(s) (HD-32) — on the short path: "this ships in 2.4.0"
-              is a normal thing to say while filing. Hidden entirely when the
-              project curates no versions, so the form doesn't grow an empty
-              control. */}
-          {versionOptions.length > 0 && effectiveWsId && effectiveProjectId && (
+              is a normal thing to say while filing. Gated on the declared
+              `releases` capability (HD-102 §6), NOT on "does this project have
+              versions yet?" — a releases project that hasn't curated any yet
+              still shows the picker, whose empty state points at the Releases
+              page. */}
+          {delivery.releases && effectiveWsId && effectiveProjectId && (
             <VersionPicker
               label="Fix version(s)"
               wsId={effectiveWsId}
@@ -511,8 +511,9 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
 
           {/* "More fields" (HD-32) — the rarely-needed classification lives here
               so the create path stays short. Affects versions is a triage detail
-              ("this defect exists in 2.3.1"), not something most filings need. */}
-          {versionOptions.length > 0 && effectiveWsId && effectiveProjectId && (
+              ("this defect exists in 2.3.1"), not something most filings need.
+              Same `releases` gate as the fix picker above. */}
+          {delivery.releases && effectiveWsId && effectiveProjectId && (
             <div className="flex flex-col gap-2">
               <button
                 type="button"

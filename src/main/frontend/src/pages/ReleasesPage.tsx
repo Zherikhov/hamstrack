@@ -3,11 +3,13 @@ import { useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { MoreHorizontal, Plus, Rocket } from 'lucide-react'
 import {
-  ApiResponseError, apiGetProject, apiGetWorkspace, versionsApi,
+  ApiResponseError, versionsApi,
 } from '../api'
 import { hqlQuote, sanitizeForHql } from '../hql'
 import { ISSUES_KEY_ROOT } from '../lib/queryKeys'
 import { Button, Checkbox, Input, Select, Textarea } from '../components/ui'
+import { CapabilityOffState, ReversibleNotice, useEnableCapability } from '../components/delivery'
+import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { Modal } from './admin/common'
 import {
   ReleasedPill, VersionProgress, moveTargets, remapTargets, versionsKey,
@@ -49,20 +51,13 @@ export default function ReleasesPage() {
   const [deleting, setDeleting] = useState<Version | null>(null)
   const [error, setError] = useState('')
 
-  const { data: project } = useQuery({
-    queryKey: ['project', wsId, projectId],
-    queryFn: () => apiGetProject(wsId!, projectId!),
-    enabled: !!wsId && !!projectId,
-  })
-  // Mirrors ScopeResolver.requireProjectCurator: a workspace OWNER/ADMIN curates
-  // a project's releases without being a project member.
-  const { data: workspace } = useQuery({
-    queryKey: ['workspace', wsId],
-    queryFn: () => apiGetWorkspace(wsId!),
-    enabled: !!wsId,
-  })
-  const isCurator = project?.myRole === 'MANAGER'
-    || workspace?.myRole === 'OWNER' || workspace?.myRole === 'ADMIN'
+  // HD-102: the route still resolves with releases OFF (Rule C, §5.3) — the rail
+  // item is gone, but a link, a bookmark or "turn this back on" must all land
+  // somewhere. `isCurator` mirrors ScopeResolver.requireProjectCurator: a
+  // workspace OWNER/ADMIN curates a project's releases without being a member.
+  const { releases, isCurator, project } =
+    useProjectDelivery(wsId, projectId, { needsRole: true })
+  const enabling = useEnableCapability(wsId, projectId)
 
   // Its OWN key (archived rows included) so the pickers' lean
   // `versionsKey(wsId, projectId)` entry stays lean; both live under the same
@@ -139,12 +134,33 @@ export default function ReleasesPage() {
               Releasing is reversible, and archiving keeps a version on the issues that carry it.
             </p>
           </div>
+          {/* Rule C: "New version" is the capability's own entry point, so it is
+              NOT gated by the capability — with releases off it turns them on in
+              the same gesture that creates the first version. */}
           {isCurator && (
             <Button variant="primary" onClick={() => { setError(''); setEditing('new') }}>
               <Plus size={14} /> New version
             </Button>
           )}
         </div>
+
+        {/* The off-state, where the page's own controls are (§5.3). Versions and
+            their issue links are untouched below — Rule B keeps every value
+            visible; only the write controls went. */}
+        {/* `project` guards the loading window: an unloaded project answers "off"
+            for every capability by design (§ `UNKNOWN_DELIVERY`), and this panel
+            must not flash onto a project whose releases are on. */}
+        {!!project && !releases && (
+          <div className="mb-4">
+            <CapabilityOffState
+              capability="releases"
+              isCurator={isCurator}
+              pending={enabling.isPending}
+              error={enabling.error}
+              onEnable={() => { setError(''); enabling.enable('releases').catch(() => {}) }}
+            />
+          </div>
+        )}
 
         {archivedCount > 0 && (
           <div className="flex justify-end mb-2">
@@ -183,7 +199,10 @@ export default function ReleasesPage() {
               <VersionCard
                 key={v.id}
                 version={v}
-                canCurate={isCurator}
+                // Rule B (§5.2): the card, its progress and its issue links stay
+                // exactly as they are; only the lifecycle CONTROLS follow the
+                // capability. Nothing here was deleted by turning releases off.
+                canCurate={isCurator && releases}
                 onOpenIssues={() => openIssues(v)}
                 onEdit={() => { setError(''); setEditing(v) }}
                 onRelease={() => { setError(''); setReleasing(v) }}
@@ -201,6 +220,10 @@ export default function ReleasesPage() {
           wsId={wsId}
           projectId={projectId}
           version={editing === 'new' ? null : editing}
+          // Rule C: creating the first version on a releases-off project turns
+          // releases on in the same submit, with the reversible notice in the
+          // dialog's copy. Editing an existing one never flips anything.
+          enableReleases={!releases}
           onClose={() => setEditing(null)}
           onSaved={() => { setEditing(null); invalidate() }}
         />
@@ -404,10 +427,16 @@ function MenuItem({ label, danger, onClick }: { label: string; danger?: boolean;
 
 // ── Create / edit ─────────────────────────────────────────────────────────────
 
-function VersionForm({ wsId, projectId, version, onClose, onSaved }: {
+function VersionForm({ wsId, projectId, version, enableReleases, onClose, onSaved }: {
   wsId: string
   projectId: string
   version: Version | null
+  /**
+   * The project has releases OFF and this submit is the gesture that turns them
+   * on (Rule C, §5.3). Only meaningful on create — an existing version is proof
+   * the capability was on once, and Rule B keeps it visible either way.
+   */
+  enableReleases?: boolean
   onClose: () => void
   onSaved: () => void
 }) {
@@ -415,16 +444,22 @@ function VersionForm({ wsId, projectId, version, onClose, onSaved }: {
   const [description, setDescription] = useState(version?.description ?? '')
   const [releaseDate, setReleaseDate] = useState(version?.releaseDate ?? '')
   const [error, setError] = useState('')
+  const enabling = useEnableCapability(wsId, projectId)
+  const bootstrapping = !version && !!enableReleases
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const base = { name: name.trim(), description: description.trim() }
-      return version
+      if (version) {
         // Partial PATCH: `clearReleaseDate` is the only way to unset a nullable
         // scalar (a plain null can't be told apart from "not sent" server-side).
-        ? versionsApi.update(wsId, projectId, version.id,
-            releaseDate ? { ...base, releaseDate } : { ...base, clearReleaseDate: true })
-        : versionsApi.create(wsId, projectId, releaseDate ? { ...base, releaseDate } : base)
+        return versionsApi.update(wsId, projectId, version.id,
+          releaseDate ? { ...base, releaseDate } : { ...base, clearReleaseDate: true })
+      }
+      // Capability first, so a failure can never leave a version stranded on a
+      // project that still says it doesn't do releases.
+      if (bootstrapping) await enabling.enable('releases')
+      return versionsApi.create(wsId, projectId, releaseDate ? { ...base, releaseDate } : base)
     },
     onSuccess: onSaved,
     // 409 duplicate name (case-insensitive, ARCHIVED names included) and any
@@ -435,6 +470,10 @@ function VersionForm({ wsId, projectId, version, onClose, onSaved }: {
   return (
     <Modal title={version ? `Edit version “${version.name}”` : 'New version'} onClose={onClose}>
       <div className="flex flex-col gap-3">
+        {/* Rule C: what this submit will change, and that it can be changed back,
+            as copy — not as a tooltip on the button. */}
+        {bootstrapping && <ReversibleNotice capability="releases" />}
+
         <Input label="Name" value={name} onChange={e => setName(e.target.value)}
                maxLength={60} placeholder="2.4.0" autoFocus />
 

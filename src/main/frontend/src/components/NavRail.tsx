@@ -10,6 +10,7 @@ import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
+import { deliveryOf } from '../hooks/useProjectDelivery'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { getLastWorkspaceId } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
@@ -91,6 +92,10 @@ export default function NavRail() {
     queryFn: () => apiGetProject(cur!.wsId, cur!.projectId),
     enabled: !!cur,
   })
+  // HD-102: which project sections this project's way of working calls for. Read
+  // off the entry above — the rail is the surface that CACHES it, so asking here
+  // is free (and `useProjectDelivery` elsewhere then hits this same entry).
+  const delivery = deliveryOf(project)
 
   // Resolve a workspace for the Search link so it's reachable even before the
   // user has opened any board (`cur` is null then). Fallback chain: current
@@ -217,8 +222,15 @@ export default function NavRail() {
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}`} end icon={Columns3} label="Board" collapsed={collapsed} />
           <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/backlog`} icon={ListTodo} label="Backlog" collapsed={collapsed} />
           {/* Releases (HD-32) — versions are working data with a lifecycle, so
-              they are managed on their own page, not in project settings */}
-          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/releases`} icon={Rocket} label="Releases" collapsed={collapsed} />
+              they are managed on their own page, not in project settings.
+              HD-102 §6: the rail item is gated on the DECLARED `releases`
+              capability (never on "does this project have versions yet?"), while
+              the ROUTE still resolves — a project with releases off can still be
+              linked/bookmarked into the page, which is where its own enabling
+              affordance lives (Rule C). */}
+          {delivery.releases && (
+            <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/releases`} icon={Rocket} label="Releases" collapsed={collapsed} />
+          )}
           {/* Reports — no backend yet */}
           <div
             style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11, padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}

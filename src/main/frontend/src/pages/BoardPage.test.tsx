@@ -7,7 +7,10 @@ import BoardPage from './BoardPage'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import type { BoardQuickFilters } from '../uiPrefs'
-import type { Issue, IssueType, PriorityOption, Status, User } from '../types'
+import { versionsApi } from '../api'
+import type {
+  Issue, IssueType, PriorityOption, ProjectDelivery, Sprint, Status, User, Version,
+} from '../types'
 
 // HD-43 (revised): the board's client-side quick filters — two assignee chips
 // plus a single-selection type <Select> shaped like the priority filter. The
@@ -70,9 +73,20 @@ const OTHER_BUG = issue('Other bug', BUG, TODO, OTHER)
 const UNASSIGNED_BUG = issue('Unassigned bug', BUG, DOING, undefined)
 const ALL_ISSUES = [MINE_TASK, MINE_BUG, OTHER_TASK, OTHER_BUG, UNASSIGNED_BUG]
 
+// What the board's issue query answers with — swappable so the HD-102 block can
+// put points on a card without disturbing the fixtures every other test counts.
+let listedIssues: Issue[] = ALL_ISSUES
 const apiListIssuesMock = vi.fn(async () => ({
-  issues: ALL_ISSUES, truncated: false, totalAvailable: ALL_ISSUES.length, cap: 100,
+  issues: listedIssues, truncated: false, totalAvailable: listedIssues.length, cap: 100,
 }))
+
+// HD-102: the project's DECLARED delivery capabilities. `undefined` means the
+// response carries no `delivery` at all — a pre-HD-102 server, which is what
+// every pre-existing test here describes, and which `deliveryOf` upgrades per §7
+// (releases + estimation on, board from the deprecated `boardMode` mirror).
+let delivery: ProjectDelivery | undefined
+let projectVersions: Version[] = []
+let activeSprints: Sprint[] = []
 
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
@@ -107,13 +121,15 @@ vi.mock('../api', () => ({
   componentsApi: { list: vi.fn(async () => [BILLING]), update: vi.fn() },
   // HD-32: the (server-side) fix-version filter and the drawer's version cells
   // read the project's versions through this one.
-  versionsApi: { list: vi.fn(async () => []) },
-  // HD-27: the board reads `boardMode` off the project (and the curator
-  // predicate off the workspace role) to decide Kanban vs Scrum. This fixture
-  // stays KANBAN, so every assertion below describes the unchanged board.
+  versionsApi: { list: vi.fn(async () => projectVersions) },
+  // HD-27 / HD-102: the board reads its delivery capabilities off the project
+  // (and the curator predicate off the workspace role) to decide what to draw.
+  // This fixture stays KANBAN with no `delivery`, so every assertion outside the
+  // HD-102 block below describes the unchanged, pre-migration board.
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
     archived: false, myRole: 'MANAGER', boardMode: 'KANBAN',
+    ...(delivery ? { delivery } : {}),
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
@@ -121,7 +137,12 @@ vi.mock('../api', () => ({
   })),
   // …and the sprint sections/header from this group (unused in KANBAN, but a
   // mocked module must expose every imported binding).
-  sprintsApi: { list: vi.fn(async () => ({ content: [], page: 0, size: 200, totalElements: 0, totalPages: 0, hasNext: false })) },
+  sprintsApi: {
+    list: vi.fn(async () => ({
+      content: activeSprints, page: 0, size: 200,
+      totalElements: activeSprints.length, totalPages: 1, hasNext: false,
+    })),
+  },
 }))
 
 beforeAll(() => {
@@ -150,7 +171,12 @@ beforeAll(() => {
 
 beforeEach(() => {
   localStorage.clear()
+  listedIssues = ALL_ISSUES
+  delivery = undefined
+  projectVersions = []
+  activeSprints = []
   apiListIssuesMock.mockClear()
+  vi.mocked(versionsApi.list).mockClear()
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
   useUiStore.setState({ createIssueOpen: false, createIssuePreset: undefined })
 })
@@ -531,5 +557,128 @@ describe('BoardPage issue creation entry points (HD-70)', () => {
     expect(useUiStore.getState().createIssueOpen).toBe(true)
     expect(useUiStore.getState().createIssuePreset)
       .toEqual({ projectId: PROJECT_ID, statusId: DOING.id })
+  })
+})
+
+/**
+ * HD-102 §6 — the board's path vocabulary follows the project's DECLARED
+ * capabilities:
+ *
+ *  | element                   | gate    |
+ *  |---------------------------|---------|
+ *  | fix-version filter        | `R`     |
+ *  | column point subtotals    | `I ∧ E` |
+ *  | sprint header point badge | `E`     |
+ *
+ * The subtotal gate is the interesting one: it is the only `∧` in the matrix, so
+ * a "close enough" implementation that gates it on `I` alone (or on `E` alone)
+ * still looks right in three of the four combinations.
+ */
+describe('BoardPage delivery capabilities (HD-102)', () => {
+  const V_240: Version = {
+    id: 'v1', name: '2.4.0', released: false, archived: false,
+    issueCount: 0, doneIssueCount: 0, affectsIssueCount: 0,
+    createdAt: '2026-08-01T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  }
+  const SPRINT_ACTIVE: Sprint = {
+    id: 'sp1', name: 'Sprint 7', state: 'ACTIVE', sequence: 7,
+    goal: null, startAt: '2026-08-01T00:00:00Z', endAt: '2026-08-15T00:00:00Z',
+    completedAt: null, daysRemaining: 3,
+    issueCount: 5, doneIssueCount: 0, points: 3, donePoints: 0, unestimatedCount: 4,
+    createdAt: '2026-07-30T00:00:00Z', updatedAt: '2026-08-01T00:00:00Z',
+  }
+
+  // Both filters are the shared custom <Select> (a button + a listbox popover),
+  // like `typeFilter` above.
+  const fixVersionFilter = () => screen.queryByRole('button', { name: 'Filter by fix version' })
+  // The COLUMN subtotal specifically — the sprint header carries a point badge of
+  // its own, so a bare /pts/ match would conflate the two.
+  const columnSubtotals = () =>
+    screen.queryAllByTitle('Story points in this column (over the loaded cards)')
+  // …and its counterpart in the sprint header strip, matched by its own title for
+  // the same reason.
+  const sprintHeaderPoints = () => screen.queryByTitle('Story points done / committed')
+
+  it('offers the fix-version filter when releases are on and versions exist', async () => {
+    delivery = { board: 'KANBAN', releases: true, estimation: false, preset: 'RELEASES' }
+    projectVersions = [V_240]
+    renderBoard()
+    await boardReady()
+
+    await waitFor(() => expect(fixVersionFilter()).toBeInTheDocument())
+  })
+
+  it('hides it when releases are off — and never fetches the versions to find out', async () => {
+    // The point of the capability model: the answer is declared, so the list that
+    // used to be fetched *in order to decide* is not fetched at all.
+    delivery = { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' }
+    projectVersions = [V_240]
+    renderBoard()
+    await boardReady()
+
+    expect(fixVersionFilter()).toBeNull()
+    expect(versionsApi.list).not.toHaveBeenCalled()
+  })
+
+  it('shows column point subtotals only when iterations AND estimation are both on', async () => {
+    listedIssues = [{ ...MINE_TASK, storyPoints: 3 }, MINE_BUG, OTHER_TASK, OTHER_BUG, UNASSIGNED_BUG]
+    activeSprints = [SPRINT_ACTIVE]
+    delivery = { board: 'SCRUM', releases: false, estimation: true, preset: 'SCRUM' }
+    renderBoard()
+    await boardReady()
+
+    await waitFor(() => expect(columnSubtotals()).toHaveLength(2))   // one per column
+    expect(await screen.findByText(/^3 pts$/)).toBeInTheDocument()
+  })
+
+  it('drops the subtotals on an iterations project that does NOT estimate', async () => {
+    listedIssues = [{ ...MINE_TASK, storyPoints: 3 }, MINE_BUG, OTHER_TASK, OTHER_BUG, UNASSIGNED_BUG]
+    activeSprints = [SPRINT_ACTIVE]
+    delivery = { board: 'SCRUM', releases: false, estimation: false, preset: 'CUSTOM' }
+    renderBoard()
+    await boardReady()
+
+    // The sprint header proves the Scrum board rendered, so the absence below is
+    // the gate and not an unfinished render.
+    expect(await screen.findByText(/Sprint 7/)).toBeInTheDocument()
+    expect(columnSubtotals()).toHaveLength(0)
+  })
+
+  it('drops them on an estimating project that does NOT run iterations', async () => {
+    // Points still exist and still show on the cards (Rule B); it is the
+    // per-column AGGREGATE that means nothing without a time-box.
+    listedIssues = [{ ...MINE_TASK, storyPoints: 3 }, MINE_BUG, OTHER_TASK, OTHER_BUG, UNASSIGNED_BUG]
+    delivery = { board: 'KANBAN', releases: false, estimation: true, preset: 'CUSTOM' }
+    renderBoard()
+    await boardReady()
+
+    expect(columnSubtotals()).toHaveLength(0)
+  })
+
+  // The sprint HEADER's badge, gated on `E` alone (the columns above are the
+  // `I ∧ E` cell): the header only exists on an iterations board in the first
+  // place, so `I` is already implied by its presence. Both halves are asserted
+  // against the SAME sprint fixture — which carries `points: 3` — so "absent"
+  // can only mean the gate fired and not that there was nothing to render.
+  it('hides the sprint header point badge when estimation is off', async () => {
+    activeSprints = [SPRINT_ACTIVE]
+    delivery = { board: 'SCRUM', releases: false, estimation: false, preset: 'CUSTOM' }
+    renderBoard()
+    await boardReady()
+
+    // The header itself rendered — so the absence below is the gate, not an
+    // unfinished render.
+    expect(await screen.findByText(/Sprint 7/)).toBeInTheDocument()
+    expect(sprintHeaderPoints()).toBeNull()
+  })
+
+  it('shows it when estimation is on', async () => {
+    activeSprints = [SPRINT_ACTIVE]
+    delivery = { board: 'SCRUM', releases: false, estimation: true, preset: 'SCRUM' }
+    renderBoard()
+    await boardReady()
+
+    await waitFor(() => expect(sprintHeaderPoints()).toBeInTheDocument())
+    expect(sprintHeaderPoints()).toHaveTextContent('0 / 3 pts')
   })
 })

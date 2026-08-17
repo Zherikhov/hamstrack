@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, Route, Routes } from 'react-router'
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import ProjectSettingsArea from './ProjectSettingsArea'
 import type { Project, Workspace } from '../../types'
 
@@ -49,13 +49,19 @@ vi.mock('../admin/AdminFieldsPage', () => ({ default: () => <div /> }))
 vi.mock('../admin/AdminWorkflowsPage', () => ({ default: () => <div /> }))
 vi.mock('./ProjectBindingsPage', () => ({ default: () => <div>Bindings page</div> }))
 vi.mock('./ProjectComponentsPage', () => ({ default: () => <div>Components page</div> }))
-vi.mock('./ProjectBoardSettingsPage', () => ({ default: () => <div>Board settings page</div> }))
+vi.mock('./ProjectDeliverySettingsPage', () => ({ default: () => <div>Delivery settings page</div> }))
+
+/** Where the router actually ended up — a redirect's destination, not just "something rendered". */
+function LocationProbe() {
+  return <div data-testid="path">{useLocation().pathname}</div>
+}
 
 function renderArea(initialPath = `/w/${WS_ID}/p/${PROJECT_ID}/settings`) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[initialPath]}>
+        <LocationProbe />
         <Routes>
           <Route path="/w/:wsId/p/:projectId" element={<div>Board page</div>} />
           <Route path="/w/:wsId/p/:projectId/settings/*" element={<ProjectSettingsArea />} />
@@ -162,10 +168,63 @@ describe('ProjectSettingsArea — curator guard (HD-31)', () => {
   it('keeps a workspace OWNER in the area when the project role echoes back VIEWER', async () => {
     apiGetProjectMock.mockResolvedValue(project('VIEWER'))
     apiGetWorkspaceMock.mockResolvedValue(workspace('OWNER'))
+    renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`)
+
+    expect(await screen.findByText('Delivery settings page')).toBeTruthy()
+    expect(screen.queryByText('Board page')).toBeNull()
+  })
+
+  // HD-106 renamed the tab Board → Delivery. The old path is in bookmarks, in
+  // links pasted into tickets, and in the sentence the Scrum blurb has always
+  // carried — so it must REDIRECT, not fall through to the area's catch-all
+  // (which would drop the user on Taxonomy with no explanation).
+  it('redirects the retired /settings/board path to the Delivery tab', async () => {
+    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
+    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
     renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/board`)
 
-    expect(await screen.findByText('Board settings page')).toBeTruthy()
-    expect(screen.queryByText('Board page')).toBeNull()
+    expect(await screen.findByText('Delivery settings page')).toBeTruthy()
+    // The tab strip points at the new path, and there is no "Board" tab left.
+    expect(screen.getByRole('link', { name: 'Delivery' }).getAttribute('href'))
+      .toBe(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`)
+    expect(screen.queryByRole('link', { name: 'Board' })).toBeNull()
+  })
+
+  // The destination, not merely "something rendered". Falling through to the
+  // area's catch-all would ALSO render a page — Taxonomy — and an old bookmark
+  // silently landing on an unrelated tab is the failure this route prevents.
+  it('lands the old /settings/board URL on /settings/delivery itself', async () => {
+    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
+    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/board`)
+
+    expect(await screen.findByText('Delivery settings page')).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId('path'))
+      .toHaveTextContent(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`))
+    expect(screen.queryByText('Bindings page')).toBeNull()
+  })
+
+  // The other half of the same claim: the catch-all still exists and still goes
+  // to Taxonomy, so the test above is proving a dedicated route rather than a
+  // coincidence of ordering.
+  it('still sends an unknown settings path to Taxonomy', async () => {
+    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
+    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/no-such-tab`)
+
+    expect(await screen.findByText('Bindings page')).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId('path'))
+      .toHaveTextContent(`/w/${WS_ID}/p/${PROJECT_ID}/settings`))
+    expect(screen.queryByText('Delivery settings page')).toBeNull()
+  })
+
+  it('routes the Delivery tab to the delivery page', async () => {
+    apiGetProjectMock.mockResolvedValue(project('MANAGER'))
+    apiGetWorkspaceMock.mockResolvedValue(workspace('MEMBER'))
+    renderArea(`/w/${WS_ID}/p/${PROJECT_ID}/settings/delivery`)
+
+    expect(await screen.findByText('Delivery settings page')).toBeTruthy()
+    expect(screen.queryByText('Bindings page')).toBeNull()
   })
 
   it('routes the Components tab to ProjectComponentsPage for a curator', async () => {

@@ -9,7 +9,7 @@ import AdminIssueTypesPage from '../admin/AdminIssueTypesPage'
 import AdminFieldsPage from '../admin/AdminFieldsPage'
 import AdminWorkflowsPage from '../admin/AdminWorkflowsPage'
 import ProjectBindingsPage from './ProjectBindingsPage'
-import ProjectBoardSettingsPage from './ProjectBoardSettingsPage'
+import ProjectDeliverySettingsPage from './ProjectDeliverySettingsPage'
 import ProjectComponentsPage from './ProjectComponentsPage'
 
 /**
@@ -63,8 +63,11 @@ export default function ProjectSettingsArea() {
     // Components are project content (HD-31), not bound taxonomy — but their
     // curation belongs with the rest of the project's settings.
     { to: `${settingsBase}/components`, label: 'Components', end: false },
-    // Kanban ⇄ Scrum (HD-27). A per-project presentation switch, not taxonomy.
-    { to: `${settingsBase}/board`, label: 'Board', end: false },
+    // How this team delivers (HD-106): the board question plus the releases and
+    // estimation capabilities. Per-project presentation switches, not taxonomy —
+    // and never a permission (Rule A). Was "Board" until the tab grew the other
+    // two capabilities; `/settings/board` still resolves, see the routes below.
+    { to: `${settingsBase}/delivery`, label: 'Delivery', end: false },
   ]
 
   // Curator = project MANAGER, or an OWNER/ADMIN of the enclosing workspace
@@ -110,7 +113,14 @@ export default function ProjectSettingsArea() {
             <Route path="priorities" element={<AdminPrioritiesPage />} />
             <Route path="fields" element={<AdminFieldsPage />} />
             <Route path="components" element={<ProjectComponentsPage />} />
-            <Route path="board" element={<ProjectBoardSettingsPage />} />
+            <Route path="delivery" element={<ProjectDeliverySettingsPage />} />
+            {/* The tab was "Board" until HD-106 renamed it. Bookmarks, the link
+                the Scrum blurb has always carried and anything a user pasted into
+                a ticket must keep working, so the old path redirects rather than
+                falling through to the catch-all below (which would silently land
+                them on Taxonomy). Absolute target: inside this splat a relative
+                one would resolve AFTER the splat segment. */}
+            <Route path="board" element={<Navigate to={`${settingsBase}/delivery`} replace />} />
             <Route path="*" element={<Navigate to={settingsBase} replace />} />
           </Routes>
         </AdminApiProvider>

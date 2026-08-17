@@ -4,9 +4,10 @@ import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import CreateIssueModal from './CreateIssueModal'
+import { sprintsApi, versionsApi } from '../api'
 import { boardIssuesKey } from '../lib/queryKeys'
 import type { CreateIssuePreset } from '../uiStore'
-import type { BoardIssues, Issue } from '../types'
+import type { BoardIssues, Issue, ProjectDelivery } from '../types'
 
 // HD-70: the board's per-column quick-add opens the create dialog with a
 // preset status ({ projectId, statusId }). The Status select must honour that
@@ -35,6 +36,10 @@ const EPIC = { id: 't2', name: 'Epic', color: '#0a0', position: 1, hierarchyLeve
 const mockState = vi.hoisted(() => ({
   issueTypes: [] as { id: string; name: string; color: string; position: number; hierarchyLevel: number }[],
   board: { issues: [], truncated: false, totalAvailable: 0, cap: 500 } as BoardIssues,
+  // HD-102: the SELECTED project's declared delivery capabilities decide which
+  // path-specific inputs this form offers — never whether it happens to have
+  // sprints or versions yet. Rides the project list the dialog already fetches.
+  delivery: { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' } as ProjectDelivery,
 }))
 
 vi.mock('../api', () => ({
@@ -42,7 +47,10 @@ vi.mock('../api', () => ({
     { id: 'w1', name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z' },
   ]),
   apiListProjects: vi.fn(async () => [
-    { id: 'p1', workspaceId: 'w1', name: 'Proj', key: 'PR', archived: false, myRole: 'MANAGER', createdAt: '2026-01-01T00:00:00Z' },
+    {
+      id: 'p1', workspaceId: 'w1', name: 'Proj', key: 'PR', archived: false,
+      myRole: 'MANAGER', delivery: mockState.delivery, createdAt: '2026-01-01T00:00:00Z',
+    },
   ]),
   apiGetProjectConfig: vi.fn(async () => ({
     statuses: STATUSES,
@@ -70,6 +78,7 @@ vi.mock('../api', () => ({
 beforeEach(() => {
   mockState.issueTypes = [TASK]
   mockState.board = { issues: [], truncated: false, totalAvailable: 0, cap: 500 }
+  mockState.delivery = { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' }
 })
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -154,5 +163,82 @@ describe('CreateIssueModal shares the board cache entry without a shape clash', 
     await waitFor(() =>
       expect(qc.getQueryData<BoardIssues>(boardIssuesKey('w1', 'p1')))
         .toMatchObject({ issues: expect.any(Array), truncated: false, cap: 500 }))
+  })
+})
+
+/**
+ * HD-102 §6 — which path-specific inputs the create form offers is decided by the
+ * selected project's DECLARED delivery capabilities, not by whether it happens to
+ * have sprints or versions yet (`sprintOptions.length > 0` / `versionOptions.length
+ * > 0` are gone — Rule C, §5.3). A create form carries no existing values, so this
+ * is pure control gating; Rule B has nothing to preserve here.
+ */
+describe('CreateIssueModal delivery capabilities (HD-102)', () => {
+  it('offers none of the path-specific inputs on a lean Kanban project', async () => {
+    render(<CreateIssueModal wsId="w1" defaultProjectId="p1" onClose={() => {}} />, { wrapper })
+
+    await waitFor(() => expect(screen.getByLabelText('Type')).toHaveTextContent('Task'))
+    expect(screen.queryByLabelText('Sprint')).toBeNull()
+    expect(screen.queryByLabelText('Story points')).toBeNull()
+    expect(screen.queryByText(/fix version/i)).toBeNull()
+    expect(screen.queryByText(/more fields/i)).toBeNull()
+  })
+
+  it('offers the sprint select and the points input on a Scrum project with NO sprints yet', async () => {
+    // The removed heuristic gated the sprint select on the sprint list being
+    // non-empty — the same "infer the mode from the data" check that produced the
+    // production dead end.
+    mockState.delivery = { board: 'SCRUM', releases: false, estimation: true, preset: 'SCRUM' }
+    render(<CreateIssueModal wsId="w1" defaultProjectId="p1" onClose={() => {}} />, { wrapper })
+
+    expect(await screen.findByLabelText('Sprint')).toBeInTheDocument()
+    expect(screen.getByLabelText('Story points')).toBeInTheDocument()
+    expect(screen.queryByText(/fix version/i)).toBeNull()
+  })
+
+  it('offers the version pickers when releases are on, with none curated yet', async () => {
+    mockState.delivery = { board: 'KANBAN', releases: true, estimation: false, preset: 'RELEASES' }
+    render(<CreateIssueModal wsId="w1" defaultProjectId="p1" onClose={() => {}} />, { wrapper })
+
+    expect(await screen.findByText('Fix version(s)')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /more fields/i })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Sprint')).toBeNull()
+    expect(screen.queryByLabelText('Story points')).toBeNull()
+  })
+})
+
+/**
+ * HD-102 §12 — the two eager prefetches this dialog used to run *purely to decide
+ * what to render* (`useOpenSprints` + `useProjectVersions`, both fired on every
+ * open and again on every project switch) are gone: the declared capabilities
+ * answer that question for free, off the project list the dialog already has.
+ *
+ * Asserting the request is NOT made is the only way to keep them gone — a
+ * "fetch it, then decide" refactor is invisible in every rendering assertion
+ * above.
+ */
+describe('CreateIssueModal spends no request to decide what to offer (HD-102)', () => {
+  beforeEach(() => {
+    vi.mocked(sprintsApi.list).mockClear()
+    vi.mocked(versionsApi.list).mockClear()
+  })
+
+  it('fetches neither sprints nor versions for a lean Kanban project', async () => {
+    render(<CreateIssueModal wsId="w1" defaultProjectId="p1" onClose={() => {}} />, { wrapper })
+
+    await waitFor(() => expect(screen.getByLabelText('Type')).toHaveTextContent('Task'))
+    expect(sprintsApi.list).not.toHaveBeenCalled()
+    expect(versionsApi.list).not.toHaveBeenCalled()
+  })
+
+  it('fetches sprints only once the capability puts a sprint picker on screen', async () => {
+    mockState.delivery = { board: 'SCRUM', releases: false, estimation: false, preset: 'CUSTOM' }
+    render(<CreateIssueModal wsId="w1" defaultProjectId="p1" onClose={() => {}} />, { wrapper })
+
+    expect(await screen.findByLabelText('Sprint')).toBeInTheDocument()
+    // The picker owns its own option list…
+    await waitFor(() => expect(sprintsApi.list).toHaveBeenCalled())
+    // …and releases being off still costs nothing.
+    expect(versionsApi.list).not.toHaveBeenCalled()
   })
 })

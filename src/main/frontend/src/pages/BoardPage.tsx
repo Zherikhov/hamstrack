@@ -2,8 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Filter, Plus } from 'lucide-react'
-import { apiGetProject, apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
+import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
 import { useAuthStore } from '../auth'
+import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { useReducedMotion } from '../hooks/useReducedMotion'
 import { forgetProject } from '../recentProjects'
 import { getUiPrefs, setUiPref } from '../uiPrefs'
@@ -16,7 +17,7 @@ import { LabelChips, LabelFilter } from '../components/labels'
 import { ComponentFilter, ComponentName } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
 import {
-  CompleteSprintDialog, SprintHeader, StartSprintDialog, StoryPointsChip,
+  CompleteSprintDialog, SprintFormDialog, SprintHeader, StartSprintDialog, StoryPointsChip,
   formatPoints, useActiveSprint, useIsProjectCurator, useOpenSprints,
 } from '../components/sprints'
 import IssueSidePanel from './IssueSidePanel'
@@ -171,20 +172,15 @@ export default function BoardPage() {
   const priorities = config?.priorities ?? []
   const fields = config?.fields ?? []
 
-  // ── Scrum mode (HD-27) ──────────────────────────────────────────────────────
-  // `boardMode` rides along on the ProjectResponse the rail and the settings
-  // areas already fetch, so this costs no request on the hot path. KANBAN is
-  // byte-identical to the pre-0.13.0 board: no sprint fetch, no header, no extra
-  // filter param.
-  // `boardMode` comes off the ProjectResponse the rail already caches; the
-  // workspace-role half of the curator predicate is only fetched once the board
-  // is actually in Scrum mode, so a Kanban board issues no new request.
-  const projectQuery = useQuery({
-    queryKey: ['project', wsId, projectId],
-    queryFn: () => apiGetProject(wsId!, projectId!),
-    enabled: !!wsId && !!projectId,
-  })
-  const scrum = (projectQuery.data?.boardMode ?? 'KANBAN') === 'SCRUM'
+  // ── Iterations (HD-27 / HD-102) ─────────────────────────────────────────────
+  // The board asks the project's DECLARED delivery capabilities (never "does this
+  // project have sprints?"). They ride the ProjectResponse the rail and the
+  // settings areas already fetch, so this costs no request on the hot path.
+  // KANBAN is byte-identical to the pre-0.13.0 board: no sprint fetch, no header,
+  // no extra filter param. The workspace-role half of the curator predicate is
+  // only fetched once the board is actually scoped to sprints, so a Kanban board
+  // issues no new request.
+  const { iterations: scrum, estimation, releases } = useProjectDelivery(wsId, projectId)
   const { isCurator } = useIsProjectCurator(wsId, projectId, scrum)
   const { sprint: activeSprint, isLoading: sprintLoading } = useActiveSprint(wsId, projectId, scrum)
   // Only consulted by the "no active sprint" empty state, so it stays unfetched
@@ -193,6 +189,16 @@ export default function BoardPage() {
     wsId, projectId, scrum && !sprintLoading && !activeSprint && isCurator)
   const futureSprints = openSprints.filter(s => s.state === 'FUTURE')
 
+  // "Show all issues" (§6, open question 3) — a LOCAL view toggle any member may
+  // flip: a Scrum board with nothing running still lets you look at the whole
+  // project. It is deliberately NOT a settings change and is not persisted — it
+  // changes what this tab shows, never what the project is. Remounting on
+  // wsId/projectId (ParamKeyed) resets it, like every other board view state.
+  const [showAllIssues, setShowAllIssues] = useState(false)
+  /** Scope the board to the running sprint — the Scrum board's defining behaviour. */
+  const sprintScoped = scrum && !showAllIssues
+
+  const [creatingSprint, setCreatingSprint] = useState(false)
   const [startingSprint, setStartingSprint] = useState<Sprint | null>(null)
   const [completing, setCompleting] = useState(false)
 
@@ -206,15 +212,16 @@ export default function BoardPage() {
     labelMatch,
     componentId: filterComponentId || undefined,
     fixVersionId: filterFixVersionId || undefined,
-    sprintId: scrum ? activeSprint?.id : undefined,
+    sprintId: sprintScoped ? activeSprint?.id : undefined,
   }
   const issuesKey = boardIssuesKey(wsId, projectId, serverFilters)
   const { data: board, isLoading, isError } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, serverFilters),
-    // A Scrum board with no active sprint has nothing to scope to — it renders
-    // the empty state instead of the whole project's issues.
-    enabled: !!wsId && !!projectId && (!scrum || !!activeSprint),
+    // A sprint-scoped board with no active sprint has nothing to scope to — it
+    // renders the empty state instead of the whole project's issues. "Show all
+    // issues" drops the scoping, so the same query then covers the project.
+    enabled: !!wsId && !!projectId && (!sprintScoped || !!activeSprint),
   })
   const issues = board?.issues ?? []
 
@@ -351,12 +358,31 @@ export default function BoardPage() {
         </div>
 
         {/* Sprint header strip — Scrum mode only; Kanban is pixel-unchanged. */}
-        {scrum && activeSprint && (
+        {sprintScoped && activeSprint && (
           <SprintHeader
             sprint={activeSprint}
             canCurate={isCurator}
+            showPoints={estimation}
             onComplete={() => setCompleting(true)}
           />
+        )}
+
+        {/* …and its counterpart while the local "show all" view is on, so the
+            board never silently misrepresents its own scope. Nothing about the
+            project changed, and the way back is right here. */}
+        {scrum && showAllIssues && (
+          <div
+            className="flex items-center gap-3 px-5 py-2 border-b flex-shrink-0 flex-wrap text-xs"
+            style={{ background: 'white', borderColor: 'var(--color-border)', color: 'var(--color-text-secondary)' }}
+          >
+            <span>
+              Showing every issue in this project. This board is normally scoped to the running
+              sprint — this is just your view, nothing about the project changed.
+            </span>
+            <Button variant="ghost" size="sm" onClick={() => setShowAllIssues(false)}>
+              Back to the sprint board
+            </Button>
+          </div>
         )}
 
         {/* Filter bar — server-side priority select, client-side type select and
@@ -398,14 +424,17 @@ export default function BoardPage() {
             onChange={setFilterComponentId}
           />
 
-          {/* Fix versions — server-side (query param); hides itself when the
-              project curates none (HD-32) */}
-          <FixVersionFilter
-            wsId={wsId}
-            projectId={projectId}
-            value={filterFixVersionId}
-            onChange={setFilterFixVersionId}
-          />
+          {/* Fix versions — server-side (query param). Gated on the declared
+              `releases` capability (HD-102 §6); with releases on it still hides
+              itself while the project has curated no versions at all (HD-32). */}
+          {releases && (
+            <FixVersionFilter
+              wsId={wsId}
+              projectId={projectId}
+              value={filterFixVersionId}
+              onChange={setFilterFixVersionId}
+            />
+          )}
 
           {/* Labels — server-side (query params), next to the priority select */}
           <LabelFilter
@@ -500,7 +529,7 @@ export default function BoardPage() {
           className="flex-1 flex gap-3 overflow-x-auto overflow-y-hidden p-4"
           style={{ background: 'var(--color-surface)' }}
         >
-          {scrum && !activeSprint ? (
+          {sprintScoped && !activeSprint ? (
             sprintLoading ? (
               <div className="flex-1 flex items-center justify-center">
                 <span className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
@@ -519,19 +548,42 @@ export default function BoardPage() {
                 >
                   <p className="font-semibold" style={{ fontSize: 15 }}>No active sprint</p>
                   <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-                    This project’s board is scoped to the running sprint. Plan one in the Backlog,
-                    then start it to see the work here.
+                    This project’s board is scoped to the running sprint. Start one to see the work
+                    here — or look at everything in the project meanwhile.
                   </p>
+                  {/* Open question 3: the empty state stays, but it must be
+                      ACTIONABLE. A curator gets a running sprint from right here
+                      without visiting the Backlog or settings (Rule C); everyone
+                      gets a local escape hatch to the whole project. */}
                   <div className="flex items-center gap-2 flex-wrap justify-center">
-                    <Link to={`/w/${wsId}/p/${projectId}/backlog`} style={{ textDecoration: 'none' }}>
-                      <Button variant="primary" size="sm">Go to Backlog</Button>
-                    </Link>
-                    {isCurator && futureSprints.length > 0 && (
-                      <Button variant="secondary" size="sm" onClick={() => setStartingSprint(futureSprints[0])}>
-                        Start “{futureSprints[0].name}”
-                      </Button>
+                    {isCurator && (
+                      futureSprints.length > 0 ? (
+                        <Button variant="primary" size="sm" onClick={() => setStartingSprint(futureSprints[0])}>
+                          Start “{futureSprints[0].name}”
+                        </Button>
+                      ) : (
+                        <Button variant="primary" size="sm" onClick={() => setCreatingSprint(true)}>
+                          Create &amp; start a sprint
+                        </Button>
+                      )
                     )}
+                    <Button variant="secondary" size="sm" onClick={() => setShowAllIssues(true)}>
+                      Show all issues
+                    </Button>
+                    <Link to={`/w/${wsId}/p/${projectId}/backlog`} style={{ textDecoration: 'none' }}>
+                      <Button variant="ghost" size="sm">Go to Backlog</Button>
+                    </Link>
                   </div>
+                  {isCurator && futureSprints.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setCreatingSprint(true)}
+                      className="text-xs cursor-pointer hover:underline"
+                      style={{ color: 'var(--color-brand)' }}
+                    >
+                      Create &amp; start a new one instead
+                    </button>
+                  )}
                 </div>
               </div>
             )
@@ -555,10 +607,13 @@ export default function BoardPage() {
               const columnIssues = visibleIssues.filter(i => i.status.id === status.id)
               const allowed = dragging ? isMoveAllowed(dragging.status, status.id, transitions) : false
               const isOver = dragOverStatusId === status.id
-              // Scrum only: the column's point subtotal over the LOADED cards.
-              // The board is server-capped, so a truncated board suffixes "+" —
-              // the existing truncation banner explains why.
-              const columnPoints = scrum
+              // The column's point subtotal over the LOADED cards — an aggregate,
+              // so §6 gates it on `I ∧ E`: it only means something for a team
+              // that both runs iterations and estimates. (The per-card chip is a
+              // VALUE and stays unconditional — Rule B.) The board is
+              // server-capped, so a truncated board suffixes "+" — the existing
+              // truncation banner explains why.
+              const columnPoints = scrum && estimation
                 ? columnIssues.reduce((sum, i) => sum + (i.storyPoints ?? 0), 0)
                 : null
               return (
@@ -730,6 +785,20 @@ export default function BoardPage() {
           sprint={activeSprint}
           onClose={() => setCompleting(false)}
           onCompleted={() => setCompleting(false)}
+        />
+      )}
+
+      {/* "Create & start a sprint" — one gesture from the empty state (§6). The
+          board only reaches this state with iterations already ON, so there is no
+          capability to enable here; the dialog's bootstrap half stays off. */}
+      {creatingSprint && wsId && projectId && (
+        <SprintFormDialog
+          wsId={wsId}
+          projectId={projectId}
+          sprint={null}
+          alsoStart
+          onClose={() => setCreatingSprint(false)}
+          onSaved={() => setCreatingSprint(false)}
         />
       )}
 

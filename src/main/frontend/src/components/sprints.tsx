@@ -11,6 +11,7 @@ import {
 } from '../lib/queryKeys'
 import type { SprintStateFilter } from '../lib/queryKeys'
 import { Button, Input, Select, Textarea } from './ui'
+import { ReversibleNotice, useEnableCapability } from './delivery'
 import { Modal } from '../pages/admin/common'
 import type {
   BacklogSectionBase, BacklogView, Issue, SectionStats, Sprint, SprintCompletionPreview,
@@ -707,9 +708,15 @@ export function SprintPicker({
  * point total, with the curator's Complete-sprint action on the right. Kept here
  * rather than in `BoardPage` so the vocabulary matches the planning sections.
  */
-export function SprintHeader({ sprint, canCurate, onComplete }: {
+export function SprintHeader({ sprint, canCurate, showPoints, onComplete }: {
   sprint: Sprint
   canCurate: boolean
+  /**
+   * `estimation` (HD-102 §6) — the point total is a point SUM, so it follows the
+   * capability exactly as the Backlog's section headers do. A project running
+   * sprints without estimating must not be shown "0 / 3 pts" anywhere.
+   */
+  showPoints: boolean
   onComplete: () => void
 }) {
   const countdown = formatDaysRemaining(sprint.daysRemaining)
@@ -749,7 +756,7 @@ export function SprintHeader({ sprint, canCurate, onComplete }: {
             {countdown}
           </span>
         )}
-        <SprintPointsBadge stats={sprint} compact />
+        {showPoints && <SprintPointsBadge stats={sprint} compact />}
         {canCurate && (
           <Button variant="secondary" size="sm" onClick={onComplete}>Complete sprint</Button>
         )}
@@ -763,13 +770,30 @@ export function SprintHeader({ sprint, canCurate, onComplete }: {
 /**
  * Create or re-plan a sprint. The name may be left blank on create — the server
  * then names it "Sprint {sequence}", which is what most teams want.
- * `startAt`/`endAt` here are a PLAN only; they do not start anything.
+ * `startAt`/`endAt` here are a PLAN only; they do not start anything — unless
+ * `alsoStart` is set, which is the board empty state's one-gesture affordance.
+ *
+ * This dialog is ALSO the first-use entry point for sprint planning (Rule C,
+ * HD-102 §5.3): with `enableIterations` it carries the reversibility notice and
+ * turns the capability on in the same submit that creates the sprint. That is why
+ * the Backlog can offer "Plan in sprints" to a Kanban project at all — the entry
+ * point to sprints is not gated by sprints.
  */
-export function SprintFormDialog({ wsId, projectId, sprint, onClose, onSaved }: {
+export function SprintFormDialog({
+  wsId, projectId, sprint, enableIterations, alsoStart, onClose, onSaved,
+}: {
   wsId: string
   projectId: string
   /** null = create. */
   sprint: Sprint | null
+  /**
+   * The project has iterations OFF and this submit is the gesture that turns them
+   * on. Ignored when editing — an existing sprint proves the switch already
+   * happened, or that a curator turned it back off (Rule B keeps it visible).
+   */
+  enableIterations?: boolean
+  /** Create it and start it in one gesture (board empty state, §6). */
+  alsoStart?: boolean
   onClose: () => void
   onSaved: (sprint: Sprint) => void
 }) {
@@ -778,9 +802,11 @@ export function SprintFormDialog({ wsId, projectId, sprint, onClose, onSaved }: 
   const [startAt, setStartAt] = useState(sprint?.startAt ? toLocalInputValue(sprint.startAt) : '')
   const [endAt, setEndAt] = useState(sprint?.endAt ? toLocalInputValue(sprint.endAt) : '')
   const [error, setError] = useState('')
-  const { create, update } = useSprintMutations(wsId, projectId)
+  const { create, update, start } = useSprintMutations(wsId, projectId)
+  const enabling = useEnableCapability(wsId, projectId)
+  const bootstrapping = !sprint && !!enableIterations
 
-  function submit() {
+  async function submit() {
     setError('')
     const trimmedName = name.trim()
     const trimmedGoal = goal.trim()
@@ -805,16 +831,42 @@ export function SprintFormDialog({ wsId, projectId, sprint, onClose, onSaved }: 
       startAt: fromLocalInputValue(startAt),
       endAt: fromLocalInputValue(endAt),
     }
-    create.mutate(payload, {
-      onSuccess: onSaved,
-      onError: e => setError(apiErrorText(e, 'Could not create the sprint')),
-    })
+    try {
+      // Capability FIRST, then the sprint. The reverse order can leave a sprint
+      // on a project that still says it doesn't plan in sprints (visible but
+      // read-only under Rule B) — confusing, and the exact shape of the dead end
+      // this ticket removes. This way a failure leaves the project switched on
+      // with no sprint yet, which the Backlog itself invites you to fix.
+      if (bootstrapping) await enabling.enable('iterations')
+      const created = await create.mutateAsync(payload)
+      if (!alsoStart) { onSaved(created); return }
+      const started = await start.mutateAsync({
+        id: created.id,
+        payload: {
+          // Blank "planned start" means "now"; a blank end lets the server apply
+          // `app.agile.default-sprint-length-days`.
+          startAt: fromLocalInputValue(startAt) ?? new Date().toISOString(),
+          endAt: fromLocalInputValue(endAt),
+          goal: trimmedGoal || undefined,
+        },
+      })
+      onSaved(started)
+    } catch (e) {
+      setError(apiErrorText(e, 'Could not create the sprint'))
+    }
   }
 
-  const saving = create.isPending || update.isPending
+  const saving = create.isPending || update.isPending || start.isPending || enabling.isPending
+  const title = sprint ? `Edit “${sprint.name}”`
+    : alsoStart ? 'Create and start a sprint'
+    : 'New sprint'
   return (
-    <Modal title={sprint ? `Edit “${sprint.name}”` : 'New sprint'} onClose={onClose}>
+    <Modal title={title} onClose={onClose}>
       <div className="flex flex-col gap-3">
+        {/* Rule C: the switch is announced, and said to be reversible, in the
+            dialog's own copy — before the click, not in a tooltip. */}
+        {bootstrapping && <ReversibleNotice capability="iterations" />}
+
         <div className="flex flex-col gap-1">
           <Input
             label="Name"
@@ -841,20 +893,23 @@ export function SprintFormDialog({ wsId, projectId, sprint, onClose, onSaved }: 
         />
 
         <div className="grid grid-cols-2 gap-3">
-          <Input label="Planned start" type="datetime-local" value={startAt}
+          <Input label={alsoStart ? 'Starts' : 'Planned start'} type="datetime-local" value={startAt}
                  onChange={e => setStartAt(e.target.value)} />
-          <Input label="Planned end" type="datetime-local" value={endAt}
+          <Input label={alsoStart ? 'Ends' : 'Planned end'} type="datetime-local" value={endAt}
                  onChange={e => setEndAt(e.target.value)} />
         </div>
         <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-          Dates are a plan only — the sprint does not begin until you start it.
+          {alsoStart
+            ? 'Leave the start blank to begin now, and the end blank to use the project’s default '
+              + 'sprint length.'
+            : 'Dates are a plan only — the sprint does not begin until you start it.'}
         </span>
 
         {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={saving} onClick={submit}>
-            {sprint ? 'Save' : 'Create'}
+            {sprint ? 'Save' : alsoStart ? 'Create & start' : 'Create'}
           </Button>
         </div>
       </div>

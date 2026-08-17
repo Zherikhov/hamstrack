@@ -5,7 +5,7 @@ import type {
   AdminField, AdminFieldSet, AdminIssueTypeSet, FieldConfig, FieldType, FieldValue,
   ProjectBinding, BindingOptions, TransitionRule, UsageDetail, AdminUser, PendingInvite,
   SearchResultRow, SearchSchema, SavedFilter, Label, MergeLabelsResult, Component,
-  Version, VersionUsage, BoardMode, Sprint, SprintState, BacklogView,
+  Version, VersionUsage, BoardMode, ProjectDeliveryUpdate, Sprint, SprintState, BacklogView,
   SprintCompletionPreview, SprintCompletionResult, UnfinishedDisposition,
 } from './types'
 import { useAuthStore } from './auth'
@@ -253,10 +253,26 @@ export async function apiListProjects(wsId: string, includeArchived = false): Pr
   return request(`/workspaces/${wsId}/projects${includeArchived ? '?includeArchived=true' : ''}`)
 }
 
-export async function apiCreateProject(wsId: string, name: string, key: string, description?: string): Promise<Project> {
+export interface CreateProjectPayload {
+  name: string
+  key: string
+  description?: string
+  /**
+   * The delivery capabilities chosen on the creation picker (HD-105). Optional
+   * on the wire — a create without it gets the same lean defaults server-side —
+   * but the SPA always sends it, because the picker exists to make the choice
+   * explicit rather than inherited.
+   *
+   * `preset` is DERIVED and **rejected** with a 400, which is why it is absent
+   * from `ProjectDeliveryUpdate`: a client can never post back what it read.
+   */
+  delivery?: ProjectDeliveryUpdate
+}
+
+export async function apiCreateProject(wsId: string, payload: CreateProjectPayload): Promise<Project> {
   return request(`/workspaces/${wsId}/projects`, {
     method: 'POST',
-    body: JSON.stringify({ name, key, description }),
+    body: JSON.stringify(payload),
   })
 }
 
@@ -273,13 +289,30 @@ export async function apiUnarchiveProject(wsId: string, projectId: string): Prom
  * MANAGER *or* workspace OWNER/ADMIN) since HD-22 §3.2 — the same predicate the
  * settings area already checks client-side.
  *
- * `boardMode` (HD-27) is a presentation switch, not a permission: the sprint API
- * behaves identically in both modes.
+ * `delivery` (HD-102) carries the three delivery capabilities, each independently
+ * optional: `{ delivery: { releases: true } }` turns releases on and touches
+ * nothing else. They are a presentation switch, never a permission — no endpoint
+ * behaves differently because of them (Rule A, §5.1) — and switching one off
+ * never destroys, clears or moves data.
+ *
+ * `preset` is DERIVED and **rejected** on write (400), so it is absent from
+ * `ProjectDeliveryUpdate`: a client can never echo back the `delivery` object it
+ * read from a GET.
+ *
+ * `boardMode` (HD-27) is the deprecated top-level mirror of `delivery.board`,
+ * still accepted; sending both with DIFFERENT values is a 400. New code sends
+ * `delivery` only.
  */
 export async function apiUpdateProject(
   wsId: string,
   projectId: string,
-  payload: Partial<{ name: string; description: string; boardMode: BoardMode }>,
+  payload: Partial<{
+    name: string
+    description: string
+    /** @deprecated send `delivery: { board }` instead. */
+    boardMode: BoardMode
+    delivery: ProjectDeliveryUpdate
+  }>,
 ): Promise<Project> {
   return request(`/workspaces/${wsId}/projects/${projectId}`, {
     method: 'PATCH',
