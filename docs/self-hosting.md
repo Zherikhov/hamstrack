@@ -493,7 +493,7 @@ Images are published to `ghcr.io/zherikhov/hamstrack` with these tags:
 |---|---|
 | `0.4.3` | exact release — fully reproducible |
 | `0.4` | latest patch of the 0.4 line — **recommended for production** |
-| `latest` | newest development build from `main` — not for production |
+| `latest` | the newest stable release, or the newest `main` build — whichever published last. Pre-releases (`0.14.0-rc1`) never move it, and neither does a tag on an older commit, so `latest` can legitimately sit *behind* the newest entry on the Releases page. A moving target that can jump mid-upgrade; **not for production** |
 
 Pin a version in your compose (e.g. `:0.4`), then upgrade with:
 

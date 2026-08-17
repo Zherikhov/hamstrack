@@ -21,6 +21,7 @@ import SearchResultsPage from './pages/SearchResultsPage'
 import ProjectSettingsArea from './pages/settings/ProjectSettingsArea'
 import WorkspaceSettingsArea from './pages/settings/WorkspaceSettingsArea'
 import AppShell from './components/AppShell'
+import NotFoundChrome, { NotFoundScreen } from './pages/NotFoundPage'
 import CookieBanner from './components/CookieBanner'
 import LandingPage from './pages/LandingPage'
 import TermsPage from './pages/legal/TermsPage'
@@ -165,6 +166,16 @@ export default function App() {
                 <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
               </Route>
             </Route>
+          </Route>
+          {/* Catch-all (HD-97). Deliberately OUTSIDE <RequireAuth>: an unknown
+              URL is a typo, not a protected resource, so an anonymous visitor
+              must get "no such page" rather than a bounce to /login that lands
+              them back on the same dead URL after signing in. NotFoundChrome
+              re-adds the app shell (rail + top bar) for signed-in users, so they
+              can navigate out instead of staring at a blank viewport. Kept last;
+              a `*` path always ranks below every real route anyway. */}
+          <Route element={<NotFoundChrome />}>
+            <Route path="*" element={<NotFoundScreen variant="route" />} />
           </Route>
         </Routes>
         <CookieBanner />

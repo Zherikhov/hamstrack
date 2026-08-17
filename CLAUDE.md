@@ -75,7 +75,7 @@ $env:DB_URL="jdbc:postgresql://localhost:15432/hamstrack"; $env:DB_USERNAME="ham
 ```
 `JWT_SECRET` must be at least 32 bytes — `JwtService` fails fast at startup otherwise (HMAC-SHA256 key size requirement).
 
-**`-Dfrontend.skip=true` does nothing** (verified 2026-08-16): `frontend-maven-plugin` in `pom.xml` has no `<skip>` configuration bound to that property, so `npm run build` runs on every Maven invocation regardless. The flag is harmless and is still passed by convention in agent instructions, but do not rely on it for a fast backend-only loop, and do not treat a slow `mvnw test` as a symptom of something else. Making it real means adding `<skipTests>`-style skip config to the plugin — worth a ticket, not a silent change. In PowerShell, prefix args with `--%` so `-D` flags aren't mangled.
+**`-Dfrontend.skip=true` really skips the frontend build** (HD-94, 2026-08-17 — it was a no-op before that): `pom.xml` declares a `frontend.skip` property (default `false`) bound to `<skip>` in the `frontend-maven-plugin` configuration, and every goal of that plugin has its own editable `skip` parameter, so **all three** executions (`install-node-and-npm`, `npm-install`, `npm-build`) log `Skipping execution.` — use it for a fast backend-only loop (~24s saved per invocation with a warm npm cache, far more on a cold one). Leave it **off** for anything that must ship the SPA: a plain `mvnw package` and CI's single `./mvnw -B verify` still build `src/main/frontend` into `src/main/resources/static` → `BOOT-INF/classes/static/` in the JAR. In PowerShell, prefix args with `--%` so `-D` flags aren't mangled.
 
 ## Commands
 

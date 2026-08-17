@@ -1,8 +1,9 @@
 import { useNavigate, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ArrowLeft } from 'lucide-react'
-import { apiGetProjectConfig } from '../api'
+import { ApiResponseError, apiGetProjectConfig } from '../api'
 import { Button } from '../components/ui'
+import { NotFoundAction, NotFoundScreen } from './NotFoundPage'
 import IssueDetail from './IssueDetail'
 
 /**
@@ -17,17 +18,29 @@ export default function IssueFullPage() {
   const navigate = useNavigate()
   const issueNumber = Number(number)
 
-  const { data: config, isLoading, isError } = useQuery({
+  const { data: config, isLoading, isError, error } = useQuery({
     queryKey: ['projectConfig', wsId, projectId],
     queryFn: () => apiGetProjectConfig(wsId!, projectId!),
     enabled: !!wsId && !!projectId,
   })
 
+  // HD-97: a 404 here is the "well-formed URL, nothing you can see" case — the
+  // server answers the same whether the issue is gone or simply isn't yours, so
+  // the shared `resource` screen carries that wording. Any OTHER failure is an
+  // outage, not a not-found, and must stay visibly different.
   if (isError) {
+    const notFound = error instanceof ApiResponseError && error.status === 404
+    if (notFound) {
+      return (
+        <NotFoundScreen variant="resource" noun="issue">
+          <NotFoundAction to={`/w/${wsId}/p/${projectId}`}>Go to board</NotFoundAction>
+        </NotFoundScreen>
+      )
+    }
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-3">
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-          Issue not found — it may have been deleted, or your access was removed.
+          This issue couldn’t be loaded. Check your connection and try again.
         </p>
         <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}/p/${projectId}`)}>
           Go to board

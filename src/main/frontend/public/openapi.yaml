@@ -5173,6 +5173,21 @@ components:
         version: { type: integer, description: Send back in PATCH for optimistic locking }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
+        closedAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-08-14T09:31:07Z'
+          description: >-
+            When the issue was closed — **server-maintained, never accepted on a
+            request**. Stamped when the issue enters a status whose `category`
+            is `DONE` (including creating it directly in one), and cleared back
+            to `null` when it leaves a DONE-category status. Only a change of
+            status **category** re-evaluates it: moving between two different
+            DONE statuses keeps the original stamp, and an update that does not
+            change the status leaves it untouched. `null` while the issue is
+            open. The stamp itself writes no `history` entry — the `status`
+            entry records the transition.
 
     IssueHistoryResponse:
       type: object

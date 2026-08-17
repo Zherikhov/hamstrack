@@ -53,8 +53,8 @@ public class HqlValueResolver {
      */
     public ResolvedValue.PositionValue resolvePriorityPosition(FieldDescriptor field, Value value,
                                                                ResolutionContext ctx) {
-        String name = requireString(field, value);
-        var matches = ctx.prioritiesByName().get(name.toLowerCase(Locale.ROOT));
+        String name = requireName(field, value);
+        var matches = ctx.prioritiesByName().get(SearchNames.key(name));
         if (matches == null || matches.isEmpty()) {
             throw new HqlSemanticException(
                     "No priority named '" + name + "' in this workspace", field.name());
@@ -68,7 +68,7 @@ public class HqlValueResolver {
     // ---- ENUM_REF (status / type / priority by name → id set) ----
 
     private ResolvedValue resolveEnum(FieldDescriptor field, Value value, ResolutionContext ctx) {
-        String name = requireString(field, value);
+        String name = requireName(field, value);
         var byName = switch (field.name()) {
             case "status" -> ctx.statusIdsByName();
             case "type" -> ctx.typeIdsByName();
@@ -84,7 +84,7 @@ public class HqlValueResolver {
             default -> throw new HqlSemanticException(
                     "Field '" + field.name() + "' is not yet queryable", field.name());
         };
-        var ids = byName.get(name.toLowerCase(Locale.ROOT));
+        var ids = byName.get(SearchNames.key(name));
         if (ids == null || ids.isEmpty()) {
             throw new HqlSemanticException(
                     "No " + field.name() + " named '" + name + "' in this workspace", field.name());
@@ -103,8 +103,8 @@ public class HqlValueResolver {
      * intended behavior (save-time validation is structural only).
      */
     private ResolvedValue resolveLabel(FieldDescriptor field, Value value, ResolutionContext ctx) {
-        String name = requireString(field, value);
-        var ids = ctx.labelIdsByName().get(name.toLowerCase(Locale.ROOT));
+        String name = requireName(field, value);
+        var ids = ctx.labelIdsByName().get(SearchNames.key(name));
         if (ids == null || ids.isEmpty()) {
             throw new HqlSemanticException(
                     "No label named '" + name + "' in this workspace", field.name());
@@ -131,8 +131,8 @@ public class HqlValueResolver {
      * is structural only).
      */
     private ResolvedValue resolveVersion(FieldDescriptor field, Value value, ResolutionContext ctx) {
-        String name = requireString(field, value);
-        var ids = ctx.versionIdsByName().get(name.toLowerCase(Locale.ROOT));
+        String name = requireName(field, value);
+        var ids = ctx.versionIdsByName().get(SearchNames.key(name));
         if (ids == null || ids.isEmpty()) {
             throw new HqlSemanticException(
                     "No version named '" + name + "' in this workspace", field.name());
@@ -258,6 +258,28 @@ public class HqlValueResolver {
     }
 
     // ---- helpers ----
+
+    /**
+     * A {@link #requireString} operand that is also usable as a catalog-name lookup key
+     * (HD-90). Every name→id map is keyed by {@link SearchNames#key(String)}, so the
+     * lookups below apply the same function to the operand — a copy-pasted
+     * {@code "2.4.0 "} or a non-breaking-space variant resolves like the plain name.
+     *
+     * <p>An operand that is <em>blank after normalization</em> ({@code fixVersion = "  "})
+     * is rejected here with its own message rather than falling through to
+     * "No version named '  '": the empty key is not a name anybody stored, and a catalog
+     * row whose name normalized to {@code ""} would otherwise be a silent match for it.
+     * Errors quote the RAW input — the user should see what they typed, not the folded
+     * form.
+     */
+    private String requireName(FieldDescriptor field, Value value) {
+        String raw = requireString(field, value);
+        if (SearchNames.key(raw).isEmpty()) {
+            throw new HqlSemanticException(
+                    "Field '" + field.name() + "' expects a non-empty name", field.name());
+        }
+        return raw;
+    }
 
     private String requireString(FieldDescriptor field, Value value) {
         if (value instanceof Value.StringLiteral s) {

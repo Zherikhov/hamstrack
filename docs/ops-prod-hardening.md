@@ -178,9 +178,24 @@ GitHub repo secrets: add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
 ```
 
 > The snapshot above is the original SSH→SSM migration shape. The live
-> `deploy.yml` since then is `workflow_run`-triggered (fires after a green
-> `Build` on `main`) with the instance id **inlined** (not a secret), and the SSM
-> command has grown — see the config auto-sync note next.
+> `deploy.yml` since then is `workflow_run`-triggered — since HD-115 it fires
+> after a green `Build` on `main` **or on a stable release tag**, serialised by a
+> `deploy-production` concurrency group — with the instance id **inlined** (not a
+> secret).
+
+> **The "config auto-sync" section below describes a deploy that was never
+> shipped.** Verified 2026-08-17 while fixing HD-115: the live `--parameters` in
+> `deploy.yml` is a plain `cd /opt/hamstrack && docker compose … pull && up -d
+> --remove-orphans && docker image prune -f`, and `git log -S synctmp --
+> .github/workflows/deploy.yml` finds no commit that ever contained the tarball
+> download. So the config files in `/opt/hamstrack` (`docker-compose.prod.yml`,
+> `Caddyfile`, `.env`, the observability stack) are still maintained **by hand** —
+> committing a compose change does NOT put it on the server. This matters for the
+> rollback advice in `docs/release-checklist.md`: pinning `app.image` in
+> `/opt/hamstrack/docker-compose.prod.yml` survives the next deploy (and must
+> therefore be un-pinned by hand), which would not be true if the sync below were
+> real. Keep the section as a design note for what auto-sync would look like, not
+> as a description of current behavior.
 
 #### Config auto-sync from the repo (2026-08-06)
 

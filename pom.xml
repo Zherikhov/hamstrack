@@ -32,6 +32,11 @@
         <java.version>21</java.version>
         <jjwt.version>0.12.6</jjwt.version>
         <awssdk.version>2.47.3</awssdk.version>
+        <!-- HD-94: -Dfrontend.skip=true skips node install + npm install + npm run build,
+             for a fast backend-only loop (`mvnw test`). Keep the default false: a plain
+             `mvnw package` / CI's `./mvnw -B verify` MUST still build the SPA into
+             src/main/resources/static, which is what ships inside the JAR. -->
+        <frontend.skip>false</frontend.skip>
     </properties>
     <dependencyManagement>
         <dependencies>
@@ -170,6 +175,10 @@
                 <configuration>
                     <workingDirectory>src/main/frontend</workingDirectory>
                     <installDirectory>target</installDirectory>
+                    <!-- Every goal of this plugin (install-node-and-npm, npm) declares its
+                         own editable `skip` parameter, so one plugin-level binding covers
+                         all three executions below. -->
+                    <skip>${frontend.skip}</skip>
                 </configuration>
                 <executions>
                     <execution>

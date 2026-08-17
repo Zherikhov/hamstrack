@@ -109,8 +109,7 @@ public class ResolutionContextFactory {
         for (var row : labelRepository.findIdAndNameByWorkspace(ws)) {
             UUID labelId = (UUID) row[0];
             String labelName = (String) row[1];
-            addId(labelIds, labelName, labelId);
-            labelNames.putIfAbsent(labelName.toLowerCase(Locale.ROOT), labelName);
+            labelNames.putIfAbsent(addId(labelIds, labelName, labelId), labelName);
         }
         // Components (HD-31) are PROJECT-scoped, so they are built from the VISIBLE
         // PROJECT set — never "all components of the workspace": a name must never
@@ -140,8 +139,8 @@ public class ResolutionContextFactory {
             for (var row : componentRepository.findIdAndNameByProjectIds(visibleIds)) {
                 UUID componentId = (UUID) row[0];
                 String componentName = (String) row[1];
-                addId(componentIds, componentName, componentId);
-                componentNames.putIfAbsent(componentName.toLowerCase(Locale.ROOT), componentName);
+                componentNames.putIfAbsent(
+                        addId(componentIds, componentName, componentId), componentName);
             }
             // Versions: RESOLUTION spans every visible project (unchanged — §9.1 is
             // absolute), but the /schema VERSION picklist only offers names from
@@ -151,9 +150,9 @@ public class ResolutionContextFactory {
                 UUID ownerProjectId = (UUID) row[0];
                 UUID versionId = (UUID) row[1];
                 String versionName = (String) row[2];
-                addId(versionIds, versionName, versionId);
+                String versionKey = addId(versionIds, versionName, versionId);
                 if (releaseProjectIds.contains(ownerProjectId)) {
-                    versionNames.putIfAbsent(versionName.toLowerCase(Locale.ROOT), versionName);
+                    versionNames.putIfAbsent(versionKey, versionName);
                 }
             }
             // Sprints: same split — every visible project's open sprints resolve by
@@ -162,9 +161,9 @@ public class ResolutionContextFactory {
                 UUID ownerProjectId = (UUID) row[0];
                 UUID sprintId = (UUID) row[1];
                 String sprintName = (String) row[2];
-                addId(sprintIds, sprintName, sprintId);
+                String sprintKey = addId(sprintIds, sprintName, sprintId);
                 if (iterationProjectIds.contains(ownerProjectId)) {
-                    sprintNames.putIfAbsent(sprintName.toLowerCase(Locale.ROOT), sprintName);
+                    sprintNames.putIfAbsent(sprintKey, sprintName);
                 }
             }
         }
@@ -175,20 +174,18 @@ public class ResolutionContextFactory {
         for (var project : visibleProjects) {
             for (Status s : projectConfigService.statuses(project)) {
                 if (s.getArchivedAt() != null) continue;
-                addId(statusIds, s.getName(), s.getId());
-                statusNames.putIfAbsent(s.getName().toLowerCase(Locale.ROOT), s.getName());
+                statusNames.putIfAbsent(addId(statusIds, s.getName(), s.getId()), s.getName());
             }
             for (IssueType t : projectConfigService.types(project)) {
                 if (t.getArchivedAt() != null) continue;
-                addId(typeIds, t.getName(), t.getId());
-                typeNames.putIfAbsent(t.getName().toLowerCase(Locale.ROOT), t.getName());
+                typeNames.putIfAbsent(addId(typeIds, t.getName(), t.getId()), t.getName());
             }
             for (PrioritySetItem item : projectConfigService.priorityItems(project)) {
                 Priority p = item.getPriority();
                 if (p.getArchivedAt() != null) continue;
-                addId(priorityIds, p.getName(), p.getId());
-                addPriority(prioritiesByName, p);
-                priorityNames.putIfAbsent(p.getName().toLowerCase(Locale.ROOT), p.getName());
+                String priorityKey = addId(priorityIds, p.getName(), p.getId());
+                addPriority(prioritiesByName, priorityKey, p);
+                priorityNames.putIfAbsent(priorityKey, p.getName());
             }
             for (var setItem : fieldValueService.fields(project)) {
                 FieldDef field = setItem.getField();
@@ -216,13 +213,29 @@ public class ResolutionContextFactory {
                 customFields, capabilities);
     }
 
-    private void addId(Map<String, List<UUID>> map, String name, UUID id) {
-        var list = map.computeIfAbsent(name.toLowerCase(Locale.ROOT), k -> new ArrayList<>());
+    /**
+     * Key every name→id map with {@link SearchNames#key(String)} — the SAME function
+     * {@code HqlValueResolver} applies to the operand (HD-90). Labels/components/
+     * versions/sprints are already normalized on write; statuses/types/priorities come
+     * from the admin catalog and are NOT, so a stored {@code "In  Progress"} lands under
+     * {@code "in progress"} here and stays reachable by both spellings.
+     *
+     * <p><strong>Returns the key it used</strong> so the caller can reuse it for the
+     * sibling display-name map instead of folding the same string twice. {@code key()}
+     * is NFC + two regex passes and this runs once per catalog row of the whole
+     * workspace on every {@code /search}, {@code /schema} and {@code /suggest} — the
+     * second call was pure duplicated CPU (see {@code ClassificationNames}).
+     */
+    private String addId(Map<String, List<UUID>> map, String name, UUID id) {
+        String key = SearchNames.key(name);
+        var list = map.computeIfAbsent(key, k -> new ArrayList<>());
         if (!list.contains(id)) list.add(id);
+        return key;
     }
 
-    private void addPriority(Map<String, List<Priority>> map, Priority p) {
-        var list = map.computeIfAbsent(p.getName().toLowerCase(Locale.ROOT), k -> new ArrayList<>());
+    /** Takes the key already computed by {@link #addId} — see the note there. */
+    private void addPriority(Map<String, List<Priority>> map, String key, Priority p) {
+        var list = map.computeIfAbsent(key, k -> new ArrayList<>());
         if (list.stream().noneMatch(e -> e.getId().equals(p.getId()))) list.add(p);
     }
 
@@ -230,6 +243,14 @@ public class ResolutionContextFactory {
      * Register a custom field by its {@code key}. The same field can be reached by
      * several projects — first-wins is fine (a global {@code field_def} id is the
      * same everywhere). SELECT/MULTI_SELECT option maps are read from {@code config}.
+     *
+     * <p>The field {@code key} deliberately keeps a PLAIN lower-case key (HD-90), unlike
+     * every display name above: it is a machine slug, and its lookup operand is a lexer
+     * {@code IDENT} token, which cannot contain whitespace or format characters — so
+     * canonical folding could never change the outcome. It stays paired with
+     * {@code ResolutionContext.customField}, which lower-cases the same way. Option
+     * LABELS are the opposite case — user-authored display text quoted in HQL — so they
+     * are keyed with {@link SearchNames}.
      */
     private void addCustomField(Map<String, CustomFieldMeta> map, FieldDef field) {
         String key = field.getKey().toLowerCase(Locale.ROOT);
@@ -247,8 +268,12 @@ public class ResolutionContextFactory {
                         String label = opt.path("label").asText(id);
                         optionsById.putIfAbsent(id, label);
                         // Accept both the human label and the raw id when writing a value.
-                        optionIdByLabel.putIfAbsent(label.toLowerCase(Locale.ROOT), id);
-                        optionIdByLabel.putIfAbsent(id.toLowerCase(Locale.ROOT), id);
+                        // ONE map serves both, so both entries must use the SAME key
+                        // function as CustomFieldMeta.resolveOption (HD-90) — canonical
+                        // for the label (user-authored text, same bug class as a version
+                        // name), and a harmless no-op for the slug-shaped id.
+                        optionIdByLabel.putIfAbsent(SearchNames.key(label), id);
+                        optionIdByLabel.putIfAbsent(SearchNames.key(id), id);
                     }
                 }
             }

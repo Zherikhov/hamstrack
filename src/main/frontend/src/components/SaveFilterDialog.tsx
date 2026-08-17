@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { X } from 'lucide-react'
 import { ApiResponseError, savedFilters } from '../api'
+import { Modal } from '../pages/admin/common'
 import { Button, Checkbox, Input } from './ui'
 
 /**
@@ -64,86 +64,67 @@ export default function SaveFilterDialog({ wsId, hql, editing, onClose, onSaved,
     if (editing) update(); else saveAsNew()
   }
 
+  // HD-100: rendered through the shared `Modal` rather than a hand-rolled
+  // overlay, so it inherits `role="dialog"` + `aria-modal` + the accessible name
+  // (and any future focus handling) that every other dialog in the app already
+  // has. `Modal` also carries the `data-modal-open` flag the global-shortcut hook
+  // reads, so `c` / `/` / `?` / g-chords stay inert while this is up (HD-39 §8.3).
   return (
-    <div
-      // Tells the global-shortcut hook that this locally-owned modal owns the
-      // keyboard, so `c` / `/` / `?` / g-chords stay inert while it is up (HD-39 §8.3).
-      data-modal-open="true"
-      className="fixed inset-0 flex items-center justify-center"
-      style={{ background: 'rgba(16,24,40,0.45)', zIndex: 100 }}
-      onMouseDown={onClose}
-    >
-      <div
-        onMouseDown={e => e.stopPropagation()}
-        style={{
-          width: 440, maxWidth: '92vw', background: 'var(--color-card)',
-          borderRadius: 'var(--radius-xl)', boxShadow: 'var(--shadow-lg)', padding: 24,
-        }}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-bold" style={{ fontSize: 16, color: 'var(--color-text)' }}>
-            {editing ? 'Update filter' : 'Save as filter'}
-          </h2>
-          <button onClick={onClose} className="cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>
-            <X size={18} />
-          </button>
+    <Modal title={editing ? 'Update filter' : 'Save as filter'} onClose={onClose}>
+      <form onSubmit={submit} className="flex flex-col gap-4">
+        <Input
+          label="Name"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder="My open bugs"
+          maxLength={120}
+          autoFocus
+        />
+
+        {/* The query being saved — rendered as PLAIN TEXT (never HTML). */}
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Query</span>
+          <div
+            className="mono"
+            style={{
+              fontSize: 12, padding: '9px 12px', borderRadius: 'var(--radius-md)',
+              background: 'var(--color-surface)', border: '1px solid var(--color-border)',
+              color: 'var(--color-text-secondary)', wordBreak: 'break-word',
+            }}
+          >
+            {hql || 'all issues'}
+          </div>
         </div>
 
-        <form onSubmit={submit} className="flex flex-col gap-4">
-          <Input
-            label="Name"
-            value={name}
-            onChange={e => setName(e.target.value)}
-            placeholder="My open bugs"
-            maxLength={120}
-            autoFocus
+        {/* Sharing is set on create; when updating it's managed from the panel. */}
+        {!editing && (
+          <Checkbox
+            label="Share with the workspace (read-only for others)"
+            checked={shared}
+            onChange={e => setShared(e.target.checked)}
           />
+        )}
 
-          {/* The query being saved — rendered as PLAIN TEXT (never HTML). */}
-          <div className="flex flex-col gap-1">
-            <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Query</span>
-            <div
-              className="mono"
-              style={{
-                fontSize: 12, padding: '9px 12px', borderRadius: 'var(--radius-md)',
-                background: 'var(--color-surface)', border: '1px solid var(--color-border)',
-                color: 'var(--color-text-secondary)', wordBreak: 'break-word',
-              }}
-            >
-              {hql || 'all issues'}
-            </div>
-          </div>
+        {error && (
+          <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>
+        )}
 
-          {/* Sharing is set on create; when updating it's managed from the panel. */}
-          {!editing && (
-            <Checkbox
-              label="Share with the workspace (read-only for others)"
-              checked={shared}
-              onChange={e => setShared(e.target.checked)}
-            />
+        <div className="flex items-center justify-end gap-2 mt-1">
+          <Button variant="ghost" onClick={onClose} type="button">Cancel</Button>
+          {editing ? (
+            <>
+              <Button variant="secondary" type="button" onClick={saveAsNew} disabled={saving}>
+                Save as new
+              </Button>
+              <Button variant="primary" type="submit" loading={saving}>
+                Update “{editing.name}”
+              </Button>
+            </>
+          ) : (
+            <Button variant="primary" type="submit" loading={saving}>Save filter</Button>
           )}
-
-          {error && (
-            <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>
-          )}
-
-          <div className="flex items-center justify-end gap-2 mt-1">
-            <Button variant="ghost" onClick={onClose} type="button">Cancel</Button>
-            {editing ? (
-              <>
-                <Button variant="secondary" type="button" onClick={saveAsNew} disabled={saving}>
-                  Save as new
-                </Button>
-                <Button variant="primary" type="submit" loading={saving}>
-                  Update “{editing.name}”
-                </Button>
-              </>
-            ) : (
-              <Button variant="primary" type="submit" loading={saving}>Save filter</Button>
-            )}
-          </div>
-        </form>
-      </div>
-    </div>
+        </div>
+      </form>
+    </Modal>
   )
 }
