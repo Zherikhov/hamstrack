@@ -33,7 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * Regression guard for the tenancy invariant enforced by
  * {@link com.hamstrack.workspace.service.WorkspaceAccessService} (HD-82) — the project's
  * top bug class. The board read ({@code GET .../projects/{id}/issues}) now resolves its
- * workspace/project through {@code WorkspaceAccessService.requireProjectMember}.
+ * workspace/project through {@code WorkspaceAccessService.resolveProject}.
  *
  * <p>The invariant under test: a caller who is <strong>not a member</strong> of the target
  * workspace, and a caller hitting a <strong>non-existent</strong> workspace, must both get
@@ -53,6 +53,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class WorkspaceAccessTenancyTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -146,7 +148,7 @@ class WorkspaceAccessTenancyTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(WorkspaceRole.OWNER);
+        m.setRole(roleCatalog.reference(WorkspaceRole.OWNER));
         workspaceMemberRepository.save(m);
     }
 
@@ -163,7 +165,7 @@ class WorkspaceAccessTenancyTest {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(ProjectRole.MANAGER);
+        m.setRole(roleCatalog.reference(ProjectRole.MANAGER));
         projectMemberRepository.save(m);
     }
 

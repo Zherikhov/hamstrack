@@ -60,6 +60,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class AttachmentOversizeTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -161,7 +163,7 @@ class AttachmentOversizeTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(WorkspaceRole.OWNER);
+        m.setRole(roleCatalog.reference(WorkspaceRole.OWNER));
         workspaceMemberRepository.save(m);
     }
 
@@ -178,7 +180,7 @@ class AttachmentOversizeTest {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(ProjectRole.MANAGER);
+        m.setRole(roleCatalog.reference(ProjectRole.MANAGER));
         projectMemberRepository.save(m);
     }
 

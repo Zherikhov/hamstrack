@@ -2,7 +2,6 @@ package com.hamstrack.admin.scope;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.project.entity.Project;
-import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.exception.InsufficientProjectRoleException;
 import com.hamstrack.project.exception.ProjectNotFoundException;
@@ -10,6 +9,7 @@ import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.exception.InsufficientWorkspaceRoleException;
+import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -35,6 +35,14 @@ public class ScopeResolver {
 
     private final WorkspaceAccessService workspaceAccess;
     private final ProjectMemberRepository projectMemberRepository;
+    /**
+     * HD-123 S1 bridge: {@code project_members.role} is now a {@code roles} row, so the
+     * legacy ordinal comparison reads the role's key through the cached view (0 queries).
+     * S3 deletes this class outright — its three methods become
+     * {@code workspace.taxonomy.manage}, {@code project.taxonomy.manage} and the curator
+     * trio (§10.4).
+     */
+    private final RoleCatalog roleCatalog;
 
     /** Workspace whose config the actor may administer (OWNER or ADMIN). */
     @Transactional(readOnly = true)
@@ -57,10 +65,10 @@ public class ScopeResolver {
     public Project requireProjectAdmin(User actor, UUID workspaceId, UUID projectId) {
         // Delegate the resolve workspace+membership+project half (404s) to the
         // primitive; keep the delegated-admin 403-on-insufficient-role rule.
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var member = projectMemberRepository.findByProjectAndUser(project, actor)
                 .orElseThrow(ProjectNotFoundException::new);
-        if (!member.getRole().isAtLeast(ProjectRole.MANAGER)) {
+        if (!roleCatalog.view(member.getRole().getId()).asProjectRole().isAtLeast(ProjectRole.MANAGER)) {
             throw new InsufficientProjectRoleException();
         }
         return project;
@@ -73,7 +81,7 @@ public class ScopeResolver {
      *
      * <p>Semantics, in order:
      * <ol>
-     *   <li>{@code requireProjectMember} — a missing workspace, a missing project or a
+     *   <li>{@code resolveProject} — a missing workspace, a missing project or a
      *       non-member of the workspace all yield <strong>404</strong>, never 403 (no
      *       existence leak across tenants);</li>
      *   <li>workspace role ≥ ADMIN → pass;</li>
@@ -93,12 +101,12 @@ public class ScopeResolver {
      */
     @Transactional(readOnly = true)
     public Project requireProjectCurator(User actor, UUID workspaceId, UUID projectId) {
-        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
         if (ctx.role().isAtLeast(WorkspaceRole.ADMIN)) {
             return ctx.project();
         }
         boolean manager = projectMemberRepository.findByProjectAndUser(ctx.project(), actor)
-                .map(ProjectMember::getRole)
+                .map(m -> roleCatalog.view(m.getRole().getId()).asProjectRole())
                 .filter(r -> r.isAtLeast(ProjectRole.MANAGER))
                 .isPresent();
         if (!manager) {

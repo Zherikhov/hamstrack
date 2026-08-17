@@ -5,6 +5,7 @@ import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
+import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.util.TokenUtils;
 import com.hamstrack.workspace.dto.*;
 import com.hamstrack.workspace.entity.*;
@@ -20,6 +21,11 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+// HD-123 S1: the WorkspaceRole ordinal ladder is a documented legacy bridge here — the
+// built-in role keys ARE the enum names, so behaviour is byte-identical. S3 replaces the
+// two invite gates with workspace.member.manage + the grant-ceiling rule (§11.2) and
+// deletes the enum.
+@SuppressWarnings("deprecation")
 public class WorkspaceService {
 
     private final WorkspaceAccessService workspaceAccess;
@@ -29,6 +35,12 @@ public class WorkspaceService {
     private final UserRepository userRepository;
     private final MailService mailService;
     private final ProductMetrics metrics;
+    /**
+     * Memberships and invites now carry a {@code roles} row. Resolving a built-in role
+     * costs no query: its id is a compile-time constant and the reference is a proxy
+     * whose only use is to have its foreign key written.
+     */
+    private final RoleCatalog roleCatalog;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -54,7 +66,7 @@ public class WorkspaceService {
         var member = new WorkspaceMember();
         member.setWorkspace(workspace);
         member.setUser(actor);
-        member.setRole(WorkspaceRole.OWNER);
+        member.setRole(roleCatalog.reference(WorkspaceRole.OWNER));
         memberRepository.save(member);
 
         // No per-workspace taxonomy seeding since M1: statuses/types/priorities
@@ -74,27 +86,34 @@ public class WorkspaceService {
             userRepository.markOnboarded(actor.getId(), Instant.now());
         }
 
-        return WorkspaceResponse.of(workspace, WorkspaceRole.OWNER);
+        return WorkspaceResponse.of(
+                workspace, roleCatalog.builtIn(RoleScope.WORKSPACE, WorkspaceRole.OWNER.name()));
     }
 
     @Transactional(readOnly = true)
     public List<WorkspaceResponse> listForUser(User actor) {
+        // One query for the memberships (roles JOIN FETCHed); each role's permission set
+        // comes from the cache, so myPermissions costs nothing per row (§9.2).
+        // The role goes through the same scope+ownership assertion `get()` applies (H3) —
+        // a list that skipped it would report a myPermissions the detail path refuses.
         return memberRepository.findAllByUserIdWithWorkspace(actor.getId()).stream()
-                .map(m -> WorkspaceResponse.of(m.getWorkspace(), m.getRole()))
+                .map(m -> WorkspaceResponse.of(m.getWorkspace(),
+                        workspaceAccess.requireRole(m.getRole().getId(), RoleScope.WORKSPACE,
+                                m.getWorkspace().getId(), "workspace_members")))
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public WorkspaceResponse get(User actor, UUID workspaceId) {
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
-        return WorkspaceResponse.of(ctx.workspace(), ctx.role());
+        return WorkspaceResponse.of(ctx.workspace(), ctx.workspaceRole());
     }
 
     @Transactional(readOnly = true)
     public List<WorkspaceMemberResponse> listMembers(User actor, UUID workspaceId) {
         var workspace = workspaceAccess.requireMember(actor, workspaceId).workspace();
         return memberRepository.findAllByWorkspaceWithUser(workspace).stream()
-                .map(WorkspaceMemberResponse::of)
+                .map(m -> WorkspaceMemberResponse.of(m, roleCatalog.view(m.getRole().getId()).asWorkspaceRole()))
                 .toList();
     }
 
@@ -103,11 +122,14 @@ public class WorkspaceService {
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
         var workspace = ctx.workspace();
         var actorMember = ctx.membership();
-        if (!actorMember.getRole().isAtLeast(WorkspaceRole.ADMIN)) {
+        // HD-123 S1: the actor's role comes from the cached view of their roles row. The
+        // built-in keys ARE the enum names, so both gates below behave exactly as before.
+        var actorRole = roleCatalog.view(actorMember.getRole().getId()).asWorkspaceRole();
+        if (!actorRole.isAtLeast(WorkspaceRole.ADMIN)) {
             throw new InsufficientWorkspaceRoleException();
         }
         // OWNER is never grantable via invite, and no one can grant a role above their own
-        if (req.role() == WorkspaceRole.OWNER || !actorMember.getRole().isAtLeast(req.role())) {
+        if (req.role() == WorkspaceRole.OWNER || !actorRole.isAtLeast(req.role())) {
             throw new InsufficientWorkspaceRoleException();
         }
         // Check not already a member
@@ -121,7 +143,7 @@ public class WorkspaceService {
         var invite = new WorkspaceInvite();
         invite.setWorkspace(workspace);
         invite.setEmail(req.email().toLowerCase());
-        invite.setRole(req.role());
+        invite.setRole(roleCatalog.reference(req.role()));
         invite.setTokenHash(TokenUtils.sha256(rawToken));
         invite.setInvitedBy(actor);
         invite.setExpiresAt(Instant.now().plusSeconds(7 * 24 * 3600)); // 7 days
@@ -150,7 +172,7 @@ public class WorkspaceService {
                 .filter(i -> !i.isExpired())
                 // Already a member (e.g. accepted a different invite to the same ws) — hide it
                 .filter(i -> !memberRepository.existsByWorkspaceAndUser(i.getWorkspace(), actor))
-                .map(PendingInviteResponse::of)
+                .map(i -> PendingInviteResponse.of(i, roleCatalog.view(i.getRole().getId()).key()))
                 .toList();
     }
 
@@ -201,7 +223,7 @@ public class WorkspaceService {
         // Joining a team completes first-login onboarding (Cloud; no-op otherwise)
         userRepository.markOnboarded(actor.getId(), Instant.now());
 
-        return WorkspaceResponse.of(workspace, invite.getRole());
+        return WorkspaceResponse.of(workspace, roleCatalog.view(invite.getRole().getId()));
     }
 
     // Marks first-login onboarding complete (the "Create a team" choice; joining

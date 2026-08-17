@@ -65,6 +65,12 @@ tags:
     description: Public instance metadata
   - name: Auth
     description: Registration, login, tokens, password recovery
+  - name: Permissions
+    description: >-
+      The permission catalog — static product metadata describing every
+      permission this build defines. The per-caller answer ("what may *I* do
+      here?") is not here: it rides `myPermissions` on each workspace and
+      project response.
   - name: Workspaces
     description: Tenancy boundary — members, invites
   - name: Onboarding
@@ -340,6 +346,37 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /permissions:
+    get:
+      tags: [Permissions]
+      summary: The permission catalog
+      description: |
+        Every permission this build defines, with the metadata a client needs to
+        make sense of a `myPermissions` entry.
+
+        **Static product metadata, not tenant data.** There is no workspace
+        context, no path or query parameter and no database access, and the body
+        is identical for every caller on a given version — fetch it once and
+        cache it for the session. It still requires a valid access token
+        (`401` without one).
+
+        Entries come back in a stable order (workspace-scoped first, then
+        project-scoped). **This endpoint is the authoritative list**: it grows
+        between releases, so drive UI from it rather than hard-coding keys or a
+        count. Individual keys, on the other hand, are permanent — they are the
+        wire contract shared by this catalog and every `myPermissions` array,
+        and are never renamed.
+      operationId: listPermissions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PermissionCatalogEntry' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
   /workspaces:
@@ -4291,6 +4328,97 @@ components:
       type: string
       enum: [MANAGER, MEMBER, VIEWER]
 
+    PermissionScope:
+      type: string
+      enum: [WORKSPACE, PROJECT]
+      description: >-
+        The object a permission is granted on, and therefore which response
+        carries it: a `WORKSPACE` key can only appear in a workspace's
+        `myPermissions`, a `PROJECT` key only in a project's.
+
+    PermissionCapabilityHint:
+      type: string
+      enum: [BOARD, RELEASES, null]
+      nullable: true
+      description: >-
+        The delivery capability this permission is *about* — `null` for most
+        entries. A **labelling hint only, never a check**: a project with
+        `delivery.board: KANBAN` still enforces `sprint.manage` in exactly the
+        same way, and `delivery.releases: false` changes nothing about
+        `version.manage`. Capabilities decide what a UI offers, permissions
+        decide what the API allows, and neither substitutes for the other.
+
+    PermissionCatalogEntry:
+      type: object
+      description: >-
+        One entry of `GET /permissions`. Describes a permission's shape, not
+        whether you hold it — that is `myPermissions`.
+      properties:
+        key:
+          type: string
+          maxLength: 64
+          example: sprint.manage
+          description: >-
+            The permanent wire key — `area.action`, lowercase, dot-separated, at
+            most 64 characters, and never containing a `:`. This is the exact
+            string that appears in a `myPermissions` array (optionally suffixed
+            with `:own`).
+        scope: { $ref: '#/components/schemas/PermissionScope' }
+        supportsOwn:
+          type: boolean
+          description: >-
+            Whether a grant of this permission may be narrowed to objects the
+            caller owns — i.e. whether the `key:own` form can ever appear in a
+            `myPermissions` array. `false` for most entries.
+        ownRequired:
+          type: boolean
+          description: >-
+            Whether the permission may **only** be granted own-only. Implies
+            `supportsOwn: true`, and means the bare key never appears in any
+            `myPermissions` — only the `:own` form does.
+        capability: { $ref: '#/components/schemas/PermissionCapabilityHint' }
+
+    MyPermissions:
+      type: array
+      items: { type: string }
+      example: ['issue.create', 'issue.edit:own', 'comment.create', 'comment.edit:own']
+      description: |-
+        The **requesting user's** effective permissions on the object carrying
+        this field, as flat keys from the catalog published by
+        `GET /permissions`. It is the intended way for a client to decide what
+        to show.
+
+        * **Always present**, in catalog order. An empty array is a real answer
+          (a caller with no grants); the field is never `null` and never
+          omitted, so a client must never read "absent" as "allowed".
+        * **The caller only** — never another user's permissions.
+        * **Scoped to the object it rides**: a workspace's array holds only
+          `WORKSPACE`-scoped keys, a project's only `PROJECT`-scoped ones —
+          including any the caller gets in that project by virtue of their
+          workspace role rather than a project membership.
+
+        **The `:own` suffix.** An entry is either the bare key
+        (`"issue.edit"` — the permission for *any* object) or the key plus
+        `:own` (`"issue.edit:own"` — only objects the caller owns: the issue's
+        reporter, the comment's author, the attachment's uploader, the label's
+        creator). At most one of the two forms appears for a given permission.
+
+        `"issue.edit"` and `"issue.edit:own"` are **two distinct values, not a
+        prefix relationship**. An own-only grant does **not** satisfy an
+        unrestricted check. Compare with equality:
+        `perms.includes('issue.edit')` for the unrestricted question, and
+        `perms.includes('issue.edit') || (isMine && perms.includes('issue.edit:own'))`
+        for the per-object one. A `startsWith`/prefix match is the one way to
+        get this wrong, and it fails in the *widening* direction — it would read
+        an own-only grant as permission over everyone's objects. (Keys never
+        contain `:`, so the suffix is unambiguous to split on; equality is still
+        the safer test.)
+
+        **Not an authorization boundary.** The API enforces its own rules on
+        every request regardless of what a client rendered; `myPermissions` only
+        lets the client hide what would be refused anyway. Hiding a control is a
+        UX decision, never a security control.
+
     Priority:
       type: object
       description: Catalog entity (was a closed enum before M1)
@@ -4576,7 +4704,18 @@ components:
         id: { type: string, format: uuid }
         slug: { type: string, example: acme-inc }
         name: { type: string, example: Acme Inc }
-        myRole: { $ref: '#/components/schemas/WorkspaceRole' }
+        myRole:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          description: >-
+            The caller's workspace role. Fine to display; to decide what to
+            show, read `myPermissions` instead.
+        myPermissions:
+          allOf:
+            - $ref: '#/components/schemas/MyPermissions'
+          description: >-
+            The caller's effective **workspace-scoped** permissions (see
+            `GET /permissions`). Always present, possibly empty.
         createdAt: { type: string, format: date-time }
 
     WorkspaceMemberResponse:
@@ -4790,7 +4929,22 @@ components:
             How this team delivers — `board`, `releases`, `estimation` and the
             derived `preset`. Presentation only: nothing in it changes what the
             API accepts or which status code it returns.
-        myRole: { $ref: '#/components/schemas/ProjectRole' }
+        myRole:
+          allOf:
+            - $ref: '#/components/schemas/ProjectRole'
+          description: >-
+            The caller's **explicit** project role — `VIEWER` when they have no
+            project membership row of their own, even where that member can in
+            fact do more than a viewer. Display only: `myPermissions` carries
+            the effective answer and is the field to gate on.
+        myPermissions:
+          allOf:
+            - $ref: '#/components/schemas/MyPermissions'
+          description: >-
+            The caller's effective **project-scoped** permissions in this
+            project (see `GET /permissions`), including any granted by their
+            workspace role rather than a project membership. Always present,
+            possibly empty. May be wider than `myRole` suggests.
         createdAt: { type: string, format: date-time }
 
     ProjectMemberResponse:

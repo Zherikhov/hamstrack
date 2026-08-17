@@ -19,12 +19,18 @@ public record PendingInviteResponse(
         Instant createdAt,
         Instant expiresAt
 ) {
-    public static PendingInviteResponse of(WorkspaceInvite invite) {
+    /**
+     * @param roleKey the invited role's key ({@code "MEMBER"}) — the built-in keys are the
+     *     legacy enum names, so this string is byte-identical to what this response
+     *     carried before HD-123 turned {@code workspace_invites.role} into a
+     *     {@code roles} row.
+     */
+    public static PendingInviteResponse of(WorkspaceInvite invite, String roleKey) {
         return new PendingInviteResponse(
                 invite.getId(),
                 invite.getWorkspace().getId(),
                 invite.getWorkspace().getName(),
-                invite.getRole().name(),
+                roleKey,
                 invite.getInvitedBy().getDisplayName(),
                 invite.getCreatedAt(),
                 invite.getExpiresAt()

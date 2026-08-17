@@ -5,12 +5,15 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.exception.UserNotFoundException;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.dto.*;
 import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
 import com.hamstrack.project.repository.*;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.workspace.service.ProjectContext;
+import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -34,10 +37,13 @@ public class ProjectService {
     private final ProjectMemberRepository projectMemberRepository;
     private final UserRepository userRepository;
     private final ProductMetrics metrics;
+    /** HD-123: project memberships carry a {@code roles} row; views come from the cache. */
+    private final RoleCatalog roleCatalog;
 
     @Transactional
     public ProjectResponse create(User actor, UUID workspaceId, CreateProjectRequest req) {
-        var workspace = resolveWorkspace(actor, workspaceId);
+        var ws = workspaceAccess.requireMember(actor, workspaceId);
+        var workspace = ws.workspace();
         // Normalize once and use the same value for the uniqueness check and the
         // insert — otherwise a future relaxed key pattern could 500 on the unique
         // constraint instead of returning a clean 409.
@@ -59,33 +65,49 @@ public class ProjectService {
         var member = new ProjectMember();
         member.setProject(project);
         member.setUser(actor);
-        member.setRole(ProjectRole.MANAGER);
+        member.setRole(roleCatalog.reference(ProjectRole.MANAGER));
         projectMemberRepository.save(member);
         metrics.projectCreated();
 
-        return ProjectResponse.of(project, ProjectRole.MANAGER);
+        var managerRole = roleCatalog.builtIn(RoleScope.PROJECT, ProjectRole.MANAGER.name());
+        return ProjectResponse.of(project, ProjectRole.MANAGER,
+                workspaceAccess.effectiveProjectPermissions(ws.permissions(), managerRole));
     }
 
     @Transactional(readOnly = true)
     public List<ProjectResponse> list(User actor, UUID workspaceId, boolean includeArchived) {
-        var workspace = resolveWorkspace(actor, workspaceId);
+        var ws = workspaceAccess.requireMember(actor, workspaceId);
+        var workspace = ws.workspace();
         var projects = includeArchived
                 ? projectRepository.findAllByWorkspace(workspace)
                 : projectRepository.findAllByWorkspaceAndArchivedAtIsNull(workspace);
-        // One membership query for all projects instead of one per project
-        var roleByProjectId = projectMemberRepository.findAllByUserAndProjectIn(actor, projects).stream()
-                .collect(Collectors.toMap(m -> m.getProject().getId(), ProjectMember::getRole));
+        // One membership query for all projects instead of one per project. HD-123 keeps
+        // it at one: the roles are JOIN FETCHed and every role -> permissions lookup below
+        // is a cache hit, so myPermissions per row costs no query (§9.2).
+        var membershipByProjectId = projectMemberRepository.findAllByUserAndProjectIn(actor, projects).stream()
+                .collect(Collectors.toMap(m -> m.getProject().getId(), m -> m));
         return projects.stream()
-                .map(p -> ProjectResponse.of(p, roleByProjectId.getOrDefault(p.getId(), ProjectRole.VIEWER)))
+                .map(p -> {
+                    var explicit = membershipByProjectId.get(p.getId());
+                    // Same scope+ownership assertion the detail path applies (H3): a list
+                    // that skipped it would render controls the detail view then refuses.
+                    // Cache hit, so it costs no query per row.
+                    var effectiveRole = explicit != null
+                            ? workspaceAccess.requireRole(explicit.getRole().getId(),
+                                    RoleScope.PROJECT, workspace.getId(), "project_members")
+                            : workspaceAccess.defaultProjectRole(workspace, p);
+                    return ProjectResponse.of(p, legacyRole(explicit),
+                            workspaceAccess.effectiveProjectPermissions(ws.permissions(), effectiveRole));
+                })
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public ProjectResponse get(User actor, UUID workspaceId, UUID projectId) {
-        var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
-        var role = getRole(actor, project);
-        return ProjectResponse.of(project, role);
+        var ws = workspaceAccess.requireMember(actor, workspaceId);
+        var project = projectInWorkspace(ws.workspace(), projectId);
+        var ctx = workspaceAccess.projectContext(actor, ws, project);
+        return ProjectResponse.of(project, legacyRole(ctx), ctx.permissions());
     }
 
     /**
@@ -133,13 +155,14 @@ public class ProjectService {
         // The caller's REAL project role, not a hardcoded MANAGER: a workspace
         // OWNER/ADMIN who is not a project member now reaches this method, and echoing
         // MANAGER back would make the SPA render project-manager-only actions for them.
-        return ProjectResponse.of(project, getRole(actor, project));
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        return ProjectResponse.of(project, legacyRole(ctx), ctx.permissions());
     }
 
     @Transactional
     public void archive(User actor, UUID workspaceId, UUID projectId) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
+        var project = projectInWorkspace(workspace, projectId);
         requireRole(actor, project, ProjectRole.MANAGER);
         project.setArchivedAt(Instant.now());
         projectRepository.save(project);
@@ -148,7 +171,7 @@ public class ProjectService {
     @Transactional
     public void unarchive(User actor, UUID workspaceId, UUID projectId) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
+        var project = projectInWorkspace(workspace, projectId);
         requireRole(actor, project, ProjectRole.MANAGER);
         project.setArchivedAt(null);
         projectRepository.save(project);
@@ -157,17 +180,17 @@ public class ProjectService {
     @Transactional(readOnly = true)
     public List<ProjectMemberResponse> listMembers(User actor, UUID workspaceId, UUID projectId) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
+        var project = projectInWorkspace(workspace, projectId);
         requireRole(actor, project, ProjectRole.VIEWER);
         return projectMemberRepository.findAllByProjectWithUser(project).stream()
-                .map(ProjectMemberResponse::of)
+                .map(m -> ProjectMemberResponse.of(m, roleCatalog.view(m.getRole().getId()).asProjectRole()))
                 .toList();
     }
 
     @Transactional
     public ProjectMemberResponse addMember(User actor, UUID workspaceId, UUID projectId, AddProjectMemberRequest req) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
+        var project = projectInWorkspace(workspace, projectId);
         requireRole(actor, project, ProjectRole.MANAGER);
         // Only workspace members can join a project — a bare findById would expose
         // any user's email/name across tenants via the response
@@ -180,15 +203,15 @@ public class ProjectService {
         var member = new ProjectMember();
         member.setProject(project);
         member.setUser(user);
-        member.setRole(req.role());
+        member.setRole(roleCatalog.reference(req.role()));
         projectMemberRepository.save(member);
-        return ProjectMemberResponse.of(member);
+        return ProjectMemberResponse.of(member, req.role());
     }
 
     @Transactional
     public void removeMember(User actor, UUID workspaceId, UUID projectId, UUID userId) {
         var workspace = resolveWorkspace(actor, workspaceId);
-        var project = resolveProject(workspace, projectId);
+        var project = projectInWorkspace(workspace, projectId);
         requireRole(actor, project, ProjectRole.MANAGER);
         var user = userRepository.findById(userId)
                 .orElseThrow(ProjectNotFoundException::new);
@@ -203,15 +226,56 @@ public class ProjectService {
         return workspaceAccess.requireMember(actor, workspaceId).workspace();
     }
 
-    private Project resolveProject(Workspace workspace, UUID projectId) {
+    /**
+     * The project by id <em>within an already-resolved workspace</em> — a lookup, not an
+     * access check. It performs no membership check of its own and must only ever be
+     * handed a {@code Workspace} that came from {@link #resolveWorkspace} (i.e. from
+     * {@code WorkspaceAccessService.requireMember}).
+     *
+     * <p><strong>Named for what it does, deliberately.</strong> It used to be called
+     * {@code resolveProject}, which is now also the name of
+     * {@code WorkspaceAccessService.resolveProject} — a method that <em>does</em> verify
+     * membership, in the same call graph. The public one was renamed (from
+     * {@code requireProjectMember}) precisely because a name that overstates what a method
+     * checks cost this project a documented gotcha; shadowing it here with an unchecked
+     * helper of the same name would have rebuilt the same trap one layer down.
+     */
+    private Project projectInWorkspace(Workspace workspace, UUID projectId) {
         return projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
     }
 
+    /**
+     * The caller's <em>explicit</em> project role, or {@link ProjectRole#VIEWER} when they
+     * have no {@code project_members} row.
+     *
+     * <p>HD-123 S1 keeps this exactly as it was — it feeds {@code ProjectResponse.myRole},
+     * and S1 must change nothing a client can observe. It is deliberately NOT the
+     * effective role of §5.2: reporting the inherited Contributor here would flip
+     * {@code myRole} from {@code "VIEWER"} to {@code "MEMBER"} for every workspace member
+     * without an explicit row, which is a wire change in a slice that is supposed to have
+     * none. {@code myPermissions} carries the effective answer instead, and S5 retires
+     * this field's role in gating altogether.
+     */
+    @SuppressWarnings("deprecation")
     private ProjectRole getRole(User actor, Project project) {
         return projectMemberRepository.findByProjectAndUser(project, actor)
-                .map(ProjectMember::getRole)
+                .map(m -> roleCatalog.view(m.getRole().getId()).asProjectRole())
                 .orElse(ProjectRole.VIEWER);
+    }
+
+    /** {@link #getRole} without the extra query, from an already-resolved context. */
+    @SuppressWarnings("deprecation")
+    private ProjectRole legacyRole(ProjectContext ctx) {
+        return ctx.explicitProjectRole() ? ctx.projectRole().asProjectRole() : ProjectRole.VIEWER;
+    }
+
+    /** {@link #getRole} without the extra query, from an already-batched membership row. */
+    @SuppressWarnings("deprecation")
+    private ProjectRole legacyRole(ProjectMember explicit) {
+        return explicit == null
+                ? ProjectRole.VIEWER
+                : roleCatalog.view(explicit.getRole().getId()).asProjectRole();
     }
 
     private void requireRole(User actor, Project project, ProjectRole required) {

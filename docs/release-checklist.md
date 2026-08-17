@@ -107,6 +107,40 @@ a suffix, Actions → Build → *Run workflow* on the tag fixes it in one click.
 `main` (the `workflow_dispatch` trigger, added with this change). No new commit,
 no new tag, no need for an existing run to re-run. The deploy chains off it.
 
+## Releases carrying a destructive migration
+
+Most releases need nothing here. A release whose migrations **drop or rename a
+column the previous image still reads** needs two extra things, and the roles
+release (**V13–V15**, HD-123) is the first one that does: `V15` drops
+`workspace_members.role`, `workspace_invites.role` and `project_members.role`.
+
+1. **Snapshot the database first.** Once `V15` has run, rollback is a *restore*,
+   not a re-deploy — the old image cannot read the new schema, and `latest` only
+   moves forward anyway. Take the snapshot between the tag push and the deploy,
+   or immediately before running `docker compose up -d` by hand.
+2. **Deploy stop-the-world, not rolling.** Flyway runs on the *new* container's
+   startup while any *old* container is still serving; from that moment the old
+   one is querying columns that no longer exist, and every request it handles
+   500s. Single-instance DC is unaffected (compose replaces the one container),
+   and prod is single-instance today — but multi-node Cloud is a stated
+   deployment model, so a rolling/blue-green deploy of this release must be
+   drained to zero old instances *before* the new one starts, or split across
+   two releases (N adds and backfills, N+1 drops) so no image ever runs against
+   a schema it does not know.
+
+A migration that only **adds** tables or columns (`V13`, `V14`) is rolling-safe
+and needs neither.
+
+**Editing a migration in place.** Allowed only while *both* are true: its branch
+is unmerged, and the only database that has ever run it is the author's local
+one. Then a checksum change costs one local `DROP DATABASE` and nothing else,
+and a `V{n+1}` correcting a `V{n}` nobody has run would permanently record a
+mistake no operator experienced. Once either condition fails — the branch is
+merged, or it has run anywhere shared (CI's throwaway databases do not count,
+they are created per run) — the only correct fix is a **new** migration. **Say
+in the PR description which you did**, because after the fact the only evidence
+is the file's mtime, and the justification expires silently at merge.
+
 ## Tracker bookkeeping
 
 Independent of git, and easy to forget:

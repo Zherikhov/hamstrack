@@ -53,7 +53,7 @@ import java.util.UUID;
  * the batched page loading the board/backlog/search rely on.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#requireProjectMember} (reads) or
+ * {@link WorkspaceAccessService#resolveProject} (reads) or
  * {@link ScopeResolver#requireProjectCurator} (writes) — a missing workspace, a
  * missing project and a non-member all yield <strong>404</strong>, never 403. 403 is
  * reserved for a <em>member without the curation role</em>. Version lookups always
@@ -109,7 +109,7 @@ public class VersionService {
     @Transactional(readOnly = true)
     public List<VersionResponse> list(User actor, UUID workspaceId, UUID projectId,
                                       boolean includeArchived, boolean includeReleased) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var versions = versionRepository.findAllByProject(project, includeArchived, includeReleased);
         return respondAll(versions);
     }
@@ -117,7 +117,7 @@ public class VersionService {
     /** One version — any project member (reads are unrestricted within the project). */
     @Transactional(readOnly = true)
     public VersionResponse get(User actor, UUID workspaceId, UUID projectId, UUID versionId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         return respond(requireVersion(project, versionId));
     }
 
@@ -399,7 +399,7 @@ public class VersionService {
      */
     @Transactional(readOnly = true)
     public VersionUsageResponse usage(User actor, UUID workspaceId, UUID projectId, UUID versionId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var version = requireVersion(project, versionId);
         var p = progressOf(version);
         return new VersionUsageResponse(p.fixCount(), p.affectsCount(), p.fixCount() - p.fixDoneCount());

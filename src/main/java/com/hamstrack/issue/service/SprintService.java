@@ -64,7 +64,7 @@ import java.util.UUID;
  * lifecycle, bulk issue assignment and the completion report.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#requireProjectMember} (reads, issue-level writes) or
+ * {@link WorkspaceAccessService#resolveProject} (reads, issue-level writes) or
  * {@link ScopeResolver#requireProjectCurator} (lifecycle writes) — a missing
  * workspace, a missing project and a non-member all yield <strong>404</strong>, never
  * 403. 403 is reserved for a <em>member without the curation role</em>. Sprint lookups
@@ -132,7 +132,7 @@ public class SprintService {
     @Transactional(readOnly = true)
     public PageResponse<SprintResponse> list(User actor, UUID workspaceId, UUID projectId,
                                              Collection<SprintState> states, Pageable pageable) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var filter = states == null || states.isEmpty()
                 ? EnumSet.allOf(SprintState.class)
                 : EnumSet.copyOf(states);
@@ -144,7 +144,7 @@ public class SprintService {
     /** One sprint — any project member (reads are unrestricted within the project). */
     @Transactional(readOnly = true)
     public SprintResponse get(User actor, UUID workspaceId, UUID projectId, UUID sprintId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         return respond(requireSprint(project, sprintId));
     }
 
@@ -159,7 +159,7 @@ public class SprintService {
     @Transactional(readOnly = true)
     public SprintCompletionPreview completionPreview(User actor, UUID workspaceId, UUID projectId,
                                                      UUID sprintId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var sprint = requireSprint(project, sprintId);
         var stats = statsOf(sprint);
         var targets = sprintRepository.findFutureByProject(project).stream()
@@ -507,7 +507,7 @@ public class SprintService {
     @Transactional
     public SprintResponse addIssues(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                                     AddIssuesToSprintRequest req) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
         requireAssignable(sprint);
@@ -591,7 +591,7 @@ public class SprintService {
     @Transactional
     public void removeIssue(User actor, UUID workspaceId, UUID projectId, UUID sprintId,
                             UUID issueId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         requireNotArchived(project);
         var sprint = requireSprint(project, sprintId);
         var issue = issueRepository.findByIdAndProject(issueId, project)

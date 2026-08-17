@@ -81,7 +81,7 @@ public class BacklogService {
                                     UUID statusId, UUID assigneeId, UUID priorityId,
                                     UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
                                     UUID fixVersionId, boolean includeDone) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var labelFilter = IssueService.LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
 

@@ -41,7 +41,7 @@ import java.util.UUID;
  * archive, delete — plus the issue-side resolution and the create-time auto-assign.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#requireProjectMember} (reads) or
+ * {@link WorkspaceAccessService#resolveProject} (reads) or
  * {@link ScopeResolver#requireProjectCurator} (writes) — a missing workspace, a
  * missing project and a non-member all yield <strong>404</strong>, never 403. 403 is
  * reserved for a <em>member without the curation role</em>. Component lookups always
@@ -84,7 +84,7 @@ public class ComponentService {
     @Transactional(readOnly = true)
     public List<ComponentResponse> list(User actor, UUID workspaceId, UUID projectId,
                                         boolean includeArchived, boolean withUsage) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var components = componentRepository.findAllByProject(project, includeArchived);
         if (!withUsage || components.isEmpty()) {
             return components.stream().map(c -> ComponentResponse.of(c, null)).toList();
@@ -98,7 +98,7 @@ public class ComponentService {
     /** One component — any project member (reads are unrestricted within the project). */
     @Transactional(readOnly = true)
     public ComponentResponse get(User actor, UUID workspaceId, UUID projectId, UUID componentId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         return ComponentResponse.of(requireComponent(project, componentId), null);
     }
 
@@ -282,7 +282,7 @@ public class ComponentService {
     /** Usage count for one component — any project member (reads are unrestricted). */
     @Transactional(readOnly = true)
     public ComponentUsageResponse usage(User actor, UUID workspaceId, UUID projectId, UUID componentId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var component = requireComponent(project, componentId);
         return new ComponentUsageResponse((int) issueRepository.countByComponent(component));
     }

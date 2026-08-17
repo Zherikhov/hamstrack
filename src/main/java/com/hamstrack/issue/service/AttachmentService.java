@@ -13,6 +13,7 @@ import com.hamstrack.issue.exception.AttachmentNotFoundException;
 import com.hamstrack.issue.repository.IssueAttachmentRepository;
 import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
+import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -41,6 +42,8 @@ public class AttachmentService {
 
     private final WorkspaceAccessService workspaceAccess;
     private final ProjectMemberRepository projectMemberRepository;
+    /** HD-123 S1 bridge: translates a {@code roles} row back to the legacy enum. */
+    private final RoleCatalog roleCatalog;
     private final IssueAttachmentRepository attachmentRepository;
     private final FileStorage fileStorage;
     private final ApplicationEventPublisher eventPublisher;
@@ -245,9 +248,19 @@ public class AttachmentService {
         }
     }
 
+    /**
+     * <p>HD-123 S1: {@code project_members.role} is a {@code roles} row now, so the
+     * ordinal comparison reads the role's key through the cached view (0 queries). The
+     * predicate is unchanged. S2 replaces the whole thing with
+     * {@code ctx.permissions().require(ATTACHMENT_DELETE, isUploader)} — this is one of
+     * the two authorization sites in the codebase that bypass {@code ScopeResolver}
+     * entirely (the other is {@code LabelService.requireEditor}), which is exactly why it
+     * has its own row in {@code PermissionParityTest}.
+     */
+    @SuppressWarnings("deprecation")
     private boolean hasProjectRole(User actor, Issue issue, ProjectRole required) {
         return projectMemberRepository.findByProjectAndUser(issue.getProject(), actor)
-                .map(pm -> pm.getRole().isAtLeast(required))
+                .map(pm -> roleCatalog.view(pm.getRole().getId()).asProjectRole().isAtLeast(required))
                 .orElse(false);
     }
 

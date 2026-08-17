@@ -56,6 +56,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class CustomFieldSearchApiTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -451,7 +453,7 @@ class CustomFieldSearchApiTest {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(u);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(role));
         workspaceMemberRepository.save(m);
     }
 
@@ -468,7 +470,7 @@ class CustomFieldSearchApiTest {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(u);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(role));
         projectMemberRepository.save(m);
     }
 

@@ -41,6 +41,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 public abstract class LabelTestBase {
 
     @Autowired protected MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired protected com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired protected UserRepository userRepository;
     @Autowired protected WorkspaceRepository workspaceRepository;
     @Autowired protected WorkspaceMemberRepository workspaceMemberRepository;
@@ -277,7 +279,7 @@ public abstract class LabelTestBase {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(role));
         workspaceMemberRepository.save(m);
     }
 
@@ -294,7 +296,7 @@ public abstract class LabelTestBase {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(role));
         projectMemberRepository.save(m);
     }
 

@@ -35,7 +35,7 @@ public class ProjectConfigController {
     public ProjectConfigResponse get(@AuthenticationPrincipal User actor,
                                      @PathVariable UUID workspaceId,
                                      @PathVariable UUID projectId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
 
         var statuses = projectConfigService.statuses(project).stream()
                 .map(StatusResponse::of).toList();

@@ -20,6 +20,7 @@ https://tracker.example.com/api
 - [Conventions](#conventions)
 - [Errors](#errors)
 - [Roles](#roles)
+- [Permissions](#permissions)
 - [Instance metadata](#instance-metadata)
 - [Auth endpoints](#auth-endpoints)
 - [Workspaces](#workspaces)
@@ -214,6 +215,85 @@ One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank
 | Edit / delete a comment | comment author |
 | Delete an attachment | uploader or project `MANAGER` |
 
+The table is the human summary; the machine-readable form of the same idea is [permissions](#permissions) — `GET /permissions` for the catalog, and `myPermissions` on each workspace and project response for what the caller actually holds.
+
+## Permissions
+
+Roles resolve to **permissions** — flat, stable string keys such as `issue.transition` or `sprint.manage`. Two surfaces expose them: `GET /permissions` describes every permission the product defines, and `myPermissions` on each workspace and project response tells you which of them *you* hold there.
+
+### The catalog — `GET /permissions`
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/permissions` | ✔ | Every permission this instance defines |
+
+Static product metadata, not tenant data: no workspace context, no path or query parameters, no database access, and the same body for every caller on a given version. Fetch it once and cache it for the session. It still needs a valid access token (`401` without one).
+
+The response is a JSON array of catalog entries in a stable order — workspace-scoped first, then project-scoped:
+
+```json
+[
+  { "key": "workspace.member.manage", "scope": "WORKSPACE", "supportsOwn": false, "ownRequired": false, "capability": null },
+  { "key": "label.manage",            "scope": "WORKSPACE", "supportsOwn": true,  "ownRequired": false, "capability": null },
+  { "key": "issue.transition",        "scope": "PROJECT",   "supportsOwn": false, "ownRequired": false, "capability": null },
+  { "key": "comment.edit",            "scope": "PROJECT",   "supportsOwn": true,  "ownRequired": true,  "capability": null },
+  { "key": "sprint.manage",           "scope": "PROJECT",   "supportsOwn": false, "ownRequired": false, "capability": "BOARD" }
+]
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `key` | string | The permanent wire key: `area.action`, lowercase, dot-separated, at most 64 chars, **never containing a `:`**. This is the exact string that appears in `myPermissions` (optionally suffixed with `:own`). |
+| `scope` | `WORKSPACE` \| `PROJECT` | Which object the permission is granted on, and therefore which response carries it: a `WORKSPACE` key can only appear in a workspace's `myPermissions`, a `PROJECT` key only in a project's. |
+| `supportsOwn` | boolean | Whether a grant may be narrowed to objects the caller owns — i.e. whether you may ever see this key with the `:own` suffix. `false` for most entries. |
+| `ownRequired` | boolean | Whether the permission can **only** be granted own-only. Implies `supportsOwn: true`, and means the bare key never appears in any `myPermissions` — only the `:own` form does. Today this is true for `comment.edit` alone: editing someone else's words is not a permission the product grants at any role. |
+| `capability` | `BOARD` \| `RELEASES` \| `null` | The [delivery capability](#delivery-capabilities) the permission is *about* — a labelling hint, **never a check**, and `null` for most entries. |
+
+**Read the catalog, don't transcribe it.** There are 29 entries at the time of writing (9 workspace-scoped, 20 project-scoped) and the list grows between releases, so this reference deliberately does not reproduce it: `GET /permissions` is the authoritative version, always in sync with what the server enforces. Drive a role picker or a permission legend from the endpoint rather than hard-coding keys or a count. Individual keys, on the other hand, are permanent — they are the wire contract and are never renamed.
+
+**`capability` is a hint, not a gate.** A project whose [`delivery.board`](#delivery-capabilities) is `KANBAN` still enforces `sprint.manage` in exactly the same way, and `delivery.releases: false` changes nothing about `version.manage`. Capabilities decide what the UI offers; permissions decide what the API allows. Never substitute one for the other.
+
+### `myPermissions` — what *you* may do
+
+Every [workspace](#workspaces) and [project](#projects) response carries `myPermissions`: the **requesting user's** effective permissions on that object, as a flat array of catalog keys. It rides responses a client already fetches, so asking "may I do this?" costs no extra request.
+
+- **Always present**, in catalog order. An empty array is a real answer (a caller with no grants); the field is never `null` and never omitted — never read "absent" as "allowed".
+- **The caller only.** It never describes another user's access.
+- **Scoped to the object it rides.** A workspace's array holds only `WORKSPACE`-scoped keys; a project's holds only `PROJECT`-scoped keys — including any the caller gets in that project by virtue of their workspace role rather than a project membership.
+
+### The `:own` suffix
+
+An entry is one of two forms:
+
+| Wire value | Means |
+|---|---|
+| `issue.edit` | the permission over **any** object of that kind |
+| `issue.edit:own` | the permission over **only objects the caller owns** |
+
+"Own" is per permission: the issue's **reporter** for `issue.edit` / `issue.delete`, the comment's **author** for `comment.edit` / `comment.delete`, the **uploader** for `attachment.delete`, the **creator** for `label.manage`. At most one of the two forms appears for a given permission — an unrestricted grant supersedes an own-only one.
+
+**`issue.edit` and `issue.edit:own` are two distinct values, not a prefix relationship.** An own-only grant does **not** satisfy an unrestricted check. Compare with equality:
+
+```js
+// the unrestricted question: "may I edit anyone's issue?"
+const canEditAny = perms.includes('issue.edit');
+
+// the per-object question: "may I edit this one?"
+const canEdit = (issue) =>
+  perms.includes('issue.edit') ||
+  (issue.reporter.id === me.id && perms.includes('issue.edit:own'));
+
+// WRONG — a prefix match also matches 'issue.edit:own', silently reading an
+// own-only grant as permission over everyone's issues.
+const canEditAnyBroken = perms.some((p) => p.startsWith('issue.edit'));
+```
+
+That failure widens rather than narrows, which is why it is worth stating plainly. Keys never contain a `:`, so the suffix is unambiguous if you do need to split — but equality against the two full strings is the safer test.
+
+### `myPermissions` is not an authorization boundary
+
+It tells a client what to render. It does not decide anything: the API performs its own check on every request, whatever the client drew. A call the caller may not make fails identically whether the button was hidden or not, and hiding a control is a UX decision, never a security control. Equally, `myRole` is display metadata — on a project it reports the caller's **explicit** project role (`VIEWER` when they have no project membership row of their own, even where that member can in fact do more), so it can be narrower than the truth. Gate on `myPermissions`.
+
 ## Instance metadata
 
 | Method | Path | Auth | Description |
@@ -282,8 +362,15 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 
 ```json
 // POST /workspaces  {"name": "Acme Inc"}
-{ "id": "…", "slug": "acme-inc", "name": "Acme Inc", "myRole": "OWNER", "createdAt": "…" }
+{
+  "id": "…", "slug": "acme-inc", "name": "Acme Inc",
+  "myRole": "OWNER",
+  "myPermissions": ["workspace.edit", "workspace.member.manage", "…"],
+  "createdAt": "…"
+}
 ```
+
+Every workspace response — create, list, get and invite acceptance — carries [`myPermissions`](#permissions): the caller's effective **workspace-scoped** permissions. It is always present (an empty array is a real answer) and is the field to gate UI on; `myRole` is for display.
 
 ## Projects
 
@@ -311,9 +398,13 @@ The workspace is the top-level container (and tenancy boundary): members, projec
     "estimation": false,
     "preset": "KANBAN"                         // DERIVED, read-only — never send it back
   },
-  "myRole": "MANAGER", "createdAt": "…"
+  "myRole": "MANAGER",                         // the caller's EXPLICIT project role
+  "myPermissions": ["issue.create", "issue.transition", "comment.edit:own", "…"],
+  "createdAt": "…"
 }
 ```
+
+Every project response — create, list, get and update — carries [`myPermissions`](#permissions): the caller's effective **project-scoped** permissions in that project, including any they hold through their workspace role rather than a project membership. It is always present, and it can be **wider than `myRole` suggests** — `myRole` reports only the caller's explicit project membership row, and reads `VIEWER` when they have none. Gate on `myPermissions`; display `myRole`.
 
 **Update permission.** `PATCH …/projects/{projectId}` needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member); any other member gets `403`. This is wider than it used to be: the endpoint was `MANAGER`-only until `boardMode` joined it, and it now matches every other project-content write ([components](#components), [versions](#versions), [sprints](#sprints--backlog)). Archiving, unarchiving and member management stay `MANAGER`-only.
 

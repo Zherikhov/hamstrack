@@ -14,10 +14,16 @@ public record WorkspaceMemberResponse(
         WorkspaceRole role,
         Instant joinedAt
 ) {
-    public static WorkspaceMemberResponse of(WorkspaceMember m) {
+    /**
+     * @param role the member's role as the legacy enum. Passed in rather than read off
+     *     {@code m.getRole()} because that is now a {@code roles} row, and translating it
+     *     needs the cached catalog the caller already has (HD-123 S1). S4 replaces this
+     *     field with the role's id + display name so a custom role can be shown.
+     */
+    public static WorkspaceMemberResponse of(WorkspaceMember m, WorkspaceRole role) {
         var u = m.getUser();
         return new WorkspaceMemberResponse(
                 u.getId(), u.getEmail(), u.getDisplayName(), u.getAvatarUrl(),
-                m.getRole(), m.getJoinedAt());
+                role, m.getJoinedAt());
     }
 }

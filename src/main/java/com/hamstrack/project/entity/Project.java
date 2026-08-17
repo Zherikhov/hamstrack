@@ -6,12 +6,14 @@ import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.IssueTypeSet;
 import com.hamstrack.issue.entity.PrioritySet;
 import com.hamstrack.issue.entity.Workflow;
+import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
 
 import java.time.Instant;
+import java.util.UUID;
 
 @Entity
 @Table(name = "projects",
@@ -108,6 +110,27 @@ public class Project extends BaseEntity {
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "issue_type_set_id")
     private IssueTypeSet issueTypeSet;
+
+    /**
+     * The project role a workspace member inherits here when they have no explicit
+     * {@code project_members} row and the workspace is {@code OPEN} (HD-123 §5.2).
+     * {@code null} → the workspace's default → the built-in Contributor.
+     *
+     * <p>Setting it to the built-in <strong>Viewer</strong> is how a single project is
+     * made strict inside an open workspace — and is also the exact seam private projects
+     * will use (§8.5), which is why no new column is needed for them.
+     *
+     * <p>Raw id for the same reason as on {@code Workspace}: the resolver needs the id
+     * and only the id, and a lazy {@code @ManyToOne} would cost one SELECT per project on
+     * {@code ProjectService.list}. {@link #defaultProjectRole} is a read-only navigation
+     * view; write through {@link #setDefaultProjectRoleId}.
+     */
+    @Column(name = "default_project_role_id")
+    private UUID defaultProjectRoleId;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "default_project_role_id", insertable = false, updatable = false)
+    private Role defaultProjectRole;
 
     public boolean isArchived() {
         return archivedAt != null;

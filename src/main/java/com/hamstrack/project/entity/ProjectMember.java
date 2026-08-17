@@ -1,6 +1,7 @@
 package com.hamstrack.project.entity;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.workspace.entity.Role;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
@@ -32,9 +33,19 @@ public class ProjectMember {
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 20)
-    private ProjectRole role;
+    /**
+     * The <em>explicit</em> project role (HD-123 §8.2). A member with no row here is not
+     * role-less: in an {@code OPEN} workspace they inherit the project's default role
+     * (§5.2), which is what makes the upgrade a no-op. Explicit membership always wins,
+     * even when it grants <em>less</em> than the default (§11.3) — {@code max(explicit,
+     * default)} would make Viewer meaningless.
+     *
+     * <p>{@code JOIN FETCH}ed by {@code ProjectMemberRepository.findByProjectAndUser} and
+     * the batch finders, so it is never a proxy on the authorization path.
+     */
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "role_id", nullable = false)
+    private Role role;
 
     @CreatedDate
     @Column(name = "joined_at", nullable = false, updatable = false)

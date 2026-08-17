@@ -28,6 +28,7 @@ import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
@@ -54,6 +55,8 @@ import java.util.stream.Collectors;
 public class IssueService {
 
     private final WorkspaceAccessService workspaceAccess;
+    /** HD-123 S1 bridge: translates a {@code roles} row back to the legacy enum. */
+    private final RoleCatalog roleCatalog;
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
     private final ProjectMemberRepository projectMemberRepository;
@@ -146,7 +149,7 @@ public class IssueService {
 
     @Transactional
     public IssueResponse create(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
-        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
         var workspace = ctx.workspace();
         var project = ctx.project();
         requireNotArchived(project);
@@ -259,7 +262,7 @@ public class IssueService {
                                           UUID statusId, UUID assigneeId, UUID priorityId,
                                           UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
                                           UUID fixVersionId, UUID sprintId, boolean noSprint) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
         requireCoherentSprintFilter(sprintId, noSprint);
@@ -293,7 +296,7 @@ public class IssueService {
                                                  UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
                                                  UUID fixVersionId, UUID sprintId, boolean noSprint,
                                                  boolean excludeDone, Pageable pageable) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
         requireCoherentSprintFilter(sprintId, noSprint);
@@ -328,7 +331,7 @@ public class IssueService {
 
     @Transactional
     public IssueResponse update(User actor, UUID workspaceId, UUID projectId, long number, UpdateIssueRequest req) {
-        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
         var workspace = ctx.workspace();
         var project = ctx.project();
         requireNotArchived(project);
@@ -633,7 +636,7 @@ public class IssueService {
     @Transactional
     public IssueResponse rank(User actor, UUID workspaceId, UUID projectId, long number,
                               RankIssueRequest req) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         requireNotArchived(project);
 
         // ---- request shape: these are malformed requests, not business rejections ----
@@ -707,7 +710,7 @@ public class IssueService {
 
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long number) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         requireNotArchived(project);
         requireProjectRole(actor, project, ProjectRole.MANAGER);
         var issue = issueRepository.findByProjectAndNumber(project, number)
@@ -956,9 +959,17 @@ public class IssueService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee"));
     }
 
+    /**
+     * HD-123 S1: {@code project_members.role} is a {@code roles} row now, so the ordinal
+     * comparison reads its key through the cached view (0 queries). The predicate — and
+     * the {@code VIEWER} fallback for a caller with no membership row, which passes every
+     * gate except {@code MANAGER} — is unchanged. S2 replaces this with
+     * {@code ctx.permissions().require(ISSUE_DELETE, isReporter)}.
+     */
+    @SuppressWarnings("deprecation")
     private void requireProjectRole(User actor, Project project, ProjectRole required) {
         var role = projectMemberRepository.findByProjectAndUser(project, actor)
-                .map(ProjectMember::getRole)
+                .map(m -> roleCatalog.view(m.getRole().getId()).asProjectRole())
                 .orElse(ProjectRole.VIEWER);
         if (!role.isAtLeast(required)) {
             throw new com.hamstrack.project.exception.InsufficientProjectRoleException();
