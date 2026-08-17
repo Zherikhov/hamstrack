@@ -61,6 +61,7 @@ public class HqlCompiler {
     private final HqlValueResolver valueResolver;
     private final HqlParentResolver parentResolver;
     private final SearchScope searchScope;
+    private final RetiredFieldAliases retiredAliases;
 
     /**
      * Build the page query: scope-ANDed predicate + ToOne fetch joins + ORDER BY
@@ -86,7 +87,7 @@ public class HqlCompiler {
         // and DISTINCT would forbid ORDER BY on a joined column (priority.position).
         cq.select(root);
         cq.where(fullPredicate(query, cq, root, cb, actor, ws, ctx));
-        cq.orderBy(orderBy(query, root, cb));
+        cq.orderBy(orderBy(query, root, cb, ctx));
         return cq;
     }
 
@@ -127,17 +128,46 @@ public class HqlCompiler {
         };
     }
 
-    private FieldDescriptor field(String name) {
+    private FieldDescriptor field(String name, ResolutionContext ctx) {
         // Validated already, but re-resolve defensively (never trust the raw string).
         return registry.find(name)
                 .filter(FieldDescriptor::available)
+                .or(() -> retiredAlias(name, ctx))
                 .orElseThrow(() -> new HqlSemanticException("Unknown field '" + name + "'", name));
     }
 
-    /** True when the name is a custom field (not a system field) — routes to the JSONB path. */
+    /**
+     * True when the name is a custom field (not a system field) — routes to the JSONB path.
+     *
+     * <p>The registry is checked FIRST and wins: a name it knows is never treated as a
+     * custom field. That precedence is why a retired key must NOT be a registry entry
+     * (HD-107 §9.2) — {@code story_points} in {@link FieldRegistry} would permanently
+     * shadow any tenant's own custom field with that key. The alias is applied only
+     * after this method has said "not custom" (see {@link #retiredAlias}).
+     */
     private boolean isCustom(String name, ResolutionContext ctx) {
         return registry.find(name).filter(FieldDescriptor::available).isEmpty()
                 && ctx.customField(name).isPresent();
+    }
+
+    /**
+     * Last-resort resolution of a <em>retired</em> field key to the system field that
+     * replaced it (HD-107 §9.2) — the step that keeps a saved filter written as
+     * {@code story_points = 5} running after V11 archived that custom field.
+     *
+     * <p>Consulted only when the registry missed, and it yields nothing when the caller
+     * CAN see a custom field with that key: system field → visible custom field →
+     * retired alias → "unknown field". The custom check is redundant on the paths that
+     * already ran {@link #isCustom}, and deliberately kept anyway — the ordering is a
+     * tenancy-safety property (a tenant's own {@code story_points} must resolve to
+     * itself, never to the native column) and must hold at every entry point,
+     * including ORDER BY.
+     */
+    private java.util.Optional<FieldDescriptor> retiredAlias(String name, ResolutionContext ctx) {
+        if (ctx.customField(name).isPresent()) return java.util.Optional.empty();
+        return retiredAliases.canonicalName(name)
+                .flatMap(registry::find)
+                .filter(FieldDescriptor::available);
     }
 
     // ---- comparison ----
@@ -147,7 +177,7 @@ public class HqlCompiler {
         if (isCustom(c.field(), ctx)) {
             return customComparison(c, outer, root, cb, ctx);
         }
-        FieldDescriptor f = field(c.field());
+        FieldDescriptor f = field(c.field(), ctx);
         ComparisonOp op = c.op();
 
         // text ~ term
@@ -254,7 +284,7 @@ public class HqlCompiler {
         if (isCustom(in.field(), ctx)) {
             return customInList(in, outer, root, cb, ctx);
         }
-        FieldDescriptor f = field(in.field());
+        FieldDescriptor f = field(in.field(), ctx);
         // priority IN (...) always uses id equality (§5.3: >/< use position, IN uses id)
         var ids = new ArrayList<UUID>();
         for (Value v : in.values()) {
@@ -285,7 +315,7 @@ public class HqlCompiler {
             Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
             return e.negated() ? anyRow : cb.not(anyRow);
         }
-        FieldDescriptor f = field(e.field());
+        FieldDescriptor f = field(e.field(), ctx);
         // label IS EMPTY = "carries no label at all" (no id filter on the subquery).
         if (f.dataType() == FieldDataType.LABEL_REF) {
             Predicate anyLabel = cb.exists(labelSubquery(outer, root, cb, null));
@@ -708,11 +738,16 @@ public class HqlCompiler {
 
     // ---- ORDER BY ----
 
-    private List<Order> orderBy(Query query, Root<Issue> root, CriteriaBuilder cb) {
+    // `ctx` is threaded in for one reason: a sort key may be a RETIRED key
+    // (`ORDER BY story_points`, HD-107 §9.2), and resolving it needs the same
+    // system → custom → alias precedence the predicate paths use. Without it the
+    // validator would accept the key and the compiler would then throw "unknown
+    // field" on the very same query.
+    private List<Order> orderBy(Query query, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         var orders = new ArrayList<Order>();
         if (query.orderBy().isPresent()) {
             for (OrderBy.SortKey key : query.orderBy().get().keys()) {
-                FieldDescriptor f = field(key.field());
+                FieldDescriptor f = field(key.field(), ctx);
                 Path<?> path = sortPath(root, f);
                 boolean desc = key.direction() == OrderBy.Direction.DESC;
                 // priority rank is inverted vs its `position` column (lower position =

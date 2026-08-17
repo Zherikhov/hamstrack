@@ -141,10 +141,16 @@ public interface VersionRepository extends JpaRepository<Version, UUID> {
     int markUnreleased(@Param("id") UUID id, @Param("projectId") UUID projectId);
 
     /**
-     * {@code (id, name)} rows for the non-archived versions of the actor's VISIBLE
-     * projects — the HQL name-resolution feed ({@code ResolutionContextFactory}).
+     * {@code (projectId, id, name)} rows for the non-archived versions of the actor's
+     * VISIBLE projects — the HQL name-resolution feed ({@code ResolutionContextFactory}).
      * A name maps to a <em>list</em> of ids on purpose: two projects may each own a
      * "2.4.0", and both must match (§3.5).
+     *
+     * <p>The owning project id rides along (HD-107 §9.1) so the factory can build the
+     * {@code /schema} VERSION <em>picklist</em> from the projects with the
+     * {@code releases} capability on, while name RESOLUTION keeps spanning every
+     * visible project — a capability may narrow suggestions, never resolution. Row
+     * shape: {@code [0] = project id, [1] = version id, [2] = name}.
      *
      * <p>Deliberately a projection rather than {@link #findAllByProject}: resolution
      * must stay unbounded (any name typed in HQL has to resolve), but hydrating
@@ -152,7 +158,7 @@ public interface VersionRepository extends JpaRepository<Version, UUID> {
      * {@code /suggest} would be pure waste. Never call with an empty collection —
      * an empty {@code IN} list is invalid in JPQL.
      */
-    @Query("SELECT v.id, v.name FROM Version v "
+    @Query("SELECT v.project.id, v.id, v.name FROM Version v "
             + "WHERE v.project.id IN :projectIds AND v.archivedAt IS NULL")
     List<Object[]> findIdAndNameByProjectIds(@Param("projectIds") Collection<UUID> projectIds);
 

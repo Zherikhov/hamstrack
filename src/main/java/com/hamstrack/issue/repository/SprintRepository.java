@@ -199,17 +199,22 @@ public interface SprintRepository extends JpaRepository<Sprint, UUID> {
     int deleteByIdAndProject(@Param("id") UUID id, @Param("projectId") UUID projectId);
 
     /**
-     * {@code (id, name)} rows for the OPEN sprints of the actor's VISIBLE projects — the
-     * HQL name-resolution feed ({@code ResolutionContextFactory}). A name maps to a
-     * <em>list</em> of ids on purpose: two projects may each run a "Sprint 7", and both
-     * must match (§4.7).
+     * {@code (projectId, id, name)} rows for the OPEN sprints of the actor's VISIBLE
+     * projects — the HQL name-resolution feed ({@code ResolutionContextFactory}). A name
+     * maps to a <em>list</em> of ids on purpose: two projects may each run a "Sprint 7",
+     * and both must match (§4.7).
+     *
+     * <p>The owning project id rides along (HD-107 §9.1) so the factory can build the
+     * {@code /schema} SPRINT <em>picklist</em> from the capability-on projects only,
+     * while name RESOLUTION keeps spanning every visible project — one query, two
+     * audiences. Row shape: {@code [0] = project id, [1] = sprint id, [2] = name}.
      *
      * <p>COMPLETED sprints are excluded from NAME resolution (they would flood the
      * namespace with years of history and a name that resolves to 40 ids is useless);
      * issues still carrying one match by id. Never call with an empty collection — an
      * empty {@code IN} list is invalid in JPQL.
      */
-    @Query("SELECT s.id, s.name FROM Sprint s WHERE s.project.id IN :projectIds "
+    @Query("SELECT s.project.id, s.id, s.name FROM Sprint s WHERE s.project.id IN :projectIds "
             + "AND s.state <> com.hamstrack.issue.entity.SprintState.COMPLETED")
     List<Object[]> findIdAndNameByProjectIds(@Param("projectIds") Collection<UUID> projectIds);
 }

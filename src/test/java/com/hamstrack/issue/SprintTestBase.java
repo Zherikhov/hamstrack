@@ -144,6 +144,37 @@ public abstract class SprintTestBase extends VersionTestBase {
                 .andReturn().getResponse().getContentAsString());
     }
 
+    // ============================================================ delivery capabilities
+
+    /**
+     * PATCH the ctx project's delivery capabilities (HD-102, delivery-paths-proposal
+     * §11.3) as the ctx owner — a curator — expecting 200. {@code membersJson} is a raw
+     * fragment of the {@code delivery} object, e.g. {@code "board":"SCRUM","estimation":true}.
+     *
+     * <p>Lives here because {@code newProject()} bootstraps a project through the
+     * repository, so it comes out with the ENTITY defaults — Kanban, releases off,
+     * estimation off (§7's lean new-project rule). Any fixture that wants a Scrum /
+     * estimating / releasing project must therefore say so <em>through the API</em>,
+     * exactly like a curator would, rather than by poking the entity.
+     */
+    protected void setDelivery(Ctx ctx, String membersJson) throws Exception {
+        mockMvc.perform(patch("/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId())
+                        .header("Authorization", "Bearer " + ctx.token())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delivery\":{" + membersJson + "}}"))
+                .andExpect(status().isOk());
+    }
+
+    /** All three capabilities on — the "this team does everything" fixture. */
+    protected void enableEveryCapability(Ctx ctx) throws Exception {
+        setDelivery(ctx, "\"board\":\"SCRUM\",\"releases\":true,\"estimation\":true");
+    }
+
+    /** All three capabilities off — the lean Kanban fixture, stated rather than assumed. */
+    protected void disableEveryCapability(Ctx ctx) throws Exception {
+        setDelivery(ctx, "\"board\":\"KANBAN\",\"releases\":false,\"estimation\":false");
+    }
+
     // ============================================================ rank + planning view
 
     protected ResultActions rank(Ctx ctx, String token, long number, String bodyJson) throws Exception {

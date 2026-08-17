@@ -408,12 +408,24 @@ public class VersionService {
     // ================================================================= HQL support
 
     /**
-     * Bounded (≤ {@code limit}) typeahead over the non-archived version names of the
-     * actor's VISIBLE projects — backs
+     * Bounded (≤ {@code limit}) typeahead over the non-archived version names of a set
+     * of the actor's VISIBLE projects — backs
      * {@code /search/suggest?field=fixVersion|affectsVersion} when the {@code /schema}
-     * picklist is truncated (§3.5). The caller has already verified workspace
-     * membership and passes {@code SearchScope.visibleProjectIds}, so a name can never
-     * resolve through a project the actor cannot see.
+     * picklist is truncated (§3.5).
+     *
+     * <p><strong>Contract:</strong> the caller has already verified workspace
+     * membership and passes a SUBSET of {@code SearchScope.visibleProjectIds} — never
+     * a wider set. Today {@code SearchService} narrows it further still, to
+     * {@code ResolutionContext.Capabilities.releaseProjectIds} (the visible projects
+     * with {@code releases} on, HD-107 §9.1). Narrowing is always safe; widening this
+     * argument would let a name resolve through a project the actor cannot see, and
+     * this method does NOT re-check visibility itself — so nothing may ever expand it.
+     *
+     * <p>Because a subset is expected, EMPTY is a NORMAL input (e.g. no visible project
+     * has {@code releases} on), not an anomaly — which makes the short-circuit on the
+     * first line of the body load-bearing rather than defensive: an empty IN list is
+     * invalid in JPQL/Hibernate, and "no projects" must resolve to "no suggestions",
+     * never to "no project filter".
      *
      * <p>Names are de-duplicated case-insensitively: two projects may each ship a
      * "2.4.0", and the suggestion list is about names, not rows.

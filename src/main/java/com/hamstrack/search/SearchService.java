@@ -116,9 +116,11 @@ public class SearchService {
         var ctx = resolutionContextFactory.build(actor, ws);
 
         var fields = new ArrayList<SearchSchemaResponse.Field>();
-        registry.availableFields().forEach(f -> fields.add(new SearchSchemaResponse.Field(
-                f.name(), f.dataType().name(), operatorTokens(f),
-                f.nullable(), f.sortable(), f.valueSuggest(), f.functions())));
+        registry.availableFields().stream()
+                .filter(f -> suggested(f, ctx))
+                .forEach(f -> fields.add(new SearchSchemaResponse.Field(
+                        f.name(), f.dataType().name(), operatorTokens(f),
+                        f.nullable(), f.sortable(), f.valueSuggest(), f.functions())));
 
         // Small, embeddable value picklists — distinct names reachable by visible
         // projects (deduped), so the picklist matches what name-resolution accepts.
@@ -139,12 +141,18 @@ public class SearchService {
         // to /suggest?field=fixVersion&q=. ONE picklist backs both fixVersion and
         // affectsVersion (both descriptors declare valueSuggest = "VERSION"): the two
         // roles draw from the same catalog, only the link differs.
+        //
+        // HD-107 §9.1: additionally scoped to visible projects with `releases` ON. That
+        // is a SUGGESTION narrowing only — `fixVersion = "2.4.0"` still resolves and
+        // still runs against a project with releases off, so a saved filter can never
+        // break because a curator flipped the toggle.
         values.put("VERSION", capped(labels(ctx.versionNames()), VERSION_PICKLIST_LIMIT));
         // SPRINT (HD-22): the OPEN sprint names of the caller's VISIBLE projects. Capped
         // like the others, though the open-sprint cap already bounds it per project —
         // "visible projects" is what makes the total unbounded. COMPLETED sprints are
         // deliberately absent: they are excluded from name resolution too, so offering
-        // them would suggest values that then 422.
+        // them would suggest values that then 422. HD-107 §9.1 narrows this to the
+        // projects with `board = SCRUM`, on the same suggestion-only terms as VERSION.
         values.put("SPRINT", capped(labels(ctx.sprintNames()), SPRINT_PICKLIST_LIMIT));
 
         // Custom fields (HD-52): append after the system fields, hidden system-name
@@ -204,13 +212,18 @@ public class SearchService {
         // non-archived versions of the caller's VISIBLE projects — the fallback when the
         // /schema VERSION picklist is capped. Both roles share one catalog, so the
         // suggestions are identical for either field name.
+        //
+        // HD-107 §9.1: this endpoint IS the overflow of that picklist, so it is scoped
+        // the same way — visible projects with `releases` on. Still a strict subset of
+        // the visible set (narrowing only, never widening), and still suggestion-only:
+        // a version name that no longer appears here keeps resolving in a query.
         boolean isVersion = registry.find(fieldName)
                 .filter(FieldDescriptor::available)
                 .filter(f -> f.dataType() == FieldDataType.VERSION_REF)
                 .isPresent();
         if (isVersion) {
             var suggestions = versionService
-                    .suggestNames(ctx.visibleProjectIds(), q, SUGGEST_LIMIT).stream()
+                    .suggestNames(ctx.capabilities().releaseProjectIds(), q, SUGGEST_LIMIT).stream()
                     .map(name -> new SuggestResponse.Suggestion(name, name))
                     .toList();
             return new SuggestResponse(fieldName, suggestions);
@@ -246,6 +259,34 @@ public class SearchService {
     }
 
     // ---- helpers ----
+
+    /**
+     * Whether {@code /schema} <em>suggests</em> a system field to this caller
+     * (delivery-paths proposal §9.1, HD-107). A field that belongs to a delivery
+     * capability is listed when <strong>at least one visible project</strong> has that
+     * capability on; every other field is always listed.
+     *
+     * <p><strong>This is autocomplete vocabulary, never a contract.</strong> An omitted
+     * field still parses, still compiles and still runs — typed by hand or loaded from
+     * a saved filter — because a capability is a presentation preference (Rule A, §5.1)
+     * and a filter that stopped working when a colleague flipped a project toggle is
+     * exactly the failure this model exists to prevent. Nothing here reaches
+     * {@link HqlValidator} or {@link HqlCompiler}, and omitting a field never changes a
+     * status code: an unknown reference is still a field-anchored 422, never a 404 and
+     * never a silent empty result.
+     *
+     * <p>Keyed on the descriptor's canonical name, so the {@code sprints}/{@code points}
+     * aliases follow their field automatically (they share the descriptor instance).
+     */
+    private boolean suggested(FieldDescriptor f, ResolutionContext ctx) {
+        var caps = ctx.capabilities();
+        return switch (f.name()) {
+            case "sprint" -> caps.iterations();
+            case "fixVersion", "affectsVersion" -> caps.releases();
+            case "storyPoints" -> caps.estimation();
+            default -> true;
+        };
+    }
 
     private List<String> operatorTokens(FieldDescriptor f) {
         var tokens = new ArrayList<String>();
