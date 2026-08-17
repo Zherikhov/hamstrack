@@ -83,7 +83,7 @@ All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#
 - **Timestamps** — ISO-8601 with UTC offset, e.g. `2026-07-14T06:24:41.486119Z`. Date-only fields (`dueDate`) use `YYYY-MM-DD`.
 - **Partial updates** — `PATCH` endpoints accept any subset of fields; omitted (or `null`) fields are left unchanged.
 - **Access model** — a resource you cannot see returns `404 Not Found`, whether it doesn't exist or you simply aren't a member of its workspace. Membership is never revealed via `403`.
-- **Optimistic locking** — issues carry a `version`; send it back in `PATCH` and get `409 Conflict` if someone changed the issue in between (see [Issues](#issues)).
+- **Optimistic locking** — issues carry a `version`; send it back in `PATCH` and get `409 Conflict` if someone changed the issue in between (see [Issues](#issues)). Omitting it is last-write-wins for the fields you send — but not a guarantee of success: if a competing write commits while your request is in flight, you get the same `409` from the database's own check. Either way a lost race is always a `409` telling you to refresh and retry, never a `500`.
 - **Pagination** — paginated list endpoints accept `page` (zero-based, default `0`) and `size` (default `50`, clamped server-side to a maximum of `100`) and return a uniform envelope:
 
   ```json
@@ -173,6 +173,7 @@ One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank
 |---|---|
 | See a workspace and its projects, issues, members | workspace member |
 | Invite workspace members | workspace `ADMIN` |
+| Change a member's role, or remove a member | workspace `ADMIN` (never on — or to — a role above your own) |
 | Manage the **global** taxonomy (statuses / priorities / issue types / fields / workflows / sets) and any project's bindings | system `ADMIN` |
 | Manage **workspace-scoped** taxonomy and the bindings of projects in the workspace | workspace `OWNER`/`ADMIN` ([delegated](#delegated-administration)) |
 | Manage **project-private** taxonomy and this project's bindings | project `MANAGER` ([delegated](#delegated-administration)) |
@@ -326,6 +327,8 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 | `GET` | `/workspaces` | ✔ | Workspaces the caller belongs to |
 | `GET` | `/workspaces/{id}` | member | Get one |
 | `GET` | `/workspaces/{id}/members` | member | List members |
+| `PATCH` | `/workspaces/{id}/members/{userId}` | `ADMIN` | Change a member's role (`{"role"}`; role ≤ your own, and so must their current one). Returns the member |
+| `DELETE` | `/workspaces/{id}/members/{userId}` | `ADMIN` | Remove a member from the workspace — not their account. `204` |
 | `POST` | `/workspaces/{id}/invites` | `ADMIN` | Email an invite (`{"email", "role"}`; role ≤ your own, never `OWNER`). `201` |
 | `POST` | `/workspaces/accept-invite?token=…` | ✔ | Accept an invite; must be signed in with the invited email |
 
@@ -340,6 +343,55 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 ```
 
 Every workspace response — create, list, get and invite acceptance — carries [`myPermissions`](#permissions): the caller's effective **workspace-scoped** permissions. It is always present (an empty array is a real answer) and is the field to gate UI on; `myRole` is for display.
+
+### Managing members
+
+`PATCH …/members/{userId}` takes `{"role": "OWNER" | "ADMIN" | "MEMBER"}` — that is the whole body, and it is required (`400` otherwise) — and returns the updated membership in the same shape `GET …/members` lists:
+
+```json
+{ "userId": "…", "email": "mia@example.com", "displayName": "Mia", "avatarUrl": null, "role": "ADMIN", "joinedAt": "…" }
+```
+
+Setting the role a member already holds is an accepted no-op rather than an error, so re-sending the current value from a form is safe.
+
+**The grant ceiling.** Nobody may hand out — or act on — a role stronger than their own, and the check covers the target's **current** role as well as the new one. An `ADMIN` can therefore manage `MEMBER`s and other `ADMIN`s, but can neither promote anyone to `OWNER` nor demote or remove an existing `OWNER`; both refusals are `403`. An `OWNER` **may** promote another member to `OWNER` — that is how ownership is handed over. This differs on purpose from `POST …/invites`, which refuses `OWNER` outright: you promote a colleague to owner, you do not invite a stranger as one. It looks like an inconsistency and is not one.
+
+**The last owner is protected.** A workspace must never end up without an `OWNER`, so demoting or removing the final one returns `409` — whoever asks, including that owner acting on themselves. Promote a second owner first. (Because an unchanged role is a no-op, re-sending `OWNER` for the last owner is still fine.) The check is serialised, so two admins demoting two different owners at the same moment cannot both succeed; the second gets the `409`.
+
+**A workspace demotion does not touch project roles.** The two scopes are separate: someone demoted from `ADMIN` to `MEMBER` keeps every explicit project membership they hold, project `MANAGER` rows included, and keeps whatever those grant inside those projects. That is deliberate scope separation, not an oversight — but it is probably not what "demote" suggests, so if you are reducing someone's access in a hurry, check `GET …/projects/{projectId}/members` as well. Removal, by contrast, *does* delete their project memberships in this workspace.
+
+**Removal is not account deletion.** A user account is global and may belong to several workspaces, so `DELETE …/members/{userId}` revokes access to **this** workspace only. In one transaction it:
+
+- deletes the workspace membership;
+- deletes that user's project memberships **within this workspace** (leaving them behind would silently restore a project role if the person were ever re-invited);
+- clears the `assignee` of their issues **in this workspace**, writing one `assignee` history entry per issue so the unassignment shows up in the activity feed like any other edit;
+- deletes every **unaccepted invite** for their address in this workspace. Duplicate pending invites are normal (a re-send), and they stay hidden while the person is a member — so without this, removing them would make a leftover invite *reappear* on their "join a team" screen, and one click would put them straight back. Accepted invites are kept as the record of how they originally joined;
+- closes any **live event stream** (SSE) they hold on this workspace. Membership is only checked when a stream is opened, so an open one would otherwise keep delivering activity metadata until it timed out. Their browser reconnects, that reconnect re-checks membership, and it gets the `404`.
+
+The unassignment bumps each affected issue's `version`, so a client that loaded one of those issues **before** the removal and then saves an edit gets the usual `409` — asking it to refresh and retry — instead of silently writing the old assignee back. That holds whether the client sent `version` (rejected by the issue endpoint's own check) or omitted it and simply lost the race (rejected by the database's).
+
+The account itself is untouched, as is their membership of every other workspace — including issues assigned to them there.
+
+**What deliberately survives**, and is not a dangling reference:
+
+| Kept | Why |
+|---|---|
+| Historical attribution — issue `reporter`, comment author, [history](#issues) entries, [attachment](#attachments) uploader | Who did a thing does not change because they left |
+| [Saved filters](#saved-filters) they own, shared ones included | A shared filter resolves in the **viewer's** context, so it keeps working for everyone else |
+| Any [component](#components) they lead (`lead`, and its `autoAssign` flag) | A departed lead keeps the row so the module still records who led it; auto-assign re-checks membership at issue-create time and silently skips them, leaving the new issue unassigned |
+
+**Status codes** for both verbs:
+
+| Status | When |
+|---|---|
+| `403` | The caller is a workspace member but below `ADMIN`, or the change breaks the grant ceiling |
+| `404` | Unknown workspace, caller not a member, **or** the target holds no membership in *this* workspace |
+| `409` | The change would leave the workspace without an `OWNER` |
+| `422` | `DELETE` only — the target is the caller (see below) |
+
+That third `404` case is about the **membership**, never about the account: an unknown id, an id belonging to someone in another workspace, and a member who was removed a second ago are one indistinguishable answer, so the endpoint cannot be used to probe which accounts exist. It also makes a repeated `DELETE` a clean `404` instead of an error — safe to retry.
+
+**There is no self-removal here, and it is enforced rather than merely absent.** `DELETE …/members/{userId}` refuses with `422` when the target is the caller: leaving a workspace is a different feature — it needs a confirmation, somewhere to land afterwards, and an answer for "that was my only workspace" — and it is not built yet. A sole owner deleting themselves gets the `409` instead, because "promote another owner first" is the answer that will still be true once leaving exists. Self-*demotion* on `PATCH` is allowed: an owner stepping down to `ADMIN` while another owner exists is an ordinary handover.
 
 ## Onboarding
 

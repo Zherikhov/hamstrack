@@ -3,8 +3,11 @@ package com.hamstrack.project.repository;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
+import com.hamstrack.workspace.entity.Workspace;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.List;
 import java.util.Optional;
@@ -42,4 +45,27 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, UU
      */
     @Query("SELECT m FROM ProjectMember m JOIN FETCH m.role WHERE m.user = :user AND m.project IN :projects")
     List<ProjectMember> findAllByUserAndProjectIn(User user, List<Project> projects);
+
+    /**
+     * Drop every explicit project membership one user holds inside ONE workspace — the
+     * second half of a workspace member removal (HD-132). Removing the
+     * {@code workspace_members} row alone would leave {@code project_members} rows behind
+     * that grant a project role to somebody who can no longer resolve the workspace at
+     * all; they would become live again the moment that person was re-invited, silently
+     * restoring an access level nobody re-granted.
+     *
+     * <p><strong>The workspace scope is the whole point.</strong> A {@code User} is
+     * global, so a {@code DELETE … WHERE m.user = :user} would evict them from every
+     * tenant they belong to. The workspace is expressed as a subquery over
+     * {@code Project} rather than the path {@code m.project.workspace}, because a bulk
+     * JPQL DELETE cannot carry an implicit join.
+     *
+     * <p>Plain {@code @Modifying}: nothing in the removal transaction has materialized a
+     * {@code ProjectMember}, and {@code clearAutomatically} would endanger the history
+     * rows the same transaction still has to write.
+     */
+    @Modifying
+    @Query("DELETE FROM ProjectMember m WHERE m.user = :user "
+            + "AND m.project IN (SELECT p FROM Project p WHERE p.workspace = :workspace)")
+    int deleteAllByUserInWorkspace(@Param("user") User user, @Param("workspace") Workspace workspace);
 }

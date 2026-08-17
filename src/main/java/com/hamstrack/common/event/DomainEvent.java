@@ -22,7 +22,7 @@ public sealed interface DomainEvent permits
         IssueCreated, IssueUpdated, IssueDeleted,
         CommentAdded, CommentUpdated, CommentDeleted,
         AttachmentAdded, AttachmentDeleted,
-        NotificationRaised {
+        NotificationRaised, WorkspaceMemberRemoved {
 
     UUID workspaceId();
 }

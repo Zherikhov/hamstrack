@@ -444,13 +444,127 @@ paths:
                 items: { $ref: '#/components/schemas/WorkspaceMemberResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /workspaces/{workspaceId}/members/{userId}:
+    patch:
+      tags: [Workspaces]
+      summary: Change a member's workspace role
+      description: |
+        Requires workspace `ADMIN`. `role` is the whole body and is required.
+        Setting the role a member already holds is an accepted no-op, not an
+        error, so re-sending the current value is safe.
+
+        **Grant ceiling.** Nobody may hand out — or act on — a role stronger
+        than their own, and the check covers the target's *current* role as well
+        as the new one. An `ADMIN` can therefore manage `MEMBER`s and other
+        `ADMIN`s but can neither promote anyone to `OWNER` nor demote an existing
+        `OWNER`; both refusals are `403`. An `OWNER` **may** promote another
+        member to `OWNER` — that is how ownership is handed over. This differs on
+        purpose from `POST /workspaces/{workspaceId}/invites`, which refuses
+        `OWNER` outright: you promote a colleague to owner, you do not invite a
+        stranger as one.
+
+        **Last owner.** A workspace must never end up without an `OWNER`, so
+        demoting the final one returns `409` — whoever asks, including that owner
+        acting on themselves. The check is serialised, so two admins demoting two
+        different owners concurrently cannot both succeed. Self-*demotion* is
+        otherwise fine: an owner stepping down while another owner exists is an
+        ordinary handover.
+
+        **Scope.** A workspace role change does not touch project memberships —
+        someone demoted to `MEMBER` keeps any explicit project `MANAGER` rows they
+        hold. Use `/workspaces/{workspaceId}/projects/{projectId}/members` for
+        those.
+
+        `404` covers an unknown workspace, a caller who is not a member, **and** a
+        target who holds no membership in *this* workspace. The last one is a
+        statement about the membership and says nothing about whether the account
+        exists.
+      operationId: updateWorkspaceMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/memberUserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceMemberRequest' }
+      responses:
+        '200':
+          description: OK — the updated membership
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceMemberResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/LastWorkspaceOwner' }
+    delete:
+      tags: [Workspaces]
+      summary: Remove a member from the workspace
+      description: |
+        Requires workspace `ADMIN`, under the same grant ceiling and last-owner
+        rules as the `PATCH` above (`403` / `409` respectively).
+
+        **This is not account deletion.** A user is global and may belong to
+        several workspaces; removal revokes access *here* only. In one
+        transaction it deletes the `workspace_members` row and the member's
+        project memberships in this workspace, clears the `assignee` of their
+        issues in this workspace — writing one `assignee` history entry per issue,
+        so the unassignment is auditable — and deletes every unaccepted invite for
+        their address here, which would otherwise re-appear as a live join button
+        the moment the membership row was gone. Once the transaction commits, any
+        live SSE stream they hold on this workspace is closed (membership is only
+        checked when a stream is opened). The account itself, and their membership
+        of every other workspace (including work assigned to them there), are
+        untouched.
+
+        The unassignment bumps each affected issue's `version`, so a client that
+        loaded one of those issues *before* the removal and then saves an edit gets
+        the usual `409` from `PATCH .../issues/{number}` and re-reads, rather than
+        silently writing the departed assignee back.
+
+        **What survives, deliberately:** all historical attribution (issue
+        reporter, comment author, history entries, attachment uploader), the saved
+        filters they own — a shared filter resolves in the *viewer's* context and
+        keeps working — and any component they lead: a departed lead keeps the
+        `lead` row and component auto-assign silently skips them. These are by
+        design, not dangling references.
+
+        Removing someone who is already not a member is a clean `404`, so a
+        repeated `DELETE` is idempotent rather than an error.
+
+        **No self-removal.** Leaving a workspace is a separate feature (its own
+        confirmation, landing page and "that was my only workspace" handling) and
+        is not built, so a caller naming themselves gets `422`. A sole owner
+        deleting themselves gets `409` instead — "promote another owner first" is
+        the answer that stays true once leaving exists. Self-*demotion* via the
+        `PATCH` above is allowed.
+      operationId: removeWorkspaceMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/memberUserId'
+      responses:
+        '204': { description: Removed from the workspace }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/LastWorkspaceOwner' }
+        '422':
+          description: >-
+            The target is the caller — self-removal ("leave workspace") is not
+            this endpoint
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
   /workspaces/{workspaceId}/invites:
     post:
       tags: [Workspaces]
       summary: Invite a member by email
       description: |
         Requires workspace `ADMIN`. The granted role must not exceed your own
-        and can never be `OWNER`. The invite is bound to the invited email.
+        and can never be `OWNER` — an existing member can still be promoted to
+        `OWNER` afterwards via `PATCH /workspaces/{workspaceId}/members/{userId}`.
+        The invite is bound to the invited email.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1641,7 +1755,10 @@ paths:
       summary: Update an issue
       description: |
         Partial update — send any subset of fields plus the `version` you last
-        read; a stale version returns `409` (omit `version` to skip the check).
+        read; a stale version returns `409` (omit `version` to skip the check —
+        last-write-wins for the fields you send, though a competing commit
+        landing while the request is in flight still returns `409` from the
+        database's own check rather than overwriting it).
         Status changes are validated against workflow transition rules (`422`
         when forbidden). `parentId` sets/changes the parent and `clearParent`
         detaches it; an illegal parent (unknown/foreign-project, self, cycle,
@@ -3979,6 +4096,15 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    memberUserId:
+      name: userId
+      in: path
+      required: true
+      description: >-
+        The id of the user whose membership is being administered. A user id
+        that holds no membership in this workspace is a `404` about the
+        membership — it reveals nothing about whether the account exists.
+      schema: { type: string, format: uuid }
     issueNumber:
       name: number
       in: path
@@ -4065,6 +4191,14 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+    LastWorkspaceOwner:
+      description: >-
+        The change would leave the workspace without an `OWNER`. `409` rather
+        than `403` on purpose: the caller's permissions are fine, it is the
+        workspace's own invariant that refuses. Promote a second owner first.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
     UnprocessableReference:
       description: Unknown status/type/assignee/parent, or a workflow-forbidden transition
       content:
@@ -4734,6 +4868,19 @@ components:
       properties:
         email: { type: string, format: email }
         role: { $ref: '#/components/schemas/WorkspaceRole' }
+
+    UpdateWorkspaceMemberRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          description: >-
+            The role the member should end up with. Required — a `PATCH` with
+            nothing to change is rejected with `400`. It must not exceed the
+            caller's own role, and neither may the member's current role.
+            Sending the role they already hold is an accepted no-op.
 
     CreateProjectRequest:
       type: object

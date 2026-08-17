@@ -41,6 +41,13 @@ public class WorkspaceService {
      * whose only use is to have its foreign key written.
      */
     private final RoleCatalog roleCatalog;
+    /**
+     * HD-132: the owner of the membership-administration rules. Injected here only for its
+     * two guards ({@code requireMemberAdmin} / {@code requireWithinGrantCeiling}) so the
+     * invite path shares one implementation of the grant ceiling with PATCH/DELETE
+     * {@code /members/{userId}} instead of keeping the copy that used to live inline.
+     */
+    private final WorkspaceMemberService memberService;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -125,13 +132,15 @@ public class WorkspaceService {
         // HD-123 S1: the actor's role comes from the cached view of their roles row. The
         // built-in keys ARE the enum names, so both gates below behave exactly as before.
         var actorRole = roleCatalog.view(actorMember.getRole().getId()).asWorkspaceRole();
-        if (!actorRole.isAtLeast(WorkspaceRole.ADMIN)) {
+        // HD-132: both gates now live in WorkspaceMemberService so the invite path and the
+        // member-administration paths cannot drift apart — same predicate, one copy.
+        memberService.requireMemberAdmin(actorRole);
+        // OWNER is never grantable via INVITE (you promote a colleague to owner, you do not
+        // invite a stranger as one) — the one rule that is specific to this call site.
+        if (req.role() == WorkspaceRole.OWNER) {
             throw new InsufficientWorkspaceRoleException();
         }
-        // OWNER is never grantable via invite, and no one can grant a role above their own
-        if (req.role() == WorkspaceRole.OWNER || !actorRole.isAtLeast(req.role())) {
-            throw new InsufficientWorkspaceRoleException();
-        }
+        memberService.requireWithinGrantCeiling(actorRole, req.role());
         // Check not already a member
         userRepository.findByEmail(req.email().toLowerCase()).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {

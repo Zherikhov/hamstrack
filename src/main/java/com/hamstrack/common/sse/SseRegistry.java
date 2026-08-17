@@ -66,6 +66,55 @@ public class SseRegistry {
         }
     }
 
+    /**
+     * Close every stream one user holds on one workspace, now — the offboarding half of
+     * revocation (HD-132).
+     *
+     * <p>Membership is checked at <em>subscribe</em> time and never again, so without this a
+     * removed member keeps receiving live workspace events until their emitter hits
+     * {@link #EMITTER_TIMEOUT_MS} — up to 30 minutes. What leaks is activity metadata (which
+     * projects are live, which issues are moving), not content: the payload is only
+     * {@code {projectId, issueNumber}} and any REST fetch it prompts 404s at the tenancy
+     * gate. But "we revoked their access" being false for half an hour is exactly the claim
+     * that matters when someone is offboarded during an incident. Completing the emitter also
+     * costs them nothing they should keep: the browser's {@code EventSource} reconnects, and
+     * that reconnect re-runs {@code SseController}'s membership check and gets the 404.
+     *
+     * <p><strong>Call this AFTER COMMIT, never inline</strong> — see
+     * {@code SseEventListener.onWorkspaceMemberRemoved}. Dropping a live stream for a removal
+     * that then rolls back would be an unexplainable disconnect for a member who is still a
+     * member.
+     *
+     * <p>Iterating while {@code complete()} triggers {@code onCompletion} → {@code cleanup} →
+     * {@code list.remove(entry)} is safe: the list is a {@link CopyOnWriteArrayList}, whose
+     * iterator walks an immutable snapshot.
+     *
+     * @return how many emitters were closed (0 when the user had no open stream — the
+     *         overwhelmingly common case, and not an error)
+     */
+    public int disconnectUser(UUID workspaceId, UUID userId) {
+        var list = connections.get(workspaceId);
+        if (list == null || list.isEmpty()) return 0;
+        int closed = 0;
+        for (var ue : list) {
+            if (!ue.userId().equals(userId)) continue;
+            closed++;
+            try {
+                ue.emitter().complete();
+            } catch (Exception e) {
+                // Already completed/timed out, or the pipe is broken. Either way this
+                // emitter is finished, which is the outcome we wanted — and one dead
+                // stream must never abort the loop for the user's other tabs.
+                log.debug("SSE emitter for user {} in workspace {} was already closed", userId, workspaceId, e);
+            }
+        }
+        if (closed > 0) {
+            log.info("SSE: closed {} stream(s) for user {} removed from workspace {}",
+                    closed, userId, workspaceId);
+        }
+        return closed;
+    }
+
     /** Send an event only to a specific user's connections in the workspace, immediately (see {@link #broadcast}). */
     public void sendToUser(UUID workspaceId, UUID userId, String event, Object data) {
         var list = connections.get(workspaceId);

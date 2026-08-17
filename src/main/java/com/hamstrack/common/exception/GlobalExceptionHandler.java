@@ -6,6 +6,7 @@ import com.hamstrack.search.HqlSemanticException;
 import com.hamstrack.search.parser.HqlParseException;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -113,6 +114,50 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ProblemDetail> handleMaxUploadSize(MaxUploadSizeExceededException ex) {
         var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONTENT_TOO_LARGE, "File is too large");
         return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).body(problem);
+    }
+
+    /**
+     * What a client sees when it loses an optimistic-lock race. Deliberately the same
+     * sentence {@code IssueService.update}'s pre-check uses, minus the subject noun: this
+     * handler cannot know <em>what</em> was modified (and naming the entity class here would
+     * leak internals onto the wire), but the caller's move is identical either way.
+     */
+    static final String OPTIMISTIC_LOCK_DETAIL =
+            "This item was modified by someone else — refresh and retry";
+
+    /**
+     * <strong>Losing an optimistic-lock race is a 409, not a crash.</strong>
+     *
+     * <p>Until this existed, only the <em>pre-check</em> in {@code IssueService.update} —
+     * "does the client's {@code version} match the row I just loaded?" — produced a 409.
+     * That check cannot cover the case it is named for. It compares against the entity
+     * loaded in <em>this</em> transaction, so a competing commit that lands <em>after</em>
+     * the read still slips past it, and a client that omits {@code version} skips it
+     * entirely. In both cases the conflict surfaces later, at flush, as Hibernate's
+     * {@code ObjectOptimisticLockingFailureException} — which no handler here declared, so
+     * it fell through to a bare <strong>500</strong>. The write was correctly rejected, so
+     * this was never a data or authorization problem; it just told the SPA to render a crash
+     * instead of "refresh and retry", for the one failure mode whose entire user-facing
+     * contract is "retry".
+     *
+     * <p>HD-132 made that window materially wider — removing a member bumps {@code @Version}
+     * on every issue it unassigns (see {@code IssueRepository.unassignAllInWorkspace}) — but
+     * the gap is <strong>app-wide and predates it</strong>: {@code Issue} and {@code Role}
+     * both carry {@code @Version}, and every loser on either 500'd.
+     *
+     * <p>Catches {@link OptimisticLockingFailureException}, the Spring DAO superclass, so
+     * both the ORM subclass and the plain-JDBC variant land here rather than only whichever
+     * one today's persistence path happens to raise.
+     *
+     * <p><strong>Not on Boot's list.</strong> Per the class note above, adding a handler for
+     * anything {@code ResponseEntityExceptionHandler} declares changes that exception's body
+     * app-wide. This one is a {@code org.springframework.dao} exception, which that class
+     * knows nothing about — so the only behaviour that changes is 500 → 409.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ProblemDetail> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, OPTIMISTIC_LOCK_DETAIL);
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(problem);
     }
 
     /**

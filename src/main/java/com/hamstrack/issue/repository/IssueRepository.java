@@ -1,5 +1,6 @@
 package com.hamstrack.issue.repository;
 
+import com.hamstrack.auth.entity.User;
 import com.hamstrack.issue.entity.Component;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueType;
@@ -9,6 +10,7 @@ import com.hamstrack.issue.entity.Status;
 import com.hamstrack.issue.entity.StatusCategory;
 import com.hamstrack.issue.entity.VersionLinkType;
 import com.hamstrack.project.entity.Project;
+import com.hamstrack.workspace.entity.Workspace;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -96,6 +98,83 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
     long countByStatusInWorkflowProjects(@Param("status") Status status,
                                          @Param("workflow") com.hamstrack.issue.entity.Workflow workflow,
                                          @Param("isDefault") boolean isDefault);
+
+    // ---- Workspace member removal (HD-132) ----
+
+    /**
+     * The {@code (id, number)} pairs of every issue in ONE workspace currently assigned to
+     * one user — read <em>before</em> {@link #unassignAllInWorkspace} so the removal can
+     * write an {@code assignee} history row per issue.
+     *
+     * <p>A scalar projection for exactly the reason
+     * {@link #findUnfinishedRefsBySprint} is one: materializing the entities and then
+     * running the bulk UPDATE below would leave stale managed copies whose later flush
+     * writes the departed assignee back (the documented "bulk JPQL UPDATE desyncs
+     * already-loaded entities" trap). Nothing enters the L1 cache, so the bulk update is
+     * safe and the history rows can be built against {@code getReferenceById} proxies.
+     *
+     * <p><strong>Scoped by workspace, not by user alone.</strong> A {@code User} is global
+     * — the same account is a member of several workspaces — so an unscoped
+     * {@code WHERE assignee = :user} would unassign a departing member's work in every
+     * tenant they belong to. That is the project's top bug class wearing a very ordinary
+     * disguise. {@code idx_issues_assignee} serves the predicate.
+     */
+    @Query("SELECT i.id, i.number FROM Issue i "
+            + "WHERE i.workspace = :workspace AND i.assignee = :user ORDER BY i.number ASC")
+    List<Object[]> findAssignedRefsInWorkspace(@Param("workspace") Workspace workspace,
+                                               @Param("user") User user);
+
+    /**
+     * Unassign every issue of ONE workspace held by a member who is being removed (HD-132).
+     * An assignee is a statement about <em>current</em> responsibility, so leaving it
+     * pointing at someone who no longer has access is how work goes missing.
+     *
+     * <p>Bulk rather than N entity saves: a large workspace can have thousands of issues on
+     * one assignee, and the row set is never materialized (see
+     * {@link #findAssignedRefsInWorkspace}).
+     *
+     * <p>Plain {@code @Modifying}, deliberately. There are no managed {@code Issue} copies
+     * to clear (the caller only read scalar refs), and {@code clearAutomatically} here would
+     * risk discarding the rest of the removal transaction's pending writes for no benefit —
+     * the {@code WorkspaceService.create} trap.
+     *
+     * <p><strong>{@code UPDATE VERSIONED} is load-bearing — do not "simplify" it away.</strong>
+     * A bulk UPDATE normally leaves {@code @Version} alone, and that is what
+     * {@link #moveUnfinishedOutOfSprint} does. Here it would be a silent-revert bug, because
+     * {@code Issue} carries no {@code @DynamicUpdate} (the annotation appears nowhere in this
+     * codebase): every flush writes <em>every</em> column from the snapshot Hibernate loaded
+     * when that transaction first read the row — {@code assignee_id} included, whether or not
+     * the editor touched it. So an editor who opened the issue <em>before</em> the removal and
+     * then saves an unrelated title change would write the departed assignee straight back,
+     * and — with the version left untouched — their optimistic-lock check would still match,
+     * so nothing would notice. {@code issue_history} would say the member was unassigned while
+     * the row said otherwise. {@code VERSIONED} increments {@code version}, so that edit is
+     * rejected and the user re-reads reality instead of overwriting it.
+     *
+     * <p><strong>Which 409 they get depends on the timing, and both exist.</strong> If the
+     * removal committed before the editor's PATCH started, {@code IssueService.update}'s
+     * pre-check sees the stale {@code version} in the body and answers 409 itself. If it
+     * commits <em>after</em> that read — or the client sent no {@code version} at all, so the
+     * pre-check never ran — the conflict surfaces at flush as
+     * {@code ObjectOptimisticLockingFailureException}, which
+     * {@code GlobalExceptionHandler.handleOptimisticLock} maps to the same 409. Before that
+     * handler existed the second case was a 500, i.e. exactly the window this method opens
+     * was the one the pre-check could not cover.
+     *
+     * <p>The trade-off is deliberate and asymmetric with the sprint carry-over: invalidating
+     * in-flight edits is a real cost, and it is worth paying only where the bulk write and a
+     * concurrent edit contend over the <em>same column</em>. A sprint move does not touch
+     * {@code assignee_id}; this does.
+     *
+     * <p>{@code updated_at} is stamped by the {@code set_updated_at()} trigger, which is
+     * correct — losing your assignee is a real change to the issue, not a re-spacing, so the
+     * rank rebalance's {@code skip_updated_at} opt-out must NOT be used here.
+     */
+    @Modifying
+    @Query("UPDATE VERSIONED Issue i SET i.assignee = null "
+            + "WHERE i.workspace = :workspace AND i.assignee = :user")
+    int unassignAllInWorkspace(@Param("workspace") Workspace workspace,
+                               @Param("user") User user);
 
     // ---- Components (HD-31 §5.3/§5.4) ----
     //
