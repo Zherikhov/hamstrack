@@ -20,13 +20,24 @@ import {
   BACKLOG_SECTION, CLOSED_SPRINT_HINT, CompleteSprintDialog, DeleteSprintDialog,
   SprintFormDialog, SprintPointsBadge, SprintStateBadge, StartSprintDialog, StoryPointsChip,
   apiErrorText, formatDaysRemaining, formatSprintRange, isSprintClosed, isStaleListError,
-  useBacklogView, useIsProjectCurator, useSprintMutations,
+  useBacklogView, useSprintMutations,
 } from '../components/sprints'
+import { CAPABILITY, CapabilityOffState, DELIVERY_SETTINGS_TAB } from '../components/delivery'
+import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
 import type {
   BacklogSectionBase, BacklogSprintSection, BacklogView, Issue, IssueType, SectionStats, Sprint,
 } from '../types'
+
+/**
+ * Why a still-open sprint section is inert (HD-102 §5.2 / §6). The sprint is
+ * KEPT — nothing was moved, nothing was completed — and turning sprint planning
+ * back on restores it in full.
+ */
+const PLANNING_OFF_HINT =
+  'Sprint planning is off for this project — this sprint and its issues are kept, '
+  + 'but issues can’t be moved in or out until a curator turns it back on.'
 
 /**
  * Backlog & sprint planning (HD-23) — `/w/:wsId/p/:projectId/backlog`, wrapped in
@@ -79,6 +90,14 @@ export default function BacklogPage() {
 
   // Sprint lifecycle dialogs
   const [creatingSprint, setCreatingSprint] = useState(false)
+  /**
+   * Whether the create dialog was opened as the FIRST-USE gesture (Rule C). Held
+   * in a ref, not derived at save time: the enabling PATCH lands in the project
+   * cache mid-submit, so by the time the sprint comes back `iterations` is
+   * already true and a fresh read would conclude nothing had changed — and
+   * swallow the very notice that tells the user it did.
+   */
+  const bootstrappingRef = useRef(false)
   const [editingSprint, setEditingSprint] = useState<Sprint | null>(null)
   const [startingSprint, setStartingSprint] = useState<Sprint | null>(null)
   const [completingSprint, setCompletingSprint] = useState<Sprint | null>(null)
@@ -96,7 +115,15 @@ export default function BacklogPage() {
   const fields = config?.fields ?? []
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
-  const { project, isCurator } = useIsProjectCurator(wsId, projectId)
+  // HD-102: what this project declares, not what its data implies. `needsRole`
+  // because this page renders curator-only sprint controls.
+  const { iterations, releases, estimation, isCurator, project } =
+    useProjectDelivery(wsId, projectId, { needsRole: true })
+  // The curator predicate can go true from the WORKSPACE role alone, before the
+  // project itself has loaded — and an unloaded project answers "off" for every
+  // capability by design. Without this guard a Scrum project would flash the
+  // "Plan in sprints" affordance at its own curator for one round trip.
+  const canBootstrap = isCurator && !!project
   const { addIssues, removeIssues } = useSprintMutations(wsId, projectId)
 
   const filters = useMemo(() => ({
@@ -134,9 +161,35 @@ export default function BacklogPage() {
   const openSprints = sprintSections.map(s => s.sprint).filter(s => !isSprintClosed(s.state))
   const activeSprint = openSprints.find(s => s.state === 'ACTIVE') ?? null
 
-  // §3.5: a pure-Kanban project that never planned an iteration gets a plain
-  // ranked list and no Scrum vocabulary at all.
-  const showSprintArea = (project?.boardMode ?? 'KANBAN') === 'SCRUM' || openSprints.length > 0
+  // ── What this page shows, per HD-102 §6 ─────────────────────────────────────
+  // The heuristic this replaces (`boardMode === 'SCRUM' || openSprints.length >
+  // 0`) is the one that produced the production dead end: it hid BOTH
+  // sprint-creation entry points until a sprint existed, so a Kanban project
+  // could never create its first one. Sprint CONTROLS now follow the declared
+  // capability and nothing else.
+  //
+  // Rule B keeps the values: a sprint that is still ACTIVE or FUTURE never
+  // becomes invisible just because the project stopped planning in sprints — its
+  // section renders READ-ONLY (no moves in or out, no lifecycle edits) with
+  // *Complete sprint* still offered to curators, because a running sprint must
+  // never be hidden. A COMPLETED section is a record the endpoint only returns
+  // transiently, and it follows the capability.
+  const sprintsReadOnly = !iterations
+  const visibleSprintSections = iterations
+    ? sprintSections
+    : sprintSections.filter(s => !isSprintClosed(s.sprint.state))
+
+  /**
+   * The ONE way this page opens the create-sprint dialog — from the header
+   * button, from the dashed slot, from the off-state affordance and from the
+   * complete-sprint dialog's "no planned sprint to carry the work into" fallback.
+   * Every one of them is a legitimate first use, so none of them may skip the
+   * capability switch (Rule C, §5.3).
+   */
+  function openCreateSprint() {
+    bootstrappingRef.current = !iterations
+    setCreatingSprint(true)
+  }
 
   function sectionIssues(sectionId: string): Issue[] {
     if (!data) return []
@@ -150,9 +203,26 @@ export default function BacklogPage() {
     return isSprintClosed(data?.sprints.find(s => s.sprint.id === sectionId)?.sprint.state)
   }
 
-  /** A move between these two sections would be refused by the server (422). */
+  /**
+   * Why a section-to-section move is not on offer, or null when it is.
+   *
+   * Two different reasons, deliberately worded differently: a COMPLETED sprint is
+   * a delivered fact the server itself refuses to change (422), while "planning
+   * off" is a reversible project preference this UI enforces alone — the API
+   * would happily take the move (Rule A, §5.1).
+   */
+  function moveRefusal(from: string, to: string): string | null {
+    if (from === to) return null
+    if (isClosedSection(from) || isClosedSection(to)) return CLOSED_SPRINT_HINT
+    // Every section other than the backlog IS a sprint, so any cross-section move
+    // touches one while sprint planning is off.
+    if (sprintsReadOnly) return PLANNING_OFF_HINT
+    return null
+  }
+
+  /** A move between these two sections is not offered — see `moveRefusal`. */
   function moveBlocked(from: string, to: string): boolean {
-    return from !== to && (isClosedSection(from) || isClosedSection(to))
+    return moveRefusal(from, to) !== null
   }
 
   // ── Rank mutation (optimistic, with rollback) ────────────────────────────────
@@ -199,10 +269,12 @@ export default function BacklogPage() {
     if (!wsId || !projectId) return
     // Backstop for every entry point (drag, kebab, "move all"): a completed
     // sprint neither takes issues in nor lets them out — the server answers 422
-    // and the UI must not have offered the gesture in the first place.
-    if (moveBlocked(from, to)) {
+    // and the UI must not have offered the gesture in the first place. Same
+    // backstop carries the "sprint planning is off" case.
+    const refusal = moveRefusal(from, to)
+    if (refusal) {
       setNotice('')
-      setMoveError(CLOSED_SPRINT_HINT)
+      setMoveError(refusal)
       return
     }
     const list = sectionIssues(to)
@@ -271,7 +343,8 @@ export default function BacklogPage() {
    */
   function moveAllTo(section: BacklogSprintSection, target: string) {
     const from = section.sprint.id
-    if (moveBlocked(from, target)) { setNotice(''); setMoveError(CLOSED_SPRINT_HINT); return }
+    const refusal = moveRefusal(from, target)
+    if (refusal) { setNotice(''); setMoveError(refusal); return }
     const ids = section.issues.map(i => i.id)
     if (ids.length === 0) return
     setMoveError('')
@@ -377,12 +450,16 @@ export default function BacklogPage() {
               Backlog
             </span>
             <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              {showSprintArea ? 'plan iterations and rank what comes next' : 'ranked — drag to reorder'}
+              {iterations ? 'plan iterations and rank what comes next' : 'ranked — drag to reorder'}
             </span>
           </div>
-          {isCurator && showSprintArea && (
-            <Button variant="secondary" size="sm" onClick={() => setCreatingSprint(true)}>
-              <Plus size={13} /> New sprint
+          {/* Rule C (§5.3): the entry point to sprints is NOT gated by sprints.
+              A curator always has one here — it just says what it will do when
+              the project doesn't plan in sprints yet. A plain member sees no
+              enabling control and no sprint vocabulary at all. */}
+          {canBootstrap && (
+            <Button variant="secondary" size="sm" onClick={openCreateSprint}>
+              <Plus size={13} /> {iterations ? 'New sprint' : CAPABILITY.iterations.enable}
             </Button>
           )}
         </div>
@@ -405,8 +482,12 @@ export default function BacklogPage() {
           </Select>
           <ComponentFilter wsId={wsId} projectId={projectId}
                            value={filterComponentId} onChange={setFilterComponentId} />
-          <FixVersionFilter wsId={wsId} projectId={projectId}
-                            value={filterFixVersionId} onChange={setFilterFixVersionId} />
+          {/* §6: the fix-version filter is release vocabulary — gated on the
+              declared capability, not on whether versions exist. */}
+          {releases && (
+            <FixVersionFilter wsId={wsId} projectId={projectId}
+                              value={filterFixVersionId} onChange={setFilterFixVersionId} />
+          )}
           <LabelFilter wsId={wsId} value={filterLabelIds} onChange={setFilterLabelIds}
                        match={labelMatch} onMatchChange={setLabelMatch} />
 
@@ -446,7 +527,7 @@ export default function BacklogPage() {
             </div>
           ) : !data ? null : (
             <div className="flex flex-col gap-3" style={{ padding: '14px 18px 40px', maxWidth: 1180 }}>
-              {showSprintArea && sprintSections.map(section => (
+              {visibleSprintSections.map(section => (
                 <SectionCard
                   key={section.sprint.id}
                   sectionId={section.sprint.id}
@@ -455,6 +536,10 @@ export default function BacklogPage() {
                       sprint={section.sprint}
                       stats={section.stats}
                       canCurate={isCurator}
+                      // Rule B: still visible, but inert except for the one
+                      // action a running sprint must never lose.
+                      planningOff={sprintsReadOnly}
+                      showPoints={estimation}
                       anotherActive={!!activeSprint && activeSprint.id !== section.sprint.id}
                       onEdit={() => setEditingSprint(section.sprint)}
                       onStart={() => setStartingSprint(section.sprint)}
@@ -463,8 +548,9 @@ export default function BacklogPage() {
                       onMoveAllTo={target => moveAllTo(section, target)}
                       // A COMPLETED sprint offers no bulk move at all: its
                       // membership is what it delivered (the server refuses both
-                      // directions with a 422).
-                      moveTargets={isSprintClosed(section.sprint.state) ? [] : [
+                      // directions with a 422). Neither does any sprint while
+                      // planning is off — the section is read-only.
+                      moveTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly ? [] : [
                         ...openSprints.filter(s => s.id !== section.sprint.id)
                           .map(s => ({ id: s.id, name: s.name })),
                         { id: BACKLOG_SECTION, name: 'Backlog' },
@@ -477,7 +563,7 @@ export default function BacklogPage() {
                   refreshing={view.refreshingSection === section.sprint.id}
                   onRefresh={() => view.refreshSection(section.sprint.id)}
                   emptyText={
-                    isCurator
+                    isCurator && !sprintsReadOnly
                       ? 'Drag issues here from the backlog to plan this sprint.'
                       : 'No issues planned for this sprint yet.'
                   }
@@ -493,8 +579,9 @@ export default function BacklogPage() {
                   onSectionDragOver={onSectionDragOver}
                   onSectionDrop={onSectionDrop}
                   // Same rule for a single row's kebab: nothing leaves a
-                  // completed sprint, so it offers no "Move to →" at all.
-                  menuTargets={isSprintClosed(section.sprint.state) ? [] : [
+                  // completed sprint — or any sprint while planning is off — so
+                  // it offers no "Move to →" at all.
+                  menuTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly ? [] : [
                     ...openSprints.filter(s => s.id !== section.sprint.id)
                       .map(s => ({ id: s.id, name: s.name })),
                     { id: BACKLOG_SECTION, name: 'Backlog' },
@@ -504,22 +591,40 @@ export default function BacklogPage() {
                 />
               ))}
 
-              {showSprintArea && isCurator && (
+              {/* Sprint creation follows the CAPABILITY, never the data — and it
+                  is offered in BOTH states (Rule C, §5.3). With iterations on
+                  this is the familiar dashed "Create sprint" slot; with them off
+                  the same slot explains the project's current way of working and
+                  offers to change it, saying up front that the change is
+                  reversible. It sits exactly where the sprint sections would be,
+                  which is where a curator looks for them. */}
+              {canBootstrap && (iterations ? (
                 <button
                   type="button"
-                  onClick={() => setCreatingSprint(true)}
+                  onClick={openCreateSprint}
                   className="flex items-center justify-center gap-1.5 text-sm cursor-pointer rounded-lg border border-dashed transition-colors hover:bg-[var(--color-surface-2)]"
                   style={{ padding: '10px 12px', borderColor: 'var(--color-border-2)', color: 'var(--color-text-secondary)' }}
                 >
                   <Plus size={14} /> Create sprint
                 </button>
-              )}
+              ) : (
+                <CapabilityOffState
+                  capability="iterations"
+                  isCurator
+                  // The switch itself happens inside the create dialog, in the
+                  // same gesture that creates the first sprint — turning sprint
+                  // planning on and then landing on an empty sprint area would be
+                  // a second dead end, one step further along.
+                  onEnable={openCreateSprint}
+                />
+              ))}
 
               <SectionCard
                 sectionId={BACKLOG_SECTION}
                 header={
                   <BacklogSectionHeader
                     stats={data.backlog.stats}
+                    showPoints={estimation}
                     onCreateIssue={() => openCreateIssue({ projectId })}
                   />
                 }
@@ -540,7 +645,9 @@ export default function BacklogPage() {
                 onRowDragOver={onRowDragOver}
                 onSectionDragOver={onSectionDragOver}
                 onSectionDrop={onSectionDrop}
-                menuTargets={openSprints.map(s => ({ id: s.id, name: s.name }))}
+                // "Move to a sprint" is a planning control, so it follows the
+                // capability — with iterations off the ranked list is all there is.
+                menuTargets={sprintsReadOnly ? [] : openSprints.map(s => ({ id: s.id, name: s.name }))}
                 onMoveWithin={moveWithin}
                 onMoveToSection={moveToSection}
               />
@@ -570,8 +677,19 @@ export default function BacklogPage() {
       {creatingSprint && wsId && projectId && (
         <SprintFormDialog
           wsId={wsId} projectId={projectId} sprint={null}
+          // Rule C: the first sprint of a Kanban project turns sprint planning on
+          // in the same submit. Already-on projects send no delivery PATCH at all.
+          enableIterations={bootstrappingRef.current}
           onClose={() => setCreatingSprint(false)}
-          onSaved={() => setCreatingSprint(false)}
+          onSaved={sprint => {
+            setCreatingSprint(false)
+            // …and the user is told what just changed, with the way back.
+            if (bootstrappingRef.current) {
+              setMoveError('')
+              setNotice(`Sprint planning is on — ${sprint.name} is ready to plan. `
+                + `You can turn it off again in Project settings → ${DELIVERY_SETTINGS_TAB}.`)
+            }
+          }}
         />
       )}
       {editingSprint && wsId && projectId && (
@@ -593,7 +711,7 @@ export default function BacklogPage() {
         <CompleteSprintDialog
           wsId={wsId} projectId={projectId} sprint={completingSprint}
           onClose={() => setCompletingSprint(null)}
-          onCreateSprint={() => { setCompletingSprint(null); setCreatingSprint(true) }}
+          onCreateSprint={() => { setCompletingSprint(null); openCreateSprint() }}
           onCompleted={result => {
             setCompletingSprint(null)
             // The reported outcome, in the spec's own wording: "Sprint 7
@@ -871,12 +989,20 @@ function DropRule({ active }: { active: boolean }) {
 // ── Section headers ───────────────────────────────────────────────────────────
 
 function SprintSectionHeader({
-  sprint, stats, canCurate, anotherActive, onEdit, onStart, onComplete, onDelete,
-  onMoveAllTo, moveTargets,
+  sprint, stats, canCurate, planningOff, showPoints, anotherActive,
+  onEdit, onStart, onComplete, onDelete, onMoveAllTo, moveTargets,
 }: {
   sprint: Sprint
   stats: SectionStats
   canCurate: boolean
+  /**
+   * The project turned sprint planning off while this sprint is still open
+   * (HD-102 §6). The section stays VISIBLE and read-only: no lifecycle edits, no
+   * moves — except *Complete sprint*, which a running sprint must never lose.
+   */
+  planningOff: boolean
+  /** `estimation` — point sums are an aggregate and follow the capability. */
+  showPoints: boolean
   /** Another sprint is already running — Start must be refused with a reason. */
   anotherActive: boolean
   onEdit: () => void
@@ -903,6 +1029,13 @@ function SprintSectionHeader({
             record only
           </span>
         )}
+        {/* …and why an OPEN one did (Rule B: kept, visible, inert). */}
+        {!closed && planningOff && (
+          <span className="text-xs flex-shrink-0" title={PLANNING_OFF_HINT}
+                style={{ color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+            sprint planning off
+          </span>
+        )}
       </div>
       {range && (
         <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{range}</span>
@@ -924,18 +1057,20 @@ function SprintSectionHeader({
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
           {stats.issueCount} issue{stats.issueCount === 1 ? '' : 's'}
         </span>
-        <SprintPointsBadge stats={stats} compact />
-        {canCurate && sprint.state === 'FUTURE' && (
+        {showPoints && <SprintPointsBadge stats={stats} compact />}
+        {canCurate && !planningOff && sprint.state === 'FUTURE' && (
           <span title={startBlocked ? 'Another sprint is already active — complete it first.' : undefined}>
             <Button variant="primary" size="sm" disabled={startBlocked} onClick={onStart}>
               Start sprint
             </Button>
           </span>
         )}
+        {/* Offered even with planning off: never leave a running sprint with no
+            way to end it (§6). */}
         {canCurate && sprint.state === 'ACTIVE' && (
           <Button variant="secondary" size="sm" onClick={onComplete}>Complete sprint</Button>
         )}
-        {canCurate && (
+        {canCurate && !planningOff && (
           <KebabMenu label={`Actions for ${sprint.name}`}>
             {close => (
               <>
@@ -960,8 +1095,10 @@ function SprintSectionHeader({
   )
 }
 
-function BacklogSectionHeader({ stats, onCreateIssue }: {
+function BacklogSectionHeader({ stats, showPoints, onCreateIssue }: {
   stats: SectionStats
+  /** `estimation` — the point sum is an aggregate and follows the capability. */
+  showPoints: boolean
   onCreateIssue: () => void
 }) {
   return (
@@ -971,7 +1108,7 @@ function BacklogSectionHeader({ stats, onCreateIssue }: {
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
           {stats.issueCount} issue{stats.issueCount === 1 ? '' : 's'}
         </span>
-        <SprintPointsBadge stats={stats} compact />
+        {showPoints && <SprintPointsBadge stats={stats} compact />}
         <Button variant="ghost" size="sm" onClick={onCreateIssue}>
           <Plus size={13} /> Create issue
         </Button>

@@ -64,17 +64,28 @@ import java.util.UUID;
  *                          case-insensitively (for the {@code /schema}
  *                          {@code COMPONENT} picklist)
  * @param versionNames      non-archived version display names across the visible
- *                          projects, original casing, de-duplicated
+ *                          projects <em>that have the {@code releases} capability
+ *                          on</em>, original casing, de-duplicated
  *                          case-insensitively (for the {@code /schema}
- *                          {@code VERSION} picklist)
- * @param sprintNames       open sprint display names across the visible projects,
+ *                          {@code VERSION} picklist, HD-107 §9.1). The capability
+ *                          narrows SUGGESTIONS only — {@link #versionIdsByName}
+ *                          above still spans every visible project, so a saved
+ *                          filter never stops resolving because a curator flipped a
+ *                          toggle
+ * @param sprintNames       open sprint display names across the visible projects
+ *                          <em>that have the {@code board = SCRUM} capability</em>,
  *                          original casing, de-duplicated case-insensitively (for the
- *                          {@code /schema} {@code SPRINT} picklist)
+ *                          {@code /schema} {@code SPRINT} picklist). Same
+ *                          suggestion-only narrowing as {@code versionNames}
  * @param customFieldsByKey non-archived custom fields (M2) reachable by any visible
  *                          project, keyed by their machine {@code key} (== HQL field
  *                          name). System field names always win — a key here is only
  *                          consulted when it is NOT a system field (HD-52). A custom
  *                          field a caller can't see simply isn't in this map (no leak).
+ * @param capabilities      which delivery capabilities the visible projects declare
+ *                          (HD-107 §9.1). Used ONLY to decide what {@code /schema}
+ *                          <em>suggests</em>; never consulted by the validator, the
+ *                          compiler or the scope predicate
  */
 public record ResolutionContext(
         User actor,
@@ -96,10 +107,54 @@ public record ResolutionContext(
         List<String> componentNames,
         List<String> versionNames,
         List<String> sprintNames,
-        Map<String, CustomFieldMeta> customFieldsByKey
+        Map<String, CustomFieldMeta> customFieldsByKey,
+        Capabilities capabilities
 ) {
     /** A workspace member's identity for USER_REF resolution. */
     public record Member(UUID id, String email, String displayName) {}
+
+    /**
+     * The delivery capabilities (delivery-paths proposal §2.3) declared by the actor's
+     * visible projects, as the id subsets that have each capability ON.
+     *
+     * <p><strong>Suggestion-only, by contract (§9.1).</strong> A capability is a
+     * presentation preference, so it may narrow what {@code /search/schema} offers and
+     * nothing else: {@code sprint}, {@code fixVersion}, {@code affectsVersion} and
+     * {@code storyPoints} keep parsing, compiling and running on every project
+     * regardless of what is stored here. A saved filter must never break because a
+     * colleague flipped a toggle — that is the same class of failure the delivery-paths
+     * work exists to fix. Nothing in {@link HqlValidator}, {@link HqlCompiler} or
+     * {@link SearchScope} reads this record.
+     *
+     * <p>Kept as id subsets rather than plain booleans so the value picklists can be
+     * built from exactly the capability-on projects; the booleans are derived. Each
+     * list is always a SUBSET of {@code visibleProjectIds} — narrowing only, so it can
+     * never widen the tenant boundary.
+     *
+     * @param iterationProjectIds visible projects with {@code board = SCRUM}
+     * @param releaseProjectIds   visible projects with {@code releases} on
+     * @param estimationProjectIds visible projects with {@code estimation} on
+     */
+    public record Capabilities(
+            List<UUID> iterationProjectIds,
+            List<UUID> releaseProjectIds,
+            List<UUID> estimationProjectIds
+    ) {
+        /** At least one visible project plans in sprints. */
+        public boolean iterations() {
+            return !iterationProjectIds.isEmpty();
+        }
+
+        /** At least one visible project uses releases. */
+        public boolean releases() {
+            return !releaseProjectIds.isEmpty();
+        }
+
+        /** At least one visible project estimates. */
+        public boolean estimation() {
+            return !estimationProjectIds.isEmpty();
+        }
+    }
 
     /** A visible custom field by its HQL name (its {@code key}), case-insensitively. */
     public java.util.Optional<CustomFieldMeta> customField(String key) {

@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import ReleasesPage from './ReleasesPage'
+import { apiUpdateProject, versionsApi } from '../api'
 import type { Version } from '../types'
 
 /**
@@ -55,6 +56,10 @@ const mockState = vi.hoisted(() => ({
   versions: [] as unknown[],
   projectRole: 'MANAGER' as 'MANAGER' | 'MEMBER',
   workspaceRole: 'MEMBER' as 'OWNER' | 'ADMIN' | 'MEMBER',
+  // HD-102: `undefined` = a response with no `delivery` at all, which `deliveryOf`
+  // upgrades per §7 (releases stay ON for every pre-existing project) — the state
+  // every test outside the off-state block below describes.
+  delivery: undefined as Record<string, unknown> | undefined,
 }))
 
 vi.mock('../api', () => ({
@@ -62,10 +67,22 @@ vi.mock('../api', () => ({
   apiGetProject: vi.fn(async () => ({
     id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY',
     archived: false, myRole: mockState.projectRole, createdAt: '2026-01-01T00:00:00Z',
+    ...(mockState.delivery ? { delivery: mockState.delivery } : {}),
   })),
   apiGetWorkspace: vi.fn(async () => ({
     id: 'w1', name: 'WS', slug: 'ws', myRole: mockState.workspaceRole, createdAt: '2026-01-01T00:00:00Z',
   })),
+  // HD-104: the only write the off-state affordance performs — a PARTIAL delivery
+  // PATCH that never carries the derived `preset`.
+  apiUpdateProject: vi.fn(async (_ws: string, _p: string, payload: Record<string, unknown>) => {
+    mockState.delivery = { board: 'KANBAN', estimation: false, preset: 'RELEASES',
+      ...(mockState.delivery ?? {}), ...(payload.delivery as Record<string, unknown>) }
+    return {
+      id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY',
+      archived: false, myRole: mockState.projectRole, createdAt: '2026-01-01T00:00:00Z',
+      delivery: mockState.delivery,
+    }
+  }),
   versionsApi: {
     list: vi.fn(async () => mockState.versions),
     usage: vi.fn(async () => ({ fixIssueCount: 24, affectsIssueCount: 0, unresolvedFixIssueCount: 6 })),
@@ -83,6 +100,9 @@ beforeEach(() => {
   mockState.versions = [UNRELEASED, NEXT, RELEASED]
   mockState.projectRole = 'MANAGER'
   mockState.workspaceRole = 'MEMBER'
+  mockState.delivery = undefined
+  vi.mocked(apiUpdateProject).mockClear()
+  vi.mocked(versionsApi.create).mockClear()
 })
 
 /** Echoes the current URL so the search-navigation assertion can read it. */
@@ -242,5 +262,79 @@ describe('ReleasesPage — curation guard', () => {
     renderPage()
 
     expect(await screen.findByLabelText('Actions for 2.4.0')).toBeInTheDocument()
+  })
+})
+
+/**
+ * HD-104 (S3) — the releases half of **Rule C** (HD-102 §5.3). The rail item is
+ * gone while the capability is off, so this page is the only place the capability
+ * can be turned back on, and the route deliberately still resolves.
+ *
+ * The same three properties as the Backlog affordance: a curator-only enabling
+ * control, a reversibility notice that is copy rather than a tooltip, and a
+ * PARTIAL `delivery` PATCH that never carries the derived `preset`. Plus Rule B
+ * (§5.2) on top: turning releases off hides the lifecycle CONTROLS and nothing
+ * else — every version, its progress and its issue links keep rendering.
+ */
+describe('ReleasesPage — the off-state (HD-104, Rule C)', () => {
+  const RELEASES_OFF = { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' }
+
+  it('offers a curator the enabling action, and says it is reversible in the copy', async () => {
+    mockState.delivery = RELEASES_OFF
+    renderPage()
+
+    expect(await screen.findByRole('button', { name: /turn on releases/i })).toBeInTheDocument()
+    expect(screen.getByText(/turn them off again in Project settings/i)).toBeInTheDocument()
+    // Rule B: the versions themselves are untouched — nothing was deleted.
+    expect(screen.getByText('18 / 24')).toBeInTheDocument()
+    // …but their lifecycle controls are gone while the capability is off.
+    expect(screen.queryByLabelText('Actions for 2.4.0')).not.toBeInTheDocument()
+  })
+
+  it('turns releases on with a partial delivery PATCH that omits `preset`', async () => {
+    mockState.delivery = RELEASES_OFF
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: /turn on releases/i }))
+
+    await waitFor(() => expect(apiUpdateProject).toHaveBeenCalledTimes(1))
+    const payload = vi.mocked(apiUpdateProject).mock.calls[0][2] as { delivery: object }
+    expect(payload.delivery).toEqual({ releases: true })
+    expect(payload.delivery).not.toHaveProperty('preset')
+    // The page re-reads the fresh project and the controls come back.
+    expect(await screen.findByLabelText('Actions for 2.4.0')).toBeInTheDocument()
+  })
+
+  it('creates the first version and turns releases on in one gesture', async () => {
+    mockState.delivery = RELEASES_OFF
+    mockState.versions = []
+    renderPage()
+
+    await userEvent.click((await screen.findAllByRole('button', { name: /New version/ }))[0])
+    // The notice is in the dialog, before the click that changes anything (the
+    // off-state panel behind it carries the same sentence, hence two).
+    expect((await screen.findAllByText(/This turns on releases for this project/i)).length)
+      .toBeGreaterThanOrEqual(2)
+
+    await userEvent.type(screen.getByLabelText('Name'), '3.0.0')
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }))
+
+    await waitFor(() => expect(apiUpdateProject).toHaveBeenCalledTimes(1))
+    expect((vi.mocked(apiUpdateProject).mock.calls[0][2] as { delivery: object }).delivery)
+      .toEqual({ releases: true })
+    await waitFor(() => expect(versionsApi.create).toHaveBeenCalledTimes(1))
+  })
+
+  it('offers a plain member no enabling action at all', async () => {
+    mockState.delivery = RELEASES_OFF
+    mockState.projectRole = 'MEMBER'
+    mockState.workspaceRole = 'MEMBER'
+    renderPage()
+
+    expect(await screen.findByText('18 / 24')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /turn on releases/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /New version/ })).not.toBeInTheDocument()
+    // …but is told why the page is inert, rather than left guessing.
+    expect(screen.getByText(/Releases are off for this project/i)).toBeInTheDocument()
   })
 })

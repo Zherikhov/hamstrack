@@ -104,17 +104,35 @@ Errors follow [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457)
 }
 ```
 
-Validation failures (`400`) additionally carry a per-field `errors` map:
+### Validation failures (`400`)
+
+A request body that fails validation answers with a `detail` naming every offending field **and** an `errors` object keyed by the JSON path of the field:
 
 ```json
 {
   "type": "about:blank",
   "title": "Bad Request",
   "status": 400,
-  "detail": "Validation failed",
-  "errors": { "email": "must be a well-formed email address" }
+  "detail": "key: Key must be uppercase letters and digits only; name: must not be blank",
+  "errors": {
+    "key": "Key must be uppercase letters and digits only",
+    "name": "must not be blank"
+  }
 }
 ```
+
+Rules worth coding against:
+
+- **`detail` and `errors` always agree** — same entries, same order. `detail` is those entries joined with `"; "`, each rendered as `<field>: <message>`; the field prefix is dropped when the message already starts with the field path, so a full-sentence message isn't stuttered back.
+- **Keys are JSON field paths**, nested ones included: `delivery.preset`, `items[3].fieldId`.
+- **Cross-field (class-level) rules use the empty-string key `""`** — they belong to no single field. Their message is rendered bare in `detail`, without a prefix.
+- **At most 10 entries are reported**, sorted by their rendered line. If more fields failed, `detail` ends with `"; … and 3 more"` (the number of entries not shown); `errors` carries the same 10.
+- **Messages are always English**, whatever the request's `Accept-Language`. Constraint text used to follow the caller's locale; it is now pinned by design, so the wording is stable — but treat it as human-readable text, not a machine-readable code, and match on `errors` keys (field paths) instead.
+- **One message per field** — if a field breaks several constraints, the first failure wins.
+- A body that can't be parsed at all (malformed JSON, a wrong JSON type) is still a `400`, but carries **no** `errors` map: nothing was ever bound.
+- **Not every `400` is a validation failure.** A rule that spans fields and is enforced in the service rather than by a field constraint — sending `boardMode` and a disagreeing [`delivery.board`](#delivery-capabilities), for instance — answers a plain problem detail: `detail` explains it, and there is **no** `errors` map. Read `errors` defensively.
+
+Uploads have two size ceilings and the `413` wording tells them apart: the in-app per-file limit answers `"File exceeds the 20 MB limit"`, while the servlet multipart ceiling answers `"File is too large"`.
 
 Some conflicts carry an **extra machine-readable member** so a client can recover in one round-trip. Creating a [label](#labels) whose name is taken — or renaming one into a taken name — returns `409` with the id of the label that already owns it:
 
@@ -135,7 +153,7 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 | `403` | Authenticated but not allowed (e.g. insufficient role) |
 | `404` | Not found — or not a member of the containing workspace |
 | `409` | Conflict: stale `version`, duplicate name/key, resource in use |
-| `413` | Attachment exceeds the per-file size limit (default 20 MB) |
+| `413` | Attachment exceeds the per-file size limit (default 20 MB) or the servlet upload ceiling (default 25 MB) |
 | `415` | Attachment file extension is not in the allow-list |
 | `422` | Semantically invalid reference (unknown status/type/assignee, workflow-forbidden transition) |
 | `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
@@ -253,10 +271,10 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/workspaces/{wsId}/projects` | member | Create (`{"name", "key", "description?"}`); key is 1–10 chars `A-Z0-9`, unique per workspace. `201` |
+| `POST` | `/workspaces/{wsId}/projects` | member | Create (`{"name", "key", "description?", "delivery?"}`); key is 1–10 chars `A-Z0-9`, unique per workspace. `201` |
 | `GET` | `/workspaces/{wsId}/projects?includeArchived=false` | member | List projects |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}` | member | Get one |
-| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | curator | Update `name` / `description` / `boardMode` |
+| `PATCH` | `/workspaces/{wsId}/projects/{projectId}` | curator | Update `name` / `description` / `delivery` (and the deprecated `boardMode`) |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/archive` | `MANAGER` | Archive (read-only afterwards). `204` |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `MANAGER` | Restore. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members |
@@ -267,16 +285,83 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 // project shape
 {
   "id": "…", "workspaceId": "…", "name": "Demo Project", "key": "DEMO",
-  "description": "…", "archived": false, "boardMode": "KANBAN",
+  "description": "…", "archived": false,
+  "boardMode": "KANBAN",                       // DEPRECATED mirror of delivery.board
+  "delivery": {
+    "board": "KANBAN",                         // KANBAN | SCRUM
+    "releases": false,
+    "estimation": false,
+    "preset": "KANBAN"                         // DERIVED, read-only — never send it back
+  },
   "myRole": "MANAGER", "createdAt": "…"
 }
 ```
 
 **Update permission.** `PATCH …/projects/{projectId}` needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member); any other member gets `403`. This is wider than it used to be: the endpoint was `MANAGER`-only until `boardMode` joined it, and it now matches every other project-content write ([components](#components), [versions](#versions), [sprints](#sprints--backlog)). Archiving, unarchiving and member management stay `MANAGER`-only.
 
-**Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `boardMode` too, which changes how the board and the backlog render. Unarchive it first (`POST …/unarchive`, `MANAGER`-only); reads keep working throughout.
+**Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `delivery` too, which changes how the board, the backlog, the rail and the issue detail render. Unarchive it first (`POST …/unarchive`, `MANAGER`-only); reads keep working throughout.
 
-**Board mode.** `boardMode` is `KANBAN` (default) or `SCRUM` and is a **presentation switch, not a permission**: the [sprint API](#sprints--backlog) behaves identically either way, so a Kanban team may still plan an iteration. `SCRUM` scopes the board to the active sprint and adds a sprint header; `KANBAN` shows the whole project. An unknown value is a `400`; omitting the field leaves the current mode.
+### Delivery capabilities
+
+A project declares **how its team delivers** through three independent capabilities. They ride the `delivery` object on **every** project response — list, get, create and update — so no surface needs an extra request (or a guess based on "does this project already have sprints?") to ask what kind of project this is. They are deliberately **not** part of [project configuration](#project-configuration): flipping a capability changes nothing about a project's workflow, priority set, type set or field set, and does not invalidate anything you cached from `…/config`.
+
+| Capability | Values | Governs (in the UI) |
+|---|---|---|
+| `board` | `KANBAN` \| `SCRUM` | sprints as a planning concept: backlog sprint sections, sprint-scoped board, the sprint field on issues |
+| `releases` | `true` / `false` | versions: the Releases page and rail item, fix/affects pickers and filters |
+| `estimation` | `true` / `false` | story points: the points input and every point sum |
+
+`delivery.preset` is a **derived** label the server computes from those three — a display convenience, never stored:
+
+| `preset` | `board` | `releases` | `estimation` |
+|---|---|---|---|
+| `KANBAN` | `KANBAN` | off | off |
+| `SCRUM` | `SCRUM` | off | on |
+| `RELEASES` | `KANBAN` | on | off |
+| `CUSTOM` | any other combination | | |
+
+`CUSTOM` is a legal, first-class answer — "Scrum + Releases" is an ordinary way to work and is never forbidden.
+
+> **Capabilities gate the UI, never the API.** This is a guarantee, not an implementation detail: **no endpoint, request field, filter or [HQL](#search-hql) field behaves differently because of a capability, and no status code anywhere depends on one.** A project with `releases: false` still accepts and returns version data; `POST …/sprints` still succeeds with `board: KANBAN`; issue creation with `storyPoints`, `fixVersionIds` and `sprintId` still returns `201` with **every** capability off. Turning a capability off never deletes, clears or moves anything — re-enabling it restores full function immediately. Do not treat a capability as a permission or as a schema switch.
+>
+> The single place a capability is visible in the API is **autocomplete metadata**: [`/search/schema`](#search-hql) omits `sprint` / `fixVersion` / `affectsVersion` / `storyPoints` when no visible project has the matching capability on, and the `SPRINT` / `VERSION` picklists (plus `/search/suggest` for the two version fields) only carry names from capability-on projects. That is a *suggestion* narrowing: every one of those fields still parses, compiles and runs, so no saved filter can break when a capability is flipped.
+
+**Choosing them at creation.** `POST …/projects` takes an optional `delivery` object, and it is **partial per member**: whatever you leave out takes the lean default — `board: KANBAN`, `releases: false`, `estimation: false` — rather than staying unset. The three capabilities are independent and the server never infers one from another, so a client that means "Scrum, and we estimate" says both, in the one create call:
+
+```bash
+curl -X POST $BASE/workspaces/$WS/projects \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
+  "name": "Payments", "key": "PAY",
+  "delivery": { "board": "SCRUM", "estimation": true }
+}'
+```
+
+That project comes back with `board: "SCRUM"`, `estimation: true`, `releases: false` and the derived `preset: "SCRUM"`.
+
+**Changing them later.** `PATCH …/projects/{projectId}` takes the same object, equally partial per member: `{"delivery": {"releases": true}}` turns releases on and leaves `board` and `estimation` untouched, and omitting `delivery` entirely leaves all three alone (renaming a project never quietly re-leans it). Setting a capability to the value it already has is a no-op that still returns `200` with the current state. The call needs the **project curator** role (above) and returns `409` on an archived project; there is no confirmation step and no `409` for "you still have unreleased versions" — confirmations are a UI affordance. **Switching destroys nothing**: no issue's sprint is cleared, no version link removed, no story-point value erased, and re-enabling a capability restores full function immediately with no further action.
+
+`board` is a closed set on both endpoints — an unknown value is a `400`, never a silent fall-through; `null`/omitted leaves the current value.
+
+**`preset` cannot be sent.** It is derived, so a create or update body carrying `delivery.preset` is rejected — a named failure rather than a silent ignore. It fails at validation, so the body is the ordinary [field-anchored `400`](#conventions) keyed by JSON path:
+
+```json
+{ "type": "about:blank", "title": "Bad Request", "status": 400,
+  "detail": "delivery.preset is derived from board/releases/estimation and cannot be set",
+  "errors": { "delivery.preset": "delivery.preset is derived from board/releases/estimation and cannot be set" } }
+```
+
+The practical consequence: **you cannot blindly `PATCH` back the `delivery` object you read from a `GET`** — strip `preset` first and send only the capabilities you mean to change. The rejection is **total**: nothing else in the same body is applied on the way to it, so a body that sets `releases` *and* echoes `preset` changes nothing at all.
+
+**`boardMode` is deprecated.** The top-level `boardMode` field is a mirror of `delivery.board`: it is still **populated** in every response and still **accepted** on `PATCH`, for one minor release, so clients written before `delivery` existed keep working. Sending both is fine when they **agree**; sending `boardMode` together with a **disagreeing** `delivery.board` is a `400` rather than a silent winner-takes-all — picking a winner would discard half of what an out-of-date client asked for without telling it which half. This one is enforced in the service, not by a field constraint, so it carries **no** `errors` map:
+
+```json
+{ "type": "about:blank", "title": "Bad Request", "status": 400,
+  "detail": "boardMode and delivery.board disagree — send only one" }
+```
+
+This rejection is total too — the rest of the body is not applied. Create has no `boardMode` field at all, so the disagreement case is `PATCH`-only. When the mirror is eventually dropped, nothing about behavior changes: `delivery.board` already carries the identical value, so migrating off it is a rename. New clients should read and write `delivery` only.
+
+**Defaults, and why an old project looks different.** A project created without a `delivery` object gets the lean defaults — `board: KANBAN`, `releases: false`, `estimation: false`. Projects that existed **before** delivery capabilities shipped were migrated to keep everything they already had: `releases: true`, `estimation: true`, and `board: SCRUM` if the project already owned a sprint. So an older project will legitimately look more capable than a freshly created one; that is the migration rule ("an upgrade never takes away a capability a project already had"), not a bug.
 
 ## Project configuration
 
@@ -375,6 +460,8 @@ Each scope owns its own rows: a workspace admin creates **workspace-scoped** sta
 ## Issues
 
 Issues live under a project and are addressed by **number** — the numeric part of their key (`DEMO-42` → `…/issues/42`). Numbers are sequential per project and never reused.
+
+**The project's [delivery capabilities](#delivery-capabilities) change nothing here.** `storyPoints`, `sprintId`, `fixVersionIds` and `affectsVersionIds` are accepted, stored and returned identically whatever a project declares — a project with `estimation: false` still takes a point value, and one with `board: KANBAN` still takes a `sprintId`. Every field below is always present in the response too; a capability hides a control in the UI and never removes anything from the API.
 
 **Hierarchy.** An issue may have a parent in the same project, governed by issue-type [hierarchy levels](#project-configuration) (a parent's type level must be strictly greater than the child's). Every `IssueResponse` carries the parent summary (`parentId`, `parentKey`, `parentTitle`, `parentTypeId`, all `null` when there is no parent) and a direct-children roll-up (`childCount`, and `doneChildCount` for children in a DONE-category status). `GET …/issues/{number}/children` lists the direct children in board order.
 
@@ -652,6 +739,8 @@ A **single project's** release plan — "2.4.0", "Sprint 12 release" — with a 
 
 Reading needs project membership; writing needs the **project curator** role — project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
 
+**The project's [delivery capabilities](#delivery-capabilities) change nothing here.** A project with `releases: false` still creates, lists, links and returns versions exactly as one with `releases: true` does — the capability hides the Releases page and the fix/affects pickers in the UI, and nothing else.
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/workspaces/{wsId}/projects/{pId}/versions?includeArchived=false&includeReleased=true` | member | The project's release plan, in Releases-page order |
@@ -740,6 +829,8 @@ A **sprint** is one project's iteration — a time-box with a goal, a start and 
 **Story points** are a native issue attribute (`storyPoints` on every issue), not a custom field: `0`–`999` with at most 2 decimals, where `null` means **unestimated** — deliberately not the same as `0`, which is why the section totals report `unestimatedCount` separately.
 
 **Permissions.** Reads (sprint list/detail, completion preview, the backlog view) need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs the **project curator** role: project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint, taking them out and dragging them around is the ordinary **issue-edit** tier, because planning is teamwork and requiring `MANAGER` to drag would make the backlog read-only for most of the team. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the curation role.
+
+**The project's [delivery capabilities](#delivery-capabilities) change nothing here.** `board: KANBAN` does not close the sprint API and `estimation: false` does not reject `storyPoints` — every endpoint below behaves identically whatever a project has declared. A capability hides vocabulary in the UI; it is never a permission.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -890,7 +981,7 @@ Search issues across a whole workspace with **HQL** (Hamstrack Query Language) �
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `POST` | `/workspaces/{wsId}/search` | member | Run an HQL query. Paginated ([envelope](#conventions), `size` clamped `1`–`100`) |
-| `GET` | `/workspaces/{wsId}/search/schema` | member | Autocomplete metadata: fields, per-field operators, and value picklists |
+| `GET` | `/workspaces/{wsId}/search/schema` | member | Autocomplete metadata: fields, per-field operators, and value picklists. **Suggestion-only, and [capability-aware](#search-hql)** — a field it omits still resolves |
 | `GET` | `/workspaces/{wsId}/search/suggest?field=&q=` | member | Typeahead for user-valued fields (`assignee`/`reporter` or a USER custom field) and for `label` / `component` / `fixVersion` / `affectsVersion`, capped at 20 |
 
 **Query** — the body is `{"query", "page?", "size?"}`. `query` is the HQL string (max 2000 chars — a longer one is rejected at binding with `400`); an empty or omitted `query` matches all visible issues in the default sort.
@@ -912,7 +1003,7 @@ Each row in the paginated `content` reuses the full [`IssueResponse`](#issues) p
 
 **HQL grammar** — a boolean expression of `field OP value` comparisons:
 
-- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`, `label` (alias `labels`), `component` (alias `components`), `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias `points`), plus any **custom field** by its `key` (e.g. `severity`). The exact list you may query comes from `/search/schema`. Field names are matched case-insensitively, so the all-lowercase `fixversion` / `affectsversion` spellings work too — `/search/schema` always advertises the camelCase name, exactly once per field.
+- **Fields:** `status`, `assignee`, `reporter`, `type`, `priority`, `created`, `updated`, `due`, `parent`, `text`, `label` (alias `labels`), `component` (alias `components`), `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias `points`), plus any **custom field** by its `key` (e.g. `severity`). `/search/schema` advertises the fields your autocomplete should offer — that list is [capability-aware](#search-hql) and can be a **subset** of what actually resolves, so treat it as vocabulary, not as the definitive query surface. Field names are matched case-insensitively, so the all-lowercase `fixversion` / `affectsversion` spellings work too — `/search/schema` always advertises the camelCase name, exactly once per field. **That list is exhaustive: there is no `project` field**, so a query cannot be narrowed to one project — the scope is always all of your visible projects, and each result row names its owner (`projectId` / `projectKey` / `projectName`) instead.
 - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=`. Which operators a field accepts is per-field (see `/search/schema`): `~` is a case-insensitive substring match, only on `text` (title + description); ordered comparisons (`>` `<` `>=` `<=`) apply to the date fields and to `priority`.
 - **Booleans:** combine terms with `AND`, `OR`, `NOT` and parentheses `( )`. Precedence is `NOT` > `AND` > `OR`.
 - **Emptiness:** `field IS [NOT] EMPTY` for nullable fields (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`, `affectsVersion`, `sprint`, `storyPoints`, and every custom field except CHECKBOX).
@@ -925,6 +1016,7 @@ Each row in the paginated `content` reuses the full [`IssueResponse`](#issues) p
 - **Sprints:** `sprint` (alias `sprints`) is single-valued and given by **name** — operators `= != IN` plus `IS [NOT] EMPTY` — and, like `label`, **not sortable** (`ORDER BY sprint` is a `422`: sprint order across several projects has no common meaning). `sprint IS EMPTY` means "in no sprint", i.e. the backlog. Names resolve across your visible **projects**, so `sprint = "Sprint 7"` matches the "Sprint 7" of every project you can see. **Completed** sprints are excluded from name resolution — years of history would flood the namespace — though issues carrying them still match by id.
 - **Story points:** `storyPoints` (alias `points`) is a native numeric field, so it takes ordered comparisons directly (`= != > < >= <=`) and **is sortable** — `ORDER BY storyPoints DESC` is the "show me the big ones first" query. `storyPoints IS EMPTY` means **unestimated**, which is deliberately not the same statement as `storyPoints = 0`. The operand is held to the field's own domain — the same `0`–`999` with at most 2 decimals that writing an estimate allows — so `storyPoints > 1e999` or `storyPoints = 1.234` comes back as the usual `422` semantic error naming the field, not a `500`. A comparison that could never match a row is rejected up front rather than passed to the database. Example: `sprint = "Sprint 7" AND storyPoints >= 5`.
 - **Custom fields:** queried by `key`, with operators per type — TEXT / TEXTAREA / URL: `= != ~`; NUMBER / DATE: `= != > < >= <=`; SELECT: `= != IN`; MULTI_SELECT: `=` (contains) / `IN` (any-of); USER: `= != IN` + `currentUser()`; CHECKBOX: `=`. All support `IS [NOT] EMPTY` except CHECKBOX. SELECT/MULTI_SELECT values are given by option **label or id**; USER values by email / display name / `currentUser()` / UUID; DATE as `YYYY-MM-DD`. Example: `severity = "High" AND environment = prod`.
+- **Retired field keys:** `story_points` — the custom-field key that release 0.13.0 archived when story points became a native field — still resolves, as a permanent alias for `storyPoints`, so a [saved filter](#saved-filters) written against the old key keeps running unchanged (no migration ever rewrites the stored text of a filter). Two observable details: a workspace that owns **its own** custom field keyed `story_points` still wins — the alias is a last-resort fallback consulted only after system fields and your visible custom fields, so it can never shadow a field of yours — and once the alias has been applied, errors name the **canonical** field: `story_points IN (5)` answers `422 "The IN operator is not allowed on field 'storyPoints'"`. Aliases are compatibility, not vocabulary: they are never advertised by `/search/schema`.
 
 More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assignee IS EMPTY AND created >= startOfWeek()` · `text ~ "flux capacitor" OR parent = "DEMO-12"`.
 
@@ -939,7 +1031,17 @@ More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assign
   "errorType": "SEMANTIC_ERROR", "field": "asignee", "position": 0 }
 ```
 
-**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, a `LABEL` picklist of the workspace's non-archived label names, a `COMPONENT` picklist of the non-archived component names of those visible projects, a `VERSION` picklist of their non-archived version names (**one** picklist serves both `fixVersion` and `affectsVersion` — the two roles draw from the same catalog, so both fields declare `valueSuggest: "VERSION"`), a `SPRINT` picklist of the **open** (non-completed) sprint names of those projects, plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The `LABEL`, `COMPONENT`, `VERSION` and `SPRINT` picklists are **capped at 200 entries** each — a workspace can accumulate far more, so fall back to `/search/suggest?field=label` / `?field=component` / `?field=fixVersion` beyond that. **`sprint` is the exception: it has no `/search/suggest` fallback** (`?field=sprint` returns the usual `422`), because a project's open sprints are already bounded and cannot realistically overflow the picklist. `storyPoints` has no picklist at all — it is numeric. The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it.
+**Suggestions are capability-aware; resolution is not.** A project's [delivery capabilities](#delivery-capabilities) narrow what the two autocomplete endpoints *offer*, and nothing else:
+
+- `/search/schema` lists `sprint`, `fixVersion`, `affectsVersion` and `storyPoints` only when **at least one** of your visible projects has the matching capability on (`board: SCRUM`, `releases`, `estimation` respectively). Every other field is listed always. In a workspace whose only visible project is `board: KANBAN`, `releases: false`, `estimation: false`, `fields` comes back as exactly `status` `type` `priority` `assignee` `reporter` `parent` `text` `created` `updated` `due` `label` `component` — plus your custom fields — with the four capability-gated names absent.
+- The `SPRINT` and `VERSION` picklists carry names only from the visible projects that have the capability **on** (they were already scoped to your visible projects; this is one predicate more). With every capability off, both come back empty.
+- `/search/suggest?field=fixVersion` and `?field=affectsVersion` are scoped the same way — that endpoint is the overflow of the same `VERSION` picklist, so it could not honestly answer differently. `label`, `component` and the user-valued fields are unaffected.
+
+**Hidden fields still resolve — this is a guarantee, not an implementation detail.** A field omitted from `/search/schema` still **parses, compiles and runs**, whether you typed it by hand or loaded it from a [saved filter](#saved-filters). On that same all-capabilities-off project, `sprint = "Smoke Sprint"` returns `200` with its rows, while `sprint = "No Such Sprint"` returns the ordinary field-anchored `422` — exactly the two answers you would get with sprints on. No capability ever changes a status code ([capabilities gate the UI, never the API](#delivery-capabilities)); a colleague flipping a project toggle must never break your saved filter.
+
+The asymmetry that follows is deliberate, and integrations need to expect it: **the suggested set is no longer the same as the resolvable set.** Because capabilities never delete or block data, a Kanban project may legitimately own sprints and a `releases: false` project may legitimately own versions; those names vanish from suggestions while still matching in queries. Do not use `/search/schema` as a validator for a query you are about to send — the query endpoint is the only authority on what resolves.
+
+**Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, a `LABEL` picklist of the workspace's non-archived label names, a `COMPONENT` picklist of the non-archived component names of those visible projects, a `VERSION` picklist of the non-archived version names of those projects **that have `releases` on** (**one** picklist serves both `fixVersion` and `affectsVersion` — the two roles draw from the same catalog, so both fields declare `valueSuggest: "VERSION"`), a `SPRINT` picklist of the **open** (non-completed) sprint names of those projects **that have `board: SCRUM`**, plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The `LABEL`, `COMPONENT`, `VERSION` and `SPRINT` picklists are **capped at 200 entries** each — a workspace can accumulate far more, so fall back to `/search/suggest?field=label` / `?field=component` / `?field=fixVersion` beyond that. **`sprint` is the exception: it has no `/search/suggest` fallback** (`?field=sprint` returns the usual `422`), because a project's open sprints are already bounded and cannot realistically overflow the picklist. `storyPoints` has no picklist at all — it is numeric. The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it. The system-field half of `fields`, and the `SPRINT` / `VERSION` picklists, are **capability-aware** (above): a field or a name that is missing here is still perfectly queryable.
 
 ```json
 {
@@ -980,7 +1082,7 @@ The same endpoint serves **labels** — `field=label` (or `labels`) returns up t
   "suggestions": [ { "label": "Billing", "value": "Billing" } ] }
 ```
 
-…and **versions** — `field=fixVersion` or `field=affectsVersion`, over the non-archived version names of the projects you can see. Both roles share one catalog, so the two field names return identical suggestions (names are de-duplicated case-insensitively, so a "2.4.0" shipped by two projects is offered once):
+…and **versions** — `field=fixVersion` or `field=affectsVersion`, over the non-archived version names of the projects you can see **that have `releases` on** (the same capability scoping the `VERSION` picklist applies, since this endpoint is that picklist's overflow; a version whose project has releases off is still perfectly queryable by name; with no releases-on project you simply get an empty `suggestions` list and a `200`, never an error). Both roles share one catalog, so the two field names return identical suggestions (names are de-duplicated case-insensitively, so a "2.4.0" shipped by two projects is offered once):
 
 ```json
 { "field": "fixVersion",

@@ -228,13 +228,28 @@ class SprintSearchTest extends SprintTestBase {
 
     // ==================================================== /schema + saved filters
 
+    /**
+     * <p><strong>Fixture note (HD-107 / delivery capabilities).</strong> Since HD-102 a
+     * repository-bootstrapped project comes out <em>lean</em> — Kanban, estimation off —
+     * and {@code /schema} suggests {@code sprint}/{@code storyPoints} only when at least
+     * one VISIBLE project declares the matching capability (§9.1). So both projects here
+     * now declare it, which is also the honest fixture: a project that owns sprints and
+     * estimates its issues is a Scrum, estimating project. The capability-OFF side of
+     * that behaviour — omission from suggestions while the fields still parse, compile
+     * and run — is pinned in {@code DeliverySearchCompatibilityTest}, not here; this test
+     * is about the descriptors' SHAPE (type, sortability, operators, alias de-duplication)
+     * and the picklist's project scoping, which is what HD-22 §4.9 asked for.
+     */
     @Test
     void schemaAdvertisesBothFieldsOnceWithASprintPicklist() throws Exception {
         var ctx = newProject();
+        setDelivery(ctx, "\"board\":\"SCRUM\",\"estimation\":true");
         createSprint(ctx, "Sprint 1");
         var completed = startedSprint(ctx, "Sprint 0");
         completeToBacklog(ctx, ctx.token(), completed).andExpect(status().isOk());
-        createSprint(siblingProject(ctx), "Sibling sprint");
+        var sibling = siblingProject(ctx);
+        setDelivery(sibling, "\"board\":\"SCRUM\"");
+        createSprint(sibling, "Sibling sprint");
 
         var schema = json.readTree(mockMvc.perform(
                         get("/api/workspaces/" + ctx.wsId() + "/search/schema")

@@ -28,15 +28,18 @@ import org.springframework.stereotype.Component;
  *
  * <p><strong>Lookup precedence:</strong> a system field ({@link FieldRegistry}) FIRST;
  * only if the name isn't a system field is it matched against the ctx's visible custom
- * fields (HD-52). A custom field a caller can't see is never in ctx → "unknown field"
- * (never leaked). Value resolvability (no such status/user/option/date) is validated
- * later, during compilation, because it needs the workspace state.
+ * fields (HD-52); only if THAT misses is it matched against the retired-key aliases
+ * ({@link RetiredFieldAliases}, HD-107 §9.2). A custom field a caller can't see is
+ * never in ctx → "unknown field" (never leaked). Value resolvability (no such
+ * status/user/option/date) is validated later, during compilation, because it needs
+ * the workspace state.
  */
 @Component
 @RequiredArgsConstructor
 public class HqlValidator {
 
     private final FieldRegistry registry;
+    private final RetiredFieldAliases retiredAliases;
 
     public void validate(Query query, ResolutionContext ctx) {
         query.filter().ifPresent(f -> validateExpr(f, ctx));
@@ -55,7 +58,7 @@ public class HqlValidator {
             }
             case Expr.Not n -> validateExpr(n.operand(), ctx);
             case Expr.Comparison c -> {
-                var sys = systemField(c.field());
+                var sys = systemField(c.field(), ctx);
                 if (sys != null) {
                     if (!sys.allows(c.op())) {
                         throw new HqlSemanticException(
@@ -72,7 +75,7 @@ public class HqlValidator {
                 }
             }
             case Expr.InList in -> {
-                var sys = systemField(in.field());
+                var sys = systemField(in.field(), ctx);
                 if (sys != null) {
                     if (!sys.supportsIn()) {
                         throw new HqlSemanticException(
@@ -87,7 +90,7 @@ public class HqlValidator {
                 }
             }
             case Expr.IsEmpty e -> {
-                var sys = systemField(e.field());
+                var sys = systemField(e.field(), ctx);
                 if (sys != null) {
                     if (!sys.nullable()) {
                         throw new HqlSemanticException(
@@ -106,7 +109,7 @@ public class HqlValidator {
 
     private void validateOrderBy(OrderBy orderBy, ResolutionContext ctx) {
         for (var key : orderBy.keys()) {
-            var sys = systemField(key.field());
+            var sys = systemField(key.field(), ctx);
             if (sys != null) {
                 if (!sys.sortable()) {
                     throw new HqlSemanticException(
@@ -125,10 +128,22 @@ public class HqlValidator {
      * Resolve a name to a system {@link FieldDescriptor}, or {@code null} if the name
      * isn't a system field. A registered-but-not-available field is still a system
      * name and throws its own "not yet queryable" error here.
+     *
+     * <p><strong>Precedence (HD-107 §9.2):</strong> the registry first; a
+     * retired-key alias is consulted ONLY when the registry misses AND the caller
+     * has no visible custom field with that key — so a tenant's own custom field
+     * keyed {@code story_points} always resolves to itself, and the alias is a
+     * last-resort fallback that can never shadow it. Returning {@code null} here
+     * hands the name on to {@link #requireCustom}, which owns the "unknown field"
+     * error.
      */
-    private FieldDescriptor systemField(String name) {
+    private FieldDescriptor systemField(String name, ResolutionContext ctx) {
         var found = registry.find(name);
-        if (found.isEmpty()) return null;
+        if (found.isEmpty()) {
+            if (ctx.customField(name).isPresent()) return null;   // the tenant's own field wins
+            found = retiredAliases.canonicalName(name).flatMap(registry::find);
+            if (found.isEmpty()) return null;
+        }
         var f = found.get();
         if (!f.available()) {
             throw new HqlSemanticException(

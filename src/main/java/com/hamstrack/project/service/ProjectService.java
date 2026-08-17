@@ -51,6 +51,9 @@ public class ProjectService {
         project.setKey(key);
         project.setDescription(req.description());
         project.setCreatedBy(actor);
+        // HD-102: the creation picker's answer. Omitted → the entity's own lean
+        // defaults (KANBAN, releases off, estimation off — §7 / open question 2).
+        applyDelivery(project, null, req.delivery());
         projectRepository.save(project);
 
         var member = new ProjectMember();
@@ -86,7 +89,7 @@ public class ProjectService {
     }
 
     /**
-     * Rename / re-describe / switch the board mode.
+     * Rename / re-describe / change the delivery capabilities.
      *
      * <p><strong>Deliberate, flagged permission change (HD-22 §3.2):</strong> this used
      * to be {@code requireRole(MANAGER)}. It is now
@@ -107,17 +110,25 @@ public class ProjectService {
      *
      * <p><strong>Archived projects are frozen</strong> (security review L5): every issue
      * edit, sprint mutation and rank move already 409s on an archived project, so its
-     * own settings — now including {@code boardMode}, which changes how the board and
-     * the backlog render — must not stay quietly writable. {@code unarchive} is the way
-     * back, and it is deliberately still MANAGER-only.
+     * own settings — now including the delivery capabilities, which change how the
+     * board, the backlog, the rail and the issue detail render — must not stay quietly
+     * writable. {@code unarchive} is the way back, and it is deliberately still
+     * MANAGER-only.
+     *
+     * <p><strong>HD-102:</strong> the capabilities arrive in {@code delivery}, with the
+     * deprecated top-level {@code boardMode} still accepted (and reconciled — see
+     * {@link #applyDelivery}). Nothing else in the codebase reads them, so this method
+     * is the <em>only</em> place a capability is ever written and there is no
+     * capability-conditional behaviour anywhere downstream (Rule A, §5.1).
      */
     @Transactional
+    @SuppressWarnings("deprecation") // reads the legacy boardMode mirror on purpose
     public ProjectResponse update(User actor, UUID workspaceId, UUID projectId, UpdateProjectRequest req) {
         var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
         requireNotArchived(project);
         if (req.name() != null) project.setName(req.name());
         if (req.description() != null) project.setDescription(req.description());
-        if (req.boardMode() != null) project.setBoardMode(req.boardMode());
+        applyDelivery(project, req.boardMode(), req.delivery());
         projectRepository.save(project);
         // The caller's REAL project role, not a hardcoded MANAGER: a workspace
         // OWNER/ADMIN who is not a project member now reaches this method, and echoing
@@ -207,6 +218,53 @@ public class ProjectService {
         var role = getRole(actor, project);
         if (!role.isAtLeast(required)) {
             throw new InsufficientProjectRoleException();
+        }
+    }
+
+    /**
+     * The <strong>only</strong> place a delivery capability is written (HD-102 §11.3),
+     * shared by create (where {@code legacyBoardMode} is always null) and update.
+     *
+     * <p>Three rules, in order:
+     * <ol>
+     *   <li><strong>{@code preset} is derived, never settable</strong> (open question
+     *       5) — a request carrying it is a <strong>400</strong> naming the field, not
+     *       a silent ignore. The label is computed by {@code DeliveryPreset.of} from
+     *       the capabilities, so accepting it would create a second source of truth
+     *       that could disagree with the first.</li>
+     *   <li><strong>The deprecated top-level {@code boardMode} and
+     *       {@code delivery.board} must agree.</strong> Both present and equal → fine
+     *       (an SPA mid-migration may well send both). Both present and different →
+     *       <strong>400</strong>: picking a winner would silently discard half of what
+     *       an out-of-date client asked for.</li>
+     *   <li>Every member is <strong>partial</strong>: null leaves the capability alone,
+     *       so a PATCH that only flips {@code releases} cannot disturb the board mode.
+     *       On create, "alone" means the entity's lean field defaults.</li>
+     * </ol>
+     *
+     * <p><strong>Rule A (§5.1) lives here, by omission:</strong> this method only ever
+     * writes three columns on {@code projects}. No repository query, no other service
+     * and no controller reads {@code releasesEnabled}/{@code estimationEnabled}/
+     * {@code boardMode} to decide whether to accept a request, so no status code
+     * anywhere can depend on a capability. Turning one off is a pure presentation
+     * change: version, sprint and story-point data is untouched and every endpoint
+     * that writes it keeps working identically (§13's non-destructive invariant).
+     */
+    private void applyDelivery(Project project, BoardMode legacyBoardMode, DeliveryRequest delivery) {
+        if (delivery != null && delivery.preset() != null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "delivery.preset is derived from board/releases/estimation and cannot be set");
+        }
+        var board = delivery != null ? delivery.board() : null;
+        if (board != null && legacyBoardMode != null && board != legacyBoardMode) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "boardMode and delivery.board disagree — send only one");
+        }
+        if (board == null) board = legacyBoardMode;
+        if (board != null) project.setBoardMode(board);
+        if (delivery != null) {
+            if (delivery.releases() != null) project.setReleasesEnabled(delivery.releases());
+            if (delivery.estimation() != null) project.setEstimationEnabled(delivery.estimation());
         }
     }
 

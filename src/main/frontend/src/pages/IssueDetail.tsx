@@ -15,10 +15,11 @@ import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, Ch
 import { FieldInput, FieldValueDisplay } from '../components/fields'
 import { LabelChip, LabelPicker } from '../components/labels'
 import { ComponentSelect, useProjectComponents } from '../components/projectComponents'
-import { VersionBadge, VersionPicker, useProjectVersions } from '../components/versions'
+import { VersionBadge, VersionPicker } from '../components/versions'
 import {
-  CLOSED_SPRINT_HINT, SprintPicker, isSprintClosed, useOpenSprints,
+  CLOSED_SPRINT_HINT, SprintBadge, SprintPicker, formatPoints, isSprintClosed,
 } from '../components/sprints'
+import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
 import { projectIssuesKeyPrefix } from '../lib/queryKeys'
@@ -93,14 +94,62 @@ function historyLabel(field: string) {
   return labels[field] ?? field
 }
 
+// Why a details cell went inert (HD-102 §5.2). Each names the capability, says
+// the value is KEPT, and points at where it is turned back on — the switch is
+// reversible and the user must be able to tell.
+const ITERATIONS_OFF_HINT =
+  'Sprint planning is off for this project — this sprint is kept and shown read-only. '
+  + 'A curator can turn it back on in Project settings.'
+const ESTIMATION_OFF_HINT =
+  'Story-point estimation is off for this project — this estimate is kept and shown read-only. '
+  + 'A curator can turn it back on in Project settings.'
+const RELEASES_OFF_HINT =
+  'Releases are off for this project — these versions are kept and shown read-only. '
+  + 'A curator can turn them back on in Project settings.'
+
+/**
+ * Rule B (HD-102 §5.2), the shape every capability-off cell takes: **controls are
+ * gated, values never are.** When a project turns a delivery capability off, the
+ * values its issues already carry keep rendering — inert, muted, and with a
+ * tooltip naming the reason — so switching a capability off is provably
+ * non-destructive *and legible*. An issue that belongs to a sprint in a project
+ * switched back to Kanban must still SHOW that sprint.
+ *
+ * The reason is also spelled out in the caption (`Sprint · planning off`), not
+ * only on hover: a hover-only explanation is invisible to exactly the user who is
+ * wondering why their field stopped responding.
+ */
+function ReadOnlyCapabilityCell({ caption, note, hint, children }: {
+  caption: string
+  /** Two or three words in the caption line, e.g. "planning off". */
+  note: string
+  /** The full sentence, on hover. */
+  hint: string
+  children: React.ReactNode
+}) {
+  return (
+    <>
+      <div className="text-xs mb-1 flex items-baseline gap-1 flex-wrap" style={{ color: 'var(--color-text-muted)' }}>
+        <span>{caption}</span>
+        <span title={hint} style={{ fontStyle: 'italic' }}>· {note}</span>
+      </div>
+      <div className="px-2 py-1 -mx-2" title={hint} style={{ cursor: 'default' }}>
+        {children}
+      </div>
+    </>
+  )
+}
+
 /**
  * One version role (fix / affects) in the details grid (HD-32) — read = badges,
  * click = the shared multi-select picker, commit = one full-replacement PATCH for
  * that role only. Identical rhythm to the Labels cell (muted caption above value,
  * Save/Cancel under the editor), so the details area stays one visual language.
+ *
+ * `readOnly` is the `releases`-off half of Rule B: the same badges, no editor.
  */
 function VersionCell({
-  caption, emptyText, wsId, projectId, versions, editing, draft,
+  caption, emptyText, wsId, projectId, versions, editing, draft, readOnly,
   onDraftChange, onStart, onCommit, onCancel,
 }: {
   caption: string
@@ -110,11 +159,21 @@ function VersionCell({
   versions: VersionRef[]
   editing: boolean
   draft: string[]
+  readOnly?: boolean
   onDraftChange: (ids: string[]) => void
   onStart: () => void
   onCommit: () => void
   onCancel: () => void
 }) {
+  if (readOnly) {
+    return (
+      <ReadOnlyCapabilityCell caption={caption} note="releases off" hint={RELEASES_OFF_HINT}>
+        <div className="flex items-center gap-1 flex-wrap">
+          {versions.map(v => <VersionBadge key={v.id} version={v} />)}
+        </div>
+      </ReadOnlyCapabilityCell>
+    )
+  }
   return (
     <>
       <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{caption}</div>
@@ -574,16 +633,23 @@ export default function IssueDetail({
     commitField({ labelIds: labelDraft })  // full replacement ([] clears them all)
   }
 
+  // ── Delivery capabilities (HD-102) ──
+  // The one question every path-specific cell below asks, answered by what the
+  // project DECLARES — never by whether sprints/versions happen to exist yet
+  // (Rule C, §5.3: that inference is what stranded projects in the first place).
+  // Free: the entry is already cached by the nav rail on every project page.
+  const { iterations, releases, estimation } = useProjectDelivery(wsId, projectId)
+
   // ── Inline versions (HD-32) ──
   // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
-  // it isn't threaded through the surface props like statuses/priorities are).
-  const { data: versionOptions = [] } = useProjectVersions(wsId, projectId)
+  // it isn't threaded through the surface props like statuses/priorities are);
+  // the picker fetches the option list itself.
   const fixVersions = issue?.fixVersions ?? []
   const affectsVersions = issue?.affectsVersions ?? []
-  // A cell is hidden when the project curates no versions AND this issue carries
-  // none in that role — nothing to choose from, so no empty control.
-  const showFixVersionCell = versionOptions.length > 0 || fixVersions.length > 0
-  const showAffectsVersionCell = versionOptions.length > 0 || affectsVersions.length > 0
+  // §6 `R ∨ value`: editable with releases on, read-only when off but the issue
+  // carries versions in that role, hidden when off and empty.
+  const showFixVersionCell = releases || fixVersions.length > 0
+  const showAffectsVersionCell = releases || affectsVersions.length > 0
 
   function startVersionsEdit(role: 'fix' | 'affects') {
     setVersionDraft((role === 'fix' ? fixVersions : affectsVersions).map(v => v.id))
@@ -603,15 +669,17 @@ export default function IssueDetail({
 
   // ── Inline sprint + story points (HD-22) ──
   // Sprints are project-scoped content with their own endpoint/key (never part of
-  // ProjectConfig), so like components and versions they are fetched here rather
-  // than threaded through the surface props.
-  const { data: sprintOptions = [] } = useOpenSprints(wsId, projectId)
-  // Hidden when the project plans no sprints AND this issue carries none —
-  // nothing to choose from, so no empty control (and no Scrum vocabulary on a
-  // pure-Kanban project).
-  const showSprintCell = sprintOptions.length > 0 || !!issue?.sprint
-  // Read-only once the sprint has completed — see the picker below.
+  // ProjectConfig); the picker fetches the open ones itself.
+  // §6 `I ∨ value`: editable while the project plans iterations, read-only when
+  // it doesn't but this issue still belongs to a sprint, hidden when neither.
+  const showSprintCell = iterations || !!issue?.sprint
+  // Two independent read-only reasons, with different wording: the CAPABILITY is
+  // off (a reversible project preference), or the issue's own sprint has
+  // COMPLETED (a delivered fact the server refuses to change either way).
   const sprintClosed = isSprintClosed(issue?.sprint?.state)
+  // §6 `E ∨ value`: same three-way rule for the estimate.
+  const hasPoints = issue?.storyPoints !== null && issue?.storyPoints !== undefined
+  const showPointsCell = estimation || hasPoints
 
   /**
    * Commit the inline estimate. Blank clears it (`clearStoryPoints` — a plain
@@ -1070,7 +1138,15 @@ export default function IssueDetail({
                   issue's own sprint has COMPLETED the cell goes read-only: its
                   membership is the sprint's record of what it delivered, and the
                   server refuses to change it in either direction. */}
-              {showSprintCell && (
+              {showSprintCell && (!iterations ? (
+                // Rule B: the project stopped planning in sprints, but this issue
+                // still belongs to one — show it, inert, and say why.
+                <div>
+                  <ReadOnlyCapabilityCell caption="Sprint" note="planning off" hint={ITERATIONS_OFF_HINT}>
+                    {issue.sprint && <SprintBadge sprint={issue.sprint} />}
+                  </ReadOnlyCapabilityCell>
+                </div>
+              ) : (
                 <div>
                   <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Sprint</div>
                   <SprintPicker
@@ -1093,29 +1169,39 @@ export default function IssueDetail({
                     </div>
                   )}
                 </div>
-              )}
+              ))}
 
               {/* Story points (HD-22) — a native attribute now, not a custom
                   field. Blank = UNESTIMATED, which is deliberately different from
-                  0 ("we didn't estimate it" vs "it's free"). */}
-              <div>
-                <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Story points</div>
-                <Input
-                  type="number"
-                  min={0}
-                  max={999}
-                  step={0.5}
-                  aria-label="Story points"
-                  placeholder="Unestimated"
-                  value={pointsDraft ?? (issue.storyPoints ?? '')}
-                  onChange={e => setPointsDraft(e.target.value)}
-                  onBlur={commitStoryPoints}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') { e.preventDefault(); commitStoryPoints() }
-                    else if (e.key === 'Escape') { e.preventDefault(); setPointsDraft(null) }
-                  }}
-                />
-              </div>
+                  0 ("we didn't estimate it" vs "it's free"). Gated on the
+                  `estimation` capability (HD-102 §8), with the same Rule B
+                  read-only fallback: an estimate already made is never hidden. */}
+              {showPointsCell && (!estimation ? (
+                <div>
+                  <ReadOnlyCapabilityCell caption="Story points" note="estimation off" hint={ESTIMATION_OFF_HINT}>
+                    <span className="mono text-sm">{formatPoints(issue.storyPoints)}</span>
+                  </ReadOnlyCapabilityCell>
+                </div>
+              ) : (
+                <div>
+                  <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Story points</div>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={999}
+                    step={0.5}
+                    aria-label="Story points"
+                    placeholder="Unestimated"
+                    value={pointsDraft ?? (issue.storyPoints ?? '')}
+                    onChange={e => setPointsDraft(e.target.value)}
+                    onBlur={commitStoryPoints}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') { e.preventDefault(); commitStoryPoints() }
+                      else if (e.key === 'Escape') { e.preventDefault(); setPointsDraft(null) }
+                    }}
+                  />
+                </div>
+              ))}
 
               {/* Due date — clearing the field clears the due date */}
               <div>
@@ -1205,6 +1291,7 @@ export default function IssueDetail({
                     versions={fixVersions}
                     editing={versionRoleEditing === 'fix'}
                     draft={versionDraft}
+                    readOnly={!releases}
                     onDraftChange={setVersionDraft}
                     onStart={() => startVersionsEdit('fix')}
                     onCommit={() => commitVersions('fix')}
@@ -1223,6 +1310,7 @@ export default function IssueDetail({
                     versions={affectsVersions}
                     editing={versionRoleEditing === 'affects'}
                     draft={versionDraft}
+                    readOnly={!releases}
                     onDraftChange={setVersionDraft}
                     onStart={() => startVersionsEdit('affects')}
                     onCommit={() => commitVersions('affects')}

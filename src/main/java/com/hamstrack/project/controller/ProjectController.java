@@ -19,7 +19,7 @@ import java.util.UUID;
  * reject issue mutations.
  *
  * <p><strong>Two mutation tiers</strong> since HD-22 (agile-sprints-proposal
- * §3.2): {@code PATCH /{projectId}} (name / description / {@code boardMode})
+ * §3.2): {@code PATCH /{projectId}} (name / description / {@code delivery})
  * takes the <em>project curator</em> — project MANAGER <strong>or</strong>
  * workspace OWNER/ADMIN, {@code ScopeResolver.requireProjectCurator} — which
  * aligns it with every other project-content write (components, versions,
@@ -29,8 +29,32 @@ import java.util.UUID;
  * <p>An <strong>archived</strong> project is frozen: {@code PATCH /{projectId}}
  * returns <strong>409 "Project is archived"</strong>, the same answer every issue
  * edit, sprint mutation and rank move already gives. That includes
- * {@code boardMode}, which changes how the board and the backlog render;
- * {@code unarchive} is the way back. Reads keep working.
+ * {@code delivery}, which changes how the board, the backlog, the rail and the
+ * issue detail render; {@code unarchive} is the way back. Reads keep working.
+ *
+ * <p><strong>Delivery capabilities</strong> (HD-102, delivery-paths-proposal §11.3)
+ * ride the create/patch bodies and every {@code ProjectResponse}:
+ * {@code delivery: { board, releases, estimation, preset }}. Status codes here are
+ * <strong>200/201</strong> normal · <strong>400</strong> for an unknown enum value,
+ * a {@code delivery.preset} attempt (it is derived, never settable) or a
+ * {@code boardMode} that disagrees with {@code delivery.board} · <strong>403</strong>
+ * member without the curation role · <strong>404</strong> unknown workspace/project
+ * or non-member · <strong>409</strong> archived.
+ *
+ * <p>The two 400s reach the client in <strong>different shapes</strong>, and the docs
+ * say so. {@code delivery.preset} is a {@code @Null} constraint on a
+ * {@code @Valid}-cascaded nested record, so it fails at the validation boundary and
+ * {@code GlobalExceptionHandler.handleValidation} answers a field-anchored body whose
+ * {@code errors} map is keyed {@code delivery.preset}. The {@code boardMode} /
+ * {@code delivery.board} disagreement is a cross-field rule enforced in
+ * {@code ProjectService.applyDelivery}, so it answers a plain {@code ProblemDetail}
+ * with no {@code errors} map. Both rejections are total — neither applies anything
+ * else from the same body.
+ * <strong>No status code anywhere in the API depends on a capability</strong>
+ * (Rule A, §5.1): {@code POST /sprints} still succeeds on a Kanban project and
+ * {@code fixVersionIds} still applies with releases off. A capability is a
+ * presentation preference; it is never an authorization boundary, and reviewers must
+ * not read a hidden control as a protected one.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects")

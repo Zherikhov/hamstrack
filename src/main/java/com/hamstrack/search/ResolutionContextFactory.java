@@ -13,6 +13,7 @@ import com.hamstrack.issue.repository.SprintRepository;
 import com.hamstrack.issue.repository.VersionRepository;
 import com.hamstrack.issue.service.FieldValueService;
 import com.hamstrack.issue.service.ProjectConfigService;
+import com.hamstrack.project.entity.BoardMode;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
@@ -23,6 +24,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +37,12 @@ import java.util.UUID;
  * workspace member roster. Assembled inside the request transaction, scoped to the
  * workspace (Advanced Search proposal §6.1). Archived catalog rows are excluded
  * from name resolution (§6.1); issues already carrying them still match by id.
+ *
+ * <p>It also records which delivery capabilities the visible projects declare
+ * (HD-107 §9.1). That is <strong>suggestion-only</strong> state: it narrows the
+ * {@code /schema} field list and the SPRINT/VERSION picklists, and it never touches a
+ * name→id resolution map. Search stays capability-blind where it matters — a saved
+ * filter must keep running after somebody turns a project's sprints off.
  */
 @Component
 @RequiredArgsConstructor
@@ -60,6 +68,25 @@ public class ResolutionContextFactory {
         var visibleIds = searchScope.visibleProjectIds(actor, ws);
         var visibleProjects = visibleIds.isEmpty() ? List.<Project>of()
                 : projectRepository.findAllById(visibleIds);
+
+        // Delivery capabilities (HD-107 §9.1) — the SUGGESTION-only half of this slice.
+        // Each list is a subset of the visible projects, so it can only ever narrow.
+        // Nothing below narrows a name→id RESOLUTION map with these: `sprint`,
+        // `fixVersion`, `affectsVersion` and `storyPoints` must keep resolving on every
+        // project, or a saved filter would break the moment a curator flipped a toggle.
+        // LinkedHashSets: membership is checked once per version/sprint row below, and a
+        // workspace can hold many projects — a list scan would be O(projects × rows).
+        var iterationProjectIds = new LinkedHashSet<UUID>();
+        var releaseProjectIds = new LinkedHashSet<UUID>();
+        var estimationProjectIds = new LinkedHashSet<UUID>();
+        for (var project : visibleProjects) {
+            if (project.getBoardMode() == BoardMode.SCRUM) iterationProjectIds.add(project.getId());
+            if (project.isReleasesEnabled()) releaseProjectIds.add(project.getId());
+            if (project.isEstimationEnabled()) estimationProjectIds.add(project.getId());
+        }
+        var capabilities = new ResolutionContext.Capabilities(
+                List.copyOf(iterationProjectIds), List.copyOf(releaseProjectIds),
+                List.copyOf(estimationProjectIds));
 
         Map<String, List<UUID>> statusIds = new LinkedHashMap<>();
         Map<String, List<UUID>> typeIds = new LinkedHashMap<>();
@@ -116,17 +143,29 @@ public class ResolutionContextFactory {
                 addId(componentIds, componentName, componentId);
                 componentNames.putIfAbsent(componentName.toLowerCase(Locale.ROOT), componentName);
             }
+            // Versions: RESOLUTION spans every visible project (unchanged — §9.1 is
+            // absolute), but the /schema VERSION picklist only offers names from
+            // projects with `releases` on. The two audiences are fed from ONE query;
+            // row[0] is the owning project id.
             for (var row : versionRepository.findIdAndNameByProjectIds(visibleIds)) {
-                UUID versionId = (UUID) row[0];
-                String versionName = (String) row[1];
+                UUID ownerProjectId = (UUID) row[0];
+                UUID versionId = (UUID) row[1];
+                String versionName = (String) row[2];
                 addId(versionIds, versionName, versionId);
-                versionNames.putIfAbsent(versionName.toLowerCase(Locale.ROOT), versionName);
+                if (releaseProjectIds.contains(ownerProjectId)) {
+                    versionNames.putIfAbsent(versionName.toLowerCase(Locale.ROOT), versionName);
+                }
             }
+            // Sprints: same split — every visible project's open sprints resolve by
+            // name, only the SCRUM ones are SUGGESTED in the /schema SPRINT picklist.
             for (var row : sprintRepository.findIdAndNameByProjectIds(visibleIds)) {
-                UUID sprintId = (UUID) row[0];
-                String sprintName = (String) row[1];
+                UUID ownerProjectId = (UUID) row[0];
+                UUID sprintId = (UUID) row[1];
+                String sprintName = (String) row[2];
                 addId(sprintIds, sprintName, sprintId);
-                sprintNames.putIfAbsent(sprintName.toLowerCase(Locale.ROOT), sprintName);
+                if (iterationProjectIds.contains(ownerProjectId)) {
+                    sprintNames.putIfAbsent(sprintName.toLowerCase(Locale.ROOT), sprintName);
+                }
             }
         }
         // Custom fields (HD-52): union of non-archived field_defs reachable by any
@@ -174,7 +213,7 @@ public class ResolutionContextFactory {
                 List.copyOf(componentNames.values()),
                 List.copyOf(versionNames.values()),
                 List.copyOf(sprintNames.values()),
-                customFields);
+                customFields, capabilities);
     }
 
     private void addId(Map<String, List<UUID>> map, String name, UUID id) {
