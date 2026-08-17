@@ -48,6 +48,38 @@ public class Project extends BaseEntity {
     @Column(name = "board_mode", nullable = false, length = 10)
     private BoardMode boardMode = BoardMode.KANBAN;
 
+    /**
+     * Delivery capability: <strong>releases</strong> (HD-102, delivery-paths-proposal
+     * §2.3). Governs the Releases page, the rail item and the fix/affects pickers —
+     * <em>on screen only</em>.
+     *
+     * <p><strong>Rule A (§5.1): a capability gates the UI, never the API.</strong>
+     * Nothing in {@code VersionService}/{@code IssueService} reads this flag, so a
+     * project with releases off still creates versions and accepts
+     * {@code fixVersionIds} with the same status codes as one with it on. Switching it
+     * is provably non-destructive: no version row and no issue↔version link is ever
+     * touched by a capability change (§13).
+     *
+     * <p>Primitive {@code boolean} is correct <em>here</em>; the request DTO
+     * ({@code DeliveryRequest}) must use boxed {@code Boolean} so a partial PATCH that
+     * omits it does not 400 under Jackson 3's {@code FAIL_ON_NULL_FOR_PRIMITIVES}.
+     * New projects default to {@code false} (§7 / open question 2 — lean); every
+     * project that existed before V12 was backfilled to {@code true}, because an
+     * upgrade must never take away a capability a team already had.
+     */
+    @Column(name = "releases_enabled", nullable = false)
+    private boolean releasesEnabled = false;
+
+    /**
+     * Delivery capability: <strong>estimation</strong> (story points) — same contract
+     * as {@link #releasesEnabled}: it hides the points input and the point sums, and
+     * nothing else. {@code issues.story_points} is never read, written or cleared on
+     * the strength of this flag, and an issue that carries a value still renders it
+     * (Rule B, §5.2).
+     */
+    @Column(name = "estimation_enabled", nullable = false)
+    private boolean estimationEnabled = false;
+
     // Project-scoped issue counter. Maintained ONLY by the atomic native
     // UPDATE ... RETURNING in ProjectRepository.incrementAndGetIssueSeq —
     // updatable=false keeps JPA from ever writing it, so a stale managed

@@ -36,6 +36,7 @@ import com.hamstrack.issue.service.IssueService;
 import com.hamstrack.issue.service.LabelService;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.project.dto.CreateProjectRequest;
+import com.hamstrack.project.dto.DeliveryRequest;
 import com.hamstrack.project.service.ProjectService;
 import com.hamstrack.workspace.dto.CreateWorkspaceRequest;
 import com.hamstrack.workspace.service.WorkspaceService;
@@ -108,7 +109,15 @@ public class DemoDataService {
                 "Demo Project", "DEMO",
                 "A sample software project showing how Hamstrack works — a board with "
                         + "statuses, issue types, priorities and due dates. Feel free to edit, "
-                        + "move or delete anything here.")).id();
+                        + "move or delete anything here.",
+                // HD-102 open question 8: the showcase project opts OUT of the lean
+                // new-project defaults and turns everything on — it seeds sprints,
+                // versions and story points, so with the defaults its own showcase data
+                // would render with the vocabulary hidden. It is also the one place a
+                // user sees that Scrum and Releases coexist (D1). Set here rather than
+                // in seedDemoSprints so the capabilities survive even if that
+                // best-effort block is skipped.
+                new DeliveryRequest(BoardMode.SCRUM, true, true, null))).id();
 
         // The demo uses the GLOBAL catalog (both scope columns null); findAtScope
         // (null, null) excludes workspace-/project-scoped rows, which may reuse a
