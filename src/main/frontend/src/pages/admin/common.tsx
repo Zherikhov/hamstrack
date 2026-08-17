@@ -182,18 +182,26 @@ export function InheritedBadge({ scope }: { scope: 'GLOBAL' | 'WORKSPACE' | 'PRO
  * `CommandPalette`/`ShortcutsHelp` (both name themselves with `aria-label`), so
  * every modal in the app looks the same to a screen reader and is findable via
  * `[role="dialog"]`.
+ *
+ * The backdrop also carries `data-modal-open="true"` (HD-100): an open dialog
+ * owns the keyboard, so the global shortcuts (`c` / `/` / `?` / g-chords, HD-39
+ * §8.3) stay inert behind it — the same contract the hand-rolled overlays
+ * declare for themselves. Centralising it here means a dialog cannot forget it.
  */
 export function Modal({ title, onClose, children, width = 440 }: {
   title: string; onClose: () => void; children: ReactNode; width?: number
 }) {
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,27,25,0.55)',
+    <div data-modal-open="true"
+         style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,27,25,0.55)',
                   display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(2px)' }}
          onClick={onClose}>
       <div role="dialog"
            aria-modal="true"
            aria-label={title}
-           style={{ background: 'white', borderRadius: 'var(--radius-lg)', width,
+           // `maxWidth` keeps a fixed-width dialog on-screen at narrow viewports
+           // (carried over from SaveFilterDialog's own overlay in HD-100).
+           style={{ background: 'white', borderRadius: 'var(--radius-lg)', width, maxWidth: '92vw',
                     border: '1px solid var(--color-border)', boxShadow: '0 20px 60px rgba(0,0,0,0.18)',
                     maxHeight: '85vh', overflowY: 'auto' }}
            onClick={e => e.stopPropagation()}>
