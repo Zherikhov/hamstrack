@@ -28,7 +28,13 @@ import type { ProjectRef, WorkspaceMember } from '../types'
  * 4. **`ADOPTION_ROLE_UNREADABLE`** — the adoption stopped on a membership row
  *    whose stored role cannot be read. Neither party can clear it; it needs an
  *    operator, so no action is offered at all.
- * 5. **Neither** — the last-Owner invariant (or the self-removal `422`). Render
+ * 5. **`STRANDED_BY_INHERITANCE`** (HD-130 S7, door 6) — the same shape as (2)
+ *    with the opposite remedy: the projects have administrators only *through
+ *    the default access*, so there is **no adoption retry** and no button. It is
+ *    classified separately from `STRANDED_PROJECTS` for exactly that reason —
+ *    treating it as its cousin would offer a "take them over" that cannot work
+ *    and would narrow the rescuer if it did.
+ * 6. **Neither** — the last-Owner invariant (or the self-removal `422`). Render
  *    `detail`; an unrecognised `errorType` is treated the same way.
  *
  * ## The adoption is consent, not a convenience
@@ -176,6 +182,19 @@ export default function RemoveMemberDialog({ wsId, member, workspaceName, onClos
             <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
               Nothing was changed, and retrying with the same flag fails identically — so no button
               here can fix it.
+            </p>
+          )}
+          {refusal.kind === 'strandedByInheritance' && (
+            // Door 6 (HD-130 S7): they administer those projects through the
+            // project's DEFAULT access, not through a membership row. There is no
+            // adopt button on purpose — adopting writes a Team lead row, and
+            // whoever is left inherits a default at least that wide, so taking
+            // them over would narrow the rescuer in the project they rescued.
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              Nothing was changed. Add an explicit administrator to each of those projects first —
+              the current default still lets you — or ask <bdi>{who}</bdi> to do it while they still
+              can. There is no “take them over” option here: it would leave you with less than you
+              have now.
             </p>
           )}
 

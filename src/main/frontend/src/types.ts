@@ -40,8 +40,44 @@ export interface Workspace {
    * hand-built object cannot silently mean "unknown", which would deny.
    */
   myPermissions: string[];
+  /**
+   * Whether workspace members who were never added to a project inherit its
+   * default role (HD-130, S7). **This is the only place it is published** — a
+   * workspace-level fact with one source of truth, read by the project People
+   * card from the `['workspace', wsId]` entry every surface already caches.
+   *
+   * It decides exactly one thing: whether the default-access chain yields a role
+   * at all. It is **not** an on/off switch for permissions, and there is
+   * deliberately no "enforcement off" mode. `OPEN` is the identity — a workspace
+   * that never opens the General page behaves exactly as it did before S7.
+   *
+   * Optional on the wire only for fixtures predating S7; absent is read as
+   * `OPEN`, which is the value every existing workspace was migrated with.
+   */
+  projectAccessMode?: ProjectAccessMode;
+  /**
+   * The workspace's declared default project role, or `null` for the built-in
+   * Contributor. A raw **id, never a name**: it is a plain FK the database cannot
+   * constrain to "a PROJECT role of THIS workspace", so a client that cannot find
+   * it in `GET …/roles` renders a placeholder rather than a guess.
+   *
+   * It exists in **both** modes. In `STRICT` it is inert but stored, and it goes
+   * live again the moment the mode is flipped back.
+   */
+  defaultProjectRoleId?: string | null;
   createdAt: string;
 }
+
+/**
+ * Whether the default-access chain yields a role for a workspace member with no
+ * explicit `project_members` row (HD-130, S7).
+ *
+ * `OPEN` — they inherit the project's declared default. `STRICT` — they inherit
+ * nothing, and only people explicitly added to a project can change anything in
+ * it. **Reads are never narrowed by either**: everyone still sees every project,
+ * because narrowing reads would be private projects by the back door.
+ */
+export type ProjectAccessMode = 'OPEN' | 'STRICT';
 
 // Presentation switch (HD-22 §3.5), NOT a permission: the sprint API works
 // identically in both modes. SCRUM scopes the board to the active sprint and
@@ -741,6 +777,133 @@ export interface RoleRef {
 export interface RoleBlocker extends RoleRef {
   /** A catalog KEY — the identical string the runtime 403 quotes. */
   missing: string;
+}
+
+/**
+ * **Which roles this actor may make a default, and why not for the rest**
+ * (HD-130, S7) — the compose-time face of the grant ceiling on the two
+ * default-role pickers, so an admin sees the bound while choosing rather than as
+ * a 403 afterwards.
+ *
+ * Derived **server-side** with the same predicate the runtime ceiling applies,
+ * which is the only reason the greyed-out reason and the refusal quote one
+ * string. **Never re-derived in TypeScript**: the own-only/unrestricted
+ * asymmetry is subtle, and a second implementation of a server predicate in the
+ * SPA is the HD-98/HD-116 bug class by construction.
+ *
+ * **The two scopes bind differently and are not symmetric.** At workspace scope
+ * the comparand is a *constant* — the built-in Contributor's set ∪ the actor's
+ * workspace-wide project grants; at project scope it is the actor's real
+ * effective set in that project. A role settable at one scope may be refused at
+ * the other, so never reuse one block for the other picker.
+ */
+export interface SettableRolesView {
+  /** Roles the ceiling admits, in the catalog's display order. */
+  canSet: RoleRef[];
+  /** Roles it refuses, each with the FIRST permission that is why. */
+  cannotSet: RoleBlocker[];
+}
+
+/** A workspace's project-access configuration, on either side of a change. */
+export interface ProjectAccessState {
+  mode: ProjectAccessMode;
+  /** `null` = the built-in Contributor. An id, never a name. */
+  defaultProjectRoleId: string | null;
+}
+
+/** One live project's row in the impact preview. */
+export interface ProjectAccessImpactRow {
+  id: string;
+  key: string;
+  name: string;
+  /** ACTIVE workspace members with no explicit row here — the people the mode is about. */
+  membersOnDefault: number;
+  /** ACTIVE members who do have one, and are therefore unaffected. */
+  explicitMembers: number;
+  /**
+   * Of the members on the default, those whose workspace role grants neither
+   * `project.curate.all` nor `project.administer.all` — i.e. who would hold the
+   * empty set here afterwards.
+   */
+  membersLosingEverything: number;
+  /** Whether this project would end up with nobody at all holding `issue.create`. */
+  noWritersAfter: boolean;
+}
+
+/**
+ * **What a project-access change would do** (HD-130, S7 §4) — the body of
+ * `POST /api/workspaces/{ws}/project-access/preview`, and the `impact` block of
+ * `GET …/project-access` computed for the current state.
+ *
+ * **Counts are advisory; refusals are authoritative.** Every number here has a
+ * definition a reviewer can check against a query, but only one of them is a
+ * guarantee: `strandedProjects` is re-derived *inside the write's transaction*
+ * and enforced there whether or not the caller ever previewed — so a
+ * clean-looking preview can still be followed by a 409
+ * `STRANDED_BY_INHERITANCE`. The rest describe a population
+ * (`workspace_members` × `project_members`) that is not the row being written, so
+ * no optimistic check could make them exact. There is deliberately no token, no
+ * echo and no `expectedCount`.
+ *
+ * The consequence for the client: **re-fetch on opening the confirm dialog and
+ * never cache a preview across a dialog close.** `computedAt` is the timestamp
+ * that makes the staleness admitted rather than hidden.
+ *
+ * **How many, never who.** Projects are named; people never are.
+ */
+export interface ProjectAccessImpact {
+  /** When this snapshot was taken. ISO-8601. */
+  computedAt: string;
+  from: ProjectAccessState;
+  to: ProjectAccessState;
+  activeMembers: number;
+  projects: number;
+  projectsWithNoExplicitMembers: number;
+  /**
+   * **The honest headline.** Live projects where, after the change, *nobody at
+   * all* holds `issue.create`. Not "only admins can work there": a workspace
+   * Owner/Admin holds `project.curate.all` — project.edit, component.manage,
+   * version.manage, sprint.manage — and no issue or comment permission, so in a
+   * restricted project with no explicit members nobody can file or edit an issue,
+   * **including the Owner**. A warning, never a refusal.
+   */
+  projectsWithNoWriters: number;
+  /** One row per live project, in key order. */
+  perProject: ProjectAccessImpactRow[];
+  /**
+   * The projects the write will **409** on — they have administrators only by
+   * inheritance and the change takes it away. Empty is the normal answer, and a
+   * non-empty list is a block, not a warning: there is no adoption retry.
+   */
+  strandedProjects: ProjectRef[];
+}
+
+/** `GET /api/workspaces/{ws}/project-access` — one request behind the General page. */
+export interface ProjectAccessSettings {
+  mode: ProjectAccessMode;
+  /** `null` = the built-in Contributor. */
+  defaultProjectRoleId: string | null;
+  settable: SettableRolesView;
+  /** The impact of the workspace **as it stands** — not of any proposal. */
+  impact: ProjectAccessImpact;
+}
+
+/**
+ * `GET /api/workspaces/{ws}/projects/{p}/default-role` — what the project's
+ * default-access picker opens against.
+ *
+ * The two ids duplicate `ProjectResponse.defaultRole` on purpose: a picker dialog
+ * is worth a self-contained read. `mode` rides along so the dialog can say "this
+ * workspace is Restricted, so nothing is inherited right now" without a second
+ * fetch — it is read here and **owned by the workspace response**; nothing writes
+ * it through this endpoint.
+ */
+export interface ProjectDefaultRoleSettings {
+  projectRoleId: string | null;
+  workspaceRoleId: string | null;
+  mode: ProjectAccessMode;
+  /** The PROJECT-scope ceiling — the actor's real effective set here, nobody exempt. */
+  settable: SettableRolesView;
 }
 
 /**

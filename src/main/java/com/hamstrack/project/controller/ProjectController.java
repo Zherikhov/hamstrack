@@ -172,4 +172,57 @@ public class ProjectController {
                              @PathVariable UUID userId) {
         projectService.removeMember(actor, workspaceId, projectId, userId);
     }
+
+    /**
+     * <strong>This project's default access</strong> (HD-130, S7 §7.2 P1) — both links of the
+     * §5.2 chain, the workspace's access mode, and which PROJECT roles this actor may make the
+     * default (with the first missing permission for each one they may not).
+     *
+     * <p>Gate: <strong>{@code project.member.manage}</strong>, not {@code project.edit}. The
+     * default role is membership authority rather than project settings and the two are
+     * deliberately different grants — which is also why this is a separate endpoint instead of
+     * a field on {@code PATCH /{projectId}}: folding a second-permission field into a
+     * single-permission PATCH is how a gate gets forgotten.
+     *
+     * <p>200 · <strong>403</strong> · <strong>404</strong> unknown workspace, non-member, or a
+     * project not in this workspace.
+     */
+    @GetMapping("/{projectId}/default-role")
+    public ProjectDefaultRoleResponse defaultRole(@AuthenticationPrincipal User actor,
+                                                  @PathVariable UUID workspaceId,
+                                                  @PathVariable UUID projectId) {
+        return projectService.getDefaultRole(actor, workspaceId, projectId);
+    }
+
+    /**
+     * Set this project's default access (S7 §7.2 P2): exactly one of {@code {"roleId": …}} or
+     * {@code {"inherit": true}}. {@code inherit} writes NULL — "follow the workspace default" —
+     * which is a real choice and not an absence.
+     *
+     * <p>Gate: {@code project.member.manage}, plus the grant ceiling on <strong>both
+     * ends</strong> against the actor's real effective set in this project, with
+     * <strong>nobody exempt and no §4 escape</strong>: the escape rests on
+     * {@code target != actor}, and a default's target is everyone including the actor, so the
+     * actor who may promote a colleague to Project admin still gets a 403 naming
+     * {@code issue.delete} when they aim that role at the default.
+     *
+     * <p>Answers the full {@code ProjectResponse}, so the People card re-renders from the write.
+     *
+     * <p>200 (including for the value already stored, which is written as a no-op) ·
+     * <strong>403</strong> missing the permission, or a ceiling refusal naming it ·
+     * <strong>404</strong> unknown workspace, non-member, or project not in this workspace ·
+     * <strong>409 {@code STRANDED_BY_INHERITANCE}</strong> when the new default would leave this
+     * project with nobody able to manage its membership — it had administrators only through
+     * the default and no explicit administering row (door 9; no adoption retry, because
+     * adopting would <em>narrow</em> whoever currently inherits the wider default) ·
+     * <strong>422</strong> a {@code roleId} that is unknown, foreign or WORKSPACE-scoped, or a
+     * body sending neither or both fields.
+     */
+    @PatchMapping("/{projectId}/default-role")
+    public ProjectResponse setDefaultRole(@AuthenticationPrincipal User actor,
+                                          @PathVariable UUID workspaceId,
+                                          @PathVariable UUID projectId,
+                                          @Valid @RequestBody UpdateProjectDefaultRoleRequest req) {
+        return projectService.setDefaultRole(actor, workspaceId, projectId, req);
+    }
 }

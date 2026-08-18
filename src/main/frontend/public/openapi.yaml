@@ -83,6 +83,15 @@ info:
     discriminator simply has no `errorType` (the lock-contention `409` above is
     exactly that case, and is told apart by `Retry-After` instead).
 
+
+    It is not a `409`-only member. One `403` carries it as well —
+    `REACTIVATED_DEFAULT_ABOVE_CEILING`, when restoring open project access
+    would make a *per-project* declared default live that the caller may not
+    set — and the same two endpoints answer the plain grant-ceiling `403` with
+    no discriminator at all, so the absence rule matters there exactly as much
+    as it does for lock contention. Being a `403`, it does not interact with the
+    "check `Retry-After` first" rule, which sorts `409`s only.
+
     **Pagination** — paginated endpoints take `page` (zero-based, default 0)
     and `size` (default 50, clamped server-side to a maximum of 100) and return
     a uniform `PageResponse` envelope (`content` plus `page`/`size`/
@@ -518,6 +527,199 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Workspaces]
+      summary: Rename a workspace, or change how its projects are accessed
+      description: |
+        Requires `workspace.edit`. Every field is optional and each is an
+        independent decision: a body naming only `name` does not disturb the
+        access mode, and one naming only the mode does not disturb the name. A
+        body naming **none** of them is a `400` rather than a silent `200`.
+
+        **What `projectAccessMode` decides — and what it does not.** Exactly one
+        thing: whether a workspace member who holds *no* explicit
+        `project_members` row in a project inherits that project's default role.
+        There is deliberately **no "enforcement off" mode**; permissions always
+        mean what they say in both modes. A member's effective project role
+        resolves as: their explicit `project_members` row, else the project's
+        `defaultProjectRoleId` → the workspace's `defaultProjectRoleId` → the
+        built-in **Contributor**, *and only while the workspace is `OPEN`* —
+        else nothing at all. `STRICT` narrows **writes** only: everyone can
+        still see every project.
+
+        `OPEN` is the default for new workspaces and for every workspace this
+        release upgrades, and behaviour under it is identical to before this
+        release. Flipping to `STRICT` changes **no data** — no membership row,
+        no assignee, no sprint — and flipping back restores every permission
+        byte for byte.
+
+        **The default role is bounded by a grant ceiling.**
+        `defaultProjectRoleId` is handed to nearly every member, so it may not
+        name a role granting a permission the caller does not already hold —
+        compared against a **fixed baseline**: the built-in Contributor's
+        permissions, unioned with whatever the caller's *workspace* role grants
+        in every project (`project.curate.all` / `project.administer.all`). The
+        bound applies to **both ends**, so a default that is already wider than
+        the baseline may not be replaced either. The built-in workspace `OWNER`
+        is exempt in their own workspace. A refusal is a `403` naming the
+        missing permission. That comparand is **not** the one the project-level
+        picker uses, so a role accepted here may be refused there and the other
+        way round — see
+        `PATCH /workspaces/{workspaceId}/projects/{projectId}/default-role`.
+
+        **A flip from `STRICT` back to `OPEN` is itself a grant**, even when the
+        body names no role: every declared default in the workspace stops being
+        inert at that moment, so the workspace default *and* every project's own
+        override are measured against the same ceiling before the flip is
+        allowed. A refusal over a **project's** override is a structured `403`
+        (`errorType: "REACTIVATED_DEFAULT_ABOVE_CEILING"`, naming the projects,
+        the role and the missing permission); a refusal over the **workspace**
+        default is the plain ceiling `403` with no `errorType` — see the `403`
+        response below, and do not assume the discriminator is there. The
+        opposite direction is unbounded: taking inheritance away grants nothing.
+
+        `defaultProjectRoleId` and `clearDefaultProjectRole` are two different
+        statements, so sending both is a `422` rather than a precedence rule.
+
+        **A request whose values already hold is a `200` that writes nothing** —
+        the row is not touched, so `updatedAt` does not move.
+      operationId: updateWorkspace
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceRequest' }
+      responses:
+        '200':
+          description: >-
+            The updated workspace — or the unchanged one, when every requested
+            value already held.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '400':
+          description: >-
+            The body names none of `name`, `projectAccessMode`,
+            `defaultProjectRoleId` or `clearDefaultProjectRole`; or `name`
+            fails validation (1–255 characters after trimming); or
+            `projectAccessMode` is not one of `OPEN` / `STRICT`, which fails at
+            the JSON boundary because there is no third mode to fall back to.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/ProjectAccessForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/StrandedByInheritance' }
+        '422':
+          description: >-
+            `defaultProjectRoleId` is unknown, belongs to another workspace or
+            is `WORKSPACE`-scoped — `PROJECT` scope is not negotiable here,
+            because a workspace role accepted as a project default would put
+            `workspace.edit` into every member's context in every project of
+            the workspace; or the body sends `defaultProjectRoleId` **and**
+            `clearDefaultProjectRole`. Branch on the status, not on the wording
+            of `detail`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /workspaces/{workspaceId}/project-access:
+    get:
+      tags: [Workspaces]
+      summary: Project access — current state, settable roles and current impact
+      description: |
+        Requires `workspace.edit`. One request behind the whole workspace
+        General settings page: the current `mode`, the current declared
+        `defaultProjectRoleId`, which `PROJECT`-scoped roles the caller may set
+        it to (`settable`), and an `impact` block describing the workspace **as
+        it stands** — the same shape `POST …/project-access/preview` returns for
+        a proposed change.
+
+        Gated on `workspace.edit` rather than open to every member because it
+        aggregates write access workspace-wide, which is a different object from
+        the project member lists any member may read. It is the control's own
+        preview.
+      operationId: getProjectAccess
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectAccessResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/project-access/preview:
+    post:
+      tags: [Workspaces]
+      summary: What would this project-access change do?
+      description: |
+        Requires `workspace.edit`. Takes **the same body as
+        `PATCH /workspaces/{workspaceId}`**, runs the same well-formedness,
+        scope and grant-ceiling checks, and **persists nothing** — `POST`
+        because it carries a body, exactly as `POST …/roles/preview` does.
+
+        **The counts are advisory; the refusals are not.** Read that literally.
+        Every number but one describes a population — active workspace members
+        crossed with explicit project memberships — that is *not* the row being
+        written, so nothing about the write can pin it: people join, leave and
+        get added to projects between a preview and a `PATCH`. The response
+        therefore carries `computedAt`, and there is deliberately no token, no
+        echo and no `expectedCount` field; inventing one would be ceremony that
+        merely looks like a guarantee. Re-fetch immediately before acting, and
+        treat the numbers as a decision aid rather than a contract.
+
+        The one exact thing is `strandedProjects`. It is **re-derived inside the
+        write's own transaction** and enforced there whether or not anybody ever
+        previewed, so a client that skips this endpoint gets the same `409`.
+        Preview and write share one implementation, so for the same body the
+        list here is the list the `PATCH` would refuse with.
+
+        A grant-ceiling failure surfaces here as the ordinary **`403`**, never
+        as a "would fail" field inside a `200` — a preview that succeeds while
+        describing a refusal teaches clients to ignore it. That includes the
+        structured refusal a `STRICT` → `OPEN` flip can produce
+        (`errorType: "REACTIVATED_DEFAULT_ABOVE_CEILING"`), which is exactly the
+        answer the `PATCH` would give for the same body. There is no `409`:
+        the stranding this body would cause is a *field*, because that is the
+        question being asked.
+      operationId: previewProjectAccess
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWorkspaceRequest' }
+      responses:
+        '200':
+          description: >-
+            What the change would do. Nothing was written — the workspace row is
+            untouched and `updatedAt` has not moved.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectAccessImpactResponse' }
+        '400':
+          description: >-
+            As the `PATCH`: an empty body, a `name` that fails validation, or an
+            unknown `projectAccessMode`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/ProjectAccessForbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >-
+            As the `PATCH`: an unknown, foreign or `WORKSPACE`-scoped
+            `defaultProjectRoleId`, or a body sending both
+            `defaultProjectRoleId` and `clearDefaultProjectRole`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/members:
     get:
@@ -775,11 +977,28 @@ paths:
         reflect it too); where the caller already held a membership row in an
         adopted project, that row is promoted in place rather than duplicated.
 
+        **A third stranding refusal, and this one is about *inherited*
+        administrators.** A project can be administered with no membership row
+        at all: while the workspace is `OPEN`, a default role that grants
+        `project.member.manage` makes every member without an explicit row an
+        administrator of it. Removing the last such member leaves that project
+        unmanageable just as surely, so the removal is refused with `409`
+        `errorType: "STRANDED_BY_INHERITANCE"` naming those projects.
+        `adoptStrandedProjects=true` does **not** clear it and is not offered:
+        adoption writes a Team lead row, and the caller here inherits a default
+        at least as wide, so it would narrow them in the project being rescued.
+        The way out is in `detail` and the caller can take it now — give each
+        named project an explicit administrator, which the current default still
+        permits — or ask the departing member to do it while they still can. It
+        is checked **after** the explicit-row cases above, and it cannot fire at
+        all while the workspace default grants no member management, which is
+        the shipped configuration.
+
         Both the last-owner `409` and the self-removal `422` are checked
         **before** this one, so at most one *invariant* refusal is ever reported;
         the two stranded-project variants above are one such refusal and are told
         apart by `errorType` (`"STRANDED_PROJECTS"` / `"ADOPTION_BLOCKED"` /
-        `"ADOPTION_ROLE_UNREADABLE"`),
+        `"ADOPTION_ROLE_UNREADABLE"` / `"STRANDED_BY_INHERITANCE"`),
         never by the wording of `detail`. A further `409` is not an invariant at
         all and can arrive on any attempt: lock contention, which carries
         `Retry-After` and deliberately **no** `errorType` — the header is what
@@ -1779,6 +1998,99 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/LastProjectAdmin' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/default-role:
+    get:
+      tags: [Projects]
+      summary: This project's default access
+      description: |
+        Requires **`project.member.manage`** — not `project.edit`. A project's
+        default role is membership authority rather than project settings, and
+        the two are deliberately different grants; that is also why this is its
+        own endpoint instead of a field on
+        `PATCH /workspaces/{workspaceId}/projects/{projectId}`, where a
+        second-permission field would be one gate away from being forgotten.
+
+        Returns both links of the default-role chain (they duplicate
+        `ProjectResponse.defaultRole` on purpose — a picker dialog is worth a
+        self-contained read), the workspace's `mode`, so the dialog can say
+        "this workspace is Restricted, so nothing is inherited right now — this
+        default applies again if it is switched back to Open" without a second
+        fetch, and `settable`: which `PROJECT`-scoped roles this caller may make
+        the default here.
+      operationId: getProjectDefaultRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectDefaultRoleResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Projects]
+      summary: Set this project's default access
+      description: |
+        Requires **`project.member.manage`**. Send **exactly one** of
+        `{"roleId": "…"}` or `{"inherit": true}`; neither and both are alike a
+        `422`, never a precedence rule. `inherit: true` stores `null`, meaning
+        *"follow the workspace default"* — a real choice rather than an absence,
+        since "this project deliberately follows the workspace" and "this
+        project happens to name the same role the workspace does" diverge the
+        moment the workspace default moves.
+
+        **The grant ceiling here is bounded differently from the workspace
+        one.** The comparand is `ctx.permissions()` — the caller's own real,
+        effective permission set *in this project* — and **nobody is exempt**;
+        the workspace picker instead compares against a fixed built-in
+        Contributor baseline. So a role one scope accepts the other may refuse,
+        in either direction. The bound applies to **both ends**: an actor whose
+        own role is narrower than the current default may not replace it, so a
+        narrow member-manager cannot quietly narrow a default of Project admin.
+        A refusal is a `403` naming the first missing permission.
+
+        **The membership escape does not reach here.** A holder of
+        `project.member.manage` may hand the built-in project `MANAGER` role to
+        *another member* regardless of the ceiling — that escape rests entirely
+        on the target not being the actor, and a default has no target, or
+        rather its target is everyone including the actor. So the same caller
+        who may promote a colleague to Project admin gets a `403` naming
+        `issue.delete` when they aim that role at the project default.
+
+        Re-sending the value already stored is an accepted no-op. Answers the
+        full `ProjectResponse`, so a People card re-renders straight from the
+        write.
+      operationId: setProjectDefaultRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectDefaultRoleRequest' }
+      responses:
+        '200':
+          description: >-
+            The updated project — or the unchanged one, when the requested value
+            was already stored.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/StrandedByInheritance' }
+        '422':
+          description: >-
+            `roleId` is unknown, belongs to another workspace or is
+            `WORKSPACE`-scoped; or the body sent neither `roleId` nor
+            `inherit: true`, or both.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/config:
     get:
@@ -5214,9 +5526,57 @@ components:
         project-scope variant of the latter reads "Reassigning … would widen
         every holder's access: the replacement includes `<key>` …" and is
         measured against the role being deleted rather than against the caller.
+
+
+        One ceiling refusal carries a **structured body** instead of a bare
+        sentence: restoring open project access when a *per-project* declared
+        default would come back above the caller's ceiling
+        (`errorType: "REACTIVATED_DEFAULT_ABOVE_CEILING"`, with `projects`,
+        `role` and `missing`). It is confined to
+        `PATCH /workspaces/{workspaceId}` and
+        `POST /workspaces/{workspaceId}/project-access/preview`, which document
+        it under `ProjectAccessForbidden`; every other `403` on this API is the
+        plain shape, and no `403` ever carries `Retry-After`.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ProjectAccessForbidden:
+      description: >-
+        Missing `workspace.edit` — or a grant-ceiling refusal, which on this
+        pair of endpoints arrives in **two different shapes**.
+
+
+        Flipping `STRICT` → `OPEN` is a grant even when the body names no role:
+        every declared default in the workspace stops being inert at that
+        moment. When the role that goes live is a **per-project** declared
+        default, the body is a `ReactivatedDefaultProblemDetail` —
+        `errorType: "REACTIVATED_DEFAULT_ABOVE_CEILING"` plus `projects`, `role`
+        and `missing` — because the obstacle is a column on another screen, in
+        one of possibly hundreds of projects, and a refusal naming only the role
+        would leave the reader opening project settings one at a time to find
+        it. When the role that goes live is the **workspace** default, it is the
+        ordinary ceiling refusal: the plain sentence, deliberately **no**
+        `errorType` and no `projects`, because there is no project to name. The
+        workspace default is bounded first, so a flip blocked by both answers
+        the plain shape and the structured one appears on the retry.
+
+
+        **Do not assume `errorType` is present.** Read its absence here as "the
+        plain refusal", never as an unrecognised value — the same rule the
+        lock-contention `409` establishes (see **Errors** in the introduction).
+        And because this is a `403`, the "check `Retry-After` first" rule does
+        not apply to it: no variant here is retryable, and none carries the
+        header.
+
+
+        Nothing is written in either shape, and the preview answers identically
+        — it runs the same checks and persists nothing.
+      content:
+        application/problem+json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/ReactivatedDefaultProblemDetail'
     NotFound:
       description: Not found — or not a member of the containing workspace
       content:
@@ -5345,13 +5705,30 @@ components:
         because they have none.
 
 
-        Cases 2, 3 and 4 are mutually exclusive and are told apart by
+        5. the removal would take the last administrator a project had **only
+        by inheritance** — its default role grants `project.member.manage`,
+        nobody holds an explicit row that does, and the departing member was one
+        of the people standing on that default. Same
+        `StrandedProjectsProblemDetail`, `errorType:
+        "STRANDED_BY_INHERITANCE"`. This one is **not** cleared by
+        `adoptStrandedProjects=true` and deliberately offers no retry: adopting
+        writes a Team lead row, and the caller here inherits a default at least
+        as wide, so it would narrow them in the project they were rescuing. The
+        remedy `detail` names is one the caller can perform right now — add an
+        explicit administrator to each named project, which the current default
+        still lets them do — or ask the departing member to do it while they
+        still can.
+
+
+        Cases 2, 3, 4 and 5 are mutually exclusive and are told apart by
         `errorType`: `"STRANDED_PROJECTS"` for case 2, `"ADOPTION_BLOCKED"` for
-        case 3, `"ADOPTION_ROLE_UNREADABLE"` for case 4. Case 2 depends on the
+        case 3, `"ADOPTION_ROLE_UNREADABLE"` for case 4 and
+        `"STRANDED_BY_INHERITANCE"` for case 5. Case 2 depends on the
         flag; when 3 and 4 both apply the server reports **4 first**, deliberately
         — either refusal ends the request, so one is necessarily second, and it
-        should not be the one no present party can clear. Case 1 carries no
-        `errorType`.
+        should not be the one no present party can clear. Case 5 is checked
+        **after** 2–4, so a removal that strands projects both ways reports the
+        explicit-row one first. Case 1 carries no `errorType`.
 
 
         All are `409` rather than `403` for the same reason: the caller's
@@ -5361,16 +5738,18 @@ components:
         respectively).
 
 
-        A fifth `409` is possible here and is **not** an invariant: lock
+        A sixth `409` is possible here and is **not** an invariant: lock
         contention, a plain `ProblemDetail` carrying `Retry-After` and no
-        `errorType` (app-wide — see **Errors** in the introduction). So all five
+        `errorType` (app-wide — see **Errors** in the introduction). So all six
         are told apart by the response and never by the wording of `detail` —
         in this order: `Retry-After` present means lock contention, so retry the
         **identical** request unchanged; otherwise `errorType` names the
         stranded-project variant (`"STRANDED_PROJECTS"` cleared by the
         `adoptStrandedProjects=true` retry, `"ADOPTION_BLOCKED"` cleared by
         somebody else's action, `"ADOPTION_ROLE_UNREADABLE"` cleared only by an
-        operator repairing stored data); and neither present means the last owner.
+        operator repairing stored data, `"STRANDED_BY_INHERITANCE"` cleared by
+        giving each named project an explicit administrator and never by a
+        retry); and neither present means the last owner.
         The header has to be checked **first**: an absent `errorType` otherwise
         reads as "no retry available", which is the one wrong answer for a
         lock-contention body.
@@ -5388,6 +5767,48 @@ components:
             anyOf:
               - $ref: '#/components/schemas/ProblemDetail'
               - $ref: '#/components/schemas/StrandedProjectsProblemDetail'
+    StrandedByInheritance:
+      description: >-
+        The change would leave one or more projects with **nobody able to manage
+        their membership**, because their administrators exist only by
+        *inheritance* — the project's default role grants
+        `project.member.manage`, nobody holds an explicit `project_members` row
+        that does, and this write takes that inheritance away. Reachable from a
+        flip to `STRICT`, from a workspace default that stops managing members,
+        and from a project default that does the same.
+
+
+        `errorType` is `"STRANDED_BY_INHERITANCE"` and the body is the familiar
+        `StrandedProjectsProblemDetail`: same status, same uncapped `projects`
+        extension ordered by `key`, same three-name cap on `detail`. **No retry
+        flag applies** — `adoptStrandedProjects=true` writes the caller a Team
+        lead row, and here the caller has no row at all and inherits a default
+        at least as wide as `project.member.manage`, so adopting would *narrow*
+        the very person doing the rescuing. The remedy is one the refused caller
+        can perform right now, and `detail` states it: give each named project
+        an explicit administrator first — the current default still lets you —
+        or pick a default that also manages members.
+
+
+        As with every other `409` on this API, check `Retry-After` **first**: a
+        header means [lock contention](#errors), which is retryable unchanged
+        and deliberately carries no `errorType`. Only then branch on
+        `errorType`, and treat a value you do not recognise as "no recovery I
+        know about".
+
+
+        Nothing is written when this fires — not the mode, not the default, not
+        the name.
+      headers:
+        Retry-After:
+          description: >-
+            Seconds to wait. Present only on the lock-contention variant, never
+            on this invariant — retrying it unchanged cannot help.
+          required: false
+          schema: { type: integer, example: 1 }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/StrandedProjectsProblemDetail' }
     LastProjectAdmin:
       description: >-
         The target is the project's only member holding
@@ -5752,7 +6173,7 @@ components:
           properties:
             errorType:
               type: string
-              enum: [STRANDED_PROJECTS, ADOPTION_BLOCKED, ADOPTION_ROLE_UNREADABLE, LAST_PROJECT_ADMIN_BULK]
+              enum: [STRANDED_PROJECTS, ADOPTION_BLOCKED, ADOPTION_ROLE_UNREADABLE, LAST_PROJECT_ADMIN_BULK, STRANDED_BY_INHERITANCE]
               description: >-
                 Which refusal this is — **always present** on this body, and the
                 only supported way to tell them apart. `STRANDED_PROJECTS` is
@@ -5778,6 +6199,21 @@ components:
                 you do not recognise as `ADOPTION_BLOCKED` — "no recovery I know
                 about" is the only default that cannot invent a button that
                 `409`s.
+
+
+                `STRANDED_BY_INHERITANCE` is the project-access family: a
+                workspace member removal, a flip to `STRICT`, or a change to
+                either default-role column that takes away an inheritance no
+                explicit membership row was standing in for — the listed
+                projects would be left with nobody able to manage their
+                membership. **No retry flag applies to it either**, and offering
+                one would be worse than useless: `adoptStrandedProjects=true`
+                writes a Team lead row, while the caller here holds no row and
+                inherits a default at least as wide, so adopting would narrow
+                the rescuer. `detail` names a remedy the refused caller can
+                perform now — give each named project an explicit administrator
+                while the current default still lets you, or choose a default
+                that also manages members.
 
 
                 Do not read the **absence** of `errorType` as an unrecognised
@@ -5817,6 +6253,88 @@ components:
                 variant it lists only the projects that block the adoption, which
                 may be a subset of what the first `409` named.
               items: { $ref: '#/components/schemas/ProjectRef' }
+
+    ReactivatedDefaultProblemDetail:
+      description: >-
+        The `403` body of a flip from `STRICT` to `OPEN` refused because it
+        would make a **per-project** declared default live again, and that
+        default grants more than the caller may grant. Returned by
+        `PATCH /workspaces/{workspaceId}` and by
+        `POST /workspaces/{workspaceId}/project-access/preview`.
+
+
+        Split out of the generic ceiling refusal because that one names a role
+        and a permission, which are the wrong two facts here: the reader is
+        flipping one switch on the workspace's General page while the obstacle
+        is a column in some *other* project's settings, one of possibly
+        hundreds, and without `projects` they cannot act at all. The remedy is
+        deliberately three-part and is stated in `detail`, because which parts
+        are open to this reader is not something the server can see — a built-in
+        role cannot be narrowed, and clearing a project's override needs
+        `project.member.manage` **in that project**, which is outside the
+        workspace-wide curator set and therefore granted by no workspace role.
+        The last part — ask a workspace Owner — always exists, which is what
+        makes this a guard rather than a lock-out.
+
+
+        The **workspace-default** branch of the same refusal deliberately keeps
+        the generic ceiling body, with no `errorType` and no `projects`: there
+        is no project to name. So one status has two shapes on one endpoint, and
+        a client must not assume the discriminator is present — the rule the
+        lock-contention `409` already establishes.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [REACTIVATED_DEFAULT_ABOVE_CEILING]
+              description: >-
+                **Always present on this body**, and the only supported way to
+                tell it from the plain ceiling `403` the same endpoints also
+                answer. A code rather than prose because the client's next
+                action is distinct from every other `403` in this area: a plain
+                ceiling refusal is cleared in the picker the client is already
+                showing, this one in another project's settings and possibly by
+                somebody else. Its **absence** is not an unknown value — it
+                means the plain refusal.
+              example: REACTIVATED_DEFAULT_ABOVE_CEILING
+            detail:
+              type: string
+              description: >-
+                Names at most **three** projects as `<name> (<key>)`,
+                summarises the remainder as `and N more`, names the role and the
+                missing permission, and ends with all three remedies. Prose for
+                a human: render it verbatim, do not parse it, and do not derive
+                the number of affected projects from it.
+              example: 'Restoring open project access would make “Project admin” the default in Payments (PAY), Ops (OPS), and it includes issue.delete — a permission you do not hold in this workspace. Narrow that role if it is one you can edit, ask an administrator of each of those projects to clear its default, or ask a workspace Owner to make this change.'
+            projects:
+              type: array
+              description: >-
+                **Every** live project whose declared default names the
+                offending role — uncapped, unlike `detail`, and in no guaranteed
+                order. One body reports one role, so a project declaring a
+                *different* over-ceiling role is not listed here: it surfaces as
+                its own refusal on the retry. Archived projects are excluded,
+                because nothing is inherited in them. Naming these discloses
+                nothing — the caller holds `workspace.edit` and can already list
+                every project of the workspace via
+                `GET /workspaces/{workspaceId}/projects`.
+              items: { $ref: '#/components/schemas/ProjectRef' }
+            role:
+              type: string
+              description: >-
+                The display name of the role those projects declare as their
+                default.
+              example: Project admin
+            missing:
+              type: string
+              description: >-
+                The first permission key the caller's baseline does not cover —
+                the identical string `settable.cannotSet[].missing` greys the
+                equivalent role out with in the pickers, because it is the same
+                comparison over the same comparand.
+              example: issue.delete
 
     MemberRemovalResponse:
       type: object
@@ -6702,6 +7220,28 @@ components:
         id: { type: string, format: uuid }
         slug: { type: string, example: acme-inc }
         name: { type: string, example: Acme Inc }
+        projectAccessMode:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessMode'
+          description: >-
+            Whether members who were never added to a project inherit its
+            default role. **This is the only place it is published** — a
+            workspace-level fact with one source of truth, read by every surface
+            that needs it (a project's People card included) from the workspace
+            response it already caches. Change it with
+            `PATCH /workspaces/{workspaceId}`.
+        defaultProjectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The workspace's declared default project role, or `null` for the
+            built-in **Contributor**. A raw **id, never a name**: resolve it
+            against `GET /workspaces/{workspaceId}/roles`, which is
+            workspace-scoped and so cannot return a foreign role, and render a
+            placeholder if you cannot find it. It is *declared* rather than
+            effective — it is stored and returned in both modes, and in `STRICT`
+            it is inert until the workspace is switched back to `OPEN`.
         myRole:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
@@ -6728,6 +7268,284 @@ components:
             The caller's effective **workspace-scoped** permissions (see
             `GET /permissions`). Always present, possibly empty.
         createdAt: { type: string, format: date-time }
+
+    ProjectAccessMode:
+      type: string
+      enum: [OPEN, STRICT]
+      description: >-
+        How a workspace treats somebody who has never been added to one of its
+        projects. **It decides exactly one thing** — whether a member with no
+        explicit `project_members` row inherits the project's default role — and
+        it is emphatically **not an "enforcement off" switch**: permissions mean
+        what they say in both modes, and there is no third value.
+
+
+        `OPEN` — everyone in the workspace can work in every project, through
+        the default-role chain (`DefaultRoleResponse`). Add somebody to a
+        project only to give them a *different* role. This is the default for
+        new workspaces and for every workspace upgraded into this release, and
+        behaviour under it is identical to the previous release.
+
+
+        `STRICT` — only people explicitly added to a project can change anything
+        in it. Everyone can still **see** every project: `STRICT` narrows writes
+        only, and narrowing reads would be private projects by the back door.
+        The declared defaults are still stored while it is on, inert, and go
+        live again the moment the workspace is switched back — which is why the
+        grant ceiling on them applies in both modes.
+      example: OPEN
+
+    UpdateWorkspaceRequest:
+      type: object
+      description: >-
+        The body of `PATCH /workspaces/{workspaceId}` and of
+        `POST /workspaces/{workspaceId}/project-access/preview`. Every field is
+        optional and each is an independent decision; a body naming **none** of
+        them is a `400`, because "I asked for nothing and something may have
+        happened" is not an answer.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Trimmed server-side; 1–255 characters after trimming.
+          example: Acme Inc
+        projectAccessMode:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessMode'
+          description: >-
+            Omit to leave the mode alone. An unknown value is a `400` at the
+            JSON boundary, which is the right failure — there is no third mode
+            to fall back to.
+        defaultProjectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The `PROJECT`-scoped role every member inherits where they have no
+            explicit `project_members` row and the project names no default of
+            its own. `422` when it is unknown, foreign or `WORKSPACE`-scoped —
+            scope is not negotiable, because a workspace role accepted here
+            would put `workspace.edit` into every member's context in every
+            project. Subject to the grant ceiling on **both ends**, `403`
+            naming the missing permission.
+        clearDefaultProjectRole:
+          type: boolean
+          default: false
+          description: >-
+            Store `null`, i.e. fall through to the built-in **Contributor**.
+            Sending it **and** `defaultProjectRoleId` is a `422`: the two mean
+            different things, and resolving them by precedence would store a
+            value the caller did not ask for in the one part of the product
+            where that is a privilege change.
+
+    SettableRolesView:
+      type: object
+      description: >-
+        **The grant ceiling, rendered** — which `PROJECT`-scoped roles this
+        caller may make a default, and the first permission that is why not for
+        the rest, so an administrator sees the bound while choosing instead of
+        as a `403` afterwards.
+
+
+        Derived **server-side** by the same comparison the runtime refusal
+        makes, which is the only reason a greyed-out tooltip and a `403` can
+        quote one string. Do **not** re-derive it client-side: the
+        own-only/unrestricted asymmetry between permission keys is subtle, and a
+        second implementation of a server predicate drifts.
+
+
+        It is **server-derived guidance, not enforcement**. The write re-checks
+        the ceiling in its own transaction, so a role listed in `canSet` can
+        still be refused if the caller's own permissions changed in between, and
+        a client must handle the `403` regardless of what this block said. Every
+        role named here is one the caller can already list through
+        `GET /workspaces/{workspaceId}/roles` — a built-in template or one of
+        this workspace's own.
+
+
+        The comparand differs by scope, so the same role may appear in `canSet`
+        at one scope and in `cannotSet` at the other: the **workspace** picker
+        compares against a fixed baseline (the built-in Contributor's
+        permissions plus the caller's workspace-wide project grants), with the
+        built-in `OWNER` exempt; the **project** picker compares against the
+        caller's real effective set in that project, with nobody exempt.
+      properties:
+        canSet:
+          type: array
+          description: Roles the ceiling admits, in the catalog's display order.
+          items: { $ref: '#/components/schemas/RoleRef' }
+        cannotSet:
+          type: array
+          description: >-
+            Roles it refuses, each with `missing` — the **first** permission the
+            caller does not hold, and the identical string the runtime `403`
+            carries for that role.
+          items: { $ref: '#/components/schemas/RoleBlocker' }
+
+    ProjectAccessResponse:
+      type: object
+      description: >-
+        `GET /workspaces/{workspaceId}/project-access` — one request behind the
+        workspace General settings page.
+      properties:
+        mode:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessMode'
+          description: The workspace's current project-access mode.
+        defaultProjectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The declared workspace default; `null` means the built-in
+            **Contributor**. An **id, never a name** — resolve it against
+            `GET /workspaces/{workspaceId}/roles` (workspace-scoped, so it
+            cannot return a foreign role) and render a placeholder if you
+            cannot find it.
+        settable:
+          allOf:
+            - $ref: '#/components/schemas/SettableRolesView'
+          description: >-
+            Which roles **this caller** may make the workspace default, bounded
+            by the fixed Contributor baseline.
+        impact:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessImpactResponse'
+          description: >-
+            The impact block computed for the workspace's **current** state, so
+            the page can say what things look like before anything is proposed.
+            A confirm dialog should re-fetch
+            `POST …/project-access/preview` for the *proposed* state rather than
+            reusing this.
+
+    ProjectAccessState:
+      type: object
+      description: >-
+        A workspace's project-access configuration on one side of a change. Ids,
+        never names — the same rule as everywhere else in this area.
+      properties:
+        mode: { $ref: '#/components/schemas/ProjectAccessMode' }
+        defaultProjectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: '`null` means the built-in Contributor.'
+
+    ProjectAccessProjectImpact:
+      type: object
+      description: One live project's row of the impact preview.
+      properties:
+        id: { type: string, format: uuid }
+        key: { type: string, example: PAY }
+        name: { type: string, example: Payments }
+        membersOnDefault:
+          type: integer
+          format: int64
+          description: >-
+            ACTIVE workspace members with **no** explicit `project_members` row
+            in this project — the people the mode is about.
+          example: 21
+        explicitMembers:
+          type: integer
+          format: int64
+          description: >-
+            ACTIVE members who do hold a row here, and are therefore unaffected
+            by the mode.
+          example: 3
+        membersLosingEverything:
+          type: integer
+          format: int64
+          description: >-
+            Of the members on the default, those whose **workspace** role grants
+            neither `project.curate.all` nor `project.administer.all` — the ones
+            who would hold the empty set here afterwards.
+          example: 21
+        noWritersAfter:
+          type: boolean
+          description: >-
+            Whether this project would be one of `projectsWithNoWriters` — i.e.
+            nobody at all would hold `issue.create` in it.
+          example: false
+
+    ProjectAccessImpactResponse:
+      type: object
+      description: >-
+        **What a project-access change would do.** The body of
+        `POST /workspaces/{workspaceId}/project-access/preview`, and the
+        `impact` block of `GET …/project-access` computed for the current state.
+
+
+        **Counts are advisory; refusals are authoritative.** Every number except
+        `strandedProjects` is a snapshot of a population (active workspace
+        members crossed with explicit project memberships) that is not the row
+        being written, so it can go stale between this call and the write, and
+        no optimistic check on the workspace could make it exact — hence
+        `computedAt`, and hence no token, echo or `expectedCount`.
+        `strandedProjects` is re-derived inside the write's transaction and
+        enforced there whether or not anyone previewed.
+
+
+        **How many, never who.** It names projects (id, `key`, `name` — all
+        already listable by the caller) and no people at all: no names, no
+        emails, no user ids. A per-person list would be a workspace-wide access
+        report behind a single permission.
+      properties:
+        computedAt:
+          type: string
+          format: date-time
+          description: >-
+            When this snapshot was taken. Re-fetch immediately before acting;
+            never render a preview older than the interaction it belongs to.
+        from:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessState'
+          description: The workspace's state now.
+        to:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessState'
+          description: The state the previewed body would produce.
+        activeMembers:
+          type: integer
+          format: int64
+          description: >-
+            ACTIVE members of the workspace. Deactivated accounts are excluded
+            throughout: an account that cannot log in is not a person who loses
+            access.
+          example: 24
+        projects:
+          type: integer
+          description: Live (non-archived) projects of the workspace.
+          example: 5
+        projectsWithNoExplicitMembers:
+          type: integer
+          description: How many of those nobody has ever been added to.
+          example: 3
+        projectsWithNoWriters:
+          type: integer
+          description: >-
+            **The honest headline.** Live projects where, after the change,
+            *nobody at all* would hold `issue.create` — no explicit member's
+            role grants it and the fallback is gone. A workspace `OWNER`/`ADMIN`
+            does **not** rescue such a project: their workspace-wide curator
+            grants are `project.edit`, `component.manage`, `version.manage` and
+            `sprint.manage`, and carry no issue or comment permission — so in a
+            restricted project with no explicit members nobody can file or edit
+            an issue, the Owner included. A warning, not a refusal: a workspace
+            may legitimately restrict a project nobody is working in.
+          example: 3
+        perProject:
+          type: array
+          description: One row per live project, ordered by `key`.
+          items: { $ref: '#/components/schemas/ProjectAccessProjectImpact' }
+        strandedProjects:
+          type: array
+          description: >-
+            The projects this write would **`409`** on — they have
+            administrators only by inheritance and the change takes it away.
+            Empty is the normal answer, and this is the one number here that is
+            re-derived and enforced under the write.
+          items: { $ref: '#/components/schemas/ProjectRef' }
 
     WorkspaceMemberResponse:
       type: object
@@ -7034,34 +7852,34 @@ components:
         default-access card costs no extra request.
 
 
-        **Read-only on the project endpoints, and there is no write path there
-        in this release** — do not look for the `PATCH`. A
+        **Writing it.** Both links are read-only on the *project* endpoints — a
         `PATCH /workspaces/{workspaceId}/projects/{projectId}` body carrying
-        `defaultRole` (or a flattened `defaultProjectRoleId`) is **ignored**:
-        neither is part of the update body, the call succeeds as if they had not
-        been sent, and both stored columns stay null — there is a test asserting
-        exactly that. The picker ships together with the bound it needs: this
-        role is handed to *every* workspace member without an explicit row, so a
-        write unbounded by the grant ceiling would let a workspace administrator
-        grant, workspace-wide and in a single request, permissions they do not
-        hold themselves.
+        `defaultRole` or a flattened `defaultProjectRoleId` is still ignored,
+        and always will be. Each link has its own endpoint and its own gate,
+        because a default is membership authority rather than project settings:
+        `PATCH /workspaces/{workspaceId}/projects/{projectId}/default-role`
+        (`project.member.manage`) writes `projectRoleId`, and
+        `PATCH /workspaces/{workspaceId}` (`workspace.edit`) writes
+        `workspaceRoleId`. Both are bounded by a grant ceiling, against
+        different comparands — see those operations.
 
 
-        **Read-only is not the same as immutable.** One endpoint does move these
-        values: `DELETE /workspaces/{workspaceId}/roles/{roleId}?reassignToRoleId=`
+        **It can also change with nothing having touched the project.**
+        `DELETE /workspaces/{workspaceId}/roles/{roleId}?reassignToRoleId=`
         repoints every project — and the workspace itself — that named the
         deleted `PROJECT`-scoped role as its default onto the replacement, in
-        the same transaction that moves the role's holders. That is deliberate
-        (it is how a delete avoids leaving a dangling default), so a project's
-        default access can change without anything having touched the project.
-        Re-read this object after a role deletion rather than assuming it is
-        frozen.
+        the same transaction that moves the role's holders. That is how a delete
+        avoids leaving a dangling default. Re-read this object after a role
+        deletion rather than assuming it is frozen.
 
 
-        One caveat worth stating honestly: the workspace's project-access mode
-        is not exposed yet, so in a future `STRICT` workspace these ids would
-        describe a chain nobody walks. That mode does not exist in this release
-        — every workspace inherits — so today the chain always applies.
+        **The chain only yields while the workspace is `OPEN`.** In a `STRICT`
+        workspace (`WorkspaceResponse.projectAccessMode`) nothing is inherited
+        at all: a member with no explicit row holds nothing in the project
+        beyond whatever their workspace role grants everywhere. These ids stay
+        stored and returned — they are the *declared* default, and they go live
+        again the moment the workspace is switched back — so read the mode
+        before telling a user what the chain gives them.
       properties:
         projectRoleId:
           type: string
@@ -7114,11 +7932,13 @@ components:
           description: >-
             The default-role chain for members of this project who have **no
             explicit membership row** — this project's override and the
-            workspace default behind it. **Read-only on this endpoint**: no
-            project endpoint accepts it in this release (a `DELETE` of a
-            `PROJECT`-scoped role with `reassignToRoleId` does move the stored
-            values), and like `delivery` it changes nothing about what any
-            endpoint accepts or returns.
+            workspace default behind it. **Read-only on this endpoint**: it is
+            written by `PATCH …/projects/{projectId}/default-role`
+            (`project.member.manage`) and `PATCH /workspaces/{workspaceId}`
+            (`workspace.edit`), never by the project `PATCH`, and a `DELETE` of
+            a `PROJECT`-scoped role with `reassignToRoleId` also moves the
+            stored values. Whether the chain currently yields anything depends
+            on `WorkspaceResponse.projectAccessMode`.
         myRole:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'
@@ -7147,6 +7967,69 @@ components:
             workspace role rather than a project membership. Always present,
             possibly empty. May be wider than `myRole` suggests.
         createdAt: { type: string, format: date-time }
+
+    ProjectDefaultRoleResponse:
+      type: object
+      description: >-
+        `GET /workspaces/{workspaceId}/projects/{projectId}/default-role` — what
+        a project's default-access picker opens against. The two ids duplicate
+        `ProjectResponse.defaultRole` on purpose: a dialog is worth a
+        self-contained read.
+      properties:
+        projectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            This project's own override, or `null` when it inherits the
+            workspace default. An id, never a name.
+        workspaceRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The workspace-level default, or `null` when the chain falls through
+            to the built-in **Contributor**.
+        mode:
+          allOf:
+            - $ref: '#/components/schemas/ProjectAccessMode'
+          description: >-
+            The **workspace's** access mode, read-only here and owned by
+            `WorkspaceResponse`. It rides along so the dialog can say "this
+            workspace is Restricted, so nothing is inherited right now — this
+            default applies again if it is switched back to Open" without a
+            second fetch. Nothing writes it through this endpoint.
+        settable:
+          allOf:
+            - $ref: '#/components/schemas/SettableRolesView'
+          description: >-
+            Which roles this caller may make the default **here** — bounded by
+            their real effective permissions in this project, with nobody
+            exempt. Server-derived guidance, not enforcement: the `PATCH`
+            re-checks.
+
+    UpdateProjectDefaultRoleRequest:
+      type: object
+      description: >-
+        **Exactly one** of the two fields, which is the same two-choice shape a
+        picker renders. Neither and both are alike a `422`, never a precedence
+        rule.
+      properties:
+        roleId:
+          type: string
+          format: uuid
+          description: >-
+            The `PROJECT`-scoped role to make this project's default. `422` when
+            unknown, foreign or `WORKSPACE`-scoped; `403` when it breaks the
+            project-scope grant ceiling.
+        inherit:
+          type: boolean
+          default: false
+          description: >-
+            `true` stores `null` — *"follow the workspace default"*. A real
+            choice rather than an absence: "deliberately follows the workspace"
+            and "happens to name the same role the workspace does" diverge the
+            moment the workspace default moves.
 
     ProjectMemberResponse:
       type: object
@@ -7247,8 +8130,10 @@ components:
         The smallest useful reference to a project: enough to link to it and
         enough for a human to recognise it. Carried by the `projects` extension
         of the workspace member-removal `409`
-        (`StrandedProjectsProblemDetail`) and by `adoptedProjects` on that
-        removal's `200` (`MemberRemovalResponse`).
+        (`StrandedProjectsProblemDetail`), by `adoptedProjects` on that
+        removal's `200` (`MemberRemovalResponse`), and by the `projects`
+        extension of the project-access `403`
+        (`ReactivatedDefaultProblemDetail`).
       properties:
         id: { type: string, format: uuid }
         key: { type: string, example: P17 }

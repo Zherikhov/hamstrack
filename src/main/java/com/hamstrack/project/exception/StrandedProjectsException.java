@@ -112,6 +112,79 @@ public class StrandedProjectsException extends AppException {
     public static final String LAST_PROJECT_ADMIN_BULK = "LAST_PROJECT_ADMIN_BULK";
 
     /**
+     * <strong>{@code errorType: "STRANDED_BY_INHERITANCE"}</strong> — the listed projects
+     * have administrators only <em>by inheritance</em> (the §5.2 default grants
+     * {@code project.member.manage} and nobody holds an explicit administering row), and
+     * this change removes that inheritance (HD-130, S7 §5). Doors 6–9: a workspace member
+     * removal that takes the last inherited administrator, a flip to {@code STRICT}, a
+     * workspace default that stops managing members, and a project default that does the
+     * same.
+     *
+     * <p><strong>No retry flag applies, and offering one would be worse than useless.</strong>
+     * {@code adoptStrandedProjects=true} writes the caller a <em>Team lead</em> row; here the
+     * caller has no row at all and inherits a default that is at least as wide as
+     * {@code project.member.manage} and may be much wider (Project admin). An explicit row
+     * always beats the default (§11.3), so "adopting" would <strong>narrow the adopter</strong>
+     * in the very project they were rescuing — the one-way trap V16 spends twenty lines
+     * avoiding and which {@code ProjectAdminGuard.adoptability}'s {@code WOULD_DEMOTE} verdict
+     * exists to refuse.
+     *
+     * <p>The H1 test is met without adoption, and that is why there is none: the remedy names
+     * an action the refused person can perform <strong>right now</strong>, because the default
+     * that is about to stop mattering still grants them {@code project.member.manage} today.
+     * The residual — an actor holding a <em>narrow explicit</em> row in that project, who
+     * therefore cannot self-serve — is the case where door 6's fourth condition has just
+     * proved that nobody else inherits either, which is why the message also names the
+     * departing member, who demonstrably can.
+     */
+    public static final String STRANDED_BY_INHERITANCE = "STRANDED_BY_INHERITANCE";
+
+    /**
+     * <strong>Door 6</strong> (§5.2) — the hole HD-136 left. {@code lockStrandedProjects}
+     * builds its candidate set from explicit {@code project_members} rows only, so a project
+     * whose administrators exist <em>only</em> by inheritance was never a candidate and the
+     * refinement that would have caught it ({@code cannotBeStranded}) never ran: remove the
+     * last workspace member who had no row there and the project is left permanently
+     * unmanageable, with no 409, no adoption and no log line.
+     *
+     * <p>It was unreachable until S7, because no built-in role that anyone would choose as a
+     * default grants {@code project.member.manage}. S7 ships the picker that can set one to
+     * Team lead, Project admin or a custom role carrying it, so S7 closes it.
+     */
+    public static StrandedProjectsException strandedByInheritance(List<ProjectRef> projects) {
+        return new StrandedProjectsException(projects,
+                "Removing this member would leave " + named(projects)
+                + " with nobody able to manage their membership — they administer "
+                + (projects.size() == 1 ? "it" : "them")
+                + " through the project's default access, not through a membership row. Add an "
+                + "explicit administrator to each first (the current default still lets you), or "
+                + "ask the member you are removing to do it while they still can.",
+                STRANDED_BY_INHERITANCE);
+    }
+
+    /**
+     * <strong>Doors 7, 8 and 9</strong> (§5.3) — a change to the access mode or to either
+     * default column demotes every inherited administrator at once, in every affected
+     * project, with no membership row touched. Structurally the same as doors 4 and 5, and
+     * invisible to every guard that existed before S7.
+     *
+     * @param change the write, in the gerund, so it reads as one sentence with the list —
+     *        "Restricting project access", "Making “Viewer” the default"
+     * @param remedy what will actually clear it, for <em>this</em> door. Per door and not
+     *        shared, for {@link #bulkRoleChange}'s reason: a refusal whose stated remedy does
+     *        not work is worse than one with no remedy at all
+     */
+    public static StrandedProjectsException inheritedAdministratorsLost(List<ProjectRef> projects,
+                                                                       String change, String remedy) {
+        return new StrandedProjectsException(projects,
+                change + " would leave "
+                + (projects.size() == 1 ? "a project" : projects.size() + " projects")
+                + " with nobody able to manage their membership: " + named(projects)
+                + ". " + remedy,
+                STRANDED_BY_INHERITANCE);
+    }
+
+    /**
      * The bulk refusal (HD-127 §6). Same 409, same {@code projects} extension and the same
      * {@code errorType} field as the two removal variants, so the SPA renders one list
      * component for all three — with a sentence that names the actual change rather than a

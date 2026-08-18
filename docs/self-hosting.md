@@ -164,6 +164,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
+| `DEFAULT_PROJECT_ACCESS_MODE` | `OPEN` | Project-access mode a **newly created** workspace starts in. `OPEN` — everyone in the workspace can work in every project through its default role; add someone to a project only to give them a *different* role. `STRICT` — only people added to a project can change anything in it (everyone can still **see** every project: it narrows writes, never reads). Applies at creation only and **never moves an existing workspace** — change one in Workspace settings → General. Demo seeding uses the same code path, so `STRICT` gives you a strict demo workspace too. Identical in `dc` and `cloud`: access modes are a product feature, not a plan feature. An unrecognised value **aborts startup** rather than falling back |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
 | `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
@@ -411,9 +412,15 @@ unaffected, because the one node that serves the edit is the one that evicts.
 
 **Membership is not cached, and that is the more important half.** Moving a
 person between roles (`PATCH …/members/{userId}`,
-`PATCH …/projects/{pId}/members/{userId}`), and deleting a role while reassigning
-its holders (`DELETE …/roles/{roleId}?reassignToRoleId=`), take effect on that
-person's very next request, on every replica. Permissions are never put in the
+`PATCH …/projects/{pId}/members/{userId}`), deleting a role while reassigning
+its holders (`DELETE …/roles/{roleId}?reassignToRoleId=`), switching a workspace
+between Open and Restricted (`PATCH /workspaces/{wsId}`) and changing either
+default project role (`PATCH /workspaces/{wsId}`,
+`PATCH …/projects/{pId}/default-role`) all take effect on that person's very next
+request, on every replica — the mode and both default columns are read from the
+row on each request, not cached. That is worth knowing in the direction that
+matters: switching a workspace to **Restricted** removes inherited write access
+everywhere, immediately, with no ten-second tail. Permissions are never put in the
 access token either, so nothing waits for a token to expire. **Only a change to a
 role's _contents_ has a window** — if you need someone's access cut instantly,
 change their role or remove them rather than editing the role they hold.

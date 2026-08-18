@@ -62,11 +62,19 @@ let projectPermissions: string[] = PROJECT_ADMIN_PERMISSIONS
 /** Both links of the default-access chain, as the project response carries them. */
 let defaultRole: { projectRoleId: string | null; workspaceRoleId: string | null } =
   { projectRoleId: null, workspaceRoleId: null }
+/**
+ * The workspace's access mode (HD-130 S7). It is published on the WORKSPACE
+ * response and nowhere else, so this is the only place the card can read it from —
+ * and reading it wrong is what makes the card's headline sentence a lie.
+ */
+let projectAccessMode: 'OPEN' | 'STRICT' = 'OPEN'
 
 const listMock = vi.fn(async () => projectMembers)
 const addMock = vi.fn()
 const updateRoleMock = vi.fn()
 const removeMock = vi.fn()
+const defaultRoleGetMock = vi.fn()
+const defaultRoleSetMock = vi.fn()
 
 vi.mock('../../api', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -75,6 +83,11 @@ vi.mock('../../api', async importOriginal => ({
     archived: false, myRole: 'MANAGER', myPermissions: projectPermissions,
     defaultRole, createdAt: '2026-01-01T00:00:00Z',
   })),
+  apiGetWorkspace: vi.fn(async () => ({
+    id: WS_ID, name: 'Acme', slug: 'acme', myRole: 'ADMIN', myPermissions: [],
+    projectAccessMode, defaultProjectRoleId: defaultRole.workspaceRoleId,
+    createdAt: '2026-01-01T00:00:00Z',
+  })),
   apiListWorkspaceMembers: vi.fn(async () => WS_MEMBERS),
   rolesApi: { list: vi.fn(async () => roleCatalog) },
   projectMembersApi: {
@@ -82,6 +95,10 @@ vi.mock('../../api', async importOriginal => ({
     add: (...a: unknown[]) => addMock(...a),
     updateRole: (...a: unknown[]) => updateRoleMock(...a),
     remove: (...a: unknown[]) => removeMock(...a),
+  },
+  projectDefaultRoleApi: {
+    get: (...a: unknown[]) => defaultRoleGetMock(...a),
+    set: (...a: unknown[]) => defaultRoleSetMock(...a),
   },
 }))
 
@@ -103,10 +120,17 @@ beforeEach(() => {
   roleCatalog = [MANAGER, CONTRIBUTOR, VIEWER]
   projectPermissions = PROJECT_ADMIN_PERMISSIONS
   defaultRole = { projectRoleId: null, workspaceRoleId: null }
+  projectAccessMode = 'OPEN'
   listMock.mockClear()
   addMock.mockReset()
   updateRoleMock.mockReset()
   removeMock.mockReset()
+  defaultRoleGetMock.mockReset()
+  defaultRoleGetMock.mockResolvedValue({
+    projectRoleId: null, workspaceRoleId: null, mode: projectAccessMode,
+    settable: { canSet: [], cannotSet: [] },
+  })
+  defaultRoleSetMock.mockReset()
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
 })
 
@@ -151,17 +175,104 @@ describe('ProjectPeoplePage — default access', () => {
     expect(screen.queryByText(/They get/)).toBeNull()
   })
 
-  it('offers the picker as a visible, disabled affordance rather than omitting it', async () => {
+  it('opens the real picker (HD-130 S7) on the choice this project actually made', async () => {
+    // Rule C: the mechanism is findable from the page it applies to. S6 drew this
+    // disabled with a "coming soon" chip because the write had no grant ceiling
+    // behind it yet; S7 ships both, so it must actually open.
+    defaultRole = { projectRoleId: MANAGER.id, workspaceRoleId: VIEWER.id }
+    defaultRoleGetMock.mockResolvedValue({
+      projectRoleId: MANAGER.id, workspaceRoleId: VIEWER.id, mode: 'OPEN',
+      settable: { canSet: [{ roleId: VIEWER.id, name: 'Viewer' }], cannotSet: [] },
+    })
     renderPage()
-    // Rule C: the mechanism has to be findable from the page it applies to even
-    // while this build cannot perform it.
+
+    const button = await screen.findByRole('button', { name: 'Change default access' })
+    // A permanent slot: it is mounted immediately and only ever goes disabled →
+    // enabled as the permission answer lands, so this waits rather than asserting
+    // on the loading frame.
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(screen.queryByText('coming soon')).toBeNull()
+    await userEvent.click(button)
+
+    const dialog = await screen.findByRole('dialog')
+    // Two DISTINCT choices, not one dropdown in which `null` is an unlabelled
+    // option: "deliberately follows the workspace" and "happens to name the same
+    // role" diverge the moment the workspace default moves.
+    expect(within(dialog).getByRole('radio', { name: /Inherit the workspace default \(Viewer\)/ })).toBeInTheDocument()
+    // The project sets its own override, so that is the radio it opens on.
+    expect(within(dialog).getByRole('radio', { name: /Use a different role in this project/ })).toBeChecked()
+  })
+
+  it('writes {inherit:true} — a real choice, never an absent field', async () => {
+    defaultRole = { projectRoleId: MANAGER.id, workspaceRoleId: null }
+    defaultRoleGetMock.mockResolvedValue({
+      projectRoleId: MANAGER.id, workspaceRoleId: null, mode: 'OPEN',
+      settable: { canSet: [], cannotSet: [] },
+    })
+    defaultRoleSetMock.mockResolvedValue({})
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Change default access' }))
+    const dialog = await screen.findByRole('dialog')
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Inherit the workspace default/ }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(defaultRoleSetMock).toHaveBeenCalled())
+    expect(defaultRoleSetMock.mock.calls[0][2]).toEqual({ inherit: true })
+  })
+
+  it('renders the ceiling from `settable` rather than discovering it on save', async () => {
+    defaultRoleGetMock.mockResolvedValue({
+      projectRoleId: null, workspaceRoleId: null, mode: 'OPEN',
+      settable: {
+        canSet: [{ roleId: VIEWER.id, name: 'Viewer' }],
+        // The §4 membership escape does NOT reach the picker: an actor who may
+        // promote a colleague to Project admin is still refused when they aim the
+        // same role at the default, and the refusal names the permission.
+        cannotSet: [{ roleId: MANAGER.id, name: 'Project admin', missing: 'issue.delete' }],
+      },
+    })
+    renderPage()
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Change default access' }))
+    const dialog = await screen.findByRole('dialog')
+    expect(within(dialog).getByText('issue.delete')).toBeInTheDocument()
+
+    await userEvent.click(within(dialog).getByRole('radio', { name: /Use a different role/ }))
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Default role for this project' }))
+    const blocked = await screen.findByRole('option', { name: /Project admin — requires issue.delete/ })
+    expect(blocked).toHaveAttribute('aria-disabled', 'true')
+    // Selecting it is refused client-side too, so nothing is sent that the
+    // server has already said it would reject.
+    await userEvent.click(blocked)
+    expect(defaultRoleSetMock).not.toHaveBeenCalled()
+  })
+
+  it('disables the picker, but never hides the card, without project.member.manage', async () => {
+    projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
+    renderPage()
     const button = await screen.findByRole('button', { name: 'Change default access' })
     expect(button).toBeDisabled()
-    expect(screen.getByText('coming soon')).toBeInTheDocument()
-    // Read-only on purpose: the default hands its role to everybody at once, so
-    // the write needs a ceiling that does not exist yet. A control that always
-    // fails would be worse than none.
-    expect(screen.getByText(/bounded by\s+the same rule/)).toBeInTheDocument()
+    // The card is the Rule C affordance — a card nobody can see is a mechanism
+    // nobody can find, so it stays even when the button is refused.
+    expect(screen.getByText('Default access')).toBeInTheDocument()
+  })
+
+  it('tells the truth in a RESTRICTED workspace: nobody works here through the default', async () => {
+    projectAccessMode = 'STRICT'
+    renderPage()
+    expect(await screen.findByText(/nobody works in/)).toBeInTheDocument()
+    // The count stops describing today and starts describing a hypothetical.
+    expect(await screen.findByText(/would work here through it if project access were Open/))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/can contribute to/)).toBeNull()
+  })
+
+  it('keeps the OPEN copy when the workspace is open', async () => {
+    renderPage()
+    expect(await screen.findByText(/can contribute to/)).toBeInTheDocument()
+    expect(await screen.findByText(/work here through that default today/)).toBeInTheDocument()
+    expect(screen.queryByText(/nobody works in/)).toBeNull()
   })
 
   it('describes an empty member table as the normal state, not a gap', async () => {

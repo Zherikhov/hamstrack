@@ -174,6 +174,32 @@ public interface WorkspaceMemberRepository extends JpaRepository<WorkspaceMember
     List<Object[]> countMembersByRole(@Param("workspaceId") UUID workspaceId);
 
     /**
+     * <strong>{@code roleId -> ACTIVE headcount}</strong> for this workspace — the second of
+     * the impact preview's four reads (S7 §4.2).
+     *
+     * <p><strong>A sibling of {@link #countMembersByRole}, not a reuse of it</strong>, and the
+     * difference is the whole point: that one answers "is this role in <em>use</em>?" and so
+     * deliberately counts everybody, including DISABLED accounts, because a role held by a
+     * deactivated member is still held. This one answers "how many people <em>lose access</em>?"
+     * and a deactivated account is not a person who loses access — it also cannot log in, so
+     * counting one would inflate the number the whole decision is made on. Every other
+     * administrator count in the codebase is ACTIVE-filtered
+     * ({@code lockAllByProjectAndRoleIdIn}, {@code findProjectIdsAdministeredOnlyBy},
+     * {@link #existsActiveMemberWithoutProjectRole}); this matches them.
+     *
+     * <p>Workspace-filtered, like every count on this table: built-in roles are shared rows
+     * ({@code workspace_id IS NULL}), so an unscoped {@code GROUP BY role_id} would publish
+     * another tenant's headcount (§8).
+     */
+    @Query("""
+            SELECT m.role.id, COUNT(m) FROM WorkspaceMember m
+             WHERE m.workspace.id = :workspaceId
+               AND m.user.status = com.hamstrack.auth.entity.UserStatus.ACTIVE
+             GROUP BY m.role.id
+            """)
+    List<Object[]> countActiveMembersByRole(@Param("workspaceId") UUID workspaceId);
+
+    /**
      * Point this workspace's holders of {@code fromRoleId} at {@code toRole}, as one
      * statement, before the role row is deleted.
      *

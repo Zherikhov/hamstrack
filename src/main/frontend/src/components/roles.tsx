@@ -2,6 +2,7 @@ import type { ReactNode } from 'react'
 import { ApiResponseError } from '../api'
 import type {
   PermissionCatalogEntry, ProjectRef, Role, RoleAssignmentView, RoleScope, RoleUsage,
+  SettableRolesView,
 } from '../types'
 import { MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING } from '../types'
 import { Select } from './ui'
@@ -35,6 +36,24 @@ export type ConflictKind =
   | { kind: 'retry'; seconds: number; detail: string }
   /** Removing this member would leave `projects` with no administrator. Adoption clears it. */
   | { kind: 'stranded'; projects: ProjectRef[]; detail: string }
+  /**
+   * The listed projects have administrators **only by inheritance**, and this
+   * change takes that inheritance away (HD-130 S7, doors 6–9: a workspace
+   * removal, the OPEN→STRICT flip, or either default-role picker).
+   *
+   * **Deliberately not `stranded`, and there is no adoption retry.** Adoption
+   * writes the caller a Team lead row, and here the caller has no row at all —
+   * they inherit a default at least as wide as `project.member.manage` and
+   * possibly much wider, so "adopting" would *narrow the adopter* in the very
+   * project they were rescuing. The remedy is an action the refused person can
+   * perform right now, because the default that is about to matter still grants
+   * it to them today: add an explicit administrator to each project first.
+   *
+   * It is re-derived inside the write's transaction, so it can arrive **after a
+   * clean-looking preview** — which is why it must render as itself rather than
+   * as a generic error.
+   */
+  | { kind: 'strandedByInheritance'; projects: ProjectRef[]; detail: string }
   /** The adoption itself is refused — the retry fails identically, so offer none. */
   | { kind: 'adoptionBlocked'; projects: ProjectRef[]; detail: string }
   /** The adoption stopped on a membership row whose stored role cannot be read. Needs an operator. */
@@ -71,6 +90,7 @@ export function classifyConflict(err: unknown): ConflictKind {
   const projects = err.projects ?? []
   switch (err.errorType) {
     case 'STRANDED_PROJECTS': return { kind: 'stranded', projects, detail }
+    case 'STRANDED_BY_INHERITANCE': return { kind: 'strandedByInheritance', projects, detail }
     case 'ADOPTION_BLOCKED': return { kind: 'adoptionBlocked', projects, detail }
     case 'ADOPTION_ROLE_UNREADABLE': return { kind: 'adoptionUnreadable', projects, detail }
     case 'LAST_PROJECT_ADMIN_BULK': return { kind: 'lastProjectAdminBulk', projects, detail }
@@ -487,6 +507,53 @@ export function resolveDefaultRole(
 }
 
 /**
+ * A **refusal**, rendered — the one place the S7 pickers and the access switch
+ * turn a `ConflictKind` into prose, so no two of them invent a different sentence
+ * for the same 409.
+ *
+ * Three cases get their own treatment and everything else renders `detail`
+ * verbatim (a ceiling 403's `detail` *names the permission the actor lacks*,
+ * which is the only actionable part of it — replacing it with "Forbidden" throws
+ * away the answer):
+ *
+ *  • **`retry`** — `Retry-After` was present, so nothing happened and the
+ *    identical request is the fix. Read first, before any look at `errorType`.
+ *  • **`strandedByInheritance`** — the change would leave the listed projects with
+ *    nobody able to manage their membership. No adoption retry exists for it, so
+ *    none is offered; the remedy names something the refused person can do now.
+ *  • **`stranded`** — the workspace-removal shape, which *does* have an adoption
+ *    path. It is not reachable from these screens, but classifying it as its
+ *    cousin would silently offer the wrong remedy, so it is named separately.
+ */
+export function ConflictNotice({ refusal, children }: { refusal: ConflictKind; children?: ReactNode }) {
+  const stranding = refusal.kind === 'strandedByInheritance'
+  return (
+    <Notice tone={refusal.kind === 'retry' ? 'warning' : 'danger'}>
+      <span className="text-sm">{refusal.detail}</span>
+      {'projects' in refusal && refusal.projects.length > 0 && (
+        <ProjectRefList projects={refusal.projects} />
+      )}
+      {refusal.kind === 'retry' && (
+        <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          Somebody else was changing this at the same moment, so nothing was changed at all. Try
+          again in {refusal.seconds} second{refusal.seconds !== 1 ? 's' : ''}.
+        </span>
+      )}
+      {stranding && (
+        <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          Nothing was changed. There is no “take them over” option here on purpose: whoever
+          administers {refusal.projects.length === 1 ? 'that project' : 'those projects'} does it
+          through the default that is about to go away, so taking it over would give them
+          <i> less </i>than they have now. Add an explicit administrator to each first — the current
+          default still lets you.
+        </span>
+      )}
+      {children}
+    </Notice>
+  )
+}
+
+/**
  * A role picker over the roles of one scope. Renders the CURRENT value even when
  * it is not in the list (a role the caller cannot assign, or one that was just
  * deleted), so a select never silently reports a role the member does not hold.
@@ -517,5 +584,80 @@ export function RoleSelect({ roles, value, onChange, disabled, label, ariaLabel,
         {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
       </>
     </Select>
+  )
+}
+
+/**
+ * The **default-role picker**, bounded by the server's own ceiling (HD-130 S7).
+ *
+ * The difference from {@link RoleSelect} is the whole point of the slice: a role
+ * the actor may not make a default is rendered **disabled with the reason** —
+ * the first permission they lack, the identical string the runtime 403 would
+ * quote — rather than being offered and refused at save. That is the same
+ * discipline the role editor applies with `canAssign`/`cannotAssign`.
+ *
+ * `settable` is **server-derived and never recomputed here**, and the two scopes
+ * are asymmetric: the workspace comparand is a constant (built-in Contributor ∪
+ * the actor's workspace-wide project grants), the project one is the actor's real
+ * effective set in that project. So a role settable at one scope may be refused
+ * at the other, and a block from one picker must never be reused for the other.
+ *
+ * A role in neither list is still rendered and still selectable: `settable` is
+ * guidance, the API is the boundary, and silently dropping a role the server
+ * would have accepted is the failure mode that hides a legitimate action.
+ */
+export function DefaultRoleSelect({ roles, settable, value, onChange, disabled, label, ariaLabel, placeholder }: {
+  roles: Role[]
+  /** `undefined` while the read is in flight — nothing is marked blocked yet. */
+  settable: SettableRolesView | undefined
+  value: string
+  onChange: (roleId: string) => void
+  disabled?: boolean
+  label?: string
+  ariaLabel?: string
+  placeholder?: string
+}) {
+  const blocked = new Map((settable?.cannotSet ?? []).map(b => [b.roleId, b.missing]))
+  return (
+    <Select label={label} aria-label={ariaLabel} value={value} disabled={disabled}
+            onChange={e => onChange(e.target.value)}>
+      <>
+        {placeholder !== undefined && <option value="">{placeholder}</option>}
+        {roles.map(r => {
+          const missing = blocked.get(r.id)
+          return (
+            <option key={r.id} value={r.id} disabled={missing !== undefined}
+                    title={missing !== undefined ? `Requires ${missing}` : undefined}>
+              {missing !== undefined ? `${r.name} — requires ${missing}` : r.name}
+            </option>
+          )
+        })}
+      </>
+    </Select>
+  )
+}
+
+/**
+ * The refusals from `settable`, listed under a picker — because a disabled option
+ * inside a closed dropdown is invisible until somebody goes looking, and "why
+ * can't I choose that?" is the question this block exists to answer before it is
+ * asked.
+ */
+export function CeilingSummary({ settable }: { settable: SettableRolesView | undefined }) {
+  if (!settable || settable.cannotSet.length === 0) return null
+  return (
+    <div className="flex flex-col gap-1 mt-2">
+      <span className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+        You cannot make {settable.cannotSet.length === 1 ? 'this role' : 'these roles'} the default,
+        because {settable.cannotSet.length === 1 ? 'it grants' : 'they grant'} more than you hold
+        yourself:
+      </span>
+      {settable.cannotSet.map(blocker => (
+        <span key={blocker.roleId} className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+          · <b>{blocker.name}</b> — you are missing{' '}
+          <span className="mono" style={{ color: 'var(--color-text)' }}>{blocker.missing}</span>
+        </span>
+      ))}
+    </div>
   )
 }

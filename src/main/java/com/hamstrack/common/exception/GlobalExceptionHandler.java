@@ -3,6 +3,7 @@ package com.hamstrack.common.exception;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
 import com.hamstrack.workspace.exception.RoleInUseException;
 import com.hamstrack.workspace.exception.RoleLimitReachedException;
 import com.hamstrack.workspace.exception.SelfHeldRoleException;
@@ -111,6 +112,27 @@ public class GlobalExceptionHandler {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         problem.setProperty("errorType", ex.getErrorType());
         problem.setProperty("projects", ex.getProjects());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * More specific than the {@code AppException} handler — a 403 whose obstacle lives on
+     * <em>another</em> screen, so the body has to say which one (HD-130 S7, review round 3).
+     *
+     * <p>{@code projects} names every project whose declared default carries the offending
+     * role; {@code role} and {@code missing} are the same pair the picker greys a role out
+     * with, so a client can render the refusal in its own copy without parsing {@code detail}.
+     * Discloses nothing — the caller holds {@code workspace.edit} and can already list every
+     * project of this workspace.
+     */
+    @ExceptionHandler(ReactivatedProjectDefaultsException.class)
+    public ResponseEntity<ProblemDetail> handleReactivatedProjectDefaults(
+            ReactivatedProjectDefaultsException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("projects", ex.getProjects());
+        problem.setProperty("role", ex.getRoleName());
+        problem.setProperty("missing", ex.getMissing());
         return ResponseEntity.status(ex.getStatus()).body(problem);
     }
 

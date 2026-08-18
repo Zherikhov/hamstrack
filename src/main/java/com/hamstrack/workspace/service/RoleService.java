@@ -26,6 +26,7 @@ import com.hamstrack.workspace.entity.RolePermission;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.event.RolePermissionsChanged;
 import com.hamstrack.workspace.exception.BuiltInRoleNotEditableException;
+import com.hamstrack.workspace.exception.DefaultRoleCeilingException;
 import com.hamstrack.workspace.exception.OwnerIsNotGrantableException;
 import com.hamstrack.workspace.exception.RoleInUseException;
 import com.hamstrack.workspace.exception.RoleLimitReachedException;
@@ -123,6 +124,15 @@ public class RoleService {
      * no ceiling at all in round 1.
      */
     private final WorkspaceMemberService workspaceMembers;
+    /**
+     * <strong>For the S7 default-role ceiling, and only for it</strong>
+     * ({@link #requireDefaultStaysWithinCeiling}). The comparand is taken from the same bean
+     * the two pickers render, so the tooltip that greys a role out and the 403 this service
+     * raises when the role is edited into that state quote one permission key. Re-deriving
+     * "built-in Contributor ∪ the actor's workspace grants" here is how the picker and the
+     * editor would start disagreeing about the same rule.
+     */
+    private final SettableRoles settableRoles;
     private final RolesProperties properties;
     /**
      * Bound first, then lock — applied as the first statement of <em>every</em> write in this
@@ -384,7 +394,10 @@ public class RoleService {
      *   <li><strong>403</strong> — {@code workspace.role.manage}; the definition ceiling
      *       ({@link #requireWithinDefinitionCeiling}) on <em>both</em> ends of the edit, the
      *       current role's grants included, so it applies to a name-only PATCH as well as one
-     *       carrying {@code permissions} (WORKSPACE scope only, Owner exempt);</li>
+     *       carrying {@code permissions} (WORKSPACE scope only, Owner exempt); and the
+     *       default-role ceiling ({@link #requireDefaultStaysWithinCeiling},
+     *       {@link DefaultRoleCeilingException}) when this role <em>is</em> a workspace or
+     *       project default — PROJECT scope only, Owner exempt;</li>
      *   <li><strong>404</strong> — unknown workspace, non-member, or a role this workspace
      *       cannot address;</li>
      *   <li><strong>409</strong> — built-in ({@link #requireCustom}), stale {@code version},
@@ -445,8 +458,12 @@ public class RoleService {
         // the save, which is the documented way to bump @Version by more than one.
         List<String> added = List.of();
         long holders = 0;
+        // The post-edit grants: the replacement when this PATCH carries one, otherwise the
+        // role's own. A rename does not change what a role hands out, but it does not exempt
+        // the role from being measured either — see requireDefaultStaysWithinCeiling, which is
+        // the one guard below that runs on every PATCH.
+        var next = grants == null ? current : PermissionSet.of(grants);
         if (grants != null) {
-            var next = PermissionSet.of(grants);
             // The other end, `current` having been bounded above before anything about this
             // request was judged: the incoming set must be within the actor's own too.
             requireWithinDefinitionCeiling(ctx, role.getScope(), next,
@@ -461,6 +478,10 @@ public class RoleService {
                 holders = holderCount(workspace, role);
             }
         }
+        // UNCONDITIONAL, and last of the ceilings, because it is the only one that knows about
+        // the second way to hold a PROJECT role: being a default (S7 §5.2). The guard above
+        // reads explicit project_members rows and cannot see it.
+        requireDefaultStaysWithinCeiling(ctx, workspace, role, current, next);
 
         // ---- mutation, immediately before the save ----
         if (name != null) role.setName(name);
@@ -785,6 +806,11 @@ public class RoleService {
      * uses. Deliberately not extended to WORKSPACE scope: there the definition ceiling
      * already binds every edit against the actor's own set, so a widening beyond it is
      * refused before this could be asked.
+     *
+     * <p><strong>It sees only EXPLICIT holders</strong> — {@code existsHolderInWorkspace}
+     * reads {@code project_members} rows — and since S7 that is no longer the only way to
+     * hold a PROJECT role. {@link #requireDefaultStaysWithinCeiling} is the other half; do
+     * not fold them together, they refuse different things for different reasons.
      */
     private void requireNotSelfWidening(Workspace workspace, User actor, Role role,
                                         PermissionSet current, PermissionSet next) {
@@ -795,6 +821,65 @@ public class RoleService {
                 workspace.getId(), actor.getId(), role.getId())) {
             throw SelfHeldRoleException.widening();
         }
+    }
+
+    /**
+     * <strong>Being a default is a way of holding a role, and the guard above cannot see
+     * it</strong> — HD-130 S7, security review round 2, the Critical. See
+     * {@link DefaultRoleCeilingException} for the traced three-call route and for why the two
+     * scopes are refused differently.
+     *
+     * <p>In one line: <em>set the default narrow, then widen the role.</em>
+     * {@link #requireNotSelfWidening} asks {@code project_members}; the §5.2 chain has no row
+     * at all, so it answers "not held" for a role every member without an explicit row is
+     * standing on. The PROJECT-scope definition ceiling is deliberately absent (§11.3) and
+     * {@link #requireNothingBulkStranded} only watches one permission leaving, so before this
+     * guard the third call was unrefused by anything.
+     *
+     * <p><strong>Ordering.</strong> The free half runs first: whether this role is
+     * {@code workspaces.default_project_role_id} is a comparison against a column of a row
+     * already in hand. The project half costs one indexed count and is reached only when the
+     * edit actually <em>widens</em>, because only a widening can hand somebody something new
+     * — a narrowing or a rename of a project default is legal for the same reason narrowing a
+     * self-held role is.
+     *
+     * <p><strong>{@code next} is the post-edit set, including on a rename</strong>, so a
+     * workspace default whose grants are outside the actor's baseline cannot be relabelled
+     * either. Same argument as {@link #requireWithinDefinitionCeiling}'s unconditional
+     * placement — the name is what the next administrator picks the default by — and the same
+     * verdict the picker already gives that role through
+     * {@code ProjectAccessService.proposalFrom}'s "current end" (§3.1, AC 14): whatever you
+     * may not set, you may not narrow, and you may not relabel.
+     *
+     * <p>The comparand is {@code SettableRoles.workspaceComparand} itself, not a copy: the
+     * greyed-out entry in the picker and this 403 are one {@code firstNotCovered} call over
+     * one comparand, or they are two rules that will disagree.
+     */
+    private void requireDefaultStaysWithinCeiling(WorkspaceContext ctx, Workspace workspace,
+                                                  Role role, PermissionSet current,
+                                                  PermissionSet next) {
+        // Only a PROJECT role can sit in either default_project_role_id column, and the
+        // built-in Owner is the root of trust in their own workspace, exempt as everywhere.
+        if (role.getScope() != RoleScope.PROJECT
+                || settableRoles.ownerExempt(ctx.workspaceRole())) {
+            return;
+        }
+        if (role.getId().equals(workspace.getDefaultProjectRoleId())) {
+            settableRoles.workspaceComparand(ctx.permissions()).firstNotCovered(next)
+                    .ifPresent(missing -> {
+                        throw DefaultRoleCeilingException.workspaceDefault(role.getName(), missing);
+                    });
+        }
+        // The project half: no ProjectContext here and no single project, so there is no
+        // comparand to measure against — the refusal is about the transition instead.
+        current.firstNotCovered(next).ifPresent(widened -> {
+            var projects = projectRepository.countByWorkspaceIdAndDefaultProjectRoleId(
+                    workspace.getId(), role.getId());
+            if (projects > 0) {
+                throw DefaultRoleCeilingException.projectDefaults(
+                        role.getName(), widened, projects);
+            }
+        });
     }
 
     /**

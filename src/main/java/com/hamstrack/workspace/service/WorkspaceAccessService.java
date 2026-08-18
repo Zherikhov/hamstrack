@@ -220,8 +220,10 @@ public class WorkspaceAccessService {
     }
 
     /**
-     * The project role a workspace member inherits when they have <em>no</em> explicit
-     * {@code project_members} row (§5.2, step 2):
+     * <strong>THE MODE-AWARE ONE. A new caller wants this method.</strong>
+     *
+     * <p>The project role a workspace member <em>actually</em> inherits when they have no
+     * explicit {@code project_members} row (§5.2, step 2):
      * {@code projects.default_project_role_id} → {@code workspaces.default_project_role_id}
      * → the built-in <strong>Contributor</strong> — but only while the workspace is
      * {@link ProjectAccessMode#OPEN}. In {@code STRICT} the answer is {@code null}: no
@@ -230,24 +232,115 @@ public class WorkspaceAccessService {
      * <p>This is the mechanism that makes the upgrade a no-op. V14 leaves every workspace
      * {@code OPEN} with a NULL default, so every workspace member falls through to
      * Contributor — whose permission set is verbatim what they can do in a project today.
+     *
+     * <p><strong>Do not swap a call to this for {@link #declaredDefaultProjectRole}</strong>
+     * (S7's highest-risk assumption). The two look interchangeable and are not: the declared
+     * chain answers "what is configured", this one answers "what does somebody inherit".
+     * Four live call sites read <em>this</em> one to decide whether somebody inherits
+     * something — {@code ProjectAdminGuard.cannotBeStranded},
+     * {@code ProjectAdminGuard.inheritedAdministratorSurvives},
+     * {@code ProjectService.removeMember}'s {@code LEAVING_DEFAULT} ceiling, and
+     * {@link #projectContext} itself. Pointing any of them at the declared chain re-grants,
+     * in a {@code STRICT} workspace, an inheritance that does not exist: a stranding excuse
+     * that excuses nothing, a ceiling bounded by a role nobody holds, and a permission set
+     * handed to a member the mode says holds none. No test outside
+     * {@code ProjectAccessModeTest} would notice.
      */
     public RoleView defaultProjectRole(Workspace workspace, Project project) {
-        if (workspace.getProjectAccessMode() != ProjectAccessMode.OPEN) {
+        return fallback(workspace.getProjectAccessMode(), workspace, project,
+                project.getDefaultProjectRoleId(), workspace.getDefaultProjectRoleId());
+    }
+
+    /**
+     * <strong>THE MODE-INDEPENDENT ONE. Almost nobody wants this method</strong> — read
+     * {@link #defaultProjectRole} first, and use that unless you are one of the two callers
+     * below.
+     *
+     * <p>The §5.2 chain as <em>declared</em>: what the two {@code default_project_role_id}
+     * columns say, whether or not {@link ProjectAccessMode#STRICT} currently suppresses it.
+     * It exists because the declared default is stored in both modes and becomes live the
+     * moment somebody flips back, so it must be <strong>bounded in both modes</strong> — a
+     * ceiling that only bites while {@code OPEN} is a ceiling you step over by flipping
+     * twice (S7 §2).
+     *
+     * <p><strong>These are the only methods in the codebase allowed to ignore the mode, and
+     * they are called from exactly two places</strong>, both of them the "current end" of a
+     * default-role grant ceiling:
+     * <ol>
+     *   <li>{@code ProjectAccessService.update} — the workspace picker (W3);</li>
+     *   <li>{@code ProjectService.setDefaultRole} — the project picker (P2).</li>
+     * </ol>
+     * Anything asking <em>who inherits what</em> — every guard, every response, every
+     * authorization decision — asks {@link #defaultProjectRole}. Adding a third caller is
+     * the moment to re-read S7 §5.4.
+     */
+    public RoleView declaredDefaultProjectRole(Workspace workspace, Project project) {
+        // OPEN is passed as "the mode does not intervene", which is what "declared" means;
+        // it is NOT a claim about this workspace's stored mode.
+        return fallback(ProjectAccessMode.OPEN, workspace, project,
+                project.getDefaultProjectRoleId(), workspace.getDefaultProjectRoleId());
+    }
+
+    /**
+     * {@link #declaredDefaultProjectRole(Workspace, Project)} with no project in hand — the
+     * workspace half of the chain alone ({@code workspaces.default_project_role_id} → the
+     * built-in Contributor). What {@code PATCH /workspaces/{ws}} is replacing, and therefore
+     * the "current end" its ceiling must clear.
+     */
+    public RoleView declaredDefaultProjectRole(Workspace workspace) {
+        return fallback(ProjectAccessMode.OPEN, workspace, null,
+                null, workspace.getDefaultProjectRoleId());
+    }
+
+    /**
+     * {@link #defaultProjectRole} evaluated against a <em>hypothetical</em> post-state — the
+     * what-if half of S7's impact preview (§4) and of stranding doors 7–9 (§5.3).
+     *
+     * <p><strong>Mode-aware, like its non-hypothetical twin</strong>: it reads the mode off
+     * the {@link ProjectAccessProposal} rather than off the workspace, because the proposal
+     * <em>is</em> the mode after the write. That is what makes doors 7–9 one-way by
+     * construction — a flip from {@code STRICT} to {@code OPEN}, or any change that widens,
+     * can never strand.
+     *
+     * <p>One implementation, two entry points: this and {@link #defaultProjectRole} share
+     * {@link #fallback}, so the preview's numbers cannot drift from the rule that will
+     * actually apply (§4.3, property 1).
+     */
+    public RoleView defaultProjectRoleUnder(Workspace workspace, Project project,
+                                            ProjectAccessProposal after) {
+        return fallback(after.mode(), workspace, project,
+                after.defaultRoleIdFor(project), after.workspaceDefaultRoleId());
+    }
+
+    /**
+     * <strong>The §5.2 chain, once.</strong> The single place in the product that decides
+     * whether the access mode suppresses inheritance — S7 adds no second one, for the same
+     * reason DC must not be forked from Cloud: two authorization paths is the condition this
+     * epic exists to remove. Every public sibling above is this method with different
+     * arguments.
+     *
+     * @param project may be {@code null} — only for the workspace-level declared chain,
+     *                where {@code projectDefaultId} is necessarily {@code null} too and the
+     *                project is therefore never dereferenced
+     */
+    private RoleView fallback(ProjectAccessMode mode, Workspace workspace, Project project,
+                              UUID projectDefaultId, UUID workspaceDefaultId) {
+        if (mode != ProjectAccessMode.OPEN) {
             return null;
         }
-        boolean fromProject = project.getDefaultProjectRoleId() != null;
-        var defaultId = fromProject
-                ? project.getDefaultProjectRoleId()
-                : workspace.getDefaultProjectRoleId();
+        boolean fromProject = projectDefaultId != null;
+        var defaultId = fromProject ? projectDefaultId : workspaceDefaultId;
         if (defaultId == null) {
             return roleCatalog.defaultProjectRole();
         }
         // T2: `default_project_role_id` is a plain FK to roles(id) — the database cannot
         // express "…and it must be a PROJECT role of THIS workspace", so this is the only
-        // place that can. Unreachable in S1 (V14 leaves both columns NULL and no write path
-        // exists), and live the moment S4/S7 ships the picker: a foreign or workspace-scoped
-        // role id written here would otherwise be honoured for EVERY member of this
-        // workspace who has no explicit project row — which is nearly everyone (§2.3).
+        // place that can. It was unreachable in S1 (V14 leaves both columns NULL and no
+        // write path existed) and is live from S7, which ships the picker: a foreign or
+        // workspace-scoped role id written here would otherwise be honoured for EVERY member
+        // of this workspace who has no explicit project row — which is nearly everyone
+        // (§2.3). The write path refuses one (`roleCatalog.requireAssignable`); this is what
+        // survives a row that got in some other way.
         var role = roleCatalog.view(defaultId);
         if (!isUsableAs(role, RoleScope.PROJECT, workspace.getId())) {
             log.error("{} {} names default_project_role_id {} which is not a PROJECT role of "
@@ -255,7 +348,7 @@ public class WorkspaceAccessService {
                       + "Contributor. This is a data error: the picker must only offer roles from "
                       + "RoleRepository.findAssignable(id, workspaceId, PROJECT).",
                     fromProject ? "Project" : "Workspace",
-                    fromProject ? project.getId() : workspace.getId(),
+                    fromProject && project != null ? project.getId() : workspace.getId(),
                     defaultId, workspace.getId(), role.scope(), role.workspaceId());
             // Same signal as reportScopeViolation, from the one call site that recovers rather
             // than refusing: the fallback keeps the workspace working, so without a counter a

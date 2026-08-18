@@ -2,6 +2,7 @@ package com.hamstrack.workspace.controller;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.workspace.dto.*;
+import com.hamstrack.workspace.service.ProjectAccessService;
 import com.hamstrack.workspace.service.WorkspaceMemberService;
 import com.hamstrack.workspace.service.WorkspaceService;
 import jakarta.validation.Valid;
@@ -69,6 +70,8 @@ public class WorkspaceController {
     private final WorkspaceService workspaceService;
     /** HD-132: administering an EXISTING membership (role change / removal). */
     private final WorkspaceMemberService workspaceMemberService;
+    /** HD-130 (S7): the project-access mode and the workspace default-role picker. */
+    private final ProjectAccessService projectAccessService;
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -91,6 +94,74 @@ public class WorkspaceController {
     public List<WorkspaceMemberResponse> members(@AuthenticationPrincipal User user,
                                                  @PathVariable UUID id) {
         return workspaceService.listMembers(user, id);
+    }
+
+    /**
+     * <strong>Workspace settings → General</strong> (HD-130, S7 §7.1 W3): rename the
+     * workspace, switch its project-access mode, and choose the default project role every
+     * member inherits where they have no explicit {@code project_members} row.
+     *
+     * <p>Gate: {@code workspace.edit}. Every field is optional and independent — a body naming
+     * only {@code name} does not disturb the mode, and vice versa.
+     *
+     * <p><strong>200</strong>, including for a request whose values already hold (the row is
+     * then not written at all, so {@code updated_at} does not move) · <strong>400</strong> an
+     * empty body, or an unknown {@code projectAccessMode} · <strong>403</strong> missing
+     * {@code workspace.edit}, or the grant ceiling on the default role — naming the permission
+     * the actor lacks; the built-in workspace Owner is exempt in their own workspace ·
+     * <strong>404</strong> unknown workspace or non-member, indistinguishably ·
+     * <strong>409 {@code STRANDED_BY_INHERITANCE}</strong> when the change would leave projects
+     * whose administrators exist only through the default with nobody able to manage their
+     * membership (doors 7 and 8; the {@code projects} extension names them, and there is
+     * deliberately no adoption retry) · <strong>422</strong> a {@code defaultProjectRoleId}
+     * that is unknown, foreign or WORKSPACE-scoped, or a body sending both
+     * {@code defaultProjectRoleId} and {@code clearDefaultProjectRole}.
+     */
+    @PatchMapping("/{id}")
+    public WorkspaceResponse update(@AuthenticationPrincipal User user,
+                                    @PathVariable UUID id,
+                                    @Valid @RequestBody UpdateWorkspaceRequest req) {
+        return projectAccessService.update(user, id, req);
+    }
+
+    /**
+     * The General page's single read (S7 §7.1 W1): mode, declared default project role, which
+     * roles this actor may set it to (with the first missing permission for each one they may
+     * not), and the impact of the workspace as it stands.
+     *
+     * <p>Gate: {@code workspace.edit} — it is the control's own preview, and it aggregates
+     * write access workspace-wide, which is a different object from the project member lists
+     * that are open to every member. <strong>200</strong> · <strong>403</strong> ·
+     * <strong>404</strong>.
+     */
+    @GetMapping("/{id}/project-access")
+    public ProjectAccessResponse projectAccess(@AuthenticationPrincipal User user,
+                                               @PathVariable UUID id) {
+        return projectAccessService.get(user, id);
+    }
+
+    /**
+     * <strong>What would this change do?</strong> (S7 §7.1 W2) — the same body as the
+     * {@code PATCH}, running the same guards and <strong>persisting nothing</strong>. POST
+     * because it carries a body, exactly as {@code POST /roles/preview} does.
+     *
+     * <p>The counts are advisory — they describe a population
+     * ({@code workspace_members} × {@code project_members}) that is not the row being written,
+     * so they carry {@code computedAt} and no token, echo or {@code expectedCount}. The one
+     * number that must be exact, {@code strandedProjects}, is re-derived under the write and
+     * enforced there whether or not the caller ever previewed.
+     *
+     * <p>A ceiling failure surfaces here as the ordinary <strong>403</strong> and never as a
+     * "would fail" field in a 200 body: a preview that succeeds while describing a refusal
+     * teaches a client to ignore it. Same 400/403/404/422 as the {@code PATCH}; no 409 — the
+     * stranding it would produce is a field, because that is the question being asked.
+     */
+    @PostMapping("/{id}/project-access/preview")
+    public ProjectAccessImpactResponse previewProjectAccess(
+            @AuthenticationPrincipal User user,
+            @PathVariable UUID id,
+            @Valid @RequestBody UpdateWorkspaceRequest req) {
+        return projectAccessService.preview(user, id, req);
     }
 
     /**

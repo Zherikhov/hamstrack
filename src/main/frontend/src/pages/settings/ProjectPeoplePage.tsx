@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { UserPlus, Users } from 'lucide-react'
-import { apiGetProject, apiListWorkspaceMembers, projectMembersApi } from '../../api'
+import { apiGetProject, apiGetWorkspace, apiListWorkspaceMembers, projectMembersApi } from '../../api'
 import { useAuthStore } from '../../auth'
 import { useProjectPermissions } from '../../hooks/usePermissions'
 import { projectMembersKey, useRoleInvalidation, useRoles, sortRoles } from '../../hooks/useRoles'
@@ -10,6 +10,7 @@ import { Avatar, Button, Select } from '../../components/ui'
 import {
   Chip, Notice, RoleLabel, RoleSelect, classifyConflict, resolveDefaultRole, resolveRoleById,
 } from '../../components/roles'
+import ProjectDefaultRoleDialog from '../../components/ProjectDefaultRoleDialog'
 import type { ProjectMember } from '../../types'
 
 /**
@@ -36,17 +37,23 @@ import type { ProjectMember } from '../../types'
  * from, which one value alone could never do: "this project overrides the
  * workspace" and "this project inherits" are different facts about the same name.
  *
- * It stays **read-only here, on purpose**. The default hands its role to every
- * workspace member without an explicit row, so a picker unbounded by the grant
- * ceiling is an administrator granting permissions they do not hold, workspace-
- * wide, in one request; S7 ships the picker and that ceiling together. The
- * backend has no write path, and a control that always fails is worse than none —
- * so the affordance is visible and disabled, which is what Rule C asks for.
+ * S7 turns S6's disabled affordance into a real picker, bounded by the grant
+ * ceiling that had to ship with it: the default hands its role to every workspace
+ * member without an explicit row, so an unbounded picker is an administrator
+ * granting permissions they do not hold, workspace-wide, in one request.
  *
- * The workspace's project-access mode is still not exposed, for the same reason,
- * so the card describes the mechanism without claiming the workspace lets people
- * in by default. An id the chain names but this workspace cannot describe gets a
- * placeholder: a confidently wrong label on a privilege is worse than an absent one.
+ * **The card's copy is mode-dependent, and ignoring that makes it lie.** With the
+ * workspace's project access set to `STRICT`, nobody works here through the
+ * default at all — so "everyone in this workspace can contribute to X without
+ * being added to it" is false, and the count below it stops describing today and
+ * starts describing a hypothetical. The mode is read from the `['workspace', wsId]`
+ * entry every surface already caches: it is published on the workspace response
+ * and **nowhere else**, so there is no second copy that can disagree with it.
+ *
+ * The card stays visible **while the mechanism is off, in both directions** — that
+ * is its Rule C affordance and the reason it is drawn first, full width. An id the
+ * chain names but this workspace cannot describe gets a placeholder: a
+ * confidently wrong label on a privilege is worse than an absent one.
  *
  * ## Explicit membership
  *
@@ -80,6 +87,14 @@ export default function ProjectPeoplePage() {
     queryFn: () => apiGetProject(wsId!, projectId!),
     enabled: !!wsId && !!projectId,
   })
+  // The access mode — the one fact that decides whether this card's sentence is
+  // true. It is published on the workspace response and nowhere else, and this
+  // entry is already cached by the rail, so reading it costs nothing.
+  const { data: workspace } = useQuery({
+    queryKey: ['workspace', wsId],
+    queryFn: () => apiGetWorkspace(wsId!),
+    enabled: !!wsId,
+  })
   const { data: members = [], isLoading } = useQuery({
     queryKey: projectMembersKey(wsId, projectId),
     queryFn: () => projectMembersApi.list(wsId!, projectId!),
@@ -95,6 +110,7 @@ export default function ProjectPeoplePage() {
 
   const [rowError, setRowError] = useState<Record<string, string>>({})
   const [busyRow, setBusyRow] = useState<string | null>(null)
+  const [pickingDefault, setPickingDefault] = useState(false)
 
   async function changeRole(member: ProjectMember, roleId: string) {
     setBusyRow(member.userId)
@@ -129,15 +145,21 @@ export default function ProjectPeoplePage() {
   // Project override → workspace default → the built-in Contributor. Both links
   // ride the project response, so this costs no request.
   const fallback = resolveDefaultRole(roles, project?.defaultRole)
+  // Absent is read as OPEN — the value every existing workspace was migrated
+  // with, and the only one that is byte-identical to the pre-S7 product.
+  const restricted = workspace?.projectAccessMode === 'STRICT'
 
   return (
     <div>
       <div className="mb-5">
         <h2 className="font-display font-bold" style={{ fontSize: 18, letterSpacing: '-0.2px' }}>People</h2>
         <p className="text-sm mt-1" style={{ color: 'var(--color-text-secondary)', maxWidth: 620 }}>
-          Almost nobody needs a role of their own here. Everyone in the workspace can already work in
-          this project through its default access; add somebody explicitly only to give them
-          something different.
+          {restricted
+            ? 'Project access is Restricted for this workspace, so this list is the whole of it: only'
+              + ' the people below can change anything here. Everyone else can still see the project.'
+            : 'Almost nobody needs a role of their own here. Everyone in the workspace can already work'
+              + ' in this project through its default access; add somebody explicitly only to give them'
+              + ' something different.'}
         </p>
       </div>
 
@@ -154,9 +176,20 @@ export default function ProjectPeoplePage() {
           <div className="flex-1 min-w-0">
             <div className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>Default access</div>
             <p className="text-sm mt-1" style={{ color: 'var(--color-text-secondary)' }}>
-              Everyone in this workspace can contribute to{' '}
-              <b><bdi>{project?.name ?? 'this project'}</bdi></b>{' '}
-              without being added to it. Anyone listed below has been given a different role instead.
+              {restricted ? (
+                <>
+                  Project access is <b>Restricted</b> for this workspace, so nobody works in{' '}
+                  <b><bdi>{project?.name ?? 'this project'}</bdi></b> through the default — only the
+                  people listed below can change anything. This default applies again if project
+                  access is switched back to Open.
+                </>
+              ) : (
+                <>
+                  Everyone in this workspace can contribute to{' '}
+                  <b><bdi>{project?.name ?? 'this project'}</bdi></b>{' '}
+                  without being added to it. Anyone listed below has been given a different role instead.
+                </>
+              )}
             </p>
             {rolesLoading ? (
               // Hold the sentence rather than name the built-in fallback and then
@@ -185,8 +218,11 @@ export default function ProjectPeoplePage() {
               {workspaceMembers.length > 0 ? (
                 <>
                   <b>{onDefault.length}</b> of {workspaceMembers.length} workspace{' '}
-                  {workspaceMembers.length === 1 ? 'member works' : 'members work'} here through that
-                  default today
+                  {restricted
+                    ? <>{workspaceMembers.length === 1 ? 'member would work' : 'members would work'} here
+                        through it if project access were Open</>
+                    : <>{workspaceMembers.length === 1 ? 'member works' : 'members work'} here through
+                        that default today</>}
                   {members.length > 0 && <>, and {members.length} {members.length === 1 ? 'has' : 'have'} a role of their own</>}.
                 </>
               ) : (
@@ -194,17 +230,21 @@ export default function ProjectPeoplePage() {
               )}
             </p>
             <div className="flex items-center gap-2 mt-3">
-              <Button variant="secondary" size="sm" disabled
-                      title="The default-role picker and the workspace-wide Open/Restricted switch are not built yet.">
+              {/* A permanent slot: disabled while the permission answer is still
+                  loading, never absent — and never hidden for a lack of it, since
+                  a card nobody can see is a mechanism nobody can find. */}
+              <Button variant="secondary" size="sm"
+                      disabled={!canManage}
+                      title={canManage ? undefined
+                        : 'Changing a project’s default access needs project.member.manage in this project.'}
+                      onClick={() => setPickingDefault(true)}>
                 Change default access
               </Button>
-              <Chip tone="warning">coming soon</Chip>
             </div>
             <p className="text-xs mt-2" style={{ color: 'var(--color-text-muted)' }}>
-              Changing the default hands its role to everybody at once, so it has to be bounded by
-              the same rule that bounds handing a role to one person — that rule, and this picker,
-              land together. Whether the workspace lets people in by default at all is part of the
-              same change.
+              Changing it hands its role to everybody at once, so you can only choose something you
+              already hold here yourself. Whether the workspace lets people in by default at all is a
+              workspace-wide setting, on Workspace settings → General.
             </p>
           </div>
         </div>
@@ -284,6 +324,14 @@ export default function ProjectPeoplePage() {
         default access above. A project’s last administrator cannot be removed or demoted: add
         another one first.
       </p>
+
+      {pickingDefault && (
+        <ProjectDefaultRoleDialog
+          wsId={wsId!} projectId={projectId!} projectName={project?.name ?? 'this project'}
+          roles={roles}
+          onClose={() => setPickingDefault(false)}
+          onSaved={invalidate} />
+      )}
     </div>
   )
 }

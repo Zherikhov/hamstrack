@@ -9,6 +9,7 @@ import type {
   SprintCompletionPreview, SprintCompletionResult, UnfinishedDisposition,
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
+  ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -42,7 +43,7 @@ export interface ConflictInfo {
   /** Seconds from the `Retry-After` header. Present ⇒ retry the identical request. */
   retryAfter?: number
   /**
-   * `STRANDED_PROJECTS` · `ADOPTION_BLOCKED` · `ADOPTION_ROLE_UNREADABLE` ·
+   * `STRANDED_PROJECTS` · `STRANDED_BY_INHERITANCE` · `ADOPTION_BLOCKED` · `ADOPTION_ROLE_UNREADABLE` ·
    * `LAST_PROJECT_ADMIN_BULK` · `ROLE_IN_USE` · `SELF_HELD_ROLE` ·
    * `ROLE_LIMIT_REACHED`. Typed as an open string on purpose — the server may
    * add one, and an unknown code must degrade to "render `detail`".
@@ -303,6 +304,67 @@ export async function apiCreateWorkspace(name: string): Promise<Workspace> {
 
 export async function apiGetWorkspace(wsId: string): Promise<Workspace> {
   return request(`/workspaces/${wsId}`)
+}
+
+/**
+ * The body of `PATCH /api/workspaces/{ws}` and of the preview that shares it
+ * (HD-130, S7 §7.1) — every field optional and every one an independent
+ * decision, so a body naming only `name` must not disturb the access mode.
+ *
+ * `defaultProjectRoleId` and `clearDefaultProjectRole` are the two accepted ways
+ * of naming the same column and sending **both is a 422**, not a precedence
+ * rule: two fields that mean different things must not be resolved by picking a
+ * winner. Sending neither leaves the column alone.
+ */
+export interface UpdateWorkspacePayload {
+  name?: string
+  projectAccessMode?: ProjectAccessMode
+  /** A PROJECT-scoped role of THIS workspace. Anything else is a 422. */
+  defaultProjectRoleId?: string
+  /** Write NULL — i.e. fall through to the built-in Contributor. */
+  clearDefaultProjectRole?: boolean
+}
+
+/**
+ * Workspace General (HD-130, S7 W3) — rename, the OPEN/STRICT switch and the
+ * workspace-level default project role, gated on `workspace.edit`.
+ *
+ * Refusals worth rendering rather than swallowing: **403** carries the grant
+ * ceiling's sentence, which *names the permission the actor lacks*; **409
+ * `STRANDED_BY_INHERITANCE`** carries the projects the change would leave with no
+ * administrator, and has **no adoption retry** — it is re-derived inside the
+ * write's transaction, so it can arrive after a clean preview.
+ *
+ * A body whose every value already holds returns 200 without writing the row.
+ */
+export async function apiUpdateWorkspace(
+  wsId: string, payload: UpdateWorkspacePayload,
+): Promise<Workspace> {
+  return request(`/workspaces/${wsId}`, { method: 'PATCH', body: JSON.stringify(payload) })
+}
+
+/** W1 — the one read behind Workspace settings → General. Needs `workspace.edit`. */
+export async function apiGetProjectAccess(wsId: string): Promise<ProjectAccessSettings> {
+  return request(`/workspaces/${wsId}/project-access`)
+}
+
+/**
+ * W2 — **what would this change do?** Same body as the write, same guards,
+ * persists nothing. POST because it carries a body, exactly as
+ * `POST /roles/preview` does.
+ *
+ * The counts are **advisory** and carry `computedAt`: they describe a population
+ * that is not the row being written, so nothing here is a guarantee. Re-fetch on
+ * opening the confirm dialog and never render a preview older than that
+ * interaction. A ceiling failure surfaces as an ordinary **403**, never as a
+ * "would fail" field in a 200 body.
+ */
+export async function apiPreviewProjectAccess(
+  wsId: string, payload: UpdateWorkspacePayload,
+): Promise<ProjectAccessImpact> {
+  return request(`/workspaces/${wsId}/project-access/preview`, {
+    method: 'POST', body: JSON.stringify(payload),
+  })
 }
 
 // ── Onboarding (first-login: create or join a team) ──────────────────────────
@@ -1081,6 +1143,35 @@ export const projectMembersApi = {
   /** 409 when the target is the project's last administrator — add another one first. */
   remove: (wsId: string, projectId: string, userId: string) =>
     request<void>(`/workspaces/${wsId}/projects/${projectId}/members/${userId}`, { method: 'DELETE' }),
+}
+
+/**
+ * A project's **default access** (HD-130, S7 §7.2) — the role every workspace
+ * member inherits here when they have no `project_members` row.
+ *
+ * A separate endpoint from `PATCH /projects/{p}` on purpose: that one is gated on
+ * `project.edit`, and this write is membership authority, gated on
+ * **`project.member.manage`**. Folding a second-permission field into a
+ * single-permission PATCH is how a gate gets forgotten.
+ *
+ * **Exactly one of `roleId` / `inherit` per write** — neither or both is a 422,
+ * never a precedence rule. `inherit: true` writes NULL, meaning "follow the
+ * workspace default", which is a real choice and not an absence: "this project
+ * deliberately follows the workspace" and "this project happens to name the same
+ * role the workspace does" diverge the moment the workspace default moves.
+ *
+ * The ceiling here has **no §4 escape**: the actor who may promote a colleague to
+ * Project admin still gets a 403 naming `issue.delete` when they aim that role at
+ * the default, because a default's target is everyone including the actor.
+ */
+export const projectDefaultRoleApi = {
+  get: (wsId: string, projectId: string) =>
+    request<ProjectDefaultRoleSettings>(`/workspaces/${wsId}/projects/${projectId}/default-role`),
+  /** Answers the full `Project`, so the People card re-renders straight from the write. */
+  set: (wsId: string, projectId: string, payload: { roleId: string } | { inherit: true }) =>
+    request<Project>(`/workspaces/${wsId}/projects/${projectId}/default-role`, {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
 }
 
 // ── Labels — HD-30 ────────────────────────────────────────────────────────────

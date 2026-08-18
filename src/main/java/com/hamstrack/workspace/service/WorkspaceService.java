@@ -2,6 +2,7 @@ package com.hamstrack.workspace.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.config.WorkspaceProperties;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
@@ -50,6 +51,8 @@ public class WorkspaceService {
      * {@code /members/{userId}} instead of keeping the copy that used to live inline.
      */
     private final WorkspaceMemberService memberService;
+    /** HD-130 §10: {@code app.workspace.default-project-access-mode}, for NEW workspaces only. */
+    private final WorkspaceProperties workspaceProperties;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -70,6 +73,13 @@ public class WorkspaceService {
         workspace.setName(req.name());
         workspace.setSlug(slug);
         workspace.setCreatedBy(actor);
+        // HD-130 §10: the mode a NEW workspace starts in, from configuration — never a
+        // profile, because access modes are a product feature and not a plan feature. It
+        // never moves an existing workspace: V14 set every one of them OPEN and the only way
+        // to change one is PATCH /api/workspaces/{ws}. Demo seeding comes through this same
+        // method on purpose, so a DC operator who configures STRICT gets a strict demo
+        // workspace — no bypass is added for seeding (epic §11.5).
+        workspace.setProjectAccessMode(workspaceProperties.defaultProjectAccessMode());
         workspaceRepository.save(workspace);
 
         var member = new WorkspaceMember();

@@ -20,7 +20,24 @@ public enum GrantCeilingAction {
      * The removal would drop the member onto the project's default role (§5.2), so the
      * ceiling bounds what they would be left <em>inheriting</em>, not what they hold.
      */
-    LEAVING_DEFAULT("Removing this member would leave them with the project's default role");
+    LEAVING_DEFAULT("Removing this member would leave them with the project's default role"),
+
+    /**
+     * Making a role this project's <em>default</em> (HD-130, S7 §3.2) — the picker hands it
+     * to every workspace member with no explicit {@code project_members} row here, which is
+     * nearly everyone (§2.3). There is no target to name, which is exactly why
+     * {@code ProjectService.requireGrantable}'s §4 escape does not apply: the escape rests
+     * on {@code target != actor}, and a default's target is everyone, the actor included.
+     */
+    SETTING_DEFAULT("You cannot make this the default role for everyone in this project"),
+
+    /**
+     * Replacing a default that is already wider than the actor's own set — the "current end"
+     * of the ceiling. Without it, whatever you may not grant you could still <em>strip</em>:
+     * a narrow member-manager would be able to narrow a default of Project admin that only
+     * somebody wider could put back.
+     */
+    REPLACING_DEFAULT("You cannot change a default that grants more than you hold");
 
     private final String phrase;
 

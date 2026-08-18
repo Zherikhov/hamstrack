@@ -14,6 +14,7 @@ import WorkspaceProjectsMatrix from './WorkspaceProjectsMatrix'
 import WorkspaceLabelsPage from './WorkspaceLabelsPage'
 import WorkspacePeoplePage from './WorkspacePeoplePage'
 import WorkspaceRolesPage from './WorkspaceRolesPage'
+import WorkspaceGeneralPage from './WorkspaceGeneralPage'
 
 // The People/Roles pair is gated on the permissions the SERVER checks, not on a
 // role name: People renders for anyone who can act on a member, Roles only for a
@@ -29,6 +30,10 @@ interface SettingsSection {
 }
 
 const SECTIONS: SettingsSection[] = [
+  // First, and gated on the permission the endpoints behind it check: General
+  // carries the workspace rename and the project-access mode, which apply to
+  // every project in the workspace at once.
+  { path: 'general', label: 'General', end: false, permission: 'workspace.edit' as const },
   { path: '', label: 'Projects', end: true },
   { path: 'people', label: 'People', end: false, permission: 'workspace.member.manage' as const },
   { path: 'roles', label: 'Roles', end: false, permission: 'workspace.role.manage' as const },
@@ -111,6 +116,7 @@ export default function WorkspaceSettingsArea() {
               <Route path="fields" element={<AdminFieldsPage />} />
               <Route path="labels" element={<WorkspaceLabelsPage />} />
               <Route path="people" element={<WorkspacePeoplePage />} />
+              <Route path="general" element={<WorkspaceGeneralPage />} />
               <Route path="roles" element={<WorkspaceRolesPage />} />
               <Route path="*" element={<Navigate to={base} replace />} />
             </Routes>

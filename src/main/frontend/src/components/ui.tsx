@@ -158,7 +158,7 @@ interface SelectProps extends Omit<SelectHTMLAttributes<HTMLSelectElement>, 'onC
   compact?: boolean
 }
 
-interface SelectOption { value: string; label: ReactNode; disabled: boolean }
+interface SelectOption { value: string; label: ReactNode; disabled: boolean; title?: string }
 
 /**
  * Collect <option> children, descending into fragments. A caller that wraps its
@@ -170,7 +170,7 @@ function collectOptions(nodes: ReactNode): SelectOption[] {
   return Children.toArray(nodes)
     .filter(isValidElement)
     .flatMap(c => {
-      const el = c as { type?: unknown; props: { value?: unknown; children?: ReactNode; disabled?: boolean } }
+      const el = c as { type?: unknown; props: { value?: unknown; children?: ReactNode; disabled?: boolean; title?: string } }
       if (el.type === Fragment) return collectOptions(el.props.children)
       if (el.type !== 'option') return []
       const p = el.props
@@ -178,6 +178,10 @@ function collectOptions(nodes: ReactNode): SelectOption[] {
         value: String(p.value ?? p.children ?? ''),
         label: (p.children ?? p.value ?? '') as ReactNode,
         disabled: !!p.disabled,
+        // Carried through so a DISABLED option can say why it is disabled —
+        // a greyed-out row with no reason is a dead end (HD-130 §9.1: the
+        // ceiling's `missing` permission is rendered, not discovered at save).
+        title: p.title,
       }]
     })
 }
@@ -296,6 +300,8 @@ export function Select({
                 key={o.value + ':' + idx}
                 role="option"
                 aria-selected={selected}
+                aria-disabled={o.disabled || undefined}
+                title={o.title}
                 onMouseEnter={() => setHi(idx)}
                 onClick={() => choose(o)}
                 className="flex items-center gap-2 cursor-pointer"

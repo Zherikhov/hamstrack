@@ -11,6 +11,7 @@ import com.hamstrack.issue.entity.IssueHistory;
 import com.hamstrack.issue.repository.IssueHistoryRepository;
 import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.project.dto.ProjectRef;
+import com.hamstrack.project.exception.StrandedProjectsException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.service.ProjectAdminGuard;
 import com.hamstrack.workspace.dto.UpdateWorkspaceMemberRequest;
@@ -276,6 +277,38 @@ public class WorkspaceMemberService {
             adopted = projectAdminGuard.adoptAll(actor, workspace, stranded);
         } else {
             projectAdminGuard.requireNothingStranded(stranded);
+        }
+
+        // ---- door 6 (HD-130 §5.2): the administrators that exist only by INHERITANCE ----
+        //
+        // The guard above builds its candidate set from explicit project_members rows, so a
+        // project whose only administrators hold no row at all — the §5.2 default grants
+        // project.member.manage and nobody was ever added — is not a candidate and
+        // cannotBeStranded never runs for it. Removing the last workspace member who had no
+        // row there left it permanently unmanageable, silently. Unreachable before S7,
+        // because no built-in anyone would pick as a default grants member management;
+        // reachable the moment the S7 picker sets one to Team lead, Project admin or a custom
+        // role carrying it.
+        //
+        // AFTER the adoption branch, and with no retry of its own: adoptAll writes a Team lead
+        // row, which would NARROW an adopter who currently inherits something wider (§5.2), so
+        // `adoptStrandedProjects=true` deliberately does not clear this one.
+        //
+        // UNLIKE every other door in this method, THIS ONE THE ACTOR CANNOT SATISFY (security
+        // review round 2 — the previous sentence here claimed the opposite and was wrong).
+        // Whenever it fires, the actor necessarily holds an explicit, non-administering row in
+        // that project, so they hold no project.member.manage there: the person who still
+        // inherits it is the member being removed. The remedy therefore belongs to somebody
+        // else — the departing member adds an explicit administrator before they go, or an
+        // Owner grants the actor a workspace role carrying project.administer.all. The full
+        // derivation, and why a scoped escape is a slice rather than a patch, is on
+        // ProjectAdminGuard.projectsAdministeredOnlyByInheritance.
+        //
+        // Free in the shipped configuration: a cached role view and one bit test per project.
+        var strandedByInheritance =
+                projectAdminGuard.projectsAdministeredOnlyByInheritance(workspace, userId);
+        if (!strandedByInheritance.isEmpty()) {
+            throw StrandedProjectsException.strandedByInheritance(strandedByInheritance);
         }
 
         // The issues to unassign are read as scalar (id, number) refs BEFORE the bulk

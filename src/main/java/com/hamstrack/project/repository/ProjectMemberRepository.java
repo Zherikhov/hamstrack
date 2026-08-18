@@ -235,6 +235,99 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, UU
                                                 @Param("adminRoleIds") Collection<UUID> adminRoleIds,
                                                 @Param("roleId") UUID roleId);
 
+    // ------------------------------------------------ S7: inherited administrators & impact
+    //
+    // The workspace filter travels through `project.workspace`, exactly as the S4 counts
+    // above: project_members has no workspace_id of its own, built-in roles are SHARED rows,
+    // and an unscoped read here would count another tenant's people on an endpoint whose
+    // whole job is counting people (S7 §8).
+
+    /**
+     * <strong>Which live projects of this workspace have at least one ACTIVE explicit
+     * administrator</strong> — condition 2 of stranding doors 6–9 (S7 §5).
+     *
+     * <p>The unlocked sibling of {@link #lockAllByWorkspaceAndRoleIdIn}, with the identical
+     * ACTIVE + live-project filters so the four doors cannot disagree about who counts.
+     * Unlocked <strong>deliberately and advisorily</strong>: doors 6–9 are aggregates over a
+     * whole workspace and an aggregate cannot take {@code FOR UPDATE}. The locked invariant
+     * remains the per-row one (doors 1–3) — see {@code ProjectAdminGuard}'s class javadoc,
+     * and do not paper this over with a lock that is not there.
+     *
+     * <p><strong>Workspace membership is required too</strong> (tenancy review, round 2), for
+     * the reason {@link #countActiveExplicitMembersByRolePair} documents and insists on: every
+     * read resolves through workspace membership first, so a {@code project_members} row
+     * belonging to somebody who is no longer a member of the workspace grants
+     * <em>nothing</em> — they cannot reach the project at all. Counting one as an
+     * administrator made this guard <strong>under</strong>-report stranding, which is the
+     * dangerous direction: a project whose only "administrator" is such a row would be waved
+     * through as safe. The two siblings now ask the same question of the same rows; if one
+     * ever needs a different filter from the other, that difference belongs in this javadoc.
+     *
+     * <p>Ids, not entities: the caller only ever tests membership of the set.
+     */
+    @Query("""
+            SELECT DISTINCT m.project.id FROM ProjectMember m
+             WHERE m.role.id IN :roleIds
+               AND m.user IN (SELECT u FROM User u WHERE u.status = com.hamstrack.auth.entity.UserStatus.ACTIVE)
+               AND m.user IN (SELECT wm.user FROM WorkspaceMember wm WHERE wm.workspace = :workspace)
+               AND m.project IN (SELECT p FROM Project p WHERE p.workspace = :workspace
+                                                           AND p.archivedAt IS NULL)
+            """)
+    List<UUID> findProjectIdsWithAdministrator(@Param("workspace") Workspace workspace,
+                                               @Param("roleIds") Collection<UUID> roleIds);
+
+    /**
+     * The live projects of this workspace in which one user holds an explicit row — condition
+     * 3 of door 6 (S7 §5.2): a member who <em>has</em> a row there was never one of the
+     * inherited administrators, so their removal cannot take the last one.
+     *
+     * <p>No ACTIVE filter, and that asymmetry is deliberate: this is about the departing
+     * member's own rows, not about who counts as an administrator, and the departing member
+     * is by construction the person being removed rather than a person being counted on.
+     */
+    @Query("""
+            SELECT m.project.id FROM ProjectMember m
+             WHERE m.user.id = :userId
+               AND m.project IN (SELECT p FROM Project p WHERE p.workspace = :workspace
+                                                           AND p.archivedAt IS NULL)
+            """)
+    List<UUID> findProjectIdsOfMemberInWorkspace(@Param("workspace") Workspace workspace,
+                                                 @Param("userId") UUID userId);
+
+    /**
+     * <strong>{@code (project, project role, workspace role) -> headcount}</strong> for every
+     * ACTIVE explicit member of this workspace's projects, in one statement — the third of
+     * the impact preview's four reads (S7 §4.2).
+     *
+     * <p>Three grouping keys rather than the two the spec sketched, because the preview asks
+     * two questions of the same rows and one key cannot answer both: {@code projectsWithNoWriters}
+     * needs each explicit member's <em>project</em> role (does anybody still hold
+     * {@code issue.create}?) and {@code membersLosingEverything} needs their <em>workspace</em>
+     * role (subtracting them from the per-workspace-role totals is the only way to say how many
+     * members-on-the-default hold {@code project.curate.all} / {@code project.administer.all}).
+     * Splitting it in two would be a second statement for one join; approximating either would
+     * be a count that does not survive AC 24's "apply it and recount".
+     *
+     * <p>The join to {@code WorkspaceMember} is an inner one on purpose: a
+     * {@code project_members} row belonging to somebody who is no longer a member of the
+     * workspace grants nothing (every read resolves through workspace membership first), so it
+     * must not be counted as a person who has, or loses, access.
+     *
+     * <p>Cardinality is the number of explicit rows, which §2.3 observes is small — the
+     * preview's cost does not grow with the project count (AC 28).
+     */
+    @Query("""
+            SELECT pm.project.id, pm.role.id, wm.role.id, COUNT(pm)
+              FROM ProjectMember pm, WorkspaceMember wm
+             WHERE wm.workspace.id = :workspaceId
+               AND wm.user = pm.user
+               AND pm.project.workspace.id = :workspaceId
+               AND pm.project.archivedAt IS NULL
+               AND pm.user.status = com.hamstrack.auth.entity.UserStatus.ACTIVE
+             GROUP BY pm.project.id, pm.role.id, wm.role.id
+            """)
+    List<Object[]> countActiveExplicitMembersByRolePair(@Param("workspaceId") UUID workspaceId);
+
     /**
      * Point this workspace's project memberships holding {@code fromRoleId} at
      * {@code toRole}. Plain {@code @Modifying} for the reason

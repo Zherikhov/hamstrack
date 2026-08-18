@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { apiPermissionCatalog, rolesApi } from '../api'
+import { apiGetProjectAccess, apiPermissionCatalog, projectDefaultRoleApi, rolesApi } from '../api'
 import type { PermissionCatalogEntry, Role, RoleScope } from '../types'
 
 /**
@@ -100,6 +100,16 @@ export function usePermissionCatalog() {
  *    project-scoped one obviously does.
  *  • `['workspace-members', wsId]` / `['project-members', wsId]` — the rendered
  *    role names, and the membership rows a delete-with-reassign rewrites in bulk.
+ *  • `['project-access', wsId]` and `['project-default-role', wsId]` (a prefix,
+ *    so every project's entry) — the S7 settings reads. Both carry a
+ *    server-derived `settable` block computed against the caller's own permission
+ *    set, so a role edit moves what the pickers may offer even when neither the
+ *    mode nor a default changed.
+ *
+ * **This is also the invalidation every S7 write runs** (HD-130 §9.4). The access
+ * mode and either default role change what `myPermissions` contains on the very
+ * next request, on every replica — so a stale project list is a stale gate, and
+ * "the screen I am looking at updated" is precisely the wrong test.
  */
 export function useRoleInvalidation(wsId: string | undefined) {
   const qc = useQueryClient()
@@ -112,8 +122,59 @@ export function useRoleInvalidation(wsId: string | undefined) {
       qc.invalidateQueries({ queryKey: ['project', wsId] }),
       qc.invalidateQueries({ queryKey: ['workspace-members', wsId] }),
       qc.invalidateQueries({ queryKey: ['project-members', wsId] }),
+      qc.invalidateQueries({ queryKey: [PROJECT_ACCESS_KEY_ROOT, wsId] }),
+      qc.invalidateQueries({ queryKey: [PROJECT_DEFAULT_ROLE_KEY_ROOT, wsId] }),
     ])
   }, [qc, wsId])
+}
+
+/** `GET /project-access` — the workspace General page's single read (HD-130 S7 W1). */
+export const PROJECT_ACCESS_KEY_ROOT = 'project-access' as const
+
+export function projectAccessKey(wsId: string | undefined) {
+  return [PROJECT_ACCESS_KEY_ROOT, wsId] as const
+}
+
+/** `GET /projects/{p}/default-role` — what the project picker dialog opens against. */
+export const PROJECT_DEFAULT_ROLE_KEY_ROOT = 'project-default-role' as const
+
+export function projectDefaultRoleKey(wsId: string | undefined, projectId: string | undefined) {
+  return [PROJECT_DEFAULT_ROLE_KEY_ROOT, wsId, projectId] as const
+}
+
+/**
+ * The workspace's project-access settings — mode, declared default, the ceiling
+ * rendered, and the impact of the workspace **as it stands**.
+ *
+ * Gated on `workspace.edit` server-side, so `enabled` must be held until that
+ * answer is known: firing it for a member without the permission is a guaranteed
+ * 403 and a retry storm on a screen that should simply not have been reachable.
+ *
+ * **The `impact` here is the current state, never a proposal.** The confirm dialog
+ * re-fetches `POST …/preview` for what is actually being asked; reusing this block
+ * would render a snapshot of the wrong question.
+ */
+export function useProjectAccess(wsId: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: projectAccessKey(wsId),
+    queryFn: () => apiGetProjectAccess(wsId!),
+    enabled: !!wsId && enabled,
+  })
+}
+
+/**
+ * One project's default-access settings. Gated on `project.member.manage` in
+ * **that project** — which no workspace-wide role grants — so, as above, `enabled`
+ * waits for the project's own permission answer.
+ */
+export function useProjectDefaultRole(
+  wsId: string | undefined, projectId: string | undefined, enabled = true,
+) {
+  return useQuery({
+    queryKey: projectDefaultRoleKey(wsId, projectId),
+    queryFn: () => projectDefaultRoleApi.get(wsId!, projectId!),
+    enabled: !!wsId && !!projectId && enabled,
+  })
 }
 
 /** Members of one project — the list the SPA never called before this slice. */

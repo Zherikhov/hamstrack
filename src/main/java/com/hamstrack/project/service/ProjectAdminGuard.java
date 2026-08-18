@@ -15,6 +15,7 @@ import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.RoleRepository;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.workspace.service.ProjectAccessProposal;
 import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.RoleView;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
@@ -59,11 +60,12 @@ import java.util.stream.Collectors;
  *       for any number of projects at once through a different door.</li>
  * </ol>
  *
- * <h2>The doors — all five of them</h2>
+ * <h2>The doors — all nine of them</h2>
  *
  * <p><strong>This enumeration is deliberate, and an unlisted door is the bug.</strong> Two
  * are deletions of a {@code project_members} row (HD-136); three are HD-127's, and two of
- * those are not per-member operations at all.
+ * those are not per-member operations at all; four are HD-130's (S7), and <em>none</em> of
+ * those four touches a membership row.
  *
  * <ol>
  *   <li><strong>{@code DELETE /projects/{p}/members/{u}}</strong> — one row, one project.
@@ -77,15 +79,41 @@ import java.util.stream.Collectors;
  *       because a promotion cannot strand.</li>
  *   <li><strong>{@code PATCH /roles/{id}}</strong> that drops {@code project.member.manage}
  *       from a PROJECT-scoped role — demotes <em>every holder at once, in every project</em>.
- *       {@link #projectsAdministeredOnlyBy}.</li>
+ *       {@link #projectsAdministeredOnlyBy}. <em>Advisory.</em></li>
  *   <li><strong>{@code DELETE /roles/{id}?reassignToRoleId=}</strong> whose target role
  *       lacks {@code project.member.manage} — the same bulk demotion by another name.
- *       {@link #projectsAdministeredOnlyBy}.</li>
+ *       {@link #projectsAdministeredOnlyBy}. <em>Advisory.</em></li>
+ *   <li><strong>{@code DELETE /workspaces/{ws}/members/{u}}, again — the
+ *       <em>inherited</em> administrators</strong> (S7 §5.2). Door 2 builds its candidate set
+ *       from explicit {@code project_members} rows only, so a project administered
+ *       <em>solely through the §5.2 default</em> was never a candidate and
+ *       {@link #cannotBeStranded} never ran for it: removing the last workspace member who
+ *       had no row there left it permanently unmanageable, with no 409, no adoption and no
+ *       log line. {@link #projectsAdministeredOnlyByInheritance}. <em>Advisory.</em></li>
+ *   <li><strong>{@code PATCH /workspaces/{ws}} setting {@code projectAccessMode = STRICT}</strong>
+ *       — the current fallback grants {@code project.member.manage} and the new one (none)
+ *       does not. {@link #projectsLosingLastAdministrator}. <em>Advisory.</em></li>
+ *   <li><strong>{@code PATCH /workspaces/{ws}} setting {@code defaultProjectRoleId}</strong>
+ *       — for every project that does not override it.
+ *       {@link #projectsLosingLastAdministrator}. <em>Advisory.</em></li>
+ *   <li><strong>{@code PATCH /workspaces/{ws}/projects/{p}/default-role}</strong> — the same,
+ *       for that one project. {@link #projectsLosingLastAdministrator}. <em>Advisory.</em></li>
  * </ol>
  *
- * <p>Doors 4 and 5 are guarded <strong>advisorily</strong>; doors 1–3 are locked. See
+ * <p>Doors 4–9 are guarded <strong>advisorily</strong>; doors 1–3 are locked. See
  * {@link #projectsAdministeredOnlyBy} for why, and for why that honesty is written down
- * rather than papered over.
+ * rather than papered over. <strong>Doors 6–9 have no adoption path, deliberately</strong>
+ * ({@link #projectsAdministeredOnlyByInheritance} carries the argument): {@link #adoptAll}
+ * writes a Team lead row, which would <em>narrow</em> an adopter who currently inherits
+ * something wider.
+ *
+ * <p><strong>In the shipped configuration every one of doors 6–9 is free.</strong> The
+ * workspace default is NULL → Contributor, which does not grant
+ * {@code project.member.manage}, and no built-in project role anyone would choose as a
+ * default does except Team lead and Project admin. So until somebody uses S7's own picker,
+ * the whole of §5 is a role-permission bit test over cached {@code RoleView}s and
+ * <strong>zero</strong> {@code existsActiveMemberWithoutProjectRole} queries — which is why
+ * it can be added to the removal path without argument.
  *
  * <p><strong>Why it matters more than it looks.</strong> {@code project.member.manage} is
  * deliberately not in {@link Permission#projectCuration()}, so the workspace-admin bypass
@@ -597,6 +625,190 @@ public class ProjectAdminGuard {
                 .map(ProjectRef::of)
                 .sorted(Comparator.comparing(ProjectRef::key))
                 .toList();
+    }
+
+    // ------------------------------------- S7: the inherited administrators (doors 6–9)
+
+    /**
+     * <strong>Door 6</strong> (S7 §5.2) — every live project of {@code workspace} whose
+     * administrators exist <em>only by inheritance</em> and whose last such administrator
+     * this workspace removal would take.
+     *
+     * <p>A project qualifies when all four hold:
+     * <ol>
+     *   <li>its <strong>mode-aware</strong> fallback ({@code defaultProjectRole}) is non-null
+     *       and grants {@code project.member.manage} unrestricted — so in a {@code STRICT}
+     *       workspace this never fires and costs one comparison per project;</li>
+     *   <li>it has <strong>no</strong> explicit administering {@code project_members} row
+     *       (ACTIVE users, administering role ids — the same filter the locked paths use);</li>
+     *   <li>the leaving member has <strong>no</strong> explicit row there, so they were one of
+     *       the inherited administrators. A project that already had none cannot lose its
+     *       last;</li>
+     *   <li>nobody else is standing on the fallback
+     *       ({@link WorkspaceMemberRepository#existsActiveMemberWithoutProjectRole}) — the same
+     *       both-halves proof {@link #cannotBeStranded} insists on, for the same reason: "the
+     *       default grants it" alone is wrong in the dangerous direction.</li>
+     * </ol>
+     *
+     * <p><strong>Mode-aware, and it must stay so.</strong> Condition 1 asks
+     * {@code WorkspaceAccessService.defaultProjectRole}, never
+     * {@code declaredDefaultProjectRole}: in {@code STRICT} nothing is inherited, so a
+     * project's administrators are exactly its explicit administering rows and this door does
+     * not exist.
+     *
+     * <p><strong>No adoption path, and — stated honestly, after round 2 got it wrong — the
+     * actor cannot satisfy this refusal themselves.</strong>
+     *
+     * <p>The old wording claimed the H1 test was met "because the default that is about to
+     * stop mattering still grants them {@code project.member.manage} today". It does not
+     * grant it to <em>them</em>. Work the conditions through: condition 4 excludes only the
+     * leaver, so if the actor had no explicit row here they would be standing on the fallback
+     * and this door would not fire at all; and condition 2 says no explicit row administers.
+     * Therefore <strong>whenever door 6 fires, the actor holds an explicit, non-administering
+     * row in that project</strong> — the person still inheriting {@code project.member.manage}
+     * is the member being removed, nobody else. So the actor cannot add an administrator
+     * there, cannot change that project's default, and cannot adopt it; and
+     * {@code project.member.manage} is deliberately outside {@link Permission#projectCuration()},
+     * so being the workspace Owner does not help either. The one exception is a
+     * <em>workspace</em> role carrying {@code project.administer.all}, which grants all twenty
+     * project permissions everywhere — no built-in holds it.
+     *
+     * <p><strong>Two remedies exist, and neither is the actor's alone</strong>, which is worth
+     * knowing before this arrives as "the member cannot be removed at all":
+     * <ol>
+     *   <li>anybody still standing on the fallback — by construction, the departing member —
+     *       adds an explicit administrator to the project before the removal;</li>
+     *   <li>an Owner mints {@code project.administer.all} onto a custom workspace role (they
+     *       are exempt from the definition ceiling <em>precisely</em> so that permission is
+     *       mintable) and grants it to the actor, who then holds
+     *       {@code project.member.manage} in every project and can clear condition 2.</li>
+     * </ol>
+     * That is a real cost and it is not pretty. It is accepted here rather than papered over
+     * because the alternative — extending {@link #adoptAll} to this door — is new
+     * <em>self-grant</em> surface: adoption would have to UPDATE the actor's existing row
+     * rather than insert one, and {@link StrandedProjects}' private constructor exists so that
+     * {@code adoptAll} can never be handed a candidate set that was not derived under the lock,
+     * which an aggregate like this one cannot be. Both are decisions for a reviewed slice, not
+     * for a review round. Whoever takes them: the {@link Adoptability#WOULD_DEMOTE} argument
+     * below does <strong>not</strong> apply to the adopter here — they hold an explicit row, so
+     * adopting would widen them, not narrow them. It applies to the <em>leaver</em>, and the
+     * leaver is not the one adopting.
+     *
+     * <p><strong>Advisory, like doors 4–5.</strong> Conditions 2 and 4 are aggregates and an
+     * aggregate cannot take {@code FOR UPDATE}. The locked invariant remains the per-row one.
+     *
+     * <p>Cost on the shipped configuration: one role-id lookup and one project list, then a
+     * bit test per project that answers "no" — no existence check is issued at all.
+     */
+    @Transactional(readOnly = true)
+    public List<ProjectRef> projectsAdministeredOnlyByInheritance(Workspace workspace,
+                                                                  UUID leavingUserId) {
+        var candidates = projectRepository.findAllByWorkspaceAndArchivedAtIsNull(workspace).stream()
+                // Condition 1, first because it is free: a cached RoleView and one bit test.
+                .filter(p -> administersByInheritance(workspace, p))
+                .toList();
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        var roleIds = administeringRoleIds(workspace.getId());
+        var withExplicitAdmin = roleIds.isEmpty()
+                ? Set.<UUID>of()
+                : Set.copyOf(projectMemberRepository.findProjectIdsWithAdministrator(workspace, roleIds));
+        var leaversProjects = Set.copyOf(
+                projectMemberRepository.findProjectIdsOfMemberInWorkspace(workspace, leavingUserId));
+        return candidates.stream()
+                .filter(p -> !withExplicitAdmin.contains(p.getId()))   // condition 2
+                .filter(p -> !leaversProjects.contains(p.getId()))     // condition 3
+                // Condition 4, last because it is the only one that costs a query per project.
+                .filter(p -> !workspaceMemberRepository.existsActiveMemberWithoutProjectRole(
+                        workspace, p, leavingUserId))
+                .map(ProjectRef::of)
+                .sorted(Comparator.comparing(ProjectRef::key))
+                .toList();
+    }
+
+    /**
+     * <strong>Doors 7, 8 and 9</strong> (S7 §5.3) — every live project of {@code workspace}
+     * that {@code after} would leave with no administrator at all, because it had them only
+     * by inheritance and the proposal takes that inheritance away.
+     *
+     * <p>A change to the mode or to either {@code default_project_role_id} demotes every
+     * inherited administrator at once, in every affected project, with no membership row
+     * touched — structurally doors 4 and 5, and invisible to every guard that predates S7.
+     * One method serves all three writes and the impact preview, so the number a user is
+     * shown and the refusal they then receive are the same computation (§4.3).
+     *
+     * <p>A project qualifies when its <strong>current effective</strong> fallback grants
+     * {@code project.member.manage}, its <strong>proposed</strong> fallback does not, it has
+     * no explicit administering row, and somebody is actually standing on the fallback.
+     * Comparing current-effective against proposed makes the guard <strong>one-way by
+     * construction</strong>: a flip from {@code STRICT} to {@code OPEN}, or any change that
+     * widens, can never strand.
+     *
+     * <p>Advisory, for {@link #projectsAdministeredOnlyByInheritance}'s reason, and with no
+     * adoption path for the same one. The remedy is satisfiable by the person refused, with
+     * nothing granted to anybody.
+     *
+     * @param liveProjects the workspace's non-archived projects, already loaded. Taken rather
+     *        than re-read so the impact preview stays at four statements however many projects
+     *        the workspace has (§4.2, AC 28)
+     */
+    @Transactional(readOnly = true)
+    public List<ProjectRef> projectsLosingLastAdministrator(Workspace workspace,
+                                                            List<Project> liveProjects,
+                                                            ProjectAccessProposal after) {
+        // §4.2 statement 4. Unconditional so the preview's statement count is the same four
+        // for every workspace; it is one indexed read of catalog data, and everything after
+        // it is free in the shipped configuration.
+        var roleIds = administeringRoleIds(workspace.getId());
+        if (roleIds.isEmpty()) {
+            return List.of();
+        }
+        var candidates = liveProjects.stream()
+                .filter(p -> administersByInheritance(workspace, p))
+                .filter(p -> {
+                    var proposed = workspaceAccess.defaultProjectRoleUnder(workspace, p, after);
+                    return proposed == null
+                           || !proposed.permissions().has(Permission.PROJECT_MEMBER_MANAGE);
+                })
+                .toList();
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        var withExplicitAdmin = Set.copyOf(
+                projectMemberRepository.findProjectIdsWithAdministrator(workspace, roleIds));
+        return candidates.stream()
+                .filter(p -> !withExplicitAdmin.contains(p.getId()))
+                .filter(p -> inheritedAdministratorSurvives(workspace, p))
+                .map(ProjectRef::of)
+                .sorted(Comparator.comparing(ProjectRef::key))
+                .toList();
+    }
+
+    /** {@link #projectsLosingLastAdministrator} for a caller that has not loaded the list. */
+    @Transactional(readOnly = true)
+    public List<ProjectRef> projectsLosingLastAdministrator(Workspace workspace,
+                                                            ProjectAccessProposal after) {
+        return projectsLosingLastAdministrator(workspace,
+                projectRepository.findAllByWorkspaceAndArchivedAtIsNull(workspace), after);
+    }
+
+    /** Refuse doors 7–9 with the per-door sentence; see {@code StrandedProjectsException}. */
+    public void requireNoInheritedAdministratorsLost(List<ProjectRef> stranded,
+                                                     String change, String remedy) {
+        if (!stranded.isEmpty()) {
+            throw StrandedProjectsException.inheritedAdministratorsLost(stranded, change, remedy);
+        }
+    }
+
+    /**
+     * Condition 1 of doors 6–9: does this project's <strong>mode-aware</strong> §5.2 fallback
+     * hand out {@code project.member.manage}? Zero queries — a cached {@link RoleView} and one
+     * bit test — which is what makes the whole of S7 §5 free until somebody uses the picker.
+     */
+    private boolean administersByInheritance(Workspace workspace, Project project) {
+        var fallback = workspaceAccess.defaultProjectRole(workspace, project);
+        return fallback != null && fallback.permissions().has(Permission.PROJECT_MEMBER_MANAGE);
     }
 
     /**

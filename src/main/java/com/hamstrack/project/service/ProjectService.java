@@ -13,11 +13,14 @@ import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
 import com.hamstrack.project.repository.*;
 import com.hamstrack.workspace.entity.Workspace;
+import com.hamstrack.workspace.exception.RoleSelectionException;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.workspace.service.ProjectAccessProposal;
 import com.hamstrack.workspace.service.ProjectContext;
 import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.RoleView;
+import com.hamstrack.workspace.service.SettableRoles;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -61,6 +64,11 @@ public class ProjectService {
     private final ProjectAdminGuard projectAdminGuard;
     /** HD-136 review round 4: {@code removeMember} takes a row lock, so it bounds the wait. */
     private final LockTimeout lockTimeout;
+    /**
+     * HD-130 (S7): the default-role picker's ceiling, rendered. One implementation shared with
+     * the workspace picker, so the greyed-out tooltip and the 403 quote the same string.
+     */
+    private final SettableRoles settableRoles;
 
     /**
      * <strong>Permission: {@code project.create}</strong> (HD-126 S3, §10.1) — a
@@ -489,6 +497,137 @@ public class ProjectService {
                 ctx.workspace().getId(), project.getId(), actor.getId(), userId,
                 current.id(), requested.id());
         return ProjectMemberResponse.of(member, requested);
+    }
+
+    // ------------------------------------------------ S7: the project default-role picker
+
+    /**
+     * <strong>P1</strong> — {@code GET /api/workspaces/{ws}/projects/{p}/default-role}
+     * (HD-130, S7 §7.2). What the project's default-access picker opens against: both links of
+     * the §5.2 chain, the workspace's mode, and the ceiling rendered.
+     *
+     * <p><strong>Permission: {@code project.member.manage}</strong>, not {@code project.edit}
+     * — the default role is membership authority, not project settings, and the two are
+     * deliberately different grants (epic §4). That is also why this is its own endpoint rather
+     * than a field on {@code PATCH /projects/{p}}: folding a second-permission field into a
+     * single-permission PATCH is how a gate gets forgotten.
+     *
+     * <p>The two ids duplicate {@code ProjectResponse.defaultRole} on purpose — a dialog is
+     * worth a self-contained read — and {@code mode} rides along so the dialog can say "this
+     * workspace is Restricted, so nothing is inherited right now" without a second fetch.
+     *
+     * <p>200 · <strong>403</strong> missing the permission · <strong>404</strong> unknown
+     * workspace, non-member, or a project not in this workspace.
+     */
+    @Transactional(readOnly = true)
+    public ProjectDefaultRoleResponse getDefaultRole(User actor, UUID workspaceId, UUID projectId) {
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.PROJECT_MEMBER_MANAGE);
+        var workspace = ctx.workspace();
+        return new ProjectDefaultRoleResponse(
+                ctx.project().getDefaultProjectRoleId(),
+                workspace.getDefaultProjectRoleId(),
+                workspace.getProjectAccessMode(),
+                // Comparand: the actor's REAL effective set in this project, and nobody is
+                // exempt — the project-scope half of §3.1.
+                settableRoles.projectRoles(workspace.getId(), ctx.permissions(), false));
+    }
+
+    /**
+     * <strong>P2</strong> — {@code PATCH /api/workspaces/{ws}/projects/{p}/default-role}
+     * (HD-130, S7 §7.2). Exactly one of {@code roleId} or {@code inherit: true}.
+     *
+     * <p><strong>{@code inherit: true} writes NULL</strong>, which means "fall back to the
+     * workspace default" — a real choice, not an absence, and the same two-choice shape the
+     * picker renders.
+     *
+     * <p>Guards, in order: {@code resolveProject} (404) → {@code project.member.manage} (403)
+     * → {@code requireAssignable(PROJECT, ws, roleId)} (422 for unknown, foreign or
+     * WORKSPACE-scoped) → the ceiling on <strong>both ends</strong> against
+     * {@code ctx.permissions()} (403) → stranding door 9 for this one project (409) →
+     * same-value no-op → mutate, save, log.
+     *
+     * <p><strong>The §4 escape does not reach here.</strong>
+     * {@link #requireGrantable} lets a holder of {@code project.member.manage} hand the
+     * built-in Project admin to <em>another member</em> regardless of the ceiling, and its
+     * {@code target != actor} constraint is load-bearing. A default has no target — or rather
+     * its target is everyone, the actor included — so extending the escape would hand all
+     * twenty project permissions to the whole workspace on the authority of one, which is
+     * precisely the escalation §11.2 exists to stop and precisely the argument HD-136's
+     * {@code adoptAll} safety case rests on. The same actor who may promote a colleague to
+     * Project admin therefore gets a 403 naming {@code issue.delete} when they aim the same
+     * role at the project default.
+     *
+     * <p><strong>Both ends, and the "current" end is sharply non-vacuous for an explicit
+     * member</strong>: a narrow custom role holding {@code project.member.manage} cannot narrow
+     * a project default of Project admin. For an actor with no explicit row it is vacuous —
+     * their {@code ctx.permissions()} already contains the default they are changing — and it
+     * costs one bit test, so both calls stay.
+     *
+     * <p>Answers the full {@code ProjectResponse} so the People card re-renders from the write.
+     */
+    @Transactional
+    public ProjectResponse setDefaultRole(User actor, UUID workspaceId, UUID projectId,
+                                          UpdateProjectDefaultRoleRequest req) {
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.PROJECT_MEMBER_MANAGE);
+        var workspace = ctx.workspace();
+        var project = ctx.project();
+
+        // Exactly one of the two, 422 otherwise — refused rather than resolved by precedence,
+        // for RoleSelectionException's reason.
+        if (req.inheritsWorkspaceDefault() == (req.roleId() != null)) {
+            // Named with THIS body's fields. The no-argument factories belong to the four
+            // membership doors and talk about `roleId` and a legacy `role` key —
+            // UpdateProjectDefaultRoleRequest has no `role`, so quoting them sent the caller
+            // looking for a field they cannot send (docs review, round 2).
+            throw req.roleId() != null
+                    ? RoleSelectionException.ambiguous("roleId", "inherit",
+                            "one names this project's own default and the other falls back to "
+                            + "the workspace's")
+                    : RoleSelectionException.required("roleId", "inherit");
+        }
+        var requested = req.roleId() == null
+                ? null
+                : roleCatalog.requireAssignable(RoleScope.PROJECT, workspace.getId(), req.roleId());
+
+        // The ceiling, both ends. `declaredDefaultProjectRole` for the current end and NOT
+        // `defaultProjectRole`: the declared default is stored in both modes and goes live
+        // again the moment the workspace flips back to OPEN, so a ceiling that only bit while
+        // OPEN would be one you step over by flipping twice (S7 §2).
+        if (requested != null) {
+            requireWithinGrantCeiling(ctx, requested, GrantCeilingAction.SETTING_DEFAULT);
+        }
+        requireWithinGrantCeiling(ctx, workspaceAccess.declaredDefaultProjectRole(workspace, project),
+                GrantCeilingAction.REPLACING_DEFAULT);
+
+        var before = project.getDefaultProjectRoleId();
+        var after = requested == null ? null : requested.id();
+
+        // Door 9: this project's own default stops granting project.member.manage while
+        // nobody holds it explicitly and somebody is standing on the fallback.
+        var proposal = ProjectAccessProposal.project(workspace, project.getId(), after);
+        projectAdminGuard.requireNoInheritedAdministratorsLost(
+                projectAdminGuard.projectsLosingLastAdministrator(workspace, List.of(project), proposal),
+                "Making “" + (requested == null
+                        ? roleCatalog.defaultProjectRole().name()
+                        : requested.name()) + "” the default",
+                "Choose a default that also manages members, or add an explicit administrator "
+                + "to this project first.");
+
+        if (java.util.Objects.equals(before, after)) {
+            // Re-sending the value already stored is a no-op, not a rejection: the picker
+            // re-sends its current selection on any partial edit, and `updated_at` must not
+            // move for a change that changes nothing.
+            return ProjectResponse.of(project, workspace, legacyRole(ctx), ctx.permissions());
+        }
+
+        // ---- mutation, immediately before the save (the @Version rule) ----
+        project.setDefaultProjectRoleId(after);
+        projectRepository.save(project);
+        log.info("project.default_role_changed workspace={} project={} actor={} from={} to={}",
+                workspace.getId(), project.getId(), actor.getId(), before, after);
+        return ProjectResponse.of(project, workspace, legacyRole(ctx), ctx.permissions());
     }
 
     /**

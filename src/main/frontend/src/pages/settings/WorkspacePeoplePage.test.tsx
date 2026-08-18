@@ -284,6 +284,29 @@ describe('WorkspacePeoplePage — removal, and the three refusals', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
   })
 
+  it('STRANDED_BY_INHERITANCE: the same shape as STRANDED_PROJECTS, the opposite remedy', async () => {
+    // HD-130 S7, door 6. Those projects have administrators only through the
+    // project's DEFAULT access, so "take them over" cannot apply — adoption
+    // writes a Team lead row, and whoever inherits holds at least that much
+    // already, so adopting would NARROW the rescuer in the project they rescued.
+    // Classifying it as its cousin would offer a button that makes things worse.
+    removeMock.mockRejectedValue(conflict(
+      'Removing this member would leave Alpha (P17) with nobody able to manage their membership',
+      { errorType: 'STRANDED_BY_INHERITANCE', projects: [{ id: 'p-17', key: 'P17', name: 'Alpha' }] }))
+
+    renderPage()
+    await openRemoveDialog()
+    await userEvent.click(screen.getByRole('button', { name: 'Remove from workspace' }))
+
+    expect(await screen.findByText(/nobody able to manage their membership/)).toBeInTheDocument()
+    expect(screen.getByText('Alpha')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Take over/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    // The remedy names something the refused person can do right now — the
+    // default that is about to matter still grants it to them today.
+    expect(screen.getByText(/the current default still lets you/)).toBeInTheDocument()
+  })
+
   it('ADOPTION_ROLE_UNREADABLE: no retry, and says it needs an operator', async () => {
     removeMock.mockRejectedValue(conflict(
       'Your membership in Alpha (P17) refers to a role that cannot be read',
