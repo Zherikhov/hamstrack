@@ -11,8 +11,7 @@ import org.springframework.util.Assert;
 
 /**
  * <strong>Bound how long this transaction will wait for a row lock</strong> (HD-136 review
- * round 4), for the handful of transactions that take {@code FOR UPDATE} on membership
- * rows.
+ * round 4), for the handful of transactions that take one.
  *
  * <p><strong>Why the locks need a bound at all, when they were argued to be
  * deadlock-safe.</strong> Every locking read in the membership paths is deliberately
@@ -67,10 +66,19 @@ import org.springframework.util.Assert;
  * the misuse that would make it a silent no-op: outside a transaction PostgreSQL downgrades
  * {@code SET LOCAL} to a WARNING and the guard quietly stops guarding.
  *
- * <p>Not applied everywhere. Ordinary requests take no row locks at all, and adding a
- * round-trip to every transaction to bound a wait that cannot happen would be a cost with
- * no matching risk. It belongs on the transactions that take {@code FOR UPDATE}: today the
- * two membership mutations and the project-member removal.
+ * <p><strong>Where it belongs, as a rule rather than a list.</strong> Every transaction that
+ * takes a row lock — in <em>any</em> mode, {@code FOR UPDATE} and {@code FOR NO KEY UPDATE}
+ * alike — or that writes a row another lock-taking transaction holds, calls this as its
+ * first statement. Not applied everywhere: ordinary requests take no row locks at all, and a
+ * round-trip added to every transaction to bound a wait that cannot happen is a cost with no
+ * matching risk.
+ *
+ * <p>This paragraph used to enumerate the call sites ("the two membership mutations and the
+ * project-member removal"). It was wrong within one ticket and wronger within two, because a
+ * list is maintained by whoever remembers it exists and this file is the first thing a lock
+ * author reads. The enumeration is deliberately gone — grep for
+ * {@code applyToCurrentTransaction} for the current set, and state the rule here instead of
+ * a census of it.
  */
 @Component
 @RequiredArgsConstructor

@@ -1,6 +1,8 @@
 package com.hamstrack.workspace.service;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.PermissionSet;
 import com.hamstrack.common.security.RoleScope;
@@ -75,6 +77,8 @@ public class WorkspaceAccessService {
     private final ProjectMemberRepository projectMemberRepository;
     private final IssueRepository issueRepository;
     private final RoleCatalog roleCatalog;
+    /** HD-127 §3c: a corrupt role_id is survivable on the list paths, so it must be alertable. */
+    private final ProductMetrics metrics;
 
     /**
      * Resolve the workspace and verify the actor's membership. Throws
@@ -88,7 +92,7 @@ public class WorkspaceAccessService {
         var membership = workspaceMemberRepository.findByWorkspaceAndUser(workspace, actor)
                 .orElseThrow(WorkspaceNotFoundException::new);
         var role = requireRole(membership.getRole().getId(),
-                RoleScope.WORKSPACE, workspace.getId(), "workspace_members");
+                RoleScope.WORKSPACE, workspace.getId(), RoleScopeViolationSource.WORKSPACE_MEMBERS);
         return new WorkspaceContext(workspace, membership, role, role.permissions());
     }
 
@@ -157,7 +161,7 @@ public class WorkspaceAccessService {
         var explicit = projectMemberRepository.findByProjectAndUser(project, actor);
         var projectRole = explicit
                 .map(m -> requireRole(m.getRole().getId(),
-                        RoleScope.PROJECT, ws.workspace().getId(), "project_members"))
+                        RoleScope.PROJECT, ws.workspace().getId(), RoleScopeViolationSource.PROJECT_MEMBERS))
                 .orElseGet(() -> defaultProjectRole(ws.workspace(), project));
         return new ProjectContext(ws.workspace(), ws.membership(), project,
                 ws.workspaceRole(), ws.permissions(),
@@ -202,11 +206,11 @@ public class WorkspaceAccessService {
                 .map(membership -> {
                     try {
                         var workspaceRole = requireRole(membership.getRole().getId(),
-                                RoleScope.WORKSPACE, workspace.getId(), "workspace_members");
+                                RoleScope.WORKSPACE, workspace.getId(), RoleScopeViolationSource.WORKSPACE_MEMBERS);
                         var projectRole = projectMemberRepository
                                 .findByProjectAndUser(ctx.project(), subject)
                                 .map(m -> requireRole(m.getRole().getId(),
-                                        RoleScope.PROJECT, workspace.getId(), "project_members"))
+                                        RoleScope.PROJECT, workspace.getId(), RoleScopeViolationSource.PROJECT_MEMBERS))
                                 .orElseGet(() -> defaultProjectRole(workspace, ctx.project()));
                         return effectiveProjectPermissions(workspaceRole.permissions(), projectRole);
                     } catch (WorkspaceNotFoundException e) {
@@ -253,6 +257,10 @@ public class WorkspaceAccessService {
                     fromProject ? "Project" : "Workspace",
                     fromProject ? project.getId() : workspace.getId(),
                     defaultId, workspace.getId(), role.scope(), role.workspaceId());
+            // Same signal as reportScopeViolation, from the one call site that recovers rather
+            // than refusing: the fallback keeps the workspace working, so without a counter a
+            // permanently bad default column is invisible except in the log stream.
+            metrics.roleScopeViolation(RoleScopeViolationSource.DEFAULT_PROJECT_ROLE);
             return roleCatalog.defaultProjectRole();
         }
         return role;
@@ -288,16 +296,88 @@ public class WorkspaceAccessService {
      *               clue as to which row is wrong
      */
     @Transactional(readOnly = true)
-    public RoleView requireRole(UUID roleId, RoleScope expected, UUID workspaceId, String source) {
+    public RoleView requireRole(UUID roleId, RoleScope expected, UUID workspaceId,
+                                RoleScopeViolationSource source) {
         var role = roleCatalog.view(roleId);
         if (!isUsableAs(role, expected, workspaceId)) {
-            log.error("{} references role {} (key={}, scope={}, owner={}) which is not a {} role "
-                      + "of workspace {}. Refusing the request.",
-                    source, role.id(), role.key(), role.scope(), role.workspaceId(),
-                    expected, workspaceId);
+            reportScopeViolation(role, expected, workspaceId, source);
             throw new WorkspaceNotFoundException();
         }
         return role;
+    }
+
+    /**
+     * <strong>{@link #requireRole}, degraded instead of refusing</strong> — for
+     * <em>collection</em> and <em>third-party</em> reads only (HD-127 §3b).
+     *
+     * <p>The assertion is the same; what differs is the blast radius of failing it. On a
+     * single-resource read the answer is about the caller and one 404 is proportionate. On
+     * a list it is not: one corrupt {@code role_id} would 404 the caller's <em>entire</em>
+     * workspace list, project list or People tab because of one row — often somebody else's
+     * row. So these four call sites — {@code WorkspaceService.listForUser},
+     * {@code WorkspaceService.listMembers}, {@code ProjectService.list},
+     * {@code ProjectService.listMembers} — keep the entry and render it with no role.
+     *
+     * <p><strong>It must NOT be applied to {@code requireMember} or
+     * {@code projectContext}.</strong> Degrading the caller's own workspace membership is
+     * not "empty permissions": in an {@code OPEN} workspace the project-role fallback is
+     * independent of the workspace role, so an empty workspace role would still leave the
+     * caller inheriting <strong>Contributor in every project of the workspace</strong>.
+     * Turning a 404 into Contributor-everywhere is a widening, and an invisible one. The
+     * consequence of keeping the 404 there is intended: a corrupt row makes the workspace
+     * appear in {@code GET /workspaces} and 404 on {@code GET /workspaces/{id}} — because
+     * <em>a list is a directory, a detail read is an authorization</em>. Loud, bounded to
+     * one entry, and strictly better than a user who can see no workspace at all.
+     *
+     * <p><strong>Empty means empty, and never the foreign role.</strong> Callers render
+     * {@code myPermissions} as {@code []} (never absent — an absent field makes a client
+     * fall back to permissive rendering) and the role key/name as JSON {@code null}. The one
+     * genuine leak in the vicinity is precisely that name: {@code listMembers} calls the
+     * assertion <em>because</em> it renders it, so emitting the role we just refused would
+     * defeat the whole check.
+     *
+     * <p><strong>The degrade cannot mask a tenancy bug.</strong> Whether somebody is a member
+     * of a workspace is decided by the {@code workspace_members} row and its
+     * {@code workspace_id} join, before and independently of this; the role id answers only
+     * <em>what may they do</em>, and degrading it can only ever narrow —
+     * {@code PermissionSet.empty()} is the floor. Nothing becomes reachable that was not
+     * already reachable.
+     *
+     * <p><strong>Keyed on the assertion failing, never on the role being absent.</strong>
+     * {@code RolePermissionCache.byId} throws {@code IllegalStateException} for an id that
+     * resolves to no row (a dangling FK — impossible while {@code ON DELETE} is NO ACTION,
+     * hence a 500 by design), and that is deliberately allowed to propagate. Do <strong>not
+     * </strong> widen this to {@code catch (Exception)}: a broken migration would then turn
+     * into a silent empty permission set on every list in the product.
+     */
+    @Transactional(readOnly = true)
+    public Optional<RoleView> resolveRoleOrDegrade(UUID roleId, RoleScope expected,
+                                                   UUID workspaceId,
+                                                   RoleScopeViolationSource source) {
+        var role = roleCatalog.view(roleId);
+        if (!isUsableAs(role, expected, workspaceId)) {
+            reportScopeViolation(role, expected, workspaceId, source);
+            return Optional.empty();
+        }
+        return Optional.of(role);
+    }
+
+    /**
+     * One ERROR line and one counter increment for both paths above, so the two cannot drift
+     * apart in what they report.
+     *
+     * <p>The log names the table, the id and the expected scope — the operator's only clue
+     * as to which row is wrong. The counter exists because the degrade makes the condition
+     * <em>survivable</em>: a permanently corrupt row would otherwise log at ERROR on every
+     * list request for ever, which is a Loki bill rather than a signal.
+     */
+    private void reportScopeViolation(RoleView role, RoleScope expected, UUID workspaceId,
+                                      RoleScopeViolationSource source) {
+        log.error("{} references role {} (key={}, scope={}, owner={}) which is not a {} role "
+                  + "of workspace {}. Refusing the request.",
+                source.tag(), role.id(), role.key(), role.scope(), role.workspaceId(),
+                expected, workspaceId);
+        metrics.roleScopeViolation(source);
     }
 
     private boolean isUsableAs(RoleView role, RoleScope expected, UUID workspaceId) {

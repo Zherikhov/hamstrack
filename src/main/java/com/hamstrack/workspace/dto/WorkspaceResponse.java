@@ -15,13 +15,19 @@ import java.util.UUID;
  *                      (§5.3); S5 removed the last SPA gate that did. A plain string
  *                      since HD-126 (S3) deleted the ordinal enum, with the identical
  *                      wire values the enum serialised as.
+ *                      <p><strong>{@code null} on the LIST endpoint only</strong>, when
+ *                      the membership's {@code role_id} fails the scope/ownership
+ *                      assertion (HD-127 §3b): the entry stays so the caller can still see
+ *                      their workspace, and the role we just refused is emphatically not
+ *                      rendered in its place.
  * @param myPermissions the caller's effective workspace permissions, as flat keys
  *                      ({@code ["workspace.edit", "label.manage:own"]} — §6.4). This is
  *                      the <strong>only</strong> permitted input to a UI gate. It rides a
  *                      response the SPA already fetches, so gating costs zero extra
  *                      requests, and it is <strong>never absent</strong>: an empty list
  *                      is a real answer, a missing field would make a client fall back to
- *                      permissive rendering (§12).
+ *                      permissive rendering (§12). A degraded row yields {@code []}, which
+ *                      is the floor and can only narrow.
  */
 public record WorkspaceResponse(
         UUID id,
@@ -34,5 +40,19 @@ public record WorkspaceResponse(
     public static WorkspaceResponse of(Workspace w, RoleView role) {
         return new WorkspaceResponse(w.getId(), w.getSlug(), w.getName(),
                 role.key(), role.permissions().asWireStrings(), w.getCreatedAt());
+    }
+
+    /**
+     * The degraded form — the workspace, with no claim about what the caller may do in it.
+     *
+     * <p>Reachable only from {@code WorkspaceService.listForUser}. The detail read
+     * ({@code GET /workspaces/{id}}) still 404s the same row on purpose: <em>a list is a
+     * directory, a detail read is an authorization</em>, and degrading the caller's own
+     * single-resource resolution would leave them inheriting Contributor in every project
+     * of an OPEN workspace rather than nothing.
+     */
+    public static WorkspaceResponse degraded(Workspace w) {
+        return new WorkspaceResponse(w.getId(), w.getSlug(), w.getName(),
+                null, List.of(), w.getCreatedAt());
     }
 }

@@ -15,6 +15,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -98,12 +99,35 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
         addMember(ctx, lead.token(), newcomer.user().getId(), "MEMBER")
                 .andExpect(status().isCreated());
 
-        // Handing out MANAGER is not: it includes permissions they do not hold, and the
-        // 403 names the first of them rather than saying "insufficient role".
+        // Handing out MANAGER to SOMEBODY ELSE is now allowed — deliberately. It is the §4
+        // escape, and it is the only fixed exception to the ceiling: without it, a project
+        // whose only member-managers carry a role narrower than Project admin can never
+        // acquire project.archive or project.taxonomy.manage through any endpoint, by
+        // anybody — not even a workspace Owner, who holds no project.member.manage in a
+        // project they are not a member of. The alternative is a project whose repair is a
+        // hand-written UPDATE.
         var other = actorWith(ctx, "MEMBER", null);
         addMember(ctx, lead.token(), other.user().getId(), "MANAGER")
+                .andExpect(status().isCreated());
+
+        // What keeps that from being self-escalation is `target != actor`, and it is
+        // load-bearing rather than decorative: without it project.member.manage would imply
+        // all 20 project permissions for its holder, the project-scope ceiling would be
+        // decorative, and HD-136's adoption path — which hands out Team lead on the promise
+        // that nothing it grants can destroy anything — would become a two-call route to
+        // issue.delete.
+        patchMember(ctx, lead.token(), lead.user().getId(), BuiltInRoles.PROJECT_MANAGER)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("cannot grant")));
+
+        // And the escape is ONE FIXED TARGET, not a general exemption: any other role
+        // holding something the lead does not is still refused, naming the permission.
+        var wider = customProjectRole(ctx, "wider-than-lead",
+                Permission.ISSUE_CREATE, Permission.ISSUE_DELETE);
+        var third = actorWith(ctx, "MEMBER", null);
+        addMemberById(ctx, lead.token(), third.user().getId(), wider)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.detail", containsString("issue.delete")));
 
         // Nor may they remove the project admin who outranks them (the other door: HD-132's
         // "only checking the new role would let an ADMIN demote an OWNER").
@@ -111,7 +135,7 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(status().isForbidden());
 
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
-        assert projectMemberRepository.findByProjectAndUser(project, other.user()).isEmpty()
+        assert projectMemberRepository.findByProjectAndUser(project, third.user()).isEmpty()
                 : "the refused grant created a membership anyway";
         assert projectMemberRepository.findByProjectAndUser(project, ctx.owner()).isPresent()
                 : "the refused removal deleted the project admin anyway";
@@ -341,5 +365,44 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
     private ResultActions removeMember(Ctx ctx, String token, UUID userId) throws Exception {
         return mockMvc.perform(delete(membersBase(ctx) + "/" + userId)
                 .header("Authorization", "Bearer " + token));
+    }
+
+    private ResultActions addMemberById(Ctx ctx, String token, UUID userId, UUID roleId) throws Exception {
+        return mockMvc.perform(post(membersBase(ctx))
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"userId\":\"" + userId + "\",\"roleId\":\"" + roleId + "\"}"));
+    }
+
+    private ResultActions patchMember(Ctx ctx, String token, UUID userId, UUID roleId) throws Exception {
+        return mockMvc.perform(patch(membersBase(ctx) + "/" + userId)
+                .header("Authorization", "Bearer " + token)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"roleId\":\"" + roleId + "\"}"));
+    }
+
+    /**
+     * A PROJECT-scoped custom role held by nobody — the fixture for "a role wider than the
+     * actor" that {@code actorWithCustomProjectRole} cannot give, since that one also assigns
+     * it. Written through the {@link jakarta.persistence.EntityManager} rather than the S4
+     * editor so this suite keeps testing the membership guards, not the role editor.
+     */
+    private UUID customProjectRole(Ctx ctx, String key, Permission... permissions) {
+        return txTemplate.execute(status -> {
+            var role = new com.hamstrack.workspace.entity.Role();
+            role.setWorkspaceId(ctx.wsId());
+            role.setScope(com.hamstrack.common.security.RoleScope.PROJECT);
+            role.setKey(key);
+            role.setName(key);
+            role.setBuiltIn(false);
+            var grants = new java.util.LinkedHashSet<com.hamstrack.workspace.entity.RolePermission>();
+            for (var p : permissions) {
+                grants.add(new com.hamstrack.workspace.entity.RolePermission(p, false));
+            }
+            role.setPermissions(grants);
+            entityManager.persist(role);
+            entityManager.flush();
+            return role.getId();
+        });
     }
 }

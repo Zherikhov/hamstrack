@@ -7,6 +7,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.Repository;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -123,4 +124,110 @@ public interface RoleRepository extends Repository<Role, UUID> {
              ORDER BY r.builtIn DESC, r.position ASC, r.name ASC
             """)
     List<Role> findAvailable(@Param("workspaceId") UUID workspaceId, @Param("scope") RoleScope scope);
+
+    // ---------------------------------------------------------- S4: the roles screen
+    //
+    // Every method below is a §12 review moment. Two shapes only: workspace-filtered, or
+    // fed an id that a workspace-filtered read already proved reachable. Nothing here
+    // resolves a bare id.
+
+    /**
+     * A role this workspace may <strong>address as a resource</strong>: one of its own, or
+     * a built-in template. No scope parameter, because the caller is naming a specific row
+     * rather than choosing one to assign.
+     *
+     * <p><strong>Must never be reached from a request BODY.</strong> That is
+     * {@link #findAssignable}'s job, and the difference is not stylistic: a role id in a
+     * path is an <em>address</em>, so "not addressable here" is 404 and the namespace stays
+     * opaque; a role id in a body is a <em>value</em>, so every unusable one — foreign,
+     * wrong-scope, nonsense — must collapse into a single 422 or the pair of codes becomes
+     * an oracle for whether a role exists in another tenant ({@code UnknownRoleException}
+     * explains the shape). This finder cannot answer the scope half of that question at
+     * all, which is exactly why it is not allowed near an assignment.
+     */
+    @Query("""
+            SELECT r FROM Role r
+             WHERE r.id = :id
+               AND (r.workspaceId IS NULL OR r.workspaceId = :workspaceId)
+            """)
+    Optional<Role> findInWorkspace(@Param("id") UUID id, @Param("workspaceId") UUID workspaceId);
+
+    /**
+     * {@link #findAvailable} with the grants attached — one statement for the whole Roles
+     * screen instead of 1 + N.
+     *
+     * <p>The N+1 it removes is not theoretical: every role response carries a derived
+     * {@code assignment} block computed against every other role of the same scope, so a
+     * lazily-fetched {@code permissions} collection would be initialised for all of them
+     * on every list. Hibernate 6+ de-duplicates {@code JOIN FETCH} results for entity
+     * queries, so no {@code DISTINCT} is needed (and adding one would push a needless
+     * sort onto the database).
+     *
+     * <p>{@code scopes} is a collection rather than a single value because
+     * {@code GET /roles} takes an <em>optional</em> {@code scope} filter, and the absent
+     * case must stay one query rather than two.
+     */
+    @Query("""
+            SELECT r FROM Role r LEFT JOIN FETCH r.permissions
+             WHERE r.scope IN :scopes
+               AND (r.workspaceId IS NULL OR r.workspaceId = :workspaceId)
+             ORDER BY r.scope ASC, r.builtIn DESC, r.position ASC, r.name ASC
+            """)
+    List<Role> findAvailableWithPermissions(@Param("workspaceId") UUID workspaceId,
+                                            @Param("scopes") Collection<RoleScope> scopes);
+
+    /**
+     * How many custom roles this workspace already owns, across <strong>both</strong>
+     * scopes — the {@code app.roles.max-custom-per-workspace} bound. Built-in templates
+     * have {@code workspace_id IS NULL} and are shared by every workspace, so they can
+     * never be counted here.
+     */
+    long countByWorkspaceIdAndBuiltInFalse(UUID workspaceId);
+
+    /**
+     * The display-name uniqueness guard for {@code (workspace, scope)}. Application-only:
+     * a race yields two same-named roles, which is cosmetic, and a partial unique index on
+     * {@code LOWER(name)} would need a migration this slice deliberately does not have.
+     * Built-in names are checked separately, in code, because their rows belong to no
+     * workspace and so are invisible to this predicate.
+     */
+    boolean existsByWorkspaceIdAndScopeAndNameIgnoreCase(UUID workspaceId, RoleScope scope, String name);
+
+    /**
+     * Whether a generated key is already taken in {@code (workspace, scope)} — the
+     * collision half of key generation. Built-in keys are excluded by the same
+     * {@code workspace_id} filter and are guarded in code instead, against
+     * {@code BuiltInRoles}: {@code roles_scope_key_uk} is {@code UNIQUE NULLS NOT DISTINCT},
+     * so the database would happily accept a workspace-owned role keyed {@code ADMIN}
+     * beside the built-in one.
+     */
+    boolean existsByWorkspaceIdAndScopeAndKey(UUID workspaceId, RoleScope scope, String key);
+
+    /** Next display position within a scope. Null when the workspace owns none yet. */
+    @Query("""
+            SELECT MAX(r.position) FROM Role r
+             WHERE r.workspaceId = :workspaceId AND r.scope = :scope
+            """)
+    Short maxPosition(@Param("workspaceId") UUID workspaceId, @Param("scope") RoleScope scope);
+
+    /**
+     * Re-declared from {@code JpaRepository} rather than inherited — that is the point of
+     * this interface. Only {@code RoleService} calls them, and only on a {@link Role} that
+     * {@link #findInWorkspace} already proved this workspace may address.
+     */
+    Role save(Role role);
+
+    /** @see #save */
+    void delete(Role role);
+
+    /**
+     * Flush pending role writes.
+     *
+     * <p>Needed by delete-with-reassign for the ordinary Hibernate reason rather than the
+     * documented "replace children wholesale" one: the bulk reassign {@code UPDATE}s and
+     * the role {@code DELETE} must reach the database in that order, and JPQL bulk
+     * statements bypass the persistence context, so an unflushed {@code delete} would
+     * otherwise be ordered by the {@code ActionQueue} rather than by the code.
+     */
+    void flush();
 }

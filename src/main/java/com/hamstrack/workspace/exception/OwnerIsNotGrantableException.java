@@ -25,4 +25,30 @@ public class OwnerIsNotGrantableException extends AppException {
         super("Only an Owner can assign the Owner role or administer another Owner",
                 HttpStatus.FORBIDDEN);
     }
+
+    private OwnerIsNotGrantableException(String message) {
+        super(message, HttpStatus.FORBIDDEN);
+    }
+
+    /**
+     * <strong>An invitation never grants Owner — not even one issued by an Owner</strong>
+     * (HD-127 round-3 review). {@code WorkspaceService.inviteMember} states the rule at the
+     * front door: you promote a colleague to owner, you do not invite a stranger as one.
+     * {@code RoleService.delete}'s bulk reassign is the back one — repointing a pending
+     * invite at the built-in Owner role is issuing exactly that invitation, and the Owner
+     * exemption in the grant ceiling returns before this clause can fire, so the rule had a
+     * hole that a test asserted as desired behaviour.
+     *
+     * <p>Refusal rather than a silent purge of the invites: they belong to somebody else,
+     * the actor did not ask for them to be destroyed, and the remedy is one move away —
+     * reassign to any other role and promote the invitee once they have accepted.
+     */
+    public static OwnerIsNotGrantableException viaInvite(long pendingInvites) {
+        return new OwnerIsNotGrantableException(
+                "This role has " + pendingInvites + " pending invitation"
+                + (pendingInvites == 1 ? "" : "s")
+                + ", and an invitation can never grant the Owner role — ownership is handed "
+                + "over to an existing member, not offered to somebody who has not joined "
+                + "yet. Reassign to another role, then promote them once they accept");
+    }
 }

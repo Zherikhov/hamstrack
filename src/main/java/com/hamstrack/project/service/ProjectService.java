@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.exception.UserNotFoundException;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
@@ -14,11 +15,13 @@ import com.hamstrack.project.repository.*;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.service.ProjectContext;
+import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.service.RoleCatalog;
 import com.hamstrack.workspace.service.RoleView;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -30,6 +33,7 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ProjectService {
 
     /**
@@ -121,11 +125,25 @@ public class ProjectService {
                     // Same scope+ownership assertion the detail path applies (H3): a list
                     // that skipped it would render controls the detail view then refuses.
                     // Cache hit, so it costs no query per row.
-                    var effectiveRole = explicit != null
-                            ? workspaceAccess.requireRole(explicit.getRole().getId(),
-                                    RoleScope.PROJECT, workspace.getId(), "project_members")
-                            : workspaceAccess.defaultProjectRole(workspace, p);
-                    return ProjectResponse.of(p, legacyRole(explicit),
+                    //
+                    // DEGRADED rather than refusing (HD-127 §3b): one corrupt role_id must
+                    // not cost the caller their entire project list. Empty means the
+                    // explicit role contributes NOTHING — deliberately not a fall-through
+                    // to the §5.2 default, which would WIDEN a member whose narrow row is
+                    // exactly what the corruption destroyed. `myRole` goes null for the
+                    // same reason WorkspaceResponse.degraded does: never echo the role the
+                    // assertion just refused.
+                    var degraded = explicit != null
+                            && workspaceAccess.resolveRoleOrDegrade(explicit.getRole().getId(),
+                                    RoleScope.PROJECT, workspace.getId(),
+                                    RoleScopeViolationSource.PROJECT_MEMBERS).isEmpty();
+                    RoleView effectiveRole = null;
+                    if (explicit == null) {
+                        effectiveRole = workspaceAccess.defaultProjectRole(workspace, p);
+                    } else if (!degraded) {
+                        effectiveRole = roleCatalog.view(explicit.getRole().getId());
+                    }
+                    return ProjectResponse.of(p, degraded ? null : legacyRole(explicit),
                             workspaceAccess.effectiveProjectPermissions(ws.permissions(), effectiveRole));
                 })
                 .toList();
@@ -241,9 +259,15 @@ public class ProjectService {
         // anything, so once S4 ships custom roles a foreign or corrupt `project_members
         // .role_id` would render another workspace's role name straight into the People
         // tab. Free on a warm cache — no query per row.
+        // Degraded, not refused (HD-127 §3b): the whole People tab must not 404 because of
+        // one other member's row — and the refused role's key is exactly what must NOT
+        // appear, so that entry renders with `role: null`.
         return projectMemberRepository.findAllByProjectWithUser(ctx.project()).stream()
-                .map(m -> ProjectMemberResponse.of(m, workspaceAccess.requireRole(
-                        m.getRole().getId(), RoleScope.PROJECT, ownerWorkspaceId, "project_members").key()))
+                .map(m -> ProjectMemberResponse.of(m,
+                        workspaceAccess.resolveRoleOrDegrade(m.getRole().getId(),
+                                        RoleScope.PROJECT, ownerWorkspaceId,
+                                        RoleScopeViolationSource.PROJECT_MEMBERS)
+                                .map(RoleView::key).orElse(null)))
                 .toList();
     }
 
@@ -273,13 +297,16 @@ public class ProjectService {
         ctx.permissions().require(Permission.PROJECT_MEMBER_MANAGE);
         var workspace = ctx.workspace();
         var project = ctx.project();
-        var granted = assignableRole(req.role());
-        requireWithinGrantCeiling(ctx, granted, GrantCeilingAction.GRANTING);
+        // Exactly one of roleId / role — 422 otherwise. The legacy key keeps its
+        // VIEWER -> Contributor translation; the id path deliberately does not.
+        var granted = roleCatalog.requireAssignable(RoleScope.PROJECT, workspace.getId(),
+                req.roleId(), req.role() == null ? null : storedRole(req.role()));
         // Only workspace members can join a project — a bare findById would expose
         // any user's email/name across tenants via the response
         var user = userRepository.findById(req.userId())
                 .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
                 .orElseThrow(UserNotFoundException::new);
+        requireGrantable(ctx, actor, user.getId(), granted, "add");
         if (projectMemberRepository.existsByProjectAndUser(project, user)) {
             throw new AlreadyProjectMemberException();
         }
@@ -288,7 +315,8 @@ public class ProjectService {
         member.setUser(user);
         member.setRole(roleCatalog.reference(granted.id()));
         projectMemberRepository.save(member);
-        return ProjectMemberResponse.of(member, storedRole(req.role()));
+        // Echo what was STORED, which on the roleId path is simply the role that was named.
+        return ProjectMemberResponse.of(member, granted.key());
     }
 
     /**
@@ -347,8 +375,8 @@ public class ProjectService {
                 .orElseThrow(ProjectNotFoundException::new);
         var member = projectMemberRepository.findByProjectAndUser(project, user)
                 .orElseThrow(ProjectNotFoundException::new);
-        // What they hold now…
-        requireWithinGrantCeiling(ctx, roleCatalog.view(member.getRole().getId()), GrantCeilingAction.ACTING_ON);
+        // What they hold now… — asserted, not merely dereferenced; see updateMember.
+        requireWithinGrantCeiling(ctx, requireProjectRole(ctx, member), GrantCeilingAction.ACTING_ON);
         // …and what this removal would leave them holding (null in a STRICT workspace).
         var inherited = workspaceAccess.defaultProjectRole(ctx.workspace(), project);
         if (inherited != null) {
@@ -358,21 +386,173 @@ public class ProjectService {
         projectMemberRepository.delete(member);
     }
 
+
+    /**
+     * <strong>Change an existing project member's role</strong> (HD-127, M4) — and
+     * <strong>door 3</strong> of the stranding enumeration: a demotion strands a project
+     * with no row removed at all, which neither HD-136 guard could see.
+     *
+     * <p>Before this existed, correcting somebody's project role meant remove + add: two
+     * calls, each strand-checked separately, with the member dropped onto the workspace
+     * default in between (in an {@code OPEN} workspace) and a hole in the middle where the
+     * project genuinely had no administrator.
+     *
+     * <p><strong>The order of the first five statements is the rule, not a style.</strong>
+     * <ol>
+     *   <li>bound the lock wait, before anything can queue on a lock;</li>
+     *   <li>resolve and authorize, before an unauthorized caller can take one;</li>
+     *   <li>resolve the requested role, before the target is read — so a bad role id never
+     *       depends on who it was aimed at (mirrors
+     *       {@code WorkspaceMemberService.updateRole});</li>
+     *   <li>lock the administrator set <strong>unconditionally</strong>, before the target
+     *       row is read: deciding whether to lock from an unlocked read is the race the lock
+     *       exists to close, and this is the third time the project has had to learn it
+     *       (HD-132, HD-136);</li>
+     *   <li>only then read the target.</li>
+     * </ol>
+     *
+     * <p><strong>The ceiling applies to both ends</strong> — the target's current role
+     * ({@code ACTING_ON}) and the requested one ({@code GRANTING}) — for HD-132's reason:
+     * checking only the new role would let a narrow member-manager demote somebody wider
+     * than themselves, which is the same escalation by the other door. The §4 escape may
+     * exempt the {@code GRANTING} half; it never exempts {@code ACTING_ON}.
+     *
+     * <p><strong>The last-administrator check is skipped for a promotion.</strong> A role
+     * that itself grants {@code project.member.manage} cannot strand anything, so requiring
+     * a second administrator before you may widen the only one would make the invariant
+     * unfixable — the same shape as {@code WorkspaceMemberService.updateRole}'s
+     * {@code if (!requested.isBuiltIn(WORKSPACE_OWNER))}.
+     *
+     * <p>Self-demotion is allowed, subject to that check — mirroring workspace
+     * self-demotion, and refused by the guard exactly when it would orphan the project.
+     *
+     * <p><strong>Do not "fix" the guard's two documented conservatisms on this path.</strong>
+     * It counts only explicit {@code project_members} rows and does not consult
+     * {@code project.administer.all}. A demotion's target is by definition a member with an
+     * explicit row — the one person whose default-role inheritance does not apply — so
+     * counting inheritance here would be counting a fallback that cannot reach them.
+     * {@code ProjectAdminGuard.cannotBeStranded} already asks the inheritance question
+     * correctly, for the case where somebody <em>else</em> stands on the fallback.
+     *
+     * <p>200 · <strong>403</strong> missing {@code project.member.manage}, or a ceiling
+     * refusal naming the permission · <strong>404</strong> unknown workspace, non-member,
+     * project not in this workspace, or a target holding no project membership here ·
+     * <strong>409</strong> last administrator, or a lost lock race (with
+     * {@code Retry-After}) · <strong>422</strong> an unknown, foreign or WORKSPACE-scoped
+     * {@code roleId}.
+     */
+    @Transactional
+    public ProjectMemberResponse updateMember(User actor, UUID workspaceId, UUID projectId,
+                                              UUID userId, UpdateProjectMemberRequest req) {
+        // FIRST statement: lockAdmins below is a FOR UPDATE and a lock wait has no bound of
+        // its own — the ordered reads make overlapping edits QUEUE, and an unbounded queue
+        // on a pooled connection is the failure mode.
+        lockTimeout.applyToCurrentTransaction();
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.PROJECT_MEMBER_MANAGE);
+        var project = ctx.project();
+        // 422 before the lock and before the target is read.
+        var requested = roleCatalog.requireAssignable(
+                RoleScope.PROJECT, ctx.workspace().getId(), req.roleId());
+
+        var admins = projectAdminGuard.lockAdmins(project);
+
+        var user = userRepository.findById(userId).orElseThrow(ProjectNotFoundException::new);
+        var member = projectMemberRepository.findByProjectAndUser(project, user)
+                .orElseThrow(ProjectNotFoundException::new);
+        // ANOTHER person's role_id, so it goes through the scope+ownership assertion rather
+        // than a bare cache read — the pattern listMembers was moved away from in this same
+        // slice. Refuse, do not degrade: this is a single-resource WRITE, and a foreign
+        // role_id here would put its NAME into the ProjectGrantCeilingException detail and,
+        // if WORKSPACE-scoped, supply workspace.* as the ACTING_ON comparand. Unreachable
+        // today (all eleven write doors go through findAssignable) — which is exactly when
+        // an assertion is cheap.
+        var current = requireProjectRole(ctx, member);
+
+        requireWithinGrantCeiling(ctx, current, GrantCeilingAction.ACTING_ON);
+        requireGrantable(ctx, actor, userId, requested, "change");
+        if (current.id().equals(requested.id())) {
+            // Re-sending the role a member already holds is a no-op, not a rejection: the
+            // SPA re-sends the current value on any partial edit, and the last-administrator
+            // guard must not fire on a change that changes nothing. Step 7 is naturally
+            // skipped because the grant is unchanged.
+            return ProjectMemberResponse.of(member, current.key());
+        }
+        if (!requested.permissions().has(Permission.PROJECT_MEMBER_MANAGE)) {
+            projectAdminGuard.requireNotLastAdmin(admins, userId);
+        }
+
+        // ---- mutation, immediately before the save (the @Version rule) ----
+        member.setRole(roleCatalog.reference(requested.id()));
+        projectMemberRepository.save(member);
+        log.info("project.member.role_changed workspace={} project={} actor={} target={} from={} to={}",
+                ctx.workspace().getId(), project.getId(), actor.getId(), userId,
+                current.id(), requested.id());
+        return ProjectMemberResponse.of(member, requested.key());
+    }
+
+    /**
+     * The project grant ceiling on a role being <strong>handed out</strong>, plus
+     * <strong>the §4 escape</strong>.
+     *
+     * <p>The escape, stated exactly: <em>a caller holding {@code project.member.manage} in a
+     * project may always assign the built-in Project admin role to ANOTHER member of that
+     * project, regardless of the ceiling.</em>
+     *
+     * <p><strong>Why it has to exist.</strong> Sixteen of the twenty project permissions are
+     * reachable only from inside the project, and granting any of them needs an actor holding
+     * both {@code project.member.manage} and the permission itself. So a project whose only
+     * member-managers carry a custom role narrower than Project admin can never acquire what
+     * none of them holds — {@code project.archive} and {@code project.taxonomy.manage} having
+     * no workaround at all. The workspace Owner does not help: they are exempt from the
+     * workspace ceiling but hold no {@code project.member.manage} in a project they are not a
+     * member of, so they cannot assign any project role there either. The alternative to this
+     * escape is a project no endpoint can repair, whose fix is a hand-written {@code UPDATE}.
+     *
+     * <p><strong>{@code target != actor} is load-bearing, not decorative.</strong> Without it
+     * {@code project.member.manage} would imply all twenty project permissions for its
+     * holder, which (a) makes the project-scope ceiling decorative and (b) breaks HD-136's H1
+     * argument directly: {@code ProjectAdminGuard.adoptAll} hands out the built-in Team lead
+     * on the explicit promise that nothing it grants can destroy anything, so a self-grant
+     * would turn every adoption into a two-call route to {@code issue.delete}.
+     * {@code addMember} already refuses to be that route ("remove your own row, add it back
+     * with a bigger role"); this must not become it.
+     *
+     * <p><strong>Keyed on the built-in role ID</strong>, never the key string: after S4 a
+     * workspace may own a custom role keyed {@code MANAGER}, and that role is not this
+     * guardrail.
+     *
+     * <p><strong>The residual, documented rather than hidden:</strong> two cooperating
+     * members, one holding {@code project.member.manage}, can bootstrap a Project admin (A
+     * grants B; B, now holding everything, grants A by the ordinary ceiling). That IS the
+     * recovery procedure, performed by two willing people — which is what a fixed, auditable
+     * escape means. It needs an accomplice who already has a workspace account, nobody gains
+     * visibility they lacked (v1 has no {@code project.view}), and both steps are logged.
+     *
+     * <p><strong>Secondary effect, intended — do not later "fix" it:</strong> the removal
+     * ceiling is unchanged, so after A promotes B, A can no longer remove or demote B,
+     * because {@code ACTING_ON} compares against B's <em>current</em> role.
+     *
+     * @param action a word for the log line only; the ceiling's own message is built from
+     *               {@link GrantCeilingAction}
+     */
+    private void requireGrantable(ProjectContext ctx, User actor, UUID targetUserId,
+                                  RoleView granted, String action) {
+        if (granted.isBuiltIn(BuiltInRoles.PROJECT_MANAGER) && !actor.getId().equals(targetUserId)) {
+            // Reachable only for a caller who already passed
+            // require(PROJECT_MEMBER_MANAGE) above.
+            log.info("project.admin_granted workspace={} project={} actor={} target={} reason=ceiling_escape action={}",
+                    ctx.workspace().getId(), ctx.project().getId(), actor.getId(), targetUserId, action);
+            return;
+        }
+        requireWithinGrantCeiling(ctx, granted, GrantCeilingAction.GRANTING);
+    }
+
     // ---- membership guards ----
 
     /** What a requested role key actually becomes on disk — see {@link #addMember}. */
     private static String storedRole(String requested) {
         return VIEWER_KEY.equals(requested) ? CONTRIBUTOR_KEY : requested;
-    }
-
-    /**
-     * The built-in role {@link #storedRole} names, as a view carrying its permission set.
-     * A key this build cannot assign is <strong>422 "Unknown role"</strong>, not a 500 —
-     * the DTO carries a free-form string since the enum was deleted, so validating it is
-     * this method's job (§12).
-     */
-    private RoleView assignableRole(String requested) {
-        return roleCatalog.requireAssignable(RoleScope.PROJECT, storedRole(requested));
     }
 
     /**
@@ -388,6 +568,26 @@ public class ProjectService {
         ctx.permissions().firstNotCovered(role.permissions()).ifPresent(missing -> {
             throw new ProjectGrantCeilingException(action, role.name(), missing);
         });
+    }
+
+    /**
+     * A <em>third party's</em> {@code project_members.role_id}, resolved with the
+     * scope/ownership assertion instead of a bare {@code roleCatalog.view} — for the two
+     * single-resource writes that act on somebody else's membership ({@link #removeMember},
+     * {@link #updateMember}).
+     *
+     * <p><strong>Refuse, never degrade, on a write path.</strong> The list reads use
+     * {@code resolveRoleOrDegrade} because one corrupt row must not 404 an entire People
+     * tab; here the row IS the resource, so the answer is
+     * {@code WorkspaceNotFoundException}'s 404. Two things go wrong if this is a bare
+     * dereference: the foreign role's <em>name</em> reaches the caller through
+     * {@link ProjectGrantCeilingException}'s detail, and a WORKSPACE-scoped row supplies
+     * {@code workspace.*} grants as the {@code ACTING_ON} comparand — a
+     * {@code PermissionSet} does not remember which scope its grants came from.
+     */
+    private RoleView requireProjectRole(ProjectContext ctx, ProjectMember member) {
+        return workspaceAccess.requireRole(member.getRole().getId(), RoleScope.PROJECT,
+                ctx.workspace().getId(), RoleScopeViolationSource.PROJECT_MEMBERS);
     }
 
     // ---- helpers ----

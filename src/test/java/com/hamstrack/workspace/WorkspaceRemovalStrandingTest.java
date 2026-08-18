@@ -43,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -743,9 +744,24 @@ class WorkspaceRemovalStrandingTest {
                                + "/projects/" + apollo.getId() + "/issues/" + issue)
                         .header("Authorization", "Bearer " + ws.ownerToken()))
                 .andExpect(status().isForbidden());
-        // …nor may they hand out an authority they do not hold: the grant ceiling still
-        // applies to everything the adopter does afterwards.
-        addProjectMember(ws, apollo, addMember(ws, "MEMBER"), "MANAGER")
+        // …nor may they promote THEMSELVES. The §4 ceiling escape lets any holder of
+        // project.member.manage hand out the built-in Project admin, which is what makes an
+        // under-administered project repairable at all — but only to somebody ELSE, and that
+        // constraint is what keeps HD-136's safety case intact. Team lead is handed out here
+        // on the promise that nothing it grants can destroy anything; a self-grant would turn
+        // every adoption into a two-call route to issue.delete, which is the exact escalation
+        // adoption was argued down from.
+        mockMvc.perform(patch("/api/workspaces/" + ws.workspace().getId()
+                              + "/projects/" + apollo.getId() + "/members/" + ws.owner().getId())
+                        .header("Authorization", "Bearer " + ws.ownerToken())
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"roleId\":\"" + BuiltInRoles.PROJECT_MANAGER + "\"}"))
+                .andExpect(status().isForbidden());
+
+        // …and issue.delete is still refused afterwards, which is the claim that matters.
+        mockMvc.perform(delete("/api/workspaces/" + ws.workspace().getId()
+                               + "/projects/" + apollo.getId() + "/issues/" + issue)
+                        .header("Authorization", "Bearer " + ws.ownerToken()))
                 .andExpect(status().isForbidden());
     }
 
@@ -969,6 +985,75 @@ class WorkspaceRemovalStrandingTest {
                 .getRole().getId())
                 .as("the adopter's own wider role must survive a refused adoption")
                 .isEqualTo(qaLead);
+    }
+
+    /**
+     * <strong>A corrupt role on the adopter's own row blocks the adoption; it does not 404
+     * the removal</strong> (HD-127 review round 3).
+     *
+     * <p>{@code adoptAll} reads the actor's existing {@code project_members.role_id} through
+     * {@code requireRole}, which answers a wrong-scope or foreign id with 404. Refusing is
+     * right — a degrade would read as "no permissions", i.e. "never a demotion", and the
+     * adoption would silently overwrite whatever that row actually granted. The <em>code</em>
+     * was not: on {@code DELETE /workspaces/{ws}/members/{u}} that 404 reaches a caller who
+     * has just resolved the workspace and passed {@code workspace.member.manage}, so it is
+     * indistinguishable from the tenancy 404 and tells them nothing they can act on — the
+     * exact shape H1 argued against.
+     *
+     * <p>It answers 409 naming the project instead, which is a sentence an operator can act
+     * on. Nobody is blinded — {@code requireRole} has already logged its ERROR and
+     * incremented {@code hamstrack.role.scope_violation} on the way past.
+     *
+     * <p><strong>Its own {@code errorType}, and its own copy</strong> (round 4). Round 3
+     * folded it into {@code ADOPTION_BLOCKED}, which shares a status and a payload but also
+     * shared a <em>sentence</em> — and that sentence is false here in both halves: it asserts
+     * the reader's own role is wider than the adoption role (never tested on this branch, and
+     * unknowable, since the row is precisely what could not be read), and it prescribes
+     * asking the departing member to appoint a successor, which cannot clear a refusal that
+     * does not depend on who administers the project. The retry blocks on the same unusable
+     * {@code role_id} every time. So the two are separate codes with different readers: the
+     * blocked one is cleared by a named colleague, this one only by an operator repairing
+     * stored data. Both halves of that are asserted below, because the copy is the defect
+     * being fixed — this is the third refusal in this class caught naming a cause or a remedy
+     * it could not deliver.
+     */
+    @Test
+    void aCorruptRoleOnTheAdoptersOwnRowBlocksTheAdoptionRatherThan404ingTheRemoval()
+            throws Exception {
+        var ws = newWorkspace();
+        var mia = addMember(ws, "MEMBER");
+        var apollo = project(ws, "Apollo");
+        projectMember(apollo, mia, roleCatalog.builtIn(RoleScope.PROJECT, "MANAGER").id());
+        // The adopter already works here, on a row whose role_id is not usable as a PROJECT
+        // role of this workspace — the shape a bad migration or a hand-written UPDATE leaves.
+        projectMember(apollo, ws.owner(), customWorkspaceRole(ws, "corrupt-on-project-row"));
+
+        var problem = json.readTree(deleteMember(ws, ws.ownerToken(), mia.getId(), true)
+                .andExpect(status().isConflict())
+                .andReturn().getResponse().getContentAsString());
+
+        assertThat(problem.get("errorType").asText())
+                .as("a bare 404 here is unactionable and indistinguishable from the tenancy "
+                    + "404 the same endpoint gives a non-member; and it is NOT the demotion "
+                    + "refusal, whose copy is false on this branch")
+                .isEqualTo("ADOPTION_ROLE_UNREADABLE");
+        assertThat(refs(problem)).containsExactly(apollo.getId());
+        var detail = problem.get("detail").asText();
+        assertThat(detail)
+                .as("it must not assert a cause it did not test — the actor's own role is not "
+                    + "the obstacle here, and its contents are exactly what could not be read")
+                .doesNotContain("holds more than")
+                .as("nor prescribe a handover, which cannot clear a refusal that does not "
+                    + "depend on who administers the project")
+                .doesNotContain("appoint")
+                .as("and not offer the retry either: it blocks on the same unusable row")
+                .doesNotContain("adoptStrandedProjects");
+        assertThat(detail)
+                .as("the reader is told who can actually fix it")
+                .contains("system administrator");
+        assertThat(workspaceMemberRepository.existsByWorkspaceAndUser(ws.workspace(), mia))
+                .as("a refused removal is not a partial one")
+                .isTrue();
     }
 
     /**
@@ -1260,6 +1345,24 @@ class WorkspaceRemovalStrandingTest {
         m.setUser(user);
         m.setRole(roleCatalog.reference(roleId));
         projectMemberRepository.save(m);
+    }
+
+    /**
+     * A workspace-owned <strong>WORKSPACE</strong>-scoped role — the fixture for a corrupt
+     * {@code project_members.role_id}, since nothing in the API can write one there.
+     */
+    private UUID customWorkspaceRole(Ws ws, String key) {
+        return txTemplate.execute(status -> {
+            var role = new Role();
+            role.setWorkspaceId(ws.workspace().getId());
+            role.setScope(RoleScope.WORKSPACE);
+            role.setKey(key + "-" + UUID.randomUUID().toString().substring(0, 8));
+            role.setName(key);
+            role.setBuiltIn(false);
+            entityManager.persist(role);
+            entityManager.flush();
+            return role.getId();
+        });
     }
 
     /** A workspace-owned PROJECT role granting exactly {@code permissions}. */

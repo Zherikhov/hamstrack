@@ -141,7 +141,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
-| `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction that takes row locks (workspace member role change, workspace member removal, project member removal) may wait for one, in ms. Applied with `SET LOCAL` inside those transactions only — **not** a server-wide PostgreSQL `lock_timeout`, so Flyway migrations on the same pool are unaffected and still wait as long as they need. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default |
+| `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction that takes row locks (workspace member role change, workspace member removal, project member role change, project member removal, and a custom-role duplicate) may wait for one, in ms. Applied with `SET LOCAL` inside those transactions only — **not** a server-wide PostgreSQL `lock_timeout`, so Flyway migrations on the same pool are unaffected and still wait as long as they need. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default |
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
@@ -163,6 +163,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_MAX_OPEN_SPRINTS` | `20` | Max FUTURE + ACTIVE sprints in one project (COMPLETED ones are history and cannot be started, so they don't count); creating past the cap is a 422. Valid range 1–100; an out-of-range value fails startup instead of being clamped. **Also validated jointly with `AGILE_SECTION_MAX_ISSUES`:** their product `(this + 1) × section cap` must stay ≤ 20 000, since one `GET …/backlog` assembles that many issues in a single unpaged response — both at their individual maxima would be ~202 000 rows, so startup fails rather than OOM later |
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
+| `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
 | `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
@@ -395,6 +396,37 @@ The same caveat applies to the **backlog rank-rebalance cooldown** (the 429 with
 allow up to N whole-project rebalances per cooldown window instead of one. It
 degrades safely — the operation is idempotent and the throttle only damps an
 abuse vector — and a restart re-arms the window rather than locking planners out.
+
+A third mechanism is node-local, and it is the only one of the three that is a
+**security** property: the **permission set of each role is cached in-process for
+10 seconds**. An edit through `PATCH /api/workspaces/{wsId}/roles/{roleId}`
+evicts that entry immediately *on the replica that served it*; every other
+replica keeps answering from its own copy until that copy expires. So on a
+multi-replica deployment a permission you just removed from a role can still be
+honoured for up to ~10 s, plus the tail of any request that had already resolved
+its permissions before the edit committed. Widenings have the same delay and
+nobody minds; it is the revocation direction that is worth knowing about. A
+single-instance deployment — which is what most self-hosted installs are — is
+unaffected, because the one node that serves the edit is the one that evicts.
+
+**Membership is not cached, and that is the more important half.** Moving a
+person between roles (`PATCH …/members/{userId}`,
+`PATCH …/projects/{pId}/members/{userId}`), and deleting a role while reassigning
+its holders (`DELETE …/roles/{roleId}?reassignToRoleId=`), take effect on that
+person's very next request, on every replica. Permissions are never put in the
+access token either, so nothing waits for a token to expire. **Only a change to a
+role's _contents_ has a window** — if you need someone's access cut instantly,
+change their role or remove them rather than editing the role they hold.
+
+Two things worth knowing before this reaches you as a support ticket. It is a
+**scale-out property, not a defect**: the cache is what keeps authorization at a
+constant, query-free cost on every request, and the fix (a cross-node
+invalidation channel) buys a ten-second window on an operation a workspace
+performs a handful of times a year. And the symptom users report will overstate
+it — the web UI renders its controls from a `myPermissions` payload it already
+fetched, so somebody whose access was revoked may keep *seeing* a button well
+past 10 s even though the API refuses the call behind it. Ask them to reload
+before you go looking at replicas.
 
 ## Observability (optional)
 

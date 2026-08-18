@@ -3,6 +3,7 @@ package com.hamstrack.project.repository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.workspace.entity.Workspace;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -111,4 +112,40 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
     @Query(value = "UPDATE projects SET issue_seq = issue_seq + 1 WHERE id = :id RETURNING issue_seq",
            nativeQuery = true)
     long incrementAndGetIssueSeq(@Param("id") UUID id);
+
+    // ---------------------------------------------------- S4: role usage & reassign
+    //
+    // `projects.default_project_role_id` has NO write path until S7, but the FK exists
+    // today and `ON DELETE` is NO ACTION, so a role delete that ignored it would be a 500
+    // the day the picker ships. Two statements now, instead of a production incident later
+    // (§11.5).
+
+    /** Projects of THIS workspace that name this role as their default. */
+    long countByWorkspaceIdAndDefaultProjectRoleId(UUID workspaceId, UUID defaultProjectRoleId);
+
+    /** {@code roleId -> projects defaulting to it} for this workspace, in one statement. */
+    @Query("""
+            SELECT p.defaultProjectRoleId, COUNT(p) FROM Project p
+             WHERE p.workspace.id = :workspaceId AND p.defaultProjectRoleId IS NOT NULL
+             GROUP BY p.defaultProjectRoleId
+            """)
+    List<Object[]> countDefaultRoleUse(@Param("workspaceId") UUID workspaceId);
+
+    /**
+     * Repoint this workspace's project defaults before the old role row is deleted.
+     *
+     * <p>A bulk UPDATE on a column that is also mapped on the {@code Project} entity, so
+     * the standing warning applies: it is correct <em>because</em> the deleting transaction
+     * does not materialize these projects. If a future caller loads them first, mutate them
+     * in place and {@code saveAll} instead — a flush of stale managed copies would write
+     * the deleted role id straight back.
+     */
+    @Modifying
+    @Query("""
+            UPDATE Project p SET p.defaultProjectRoleId = :toRoleId
+             WHERE p.workspace.id = :workspaceId AND p.defaultProjectRoleId = :fromRoleId
+            """)
+    int reassignDefaultProjectRole(@Param("workspaceId") UUID workspaceId,
+                                   @Param("fromRoleId") UUID fromRoleId,
+                                   @Param("toRoleId") UUID toRoleId);
 }

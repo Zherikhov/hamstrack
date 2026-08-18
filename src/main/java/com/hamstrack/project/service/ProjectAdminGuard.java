@@ -1,6 +1,7 @@
 package com.hamstrack.project.service;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.dto.ProjectRef;
@@ -11,9 +12,11 @@ import com.hamstrack.project.exception.StrandedProjectsException;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
+import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.RoleRepository;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.service.RoleCatalog;
+import com.hamstrack.workspace.service.RoleView;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -55,6 +58,34 @@ import java.util.stream.Collectors;
  *       {@code ProjectService.removeMember} enforces one project at a time could be broken
  *       for any number of projects at once through a different door.</li>
  * </ol>
+ *
+ * <h2>The doors — all five of them</h2>
+ *
+ * <p><strong>This enumeration is deliberate, and an unlisted door is the bug.</strong> Two
+ * are deletions of a {@code project_members} row (HD-136); three are HD-127's, and two of
+ * those are not per-member operations at all.
+ *
+ * <ol>
+ *   <li><strong>{@code DELETE /projects/{p}/members/{u}}</strong> — one row, one project.
+ *       Locked, {@link #lockAdmins} + {@link #requireNotLastAdmin}.</li>
+ *   <li><strong>{@code DELETE /workspaces/{ws}/members/{u}}</strong> — every row that member
+ *       holds, across the workspace. Locked, {@link #lockStrandedProjects} +
+ *       {@link #requireNothingStranded}, with {@link #adoptAll} as the satisfiable retry.</li>
+ *   <li><strong>{@code PATCH /projects/{p}/members/{u}}</strong> — a <em>demotion</em>
+ *       strands with no row removed at all. Locked, same pair as door 1, and skipped
+ *       entirely when the requested role itself grants {@code project.member.manage},
+ *       because a promotion cannot strand.</li>
+ *   <li><strong>{@code PATCH /roles/{id}}</strong> that drops {@code project.member.manage}
+ *       from a PROJECT-scoped role — demotes <em>every holder at once, in every project</em>.
+ *       {@link #projectsAdministeredOnlyBy}.</li>
+ *   <li><strong>{@code DELETE /roles/{id}?reassignToRoleId=}</strong> whose target role
+ *       lacks {@code project.member.manage} — the same bulk demotion by another name.
+ *       {@link #projectsAdministeredOnlyBy}.</li>
+ * </ol>
+ *
+ * <p>Doors 4 and 5 are guarded <strong>advisorily</strong>; doors 1–3 are locked. See
+ * {@link #projectsAdministeredOnlyBy} for why, and for why that honesty is written down
+ * rather than papered over.
  *
  * <p><strong>Why it matters more than it looks.</strong> {@code project.member.manage} is
  * deliberately not in {@link Permission#projectCuration()}, so the workspace-admin bypass
@@ -391,10 +422,11 @@ public class ProjectAdminGuard {
 
         var rows = new ArrayList<ProjectMember>(projects.size());
         var blocked = new ArrayList<ProjectRef>();
+        var unreadable = new ArrayList<ProjectRef>();
         for (var project : projects) {
             var row = byProject.get(project.getId());
-            if (row != null && !adoptionRole.permissions().firstNotCovered(
-                    roleCatalog.view(row.getRole().getId()).permissions()).isEmpty()) {
+            var verdict = row == null ? Adoptability.ADOPTABLE : adoptability(workspace, adoptionRole, row);
+            if (verdict == Adoptability.WOULD_DEMOTE) {
                 // The actor's existing role here holds something Team lead does not, so
                 // overwriting it would DEMOTE them — the one-way shape V16 exists to avoid,
                 // reappearing from the other side. It cannot be reached with any built-in
@@ -403,6 +435,15 @@ public class ProjectAdminGuard {
                 // issue.delete and no member management is exactly it, and the grant ceiling
                 // would then refuse to give them issue.delete back.
                 blocked.add(ProjectRef.of(project));
+                continue;
+            }
+            if (verdict == Adoptability.ROLE_UNREADABLE) {
+                // Different refusal, different reader, different next action — see
+                // StrandedProjectsException.ADOPTION_ROLE_UNREADABLE. Kept in its own list
+                // rather than folded into `blocked`, which is what round 3 did: the two then
+                // shared copy that asserts a cause this branch did not test and prescribes a
+                // remedy that cannot clear it.
+                unreadable.add(ProjectRef.of(project));
                 continue;
             }
             if (row == null) {
@@ -415,11 +456,21 @@ public class ProjectAdminGuard {
             row.setRole(roleCatalog.reference(adoptionRole.id()));
             rows.add(row);
         }
+        // Refuse the WHOLE removal rather than adopt what we can: skipping a blocked project
+        // and proceeding would strand it, which is the outcome this class exists to prevent.
+        //
+        // The unreadable rows are reported FIRST when both lists are non-empty. Either
+        // refusal alone ends the request, so one of them is necessarily reported second, and
+        // this is the useful order: the demotion refusal is cleared by a colleague's action,
+        // the unreadable one only by an operator repairing stored data — so leading with the
+        // repairable-by-nobody-present one avoids sending the caller to arrange a handover
+        // that will then hit a second 409 they cannot clear either.
+        if (!unreadable.isEmpty()) {
+            throw StrandedProjectsException.adoptionRoleUnreadable(unreadable);
+        }
         if (!blocked.isEmpty()) {
-            // Refuse the WHOLE removal rather than adopt what we can: skipping a blocked
-            // project and proceeding would strand it, which is the outcome this class
-            // exists to prevent — and the actor's own row is the reason it cannot be
-            // rescued automatically, so they are exactly the right person to be told.
+            // The actor's own row is the reason this one cannot be rescued automatically, so
+            // they are exactly the right person to be told.
             throw StrandedProjectsException.cannotAdopt(blocked, adoptionRole.name());
         }
         projectMemberRepository.saveAll(rows);
@@ -428,6 +479,151 @@ public class ProjectAdminGuard {
                 .sorted(Comparator.comparing(ProjectRef::key))
                 .toList();
     }
+
+    /** The three answers {@link #adoptability} can give about one existing membership row. */
+    private enum Adoptability {
+        /** Safe to overwrite with the adoption role. */
+        ADOPTABLE,
+        /** The row grants something the adoption role does not — overwriting it demotes. */
+        WOULD_DEMOTE,
+        /** The row's stored {@code role_id} failed the scope+ownership assertion. */
+        ROLE_UNREADABLE
+    }
+
+    /**
+     * Can this project be adopted by overwriting the actor's existing row? — the per-project
+     * half of {@link #adoptAll}'s refusal.
+     *
+     * <p>The actor's OWN row, and this is a write path that decides what to overwrite it
+     * with, so the role id goes through the scope+ownership assertion rather than a bare
+     * cache read. A degrade here would read as "no permissions", i.e. "never a demotion",
+     * and the adoption would silently overwrite whatever the corrupt row actually granted.
+     *
+     * <p><strong>The refusal is right; a bare 404 was the wrong shape for it</strong>
+     * (round-3 review). {@code requireRole} answers a corrupt row with
+     * {@link WorkspaceNotFoundException}, which on {@code DELETE /workspaces/{ws}/members/{u}}
+     * reaches a caller who has demonstrably just resolved that workspace and passed
+     * {@code workspace.member.manage} — the unactionable, tenancy-indistinguishable 404 H1
+     * argued against. It becomes a 409 naming the projects instead, the shape of the
+     * neighbouring branch. Nobody is blinded by that — {@code requireRole} has already logged
+     * its ERROR and incremented {@code hamstrack.role.scope_violation} before throwing.
+     *
+     * <p><strong>Two verdicts, not one</strong> (round-4 review). Round 3 returned a bare
+     * boolean and folded the corrupt row into the demotion refusal, which then told the
+     * caller their own role was too wide (untested here, and unknowable — the row is what
+     * could not be read) and asked them to arrange a handover that cannot clear it. The
+     * conservative decision "do not overwrite this row" is the same for both; the sentence
+     * the caller receives and the person who can act on it are not, so the distinction has to
+     * survive as far as the exception.
+     *
+     * <p>Catching a tenancy exception is normally exactly wrong, so the bounds matter: the
+     * project came from {@code lockStrandedProjects}, already scoped to this workspace, and
+     * the row is the actor's own. The only question being swallowed is "is this stored
+     * {@code role_id} usable", and both answers taken from it refuse.
+     */
+    private Adoptability adoptability(Workspace workspace, RoleView adoptionRole, ProjectMember row) {
+        RoleView held;
+        try {
+            held = workspaceAccess.requireRole(row.getRole().getId(), RoleScope.PROJECT,
+                    workspace.getId(), RoleScopeViolationSource.PROJECT_MEMBERS);
+        } catch (WorkspaceNotFoundException corruptRow) {
+            return Adoptability.ROLE_UNREADABLE;
+        }
+        return adoptionRole.permissions().firstNotCovered(held.permissions()).isEmpty()
+                ? Adoptability.ADOPTABLE
+                : Adoptability.WOULD_DEMOTE;
+    }
+
+    // ------------------------------------------------- bulk: a role's contents change
+
+    /**
+     * <strong>Every live project of {@code workspace} whose administrators ALL hold
+     * {@code roleId}</strong> — doors 4 and 5 (HD-127 §6).
+     *
+     * <p>A {@code PATCH /roles/{id}} that drops {@code project.member.manage}, or a
+     * {@code DELETE /roles/{id}?reassignToRoleId=} whose target lacks it, demotes every
+     * holder <em>at once, in every project</em>. Neither existing guard sees that: door 1
+     * watches one membership row and door 2 watches one departing member, and here no
+     * membership row changes at all — only what the role its holders carry <em>means</em>.
+     * The projects returned are exactly those the change would empty of administrators;
+     * non-empty is a 409.
+     *
+     * <p>One aggregate, restricted to the role ids that actually grant the permission
+     * ({@link RoleRepository#findIdsGranting}) and to the same ACTIVE-user filter the locked
+     * paths use, so the three answers cannot disagree about who counts. It runs
+     * <strong>only</strong> when the change actually removes {@code project.member.manage}
+     * from a PROJECT-scoped role, so an ordinary rename or a workspace-scoped edit pays
+     * nothing.
+     *
+     * <p><strong>Advisory, and that is stated rather than dressed up.</strong> An aggregate
+     * cannot take {@code FOR UPDATE}: this is one {@code GROUP BY … HAVING} over the
+     * workspace's {@code project_members}, so a membership change committing concurrently
+     * can make the answer stale between the check and the write. It is a bulk-safety net for
+     * an action a human performs a handful of times a year; <strong>the locked invariant
+     * remains the per-row one</strong> (doors 1–3), which is what actually holds the line.
+     * Do not paper this over with a lock that is not there — a {@code FOR UPDATE} on the
+     * grouped rows would need the whole workspace's memberships locked for the duration of a
+     * role edit, which is a far worse trade than a rare stale read on a rare operation.
+     *
+     * <p><strong>No adoption path, deliberately</strong> (contrast {@link #adoptAll}). The
+     * H1 test is whether the person refused can satisfy the refusal themselves, and here
+     * they plainly can: choose a replacement role that also grants
+     * {@code project.member.manage}, or give those projects another administrator first.
+     * Nothing has to be granted to anybody to clear it.
+     *
+     * @param roleId the role whose holders are about to lose the permission
+     * @return the affected projects, ordered by key so the SPA renders a stable list
+     */
+    @Transactional(readOnly = true)
+    public List<ProjectRef> projectsAdministeredOnlyBy(Workspace workspace, UUID roleId) {
+        var roleIds = administeringRoleIds(workspace.getId());
+        // The role in question must itself be an administering one, or nothing can be lost.
+        if (!roleIds.contains(roleId)) {
+            return List.of();
+        }
+        var projectIds = projectMemberRepository.findProjectIdsAdministeredOnlyBy(
+                workspace.getId(), roleIds, roleId);
+        if (projectIds.isEmpty()) {
+            return List.of();
+        }
+        return projectRepository
+                .findAllByWorkspaceAndIdInAndArchivedAtIsNull(workspace, projectIds).stream()
+                // The same "somebody else inherits it anyway" proof the locked paths apply.
+                // Null is not an option for `leavingUserId` here — nobody is leaving — so
+                // this asks the question for a random administrator of the project, which is
+                // the right one: if some OTHER active member with no explicit row inherits
+                // the permission from the §5.2 fallback, the project cannot be stranded.
+                .filter(p -> !inheritedAdministratorSurvives(workspace, p))
+                .map(ProjectRef::of)
+                .sorted(Comparator.comparing(ProjectRef::key))
+                .toList();
+    }
+
+    /**
+     * {@link #cannotBeStranded} with nobody excluded — the bulk form, where no single member
+     * is leaving.
+     *
+     * <p>Split out rather than passing {@code null} to the per-member predicate, for the
+     * reason {@link #lockAdmins} spells out at length: in JPQL {@code m.user.id <>
+     * :excludedUserId} is UNKNOWN for every row when the bind is null, so the existence check
+     * would silently mean "nobody inherits" instead of "exclude nobody" — the answer would be
+     * wrong, in the refusing direction, for a reason two classes away.
+     */
+    private boolean inheritedAdministratorSurvives(Workspace workspace, Project project) {
+        var fallback = workspaceAccess.defaultProjectRole(workspace, project);
+        return fallback != null
+               && fallback.permissions().has(Permission.PROJECT_MEMBER_MANAGE)
+               && workspaceMemberRepository.existsActiveMemberWithoutProjectRole(
+                       workspace, project, NOBODY_EXCLUDED);
+    }
+
+    /**
+     * A user id that cannot exist, so {@code m.user.id <> :excludedUserId} is TRUE for every
+     * row rather than UNKNOWN. The all-zero UUID is not a valid v7 and is never generated by
+     * {@code @UuidGenerator(TIME)}.
+     */
+    private static final UUID NOBODY_EXCLUDED = new UUID(0L, 0L);
+
     // ------------------------------------------------------------------ internals
 
     /**

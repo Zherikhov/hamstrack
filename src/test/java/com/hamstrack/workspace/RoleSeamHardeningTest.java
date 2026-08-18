@@ -14,6 +14,7 @@ import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
+import com.hamstrack.workspace.entity.WorkspaceInvite;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.exception.WorkspaceNotFoundException;
 import com.hamstrack.workspace.repository.RoleRepository;
@@ -27,6 +28,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 import java.util.UUID;
 
@@ -163,22 +166,38 @@ class RoleSeamHardeningTest {
     }
 
     /**
-     * <strong>The list endpoints must apply the same assertion as the detail endpoints.</strong>
-     * Both batch their membership rows into one query to dodge an N+1, so they resolve
+     * <strong>The list endpoints apply the same assertion as the detail endpoints — and
+     * DEGRADE rather than refusing</strong> (HD-127 §3b).
+     *
+     * <p>Both batch their membership rows into one query to dodge an N+1, so they resolve
      * {@code role_id}s themselves instead of going through {@code projectContext} /
      * {@code requireMember} — which is exactly how they came to be the two paths that read a
-     * role without checking it. A list that is more permissive than the detail view renders
-     * controls that then 403 on click; a list that is less permissive hides work that is
-     * actually allowed. Either way the two disagree, which is the HD-98/HD-116 bug class.
+     * role without checking it. The <em>assertion</em> must therefore be identical; what S4
+     * changed is only what happens when it fails.
      *
-     * <p>Note the deliberate blast radius: one bad row fails the <em>whole</em> list rather
-     * than being skipped. Dropping the offending row silently is the "control that stopped
-     * appearing" failure §18 names as the worst outcome, and the row cannot be created
-     * through any API — it would take a role picker with a scope bug (S4) to produce one.
+     * <p><strong>Why the blast radius moved.</strong> S1 failed the whole list, on the
+     * argument that skipping a row silently is the "control that stopped appearing" failure.
+     * That argument still holds — and this is not skipping. The entry stays, with
+     * {@code myPermissions: []} and {@code myRole: null}: strictly the floor, so nothing that
+     * was refused becomes permitted, and visibly wrong rather than silently absent. What it
+     * buys is that one corrupt row no longer 404s a caller's entire project list, which is a
+     * denial of service on data they cannot fix and often did not create.
+     *
+     * <p>Three things this must prove, and each is a separate way to get the degrade wrong:
+     * <ol>
+     *   <li>the permissions are <strong>empty</strong> — not the workspace role's, and
+     *       emphatically not a fall-through to the §5.2 default, which would WIDEN a member
+     *       whose narrow explicit row is exactly what the corruption destroyed;</li>
+     *   <li>the refused role's <strong>key and name appear nowhere</strong> in the response —
+     *       that name is the one genuine leak in the vicinity, and rendering it would defeat
+     *       the whole check;</li>
+     *   <li>the <strong>detail</strong> read of the same project still refuses, which is the
+     *       intended asymmetry: a list is a directory, a detail read is an authorization.</li>
+     * </ol>
      */
     @Test
     @Transactional
-    void theListEndpointsApplyTheSameScopeAssertionAsTheDetailEndpoints() {
+    void theProjectListDegradesACorruptRoleInsteadOfFailingTheWholeList() {
         var ws = workspace();
         var actor = member(ws, "MEMBER");
         var project = project(ws);
@@ -188,22 +207,45 @@ class RoleSeamHardeningTest {
         em.flush();
         projectMemberRow(project, actor, wrongScope);
 
+        var listed = projectService.list(actor, ws.getId(), false);
+
+        assertThat(listed).hasSize(1);
+        assertThat(listed.getFirst().myPermissions())
+                .as("a refused role must contribute NOTHING — not the workspace role's grants, "
+                    + "and not the project-access default, which would widen the very member "
+                    + "whose narrow row was corrupted")
+                .isEmpty();
+        assertThat(listed.getFirst().myRole())
+                .as("the role the assertion just refused must never be rendered")
+                .isNull();
+        assertThat(listed.toString())
+                .doesNotContain("list-sneaky")
+                .doesNotContain("Workspace-scoped");
+
+        // …and the detail path still refuses the same row. The asymmetry is the design.
         try {
-            var listed = projectService.list(actor, ws.getId(), false);
-            assert false
-                    : "ProjectService.list resolved a WORKSPACE role as a project role and served "
-                      + listed.getFirst().myPermissions() + " as myPermissions. The detail endpoint "
-                      + "refuses the same row, so the list is now strictly more permissive than the "
-                      + "thing it links to.";
+            workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
+            assert false : "the detail path must keep failing closed on a corrupt role row";
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
     }
 
-    /** The workspace list has the same shape of gap, on {@code workspace_members}. */
+    /**
+     * The workspace list has the same shape of gap, on {@code workspace_members} — and the
+     * same degrade.
+     *
+     * <p><strong>The single-resource read must NOT degrade, and that is not a
+     * conservatism.</strong> Degrading {@code requireMember} would not be "empty
+     * permissions": in an {@code OPEN} workspace the project-role fallback is independent of
+     * the workspace role, so an empty workspace role would still leave this caller inheriting
+     * <strong>Contributor in every project of the workspace</strong>. Turning a 404 into
+     * Contributor-everywhere is a widening, and an invisible one — which is why the workspace
+     * appears in the list and 404s on {@code get}.
+     */
     @Test
     @Transactional
-    void theWorkspaceListAppliesTheSameScopeAssertionAsWorkspaceGet() {
+    void theWorkspaceListDegradesACorruptRoleWhileTheDetailReadStillRefuses() {
         var ws = workspace();
         var actor = member(ws, "MEMBER");
 
@@ -213,11 +255,73 @@ class RoleSeamHardeningTest {
         membership.setRole(wrongScope);
         workspaceMemberRepository.flush();
 
+        var listed = workspaceService.listForUser(actor);
+
+        assertThat(listed).hasSize(1);
+        assertThat(listed.getFirst().myPermissions()).isEmpty();
+        assertThat(listed.getFirst().myRole()).isNull();
+        assertThat(listed.toString())
+                .doesNotContain("ws-list-sneaky")
+                .doesNotContain("Project-scoped");
+
         try {
-            workspaceService.listForUser(actor);
-            assert false
-                    : "WorkspaceService.listForUser built myPermissions from a PROJECT-scoped role "
-                      + "in workspace_members, while WorkspaceService.get refuses the same row.";
+            workspaceService.get(actor, ws.getId());
+            assert false : "the detail read must keep failing closed — degrading it would leave "
+                           + "the caller inheriting Contributor in every project of an OPEN "
+                           + "workspace, which is a widening, not an empty permission set";
+        } catch (WorkspaceNotFoundException expected) {
+            // as required
+        }
+    }
+
+    /**
+     * <strong>The single-resource WRITE paths refuse a third party's corrupt {@code role_id}
+     * — they do not degrade, and they do not dereference it bare</strong> (HD-127 tenancy
+     * review, round 2).
+     *
+     * <p>{@code ProjectService.updateMember} and {@code removeMember} both read <em>somebody
+     * else's</em> {@code project_members.role_id} to evaluate the {@code ACTING_ON} half of
+     * the grant ceiling. Round 1 read it with a bare {@code roleCatalog.view} — the exact
+     * pattern {@code listMembers} was moved away from in the same diff — and two things follow
+     * from a foreign or wrong-scope row: the refused role's <strong>name</strong> is rendered
+     * into the {@code ProjectGrantCeilingException} detail the caller reads, and a
+     * WORKSPACE-scoped role there supplies {@code workspace.*} as the comparand, because a
+     * {@code PermissionSet} does not remember which scope its grants came from.
+     *
+     * <p>Unreachable through the API today — every write door resolves role ids through
+     * {@code RoleRepository.findAssignable} — which is precisely the argument for asserting
+     * rather than trusting: the guard costs one cache hit, and the thing protecting it
+     * otherwise is that nobody has written the eleventh door yet.
+     */
+    @Test
+    @Transactional
+    void aCorruptRoleOnAnotherMembersRowRefusesTheProjectMemberWrites() {
+        var ws = workspace();
+        var project = project(ws);
+        var actor = member(ws, "MEMBER");
+        projectMemberRow(project, actor, roleCatalog.reference(RoleScope.PROJECT, "MANAGER"));
+
+        var target = member(ws, "MEMBER");
+        var wrongScope = customRole(ws, RoleScope.WORKSPACE, "pm-sneaky", "Workspace-scoped impostor");
+        wrongScope.getPermissions().add(grant(Permission.WORKSPACE_EDIT));
+        em.flush();
+        projectMemberRow(project, target, wrongScope);
+
+        try {
+            projectService.updateMember(actor, ws.getId(), project.getId(), target.getId(),
+                    new com.hamstrack.project.dto.UpdateProjectMemberRequest(
+                            BuiltInRoles.PROJECT_MEMBER));
+            assert false : "a WORKSPACE-scoped role_id on another member's row was dereferenced "
+                           + "as their current PROJECT role. Its name reaches the ceiling 403 "
+                           + "and its workspace.* grants become the ACTING_ON comparand.";
+        } catch (WorkspaceNotFoundException expected) {
+            // 404, and it says nothing about the role it refused.
+        }
+
+        try {
+            projectService.removeMember(actor, ws.getId(), project.getId(), target.getId());
+            assert false : "removeMember reads the same row for the same reason and must refuse "
+                           + "identically — one of the two guarded is not a guard";
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
@@ -274,6 +378,74 @@ class RoleSeamHardeningTest {
                 : "the fallback must be the built-in Contributor — falling back to NOTHING would "
                   + "lock every member out of every project over one bad config row. Got "
                   + ctx.permissions().asWireStrings();
+    }
+
+    // ============================================== the invite seam (round-3 review)
+
+    /**
+     * <strong>An invite's {@code role_id} is judged when it is used, not only when it was
+     * issued.</strong>
+     *
+     * <p>{@code workspace_invites} is the one place a role id is copied from one table to
+     * another without ever being re-judged: it goes through {@code requireAssignable} at
+     * {@code POST /invites} and is then written straight onto {@code workspace_members} on
+     * acceptance, possibly weeks later. That failed <em>closed</em> either way — every
+     * subsequent request runs {@code requireRole} inside {@code requireMember}, so a
+     * wrong-scope id yields 404 rather than {@code workspace.*} grants in a
+     * {@code ProjectContext} — but the row it wrote is <strong>unremovable through the
+     * API</strong>: {@code WorkspaceMemberService.requireWorkspaceRole} refuses rather than
+     * degrades, so nobody can DELETE the member the invite let in. Refusing before the insert
+     * is what makes the bad row unwritable rather than merely inert.
+     */
+    @Test
+    @Transactional
+    void acceptingAnInviteWhoseRoleIsWrongScopeIsRefusedRatherThanWritten() {
+        var ws = workspace();
+        var invitee = user();
+        var wrongScope = customRole(ws, RoleScope.PROJECT, "invite-sneaky", "Project-scoped");
+        wrongScope.getPermissions().add(grant(Permission.ISSUE_CREATE));
+        var invite = invite(ws, invitee, wrongScope);
+        em.flush();
+
+        try {
+            workspaceService.acceptInvite(invitee, invite.getId());
+            assert false : "the invite path wrote an unjudged role_id onto workspace_members — "
+                           + "and that membership row cannot then be removed through the API, "
+                           + "because every read of it refuses rather than degrades";
+        } catch (WorkspaceNotFoundException expected) {
+            // as required — and the ERROR line names workspace_invites, not workspace_members
+        }
+        assert workspaceMemberRepository.findByWorkspaceAndUser(ws, invitee).isEmpty()
+                : "a refused acceptance must leave no membership behind";
+    }
+
+    /**
+     * …and the <em>list</em> half degrades, like every other collection read.
+     *
+     * <p>This is the only bare role read in the product performed for somebody who is not yet
+     * a member of the workspace that owns the role: pending invites are fetched by email
+     * across every workspace, so a corrupt or foreign {@code role_id} would print a role name
+     * a stranger has no relationship to onto their onboarding screen. The entry survives with
+     * {@code role: null} — one bad invite must not empty the "join a team" list — and the
+     * refused role's key is exactly what must not appear.
+     */
+    @Test
+    @Transactional
+    void thePendingInviteListDegradesACorruptRoleInsteadOfNamingIt() {
+        var ws = workspace();
+        var invitee = user();
+        var wrongScope = customRole(ws, RoleScope.PROJECT, "invite-list-sneaky", "Project-scoped");
+        invite(ws, invitee, wrongScope);
+        em.flush();
+
+        var pending = workspaceService.listPendingInvites(invitee);
+
+        assert pending.size() == 1 : "one bad invite must not empty the whole list";
+        assert pending.getFirst().role() == null
+                : "the refused role's key was rendered anyway: " + pending.getFirst().role();
+        assert !pending.toString().contains("invite-list-sneaky")
+               && !pending.toString().contains("Project-scoped")
+                : "the response leaked the role we just refused: " + pending;
     }
 
     /** The scoped finder is the S4 front door for a role id from a request body. */
@@ -402,6 +574,24 @@ class RoleSeamHardeningTest {
         m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
         return user;
+    }
+
+    /**
+     * A live, unaccepted invitation carrying {@code role} — written through the
+     * {@link EntityManager} because {@code POST /invites} would (correctly) refuse the
+     * wrong-scope role these tests are about.
+     */
+    private WorkspaceInvite invite(Workspace ws, User invitee, Role role) {
+        var invite = new WorkspaceInvite();
+        invite.setWorkspace(ws);
+        invite.setEmail(invitee.getEmail());
+        invite.setRole(role);
+        invite.setTokenHash(UUID.randomUUID().toString().replace("-", ""));
+        invite.setInvitedBy(ws.getCreatedBy());
+        invite.setExpiresAt(java.time.Instant.now().plusSeconds(3600));
+        em.persist(invite);
+        em.flush();
+        return invite;
     }
 
     private void projectMemberRow(Project project, User user, Role role) {

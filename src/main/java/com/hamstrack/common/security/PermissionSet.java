@@ -45,6 +45,15 @@ public final class PermissionSet {
     private static final PermissionSet EMPTY =
             new PermissionSet(EnumSet.noneOf(Permission.class), EnumSet.noneOf(Permission.class));
 
+    /**
+     * The catalog, once. {@code Permission.values()} <em>clones</em> its backing array on
+     * every call — the JLS requires it, because the array is mutable — and the three loops
+     * below run it per containment check, i.e. once per ordered pair of roles in the derived
+     * assignment block that {@code GET /roles} builds (HD-127 round-3 review). Private and
+     * never handed out, so the reason values() copies does not apply to it.
+     */
+    private static final Permission[] CATALOG = Permission.values();
+
     /** @see #allOf(RoleScope) — declared after {@link #EMPTY}, which {@code build} returns. */
     private static final Map<RoleScope, PermissionSet> ALL_OF_SCOPE = allOfScope();
 
@@ -180,11 +189,42 @@ public final class PermissionSet {
      * "insufficient role" is not.
      */
     public Optional<Permission> firstNotCovered(PermissionSet other) {
-        for (var p : Permission.values()) {
-            if (other.unrestricted.contains(p) && !unrestricted.contains(p)) return Optional.of(p);
-            if (other.ownOnly.contains(p) && !hasAtAll(p)) return Optional.of(p);
+        for (var p : CATALOG) {
+            if (!covers(other, p)) return Optional.of(p);
         }
         return Optional.empty();
+    }
+
+    /**
+     * <strong>Every</strong> grant in {@code other} this set does not cover, in catalog
+     * order and in the {@link #asWireStrings() wire form} — the same containment rule as
+     * {@link #firstNotCovered}, enumerated rather than short-circuited.
+     *
+     * <p>Exists for one purpose: an audit line that can say <em>what</em> a role edit
+     * granted. A bulk widening of a role is a privilege grant to every holder at once, and
+     * {@code role.updated permissionsReplaced=true} records that it happened without
+     * recording what it did. Do not use it to authorize — a decision asks
+     * {@link #firstNotCovered}, which is the one predicate the ceiling, the derived
+     * assignment block and the 403 message all share.
+     */
+    public List<String> allNotCovered(PermissionSet other) {
+        var out = new ArrayList<String>();
+        for (var p : CATALOG) {
+            if (!covers(other, p)) {
+                out.add(other.unrestricted.contains(p) ? p.key() : p.key() + OWN_SUFFIX);
+            }
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * The single containment rule both of the above ask, so the "what is missing" list and
+     * the "is anything missing" decision can never disagree about width.
+     */
+    private boolean covers(PermissionSet other, Permission p) {
+        if (other.unrestricted.contains(p)) return unrestricted.contains(p);
+        if (other.ownOnly.contains(p)) return hasAtAll(p);
+        return true;
     }
 
     public boolean isEmpty() {
@@ -198,7 +238,7 @@ public final class PermissionSet {
      */
     public List<String> asWireStrings() {
         var out = new ArrayList<String>(unrestricted.size() + ownOnly.size());
-        for (var p : Permission.values()) {
+        for (var p : CATALOG) {
             if (unrestricted.contains(p)) out.add(p.key());
             else if (ownOnly.contains(p)) out.add(p.key() + OWN_SUFFIX);
         }

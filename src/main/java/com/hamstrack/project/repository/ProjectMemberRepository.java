@@ -3,6 +3,7 @@ package com.hamstrack.project.repository;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
+import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -153,4 +154,100 @@ public interface ProjectMemberRepository extends JpaRepository<ProjectMember, UU
     @Query("DELETE FROM ProjectMember m WHERE m.user = :user "
             + "AND m.project IN (SELECT p FROM Project p WHERE p.workspace = :workspace)")
     int deleteAllByUserInWorkspace(@Param("user") User user, @Param("workspace") Workspace workspace);
+
+    // ---------------------------------------------------- S4: role usage & reassign
+    //
+    // The workspace filter here travels through `project.workspace`, because
+    // project_members has no workspace_id of its own — the same subquery-free join
+    // deleteAllByUserInWorkspace above uses. Built-in roles are shared rows, so omitting
+    // it would count another tenant's project memberships (§7.1 R6).
+
+    /** How many project memberships in THIS workspace hold this role. */
+    @Query("""
+            SELECT COUNT(m) FROM ProjectMember m
+             WHERE m.project.workspace.id = :workspaceId AND m.role.id = :roleId
+            """)
+    long countHoldersInWorkspace(@Param("workspaceId") UUID workspaceId, @Param("roleId") UUID roleId);
+
+    /** In how many distinct projects of THIS workspace the role is held. */
+    @Query("""
+            SELECT COUNT(DISTINCT m.project.id) FROM ProjectMember m
+             WHERE m.project.workspace.id = :workspaceId AND m.role.id = :roleId
+            """)
+    long countProjectsUsingRole(@Param("workspaceId") UUID workspaceId, @Param("roleId") UUID roleId);
+
+    /**
+     * Does the caller hold this role in any project of this workspace? The project half of
+     * the self-held delete refusal (§7.1 R5): delete the custom "QA" role you hold in
+     * project P, reassigning to the built-in Project admin, and you are Project admin of P
+     * — a widening no ceiling sees, because a ceiling is evaluated per assignment and this
+     * is a bulk UPDATE.
+     */
+    @Query("""
+            SELECT COUNT(m) > 0 FROM ProjectMember m
+             WHERE m.project.workspace.id = :workspaceId
+               AND m.user.id = :userId
+               AND m.role.id = :roleId
+            """)
+    boolean existsHolderInWorkspace(@Param("workspaceId") UUID workspaceId,
+                                    @Param("userId") UUID userId,
+                                    @Param("roleId") UUID roleId);
+
+    /** {@code roleId -> (holders, distinct projects)} across this workspace, in one statement. */
+    @Query("""
+            SELECT m.role.id, COUNT(m), COUNT(DISTINCT m.project.id) FROM ProjectMember m
+             WHERE m.project.workspace.id = :workspaceId
+             GROUP BY m.role.id
+            """)
+    List<Object[]> countHoldersByRole(@Param("workspaceId") UUID workspaceId);
+
+    /**
+     * <strong>The projects of this workspace whose administrators ALL carry
+     * {@code roleId}</strong> — doors 4 and 5 of the stranding enumeration
+     * ({@code ProjectAdminGuard}). Restricted to the administering role ids the caller
+     * resolves from the grant, and to ACTIVE users, exactly as the locked per-row guard is.
+     *
+     * <p>{@code bool_and} over the group, so a project appears only when it has at least
+     * one administrator and every one of them would be demoted by the change. A project
+     * with no administrator at all cannot appear, which matches
+     * {@code LockedProjectAdmins.wouldStrand}: it is already in the state the guard
+     * prevents and cannot be pushed further into it.
+     *
+     * <p>{@code MIN(CASE WHEN … THEN 1 ELSE 0 END) = 1} is JPQL's spelling of
+     * {@code bool_and(role_id = :roleId)} — the portable form of the same aggregate.
+     * Archived projects are excluded, matching {@link #lockAllByWorkspaceAndRoleIdIn}
+     * rather than the single-project lock: a project frozen a year ago must not block a
+     * role edit for ever, and there is nothing left in it to administer.
+     *
+     * <p><strong>Advisory, not locked</strong> — see the guard method's javadoc. An
+     * aggregate cannot take {@code FOR UPDATE}.
+     */
+    @Query("""
+            SELECT m.project.id FROM ProjectMember m
+             WHERE m.role.id IN :adminRoleIds
+               AND m.user IN (SELECT u FROM User u WHERE u.status = com.hamstrack.auth.entity.UserStatus.ACTIVE)
+               AND m.project IN (SELECT p FROM Project p WHERE p.workspace.id = :workspaceId
+                                                           AND p.archivedAt IS NULL)
+             GROUP BY m.project.id
+            HAVING MIN(CASE WHEN m.role.id = :roleId THEN 1 ELSE 0 END) = 1
+            """)
+    List<UUID> findProjectIdsAdministeredOnlyBy(@Param("workspaceId") UUID workspaceId,
+                                                @Param("adminRoleIds") Collection<UUID> adminRoleIds,
+                                                @Param("roleId") UUID roleId);
+
+    /**
+     * Point this workspace's project memberships holding {@code fromRoleId} at
+     * {@code toRole}. Plain {@code @Modifying} for the reason
+     * {@code WorkspaceMemberRepository.reassignRole} gives — and safe as a bulk UPDATE
+     * because the deleting transaction never materializes these rows.
+     */
+    @Modifying
+    @Query("""
+            UPDATE ProjectMember m SET m.role = :toRole
+             WHERE m.role.id = :fromRoleId
+               AND m.project IN (SELECT p FROM Project p WHERE p.workspace.id = :workspaceId)
+            """)
+    int reassignRole(@Param("workspaceId") UUID workspaceId,
+                     @Param("fromRoleId") UUID fromRoleId,
+                     @Param("toRole") Role toRole);
 }

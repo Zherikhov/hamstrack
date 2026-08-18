@@ -39,6 +39,9 @@ public record ProjectResponse(
         // everybody-fallback that grants everything (§2.2). DISPLAY ONLY:
         // `myRole === 'MANAGER'` cannot express a custom role, so a component that reads it
         // for a decision is wrong by construction (§5.3) — S5 removed the last one.
+        // NULL on the LIST endpoint only, when the explicit project_members.role_id fails
+        // the scope/ownership assertion (HD-127 §3b): the project stays in the list, and the
+        // role just refused is never rendered in its place.
         String myRole,
         // The caller's effective PROJECT-scoped permissions as flat keys — the only
         // permitted input to a UI gate, and never absent (an empty list is a real answer;

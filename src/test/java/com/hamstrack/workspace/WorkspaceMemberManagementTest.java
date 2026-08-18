@@ -2,6 +2,7 @@ package com.hamstrack.workspace;
 
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.RolePermission;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -706,22 +707,39 @@ class WorkspaceMemberManagementTest {
     }
 
     /**
-     * {@code role} is the whole body, so an omitted or null one is a client bug — 400 from
-     * {@code @NotBlank}, never an accepted no-op and never an NPE-shaped 500.
+     * <strong>Naming no role at all is a 422, not a 400</strong> (HD-127).
+     *
+     * <p>It used to be {@code @NotBlank} on the single {@code role} field. S4 added
+     * {@code roleId} beside it and requires <em>exactly one</em>, which bean validation
+     * cannot express — and should not: the request is well-formed JSON and every field
+     * validates on its own, so what cannot be honoured is the <em>value</em>. That is the
+     * same reason {@code UnknownRoleException} is 422, and keeping the two apart would give a
+     * client two codes for one condition.
+     *
+     * <p>A body that is not JSON at all stays a 400: there is nothing to have a value.
      */
     @Test
-    void aMissingOrNullRoleIsACleanBadRequest() throws Exception {
+    void namingNoRoleAtAllIsAnUnprocessableValue() throws Exception {
         var ws = newWorkspace();
         var member = addMember(ws, "ADMIN", "Ada");
 
         patchRaw(ws, ws.ownerToken(), member.getId(), "{}")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnprocessableContent());
         patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":null}")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnprocessableContent());
         patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"\"}")
-                .andExpect(status().isBadRequest());
+                .andExpect(status().isUnprocessableContent());
+        patchRaw(ws, ws.ownerToken(), member.getId(), "{\"roleId\":null,\"role\":null}")
+                .andExpect(status().isUnprocessableContent());
         patchRaw(ws, ws.ownerToken(), member.getId(), "")
                 .andExpect(status().isBadRequest());
+
+        // Naming it TWICE is refused too, rather than resolved by precedence: the two fields
+        // do not always mean the same role, so a silent winner would store one the caller
+        // did not ask for — in the one place where that is a privilege change.
+        patchRaw(ws, ws.ownerToken(), member.getId(),
+                "{\"roleId\":\"" + BuiltInRoles.WORKSPACE_MEMBER + "\",\"role\":\"MEMBER\"}")
+                .andExpect(status().isUnprocessableContent());
 
         assertThat(roleOf(ws, member)).isEqualTo("ADMIN");
     }
@@ -885,40 +903,86 @@ class WorkspaceMemberManagementTest {
     // ================================================ HD-126 audit: the set half of the ceiling
 
     /**
-     * <strong>The other half of §11.2, which no built-in pair can exercise.</strong> Owner and
-     * Admin hold the same 8 workspace permissions and Member's grants are a strict subset, so
-     * {@code firstNotCovered} never fires between built-ins — every ceiling refusal the suite
-     * has seen so far came from the built-in-Owner guardrail. If the set comparison were
-     * deleted outright, all of those tests would still pass.
+     * <strong>The other half of §11.2, which no built-in pair can exercise — and the one
+     * place the Owner is above it</strong> (HD-127).
+     *
+     * <p>Owner and Admin hold the same 8 workspace permissions and Member's grants are a
+     * strict subset, so {@code firstNotCovered} never fires between built-ins: every ceiling
+     * refusal the suite saw before this test came from the built-in-Owner guardrail, and
+     * deleting the set comparison outright would have left all of them green. So the ADMIN
+     * half below is what proves the set comparison is not dead code, and it must stay.
      *
      * <p>{@code project.administer.all} is the one catalog entry <em>no</em> built-in is
      * seeded with (V13: seeding it would silently open five project-MANAGER-only gates for
      * every workspace admin in every install), which makes it the only permission a custom
-     * role can hold that puts it above an Owner. So it is also the proof that the ceiling is
-     * about grants and not about rank: the workspace <em>Owner</em> is refused too.
+     * role can hold that puts it above an Owner.
+     *
+     * <p><strong>Which is exactly why the Owner is exempt, and why that changed in S4.</strong>
+     * Until the role editor shipped, a role holding {@code project.administer.all} could not
+     * exist, so "the Owner is refused too" cost nothing and read as principled. Now it can be
+     * minted — and if the Owner were still bound by the ceiling, nobody could ever
+     * <em>assign</em> it, because no role in the product covers it. The product would ship a
+     * catalog entry that is permanently unholdable: dead code that lies, which is precisely
+     * what §3 of the proposal forbids. The workspace Owner is the root of trust inside their
+     * own workspace; the ceiling exists to stop escalation <em>past</em> whoever is
+     * ultimately responsible, and past the Owner there is nobody.
+     *
+     * <p>The exemption is deliberately narrow, and the assertions below pin every boundary:
+     * WORKSPACE scope only, keyed on the built-in Owner <em>role id</em>, and binding on
+     * Admins and everyone below. The project-scope ceiling is untouched.
      */
     @Test
-    void theSetCeilingRefusesARoleWiderThanTheActorEvenForAnOwner() throws Exception {
+    void theSetCeilingRefusesARoleWiderThanTheActorButNotForAnOwner() throws Exception {
         var ws = newWorkspace();
         var admin = addMember(ws, "ADMIN", "Ada");
         var wideMember = addMember(ws, "MEMBER", "Wilma");
         assignCustomRole(ws, wideMember, "program-manager",
                 grant(Permission.PROJECT_ADMINISTER_ALL, false));
 
-        for (var token : new String[]{login(admin), ws.ownerToken()}) {
-            var refused = patchMember(ws, token, wideMember.getId(), "MEMBER")
-                    .andExpect(status().isForbidden())
-                    .andReturn().getResponse().getContentAsString();
-            assertThat(detail(refused))
-                    .as("the ceiling must name the grant that refused, not 'insufficient role'")
-                    .contains(Permission.PROJECT_ADMINISTER_ALL.key());
-            // …and it is the SET, not the Owner guardrail, that spoke.
-            assertThat(detail(refused)).doesNotContain("Only an Owner");
-
-            deleteMember(ws, token, wideMember.getId()).andExpect(status().isForbidden());
-        }
+        // ---- an ADMIN is still bound: this is the set comparison, working ----
+        var refused = patchMember(ws, login(admin), wideMember.getId(), "MEMBER")
+                .andExpect(status().isForbidden())
+                .andReturn().getResponse().getContentAsString();
+        assertThat(detail(refused))
+                .as("the ceiling must name the grant that refused, not 'insufficient role'")
+                .contains(Permission.PROJECT_ADMINISTER_ALL.key());
+        // …and it is the SET, not the Owner guardrail, that spoke.
+        assertThat(detail(refused)).doesNotContain("Only an Owner");
+        deleteMember(ws, login(admin), wideMember.getId()).andExpect(status().isForbidden());
         assertThat(workspaceMemberRepository.existsByWorkspaceAndUser(ws.workspace(), wideMember))
                 .isTrue();
+
+        // ---- the OWNER is not: otherwise project.administer.all is unassignable for ever ----
+        patchMember(ws, ws.ownerToken(), wideMember.getId(), "MEMBER")
+                .andExpect(status().isOk());
+        assertThat(roleOf(ws, wideMember)).isEqualTo("MEMBER");
+    }
+
+    /**
+     * The Owner exemption is <strong>keyed on the built-in Owner role id, never on the key
+     * string</strong> — the same rule the Owner-is-not-grantable guardrail already follows,
+     * and for the same reason: {@code roles_scope_key_uk} is {@code UNIQUE NULLS NOT
+     * DISTINCT}, so a workspace may own a custom role keyed {@code OWNER}.
+     *
+     * <p>If the exemption keyed on the string, a workspace could mint a zero-permission role
+     * called {@code OWNER}, hand it to somebody, and that person would be above the grant
+     * ceiling entirely — able to assign every custom role in the workspace, including
+     * {@code project.administer.all}, while holding nothing themselves. A backdoor built out
+     * of the role editor's own front door.
+     */
+    @Test
+    void aCustomRoleMerelyKeyedOwnerIsNotAboveTheCeiling() throws Exception {
+        var ws = newWorkspace();
+        var impostor = addMember(ws, "MEMBER", "Imo");
+        // A workspace-owned role keyed OWNER that can administer membership and nothing else.
+        assignCustomRole(ws, impostor, "OWNER",
+                grant(Permission.WORKSPACE_MEMBER_MANAGE, false));
+        var wideMember = addMember(ws, "MEMBER", "Wilma");
+        assignCustomRole(ws, wideMember, "program-manager-2",
+                grant(Permission.PROJECT_ADMINISTER_ALL, false));
+
+        patchMember(ws, login(impostor), wideMember.getId(), "MEMBER")
+                .andExpect(status().isForbidden());
     }
 
     /**
@@ -1017,11 +1081,14 @@ class WorkspaceMemberManagementTest {
 
         // A body whose `role` is not a string at all is a malformed REQUEST, not an unusable
         // value: 400, and still never a 500 and never a silent fall-through to a default.
-        for (var raw : new String[]{"{\"role\":[\"OWNER\"]}", "{\"role\":{\"key\":\"OWNER\"}}",
-                "{\"role\":\"   \"}"}) {
+        for (var raw : new String[]{"{\"role\":[\"OWNER\"]}", "{\"role\":{\"key\":\"OWNER\"}}"}) {
             patchRaw(ws, ws.ownerToken(), member.getId(), raw)
                     .andExpect(status().isBadRequest());
         }
+        // An all-whitespace key names no role at all, which since HD-127 is the same 422 as
+        // an omitted one rather than a @NotBlank 400 — see namingNoRoleAtAllIsAnUnprocessableValue.
+        patchRaw(ws, ws.ownerToken(), member.getId(), "{\"role\":\"   \"}")
+                .andExpect(status().isUnprocessableContent());
 
         assertThat(roleOf(ws, member)).isEqualTo("MEMBER");
         // …and the invite door answers identically, since it shares requireAssignable.

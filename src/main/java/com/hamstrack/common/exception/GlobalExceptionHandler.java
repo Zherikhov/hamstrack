@@ -3,6 +3,9 @@ package com.hamstrack.common.exception;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.RoleInUseException;
+import com.hamstrack.workspace.exception.RoleLimitReachedException;
+import com.hamstrack.workspace.exception.SelfHeldRoleException;
 import com.hamstrack.search.HqlSemanticException;
 import com.hamstrack.search.parser.HqlParseException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -111,6 +114,49 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getStatus()).body(problem);
     }
 
+
+    /**
+     * More specific than the {@code AppException} handler — publishes the workspace-scoped
+     * usage counts as the {@code usage} extension so the client can render the remap dialog
+     * straight from the refusal, without a second round trip (HD-127 §7.1 R5).
+     *
+     * <p>Discloses nothing: every count is scoped to the workspace the caller is already
+     * administering, and they hold {@code workspace.role.manage} or they would not have
+     * reached this at all.
+     */
+    @ExceptionHandler(RoleInUseException.class)
+    public ResponseEntity<ProblemDetail> handleRoleInUse(RoleInUseException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("usage", ex.getUsage());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * More specific than the {@code AppException} handler — carries the {@code errorType}
+     * discriminator only. There is no payload: the refusal is about the caller's own
+     * membership, which they can already see.
+     */
+    @ExceptionHandler(SelfHeldRoleException.class)
+    public ResponseEntity<ProblemDetail> handleSelfHeldRole(SelfHeldRoleException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason: {@code POST /roles/{id}/duplicate} answers 409 for the sprawl
+     * cap, for a display-name conflict and for a lock-wait timeout, and a client that cannot
+     * tell them apart cannot offer the right remedy. The name {@code ROLE_LIMIT_REACHED}
+     * existed in the spec and in the exception's own javadoc but never on the wire (round-2
+     * docs review) — which is the same defect HD-136's two stranded refusals had.
+     */
+    @ExceptionHandler(RoleLimitReachedException.class)
+    public ResponseEntity<ProblemDetail> handleRoleLimitReached(RoleLimitReachedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
     // HQL parse error (Advanced Search §7.1): 422 with a highlight span. The custom
     // ProblemDetail properties (position/length/token/errorType) drive the SPA's
     // inline underline. errorType is always "PARSE_ERROR".

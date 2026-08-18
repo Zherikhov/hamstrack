@@ -21,6 +21,7 @@ https://tracker.example.com/api
 - [Errors](#errors)
 - [Roles](#roles)
 - [Permissions](#permissions)
+- [Custom roles](#custom-roles)
 - [Instance metadata](#instance-metadata)
 - [Auth endpoints](#auth-endpoints)
 - [Workspaces](#workspaces)
@@ -83,7 +84,8 @@ A self-hosted instance is configured through environment variables; a few of the
 | `AGILE_MAX_OPEN_SPRINTS` (`app.agile.max-open-sprints-per-project`) | `20` | Max **open** ([`FUTURE`](#sprints--backlog) + `ACTIVE`) sprints per project; `POST …/sprints` beyond it returns `422`. `COMPLETED` sprints are history and do not count. Valid range 1–100 — an out-of-range value aborts startup instead of being clamped. **Validated jointly with `AGILE_SECTION_MAX_ISSUES`:** `(this + 1) × section cap` must stay ≤ 20 000, because one `GET …/backlog` assembles that many issues in a single unpaged response; both knobs at their individual maxima would be ~202 000 rows, so startup fails rather than the response OOMing later |
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` (`app.agile.default-sprint-length-days`) | `14` | The `endAt` a [sprint start](#sprints--backlog) defaults to when the caller sends none (`startAt` + this many days). Valid range 1–90 — an out-of-range value aborts startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` (`app.agile.max-issues-per-bulk-move`) | `100` | Max distinct `issueIds` accepted by `POST …/sprints/{id}/issues` in one request (`400` beyond it — chunk the request). Echoed to clients as `bulkMoveCap` in the [planning view](#sprints--backlog) `GET …/backlog`, so they chunk at your value instead of a hardcoded one — it is a **separate** knob from `AGILE_SECTION_MAX_ISSUES`. Valid range 1–500 — an out-of-range value aborts startup instead of being clamped |
-| `DB_LOCK_TIMEOUT_MS` (`app.locking.lock-timeout-ms`) | `3000` | How long a transaction that takes row locks (the [membership mutations](#managing-members) — workspace member role change and removal, and project member removal) may wait for one, in milliseconds. Exceeding it is a retryable `409` with `Retry-After` (see [Errors](#errors)), never a `500`. Applied with `SET LOCAL` to that transaction only, so Flyway migrations sharing the datasource are unaffected. Lower it to shed load faster under contention, raise it if legitimate removals of very busy members time out. Valid range 100–60000 — an out-of-range value aborts startup instead of being clamped (PostgreSQL reads `0` as "wait for ever", which is the setting this exists to prevent) |
+| `ROLES_MAX_CUSTOM_PER_WORKSPACE` (`app.roles.max-custom-per-workspace`) | `50` | Max [custom roles](#custom-roles) one workspace may define, counted across **both** scopes with the built-in templates excluded (they belong to no workspace). Duplicating past it returns `409` `errorType: "ROLE_LIMIT_REACHED"`. It is a **sprawl guard, never a licence check** — custom roles are a product feature and not a plan feature, so the value is identical on DC and Cloud and there is no second code path anywhere. If you want to limit them, lower this number. Valid range 1–500 — an out-of-range value aborts startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory, and a duplicate is one of the calls that can lose a lock race (a retryable `409` with `Retry-After`, bounded by `DB_LOCK_TIMEOUT_MS` below) |
+| `DB_LOCK_TIMEOUT_MS` (`app.locking.lock-timeout-ms`) | `3000` | How long a transaction that takes row locks (the [membership mutations](#managing-members) — workspace member role change and removal, project member role change and removal, and a [custom-role](#custom-roles) duplicate) may wait for one, in milliseconds. Exceeding it is a retryable `409` with `Retry-After` (see [Errors](#errors)), never a `500`. Applied with `SET LOCAL` to that transaction only, so Flyway migrations sharing the datasource are unaffected. Lower it to shed load faster under contention, raise it if legitimate removals of very busy members time out. Valid range 100–60000 — an out-of-range value aborts startup instead of being clamped (PostgreSQL reads `0` as "wait for ever", which is the setting this exists to prevent) |
 | `RATE_LIMIT_ENABLED` | `true` | Auth rate limiting (see [Rate limits](#rate-limits)) |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` / `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` / `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` / `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS` | `15` / `5` / `30` / `900` | Rate-limit tuning |
 | `APP_BASE_URL` | — | The `refresh_token` cookie is marked `Secure` only when this is an `https` URL |
@@ -181,7 +183,7 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 }
 ```
 
-**`errorType` says which failure a body is**, wherever one status covers more than one. It is a plain string extension, stable and safe to branch on where the wording of `detail` is not: an [invalid HQL query](#search-hql) carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal refused over project administrators carries `STRANDED_PROJECTS` or `ADOPTION_BLOCKED`. Two rules for consuming it: treat a value you do **not** recognise as "no recovery I know about" rather than guessing at one, and do **not** read its *absence* as an unknown value — a response that needs no discriminator simply has none (the lock-contention `409` above is exactly that case, and is identified by `Retry-After` instead).
+**`errorType` says which failure a body is**, wherever one status covers more than one. It is a plain string extension, stable and safe to branch on where the wording of `detail` is not: an [invalid HQL query](#search-hql) carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal refused over project administrators carries `STRANDED_PROJECTS`, `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`. Two rules for consuming it: treat a value you do **not** recognise as "no recovery I know about" rather than guessing at one, and do **not** read its *absence* as an unknown value — a response that needs no discriminator simply has none (the lock-contention `409` above is exactly that case, and is identified by `Retry-After` instead).
 
 [Removing a workspace member](#managing-members) that would leave projects without an administrator follows the same precedent, with an array instead of a single id — plus an `errorType` saying which of that endpoint's two stranded-project refusals it is:
 
@@ -210,7 +212,7 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
   "type": "about:blank",
   "title": "Conflict",
   "status": 409,
-  "detail": "Your own role in Alpha (P17) holds more than “Team lead” does, so taking it over would take that away from you and nobody could give it back. Ask the member you are removing to appoint another administrator there while they still can, or have someone who already administers that project remove them instead.",
+  "detail": "Your own role in Alpha (P17) holds more than “Team lead” does, so taking it over would take that away from you and nobody could give it back. Ask the member you are removing to appoint another administrator there while they still can, or have another workspace administrator who does not already work in that project run the removal instead.",
   "errorType": "ADOPTION_BLOCKED",
   "projects": [
     { "id": "0198c4a1-…", "key": "P17", "name": "Alpha" }
@@ -218,14 +220,19 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 }
 ```
 
-**`errorType` tells the two apart** — they share a status and a `projects` extension, and a client that only renders "these projects are in the way" stays correct without knowing which one it received, but one that offers a *retry* must know, because the two demand opposite behaviour:
+**`errorType` tells them apart** — they share a status and a `projects` extension, and a client that only renders "these projects are in the way" stays correct without knowing which one it received, but one that offers a *retry* must know, because they demand opposite behaviour:
 
 | `errorType` | What it means | What a client should offer |
 |---|---|---|
 | `STRANDED_PROJECTS` | The ordinary refusal | Repeating the request with `adoptStrandedProjects=true` **will** clear it — an adopt button is safe |
 | `ADOPTION_BLOCKED` | That retry has already been made and cannot work | **No retry.** Render `detail`; the way out is somebody else's action |
+| `ADOPTION_ROLE_UNREADABLE` | The adoption stopped on unreadable stored data, not on permissions | **No retry, and no remedy any party to the request holds.** Render `detail`; it needs an operator |
 
-Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no retry available**. It is the only safe default, because it is the one that cannot invent a button that `409`s again. Do not branch on the wording of `detail`, which is prose and may change. And do not confuse an unknown value with an *absent* one — a `409` from this endpoint with no `errorType` at all is a different failure entirely (the last-owner invariant, or [lock contention](#errors), which **is** retryable and says so with `Retry-After`). See [Managing members](#managing-members) for the way out of each.
+**A third refusal, split out of `ADOPTION_BLOCKED` because it needs a different reader.** `ADOPTION_ROLE_UNREADABLE` means the adoption stopped on stored *data* rather than on permissions: the caller's own membership row in one of the listed projects refers to a role the server cannot resolve, so it refuses to overwrite a row it cannot read. That is corrupt or hand-edited data, which a normal client never meets. The split is not cosmetic — `ADOPTION_BLOCKED` is cleared by a named third party's action, while this one is cleared by **nobody present**: retrying fails identically, and nothing the caller or the member being removed can change will help. It needs an operator to repair the stored row, and the server has already logged what is wrong with it. While the two shared a code they also shared copy, and that copy asserted a cause this branch never tested and prescribed a remedy that could not work on it.
+
+**When both apply at once, the unreadable one is reported first.** Either refusal ends the request, so one of them is necessarily second — and it should not be the one no present party can clear, or the caller is sent off to arrange a handover only to meet a second `409` they cannot clear either.
+
+Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no retry available**. It is the only safe default, because it is the one that cannot invent a button that `409`s again. `ADOPTION_ROLE_UNREADABLE` is that rule's own evidence: a client written before the code existed, which followed the rule, was already correct for it on the day it shipped and needed no change at all. Do not branch on the wording of `detail`, which is prose and may change. And do not confuse an unknown value with an *absent* one — a `409` from this endpoint with no `errorType` at all is a different failure entirely (the last-owner invariant, or [lock contention](#errors), which **is** retryable and says so with `Retry-After`). See [Managing members](#managing-members) for the way out of each.
 
 | Status | Meaning |
 |---|---|
@@ -233,10 +240,10 @@ Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no re
 | `401` | Missing/expired/invalid access token |
 | `403` | Authenticated and a member, but missing a [permission](#permissions) — the failure names it in `detail` |
 | `404` | Not found — or not a member of the containing workspace |
-| `409` | Conflict: stale `version`, duplicate name/key, resource in use, or a state invariant (the last owner, the last project administrator) — **plus** the one retryable case above, a lost row-lock race, which carries `Retry-After` |
+| `409` | Conflict: stale `version`, duplicate name/key, resource in use, or a state invariant (the last owner, the last project administrator, a [built-in role](#built-in-roles-are-read-only)) — **plus** the one retryable case above, a lost row-lock race, which carries `Retry-After`. Several of these carry an `errorType` discriminator; see [the role `409`s](#the-409-codes-on-role-writes) for the full list and the order to check them in |
 | `413` | Attachment exceeds the per-file size limit (default 20 MB) or the servlet upload ceiling (default 25 MB) |
 | `415` | Attachment file extension is not in the allow-list |
-| `422` | Semantically invalid reference (unknown status/type/assignee, a user who [may not be assigned](#assignability--a-422-not-a-403) in this project, workflow-forbidden transition, an [unusable `role` value](#unknown-role--a-422)) |
+| `422` | Semantically invalid reference (unknown status/type/assignee, a user who [may not be assigned](#assignability--a-422-not-a-403) in this project, workflow-forbidden transition, an [unusable role reference](#unknown-role--a-422), an [unknown or wrong-scope permission](#scope-is-immutable-and-permissions-must-match-it)) or a request that names a role with [neither or both](#naming-a-role-roleid-and-the-deprecated-role-key) of `roleId` / `role` |
 | `429` | Rate limited — wait the number of seconds in the `Retry-After` header |
 
 ### Rate limits
@@ -249,7 +256,7 @@ One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank
 
 **System role** (`ADMIN` — instance-wide, typically the instance operator; maintains the global taxonomy via [`/admin/**`](#system-administration)), **workspace roles** (`OWNER`, `ADMIN`, `MEMBER`) and **project roles** (`MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER`, `VIEWER`). The `seed.admin` account (env `SEED_ADMIN_*`) gets the system `ADMIN` role automatically; `GET /auth/me` returns your `systemRole`.
 
-These are the **built-in** roles, and what follows is what each one *grants* — not a rung it occupies. The server no longer compares roles anywhere: every gate is a [permission](#permissions) check, the role is just the bundle of permissions a member happens to hold.
+These are the **built-in** roles, and what follows is what each one *grants* — not a rung it occupies. A workspace can also define [roles of its own](#custom-roles); those are composed from the same permission keys and are described in their own section. The server no longer compares roles anywhere: every gate is a [permission](#permissions) check, the role is just the bundle of permissions a member happens to hold.
 
 | Action | Permission — and which built-in roles grant it |
 |---|---|
@@ -287,6 +294,40 @@ Every `role` field on the wire — the `role` you send to `POST …/invites`, `P
 
 **Do not switch exhaustively on a role value.** It is a string, not a closed set: the field is typed as an open string precisely because a workspace will be able to define roles of its own, and the key of such a role will travel in exactly these fields. A `switch` with no default, a TypeScript union that fails to parse an unrecognized value, or an enum deserializer that throws will break the day it meets one. Treat an unrecognized role as "a role I do not have a label for" — display it, do not decide with it. For decisions there is `myPermissions`, which is a flat list of keys and needs no such exhaustiveness.
 
+### Naming a role: `roleId`, and the deprecated `role` key
+
+A workspace can now define [roles of its own](#custom-roles), and a custom role has no key you could have hard-coded. So every endpoint that assigns a role accepts the role's **id**:
+
+| Method | Path | Fields |
+|---|---|---|
+| `POST` | `/workspaces/{wsId}/invites` | `roleId` *(new)* · `role` *(deprecated)* |
+| `PATCH` | `/workspaces/{wsId}/members/{userId}` | `roleId` *(new)* · `role` *(deprecated)* |
+| `POST` | `/workspaces/{wsId}/projects/{pId}/members` | `roleId` *(new)* · `role` *(deprecated)* |
+| `PATCH` | `/workspaces/{wsId}/projects/{pId}/members/{userId}` | `roleId` only — the endpoint is new, so it has no legacy form |
+
+**Exactly one of `roleId` and `role` must be present.** Sending neither, or both, is a `422`:
+
+```json
+{ "type": "about:blank", "title": "Unprocessable Content", "status": 422,
+  "detail": "Send either roleId or role, not both — they do not always mean the same role" }
+```
+
+**Both is refused rather than resolved by precedence**, because the two fields do not always mean the same role: `role` resolves built-ins only and, on the project side, still maps `VIEWER` onto the contributor role, while `roleId` addresses any assignable role verbatim. A silent winner would store a role the caller did not ask for, in the one part of the product where that is a privilege change.
+
+**`role` is deprecated but still works, unchanged.** Nothing that sends it breaks in this release; it simply cannot name a custom role, and on the project side it keeps the `VIEWER → MEMBER` translation. Move to `roleId` when convenient. One thing `roleId` unlocks immediately: naming the built-in **Viewer** by id stores the built-in Viewer, so a genuinely read-only project membership is expressible for the first time.
+
+Get the ids from [`GET /workspaces/{wsId}/roles`](#custom-roles), which is open to any workspace member.
+
+**Unusable ids answer the same `422` as unusable keys** — one indistinguishable answer for unknown, foreign and wrong-scope, so the endpoint cannot be used to probe what exists in a workspace you cannot see. The one place a role id answers `404` instead is when it is a **path** segment (`/roles/{roleId}`, and the duplicate source): that is an address, not a value, and it behaves like every other addressed resource.
+
+### When a role reads `null`
+
+`role` on a member listing, and `myRole` on a workspace or project **list**, can be `null`. It means the server refused to describe that row's role — the stored role failed an internal scope/ownership check — and deliberately did not substitute anything in its place, because the refused role's name is precisely what must not be rendered.
+
+The entry is kept rather than dropped: one bad row must not `404` an entire People tab or workspace list. Where permissions are involved they degrade to the floor — a degraded workspace entry carries `myPermissions: []`, and a degraded project membership contributes nothing rather than falling back to a default that would *widen* the member. Render such an entry with no role rather than guessing one; nothing else about it changes.
+
+One asymmetry worth knowing: a workspace in that state still appears in `GET /workspaces` and answers `404` on `GET /workspaces/{id}`. A list is a directory; a detail read is an authorization.
+
 ### Unknown role — a `422`
 
 Any endpoint that accepts a `role` answers **`422` `"Unknown role: <what you sent>"`** when the value cannot be assigned: an unknown key, a correctly-spelled key from the *other* scope (`MANAGER` on a workspace endpoint, `OWNER` on a project one), the wrong case (`owner`), or — once workspace-defined roles exist — a role belonging to a workspace you cannot see.
@@ -298,7 +339,7 @@ Any endpoint that accepts a `role` answers **`422` `"Unknown role: <what you sen
 
 **One answer for all of those, on purpose.** It would be natural to expect `404` for a role that does not exist here and something else for nonsense; that pair would be an oracle — ask with a role reference and learn from the status code whether it names something real in a workspace you have no access to. So every unusable role value gets the identical `422`, and the `detail` only ever echoes what the caller already sent. `400` would be wrong for the opposite reason: the request is perfectly well-formed, it is the *value* that cannot be honoured — the same shape as `"Unknown label"` or `"Unknown sprint"`.
 
-Two things that are still `400`, not `422`: a **missing, null or empty** `role` (the field is required, and this is ordinary [validation](#validation-failures-400)), and a body that is not valid JSON.
+A body that names the role **in neither way** is now this `422` too, not a `400` — see [Naming a role](#naming-a-role-roleid-and-the-deprecated-role-key). What stays a `400` is a body that is not valid JSON, or a field that fails ordinary [validation](#validation-failures-400) such as a `role` string longer than 40 characters.
 
 **Permission first, then the value.** The gate on the endpoint is checked before the role value is resolved, so a caller who lacks `workspace.member.manage` gets `403` even when the role they sent was also nonsense. Fix the permission, then re-send to discover the `422`.
 
@@ -334,7 +375,43 @@ The response is a JSON array of catalog entries in a stable order — workspace-
 | `ownRequired` | boolean | Whether the permission can **only** be granted own-only. Implies `supportsOwn: true`, and means the bare key never appears in any `myPermissions` — only the `:own` form does. Today this is true for `comment.edit` alone: editing someone else's words is not a permission the product grants at any role. |
 | `capability` | `BOARD` \| `RELEASES` \| `null` | The [delivery capability](#delivery-capabilities) the permission is *about* — a labelling hint, **never a check**, and `null` for most entries. |
 
-**Read the catalog, don't transcribe it.** There are 29 entries at the time of writing (9 workspace-scoped, 20 project-scoped) and the list grows between releases, so this reference deliberately does not reproduce it: `GET /permissions` is the authoritative version, always in sync with what the server enforces. Drive a role picker or a permission legend from the endpoint rather than hard-coding keys or a count. Individual keys, on the other hand, are permanent — they are the wire contract and are never renamed.
+**`GET /permissions` is the authoritative list — the table below is a reading aid.** The catalog grows between releases and the endpoint is always in sync with what the server enforces, so drive a role picker or a permission legend from it rather than from this page, and never hard-code a count. Individual keys, on the other hand, are permanent: they are the wire contract and are never renamed. The table is reproduced here because [composing a custom role](#custom-roles) means choosing keys, and choosing them from prose you can read is easier than from a JSON dump.
+
+There are **29** entries at the time of writing — 9 workspace-scoped, 20 project-scoped. "Own?" is `supportsOwn`, i.e. whether a grant may be narrowed to objects you own.
+
+| Key | Scope | Own? | What it allows |
+|---|---|---|---|
+| `workspace.edit` | `WORKSPACE` | — | Rename/describe the workspace; set the project-access mode and the workspace default project role |
+| `workspace.member.manage` | `WORKSPACE` | — | Invite people, change a member's workspace role, revoke pending invites |
+| `workspace.role.manage` | `WORKSPACE` | — | Create / edit / delete [custom roles](#custom-roles). Deliberately separate from `workspace.member.manage` |
+| `workspace.taxonomy.manage` | `WORKSPACE` | — | The workspace-scoped catalog & sets and the project-binding matrix ([delegated admin](#delegated-administration)) |
+| `project.create` | `WORKSPACE` | — | Create a project in this workspace (workspace-scoped despite the prefix — there is no project yet to scope it to) |
+| `project.curate.all` | `WORKSPACE` | — | Hold `project.edit`, `component.manage`, `version.manage` and `sprint.manage` in **every** project of the workspace without being a project member. This is the workspace-wide "curator set" other sections refer to |
+| `project.administer.all` | `WORKSPACE` | — | Hold **every** project permission in every project of the workspace without being a member. Held by **no built-in role** — only an [Owner can mint it](#the-grant-ceiling) |
+| `label.create` | `WORKSPACE` | — | Create a workspace [label](#labels) |
+| `label.manage` | `WORKSPACE` | yes | Rename/recolor/describe (own-only is enough) and archive/unarchive/merge/delete (needs it unrestricted) |
+| `project.edit` | `PROJECT` | — | Rename/describe the project; change its [delivery capabilities](#delivery-capabilities) |
+| `project.archive` | `PROJECT` | — | Archive / unarchive the project |
+| `project.member.manage` | `PROJECT` | — | Add/remove project members, change their project role, set the project's default role |
+| `project.taxonomy.manage` | `PROJECT` | — | Project-private catalog & sets and this project's bindings |
+| `issue.create` | `PROJECT` | — | File a new issue |
+| `issue.edit` | `PROJECT` | yes | Any issue field not covered by a more specific key: title, description, type, priority, labels, component, versions, parent, due date, story points, custom fields. Own = issues you **reported** |
+| `issue.transition` | `PROJECT` | — | Change an issue's status (board drag, status picker) |
+| `issue.assign` | `PROJECT` | — | Set or clear an assignee, including self-assign |
+| `issue.assignable` | `PROJECT` | — | **May be chosen as an assignee.** Checked against the *target*, not the caller — see [Assignability](#assignability--a-422-not-a-403) |
+| `issue.rank` | `PROJECT` | — | Reorder the backlog/board rank |
+| `issue.delete` | `PROJECT` | yes | Delete an issue. Own = issues you reported |
+| `comment.create` | `PROJECT` | — | Post a comment |
+| `comment.edit` | `PROJECT` | **required** | Edit a comment. **Own-only always** — not grantable unrestricted at any role, in any custom role. The bare key never appears anywhere |
+| `comment.delete` | `PROJECT` | yes | Delete a comment. Own = your own; unrestricted = moderation |
+| `attachment.create` | `PROJECT` | — | Upload a file to an issue |
+| `attachment.delete` | `PROJECT` | yes | Delete an attachment. Own = files you uploaded |
+| `sprint.manage` | `PROJECT` | — | Create / rename / start / complete / delete [sprints](#sprints--backlog) |
+| `sprint.assign` | `PROJECT` | — | Put issues into / take issues out of a sprint — including `PATCH …/issues/{number}` with a `sprintId` |
+| `version.manage` | `PROJECT` | — | Create / edit / release / unrelease / archive / delete [versions](#versions). Setting `fixVersionIds` on an issue is `issue.edit`, not this |
+| `component.manage` | `PROJECT` | — | Create / edit / archive / delete [components](#components). Setting `componentId` on an issue is `issue.edit` |
+
+**There is no `permissions` table in the database.** The catalog is code; what is stored are *grants* — rows tying a permission key to a role. Adding a permission is a code change plus a seed row, never a migration, which is why the endpoint and not this page is the source of truth.
 
 **`capability` is a hint, not a gate.** A project whose [`delivery.board`](#delivery-capabilities) is `KANBAN` still enforces `sprint.manage` in exactly the same way, and `delivery.releases: false` changes nothing about `version.manage`. Capabilities decide what the UI offers; permissions decide what the API allows. Never substitute one for the other.
 
@@ -396,7 +473,7 @@ Two refusals deliberately do **not** name a permission, because a permission is 
 - **The grant ceiling** — `"You cannot assign or administer the role \"X\", which includes <key> — a permission you do not hold in this workspace"`. The caller holds the permission for the endpoint; what they may not do is hand out (or act on someone holding) more than they have themselves. It names the offending permission *inside* the sentence so an admin can act on it, but it is not a `Requires permission:` message.
 - **The Owner guardrail** — `"Only an Owner can assign the Owner role or administer another Owner"`. Owner and `ADMIN` hold identical permissions on purpose, so no permission comparison can express this; it is a rule about assignment.
 
-Both are `403`, and both are described under [Managing members](#managing-members).
+Both are `403`. They are described under [Managing members](#managing-members), and they also reach the [role endpoints](#custom-roles): composing a role you could not hand out, and reassigning a role's holders onto a wider one, are refused the same way.
 
 **Permission first, project state second.** The permissions a request's own shape determines are checked **before** the project's state, so a caller who lacks the permission on an **archived** project gets the `403`, not the `409 "Project is archived"`. This is a deliberate behavior change — [deleting an issue](#issues), [deleting an attachment](#attachments), [commenting](#comments) and [ranking](#ranking-an-issue) used to report the archive conflict first — and the rule is: the answer to "may you?" must never depend on the state of the thing you are asking about. It holds for *every* permission a request needs, not just the first: `POST …/issues/{number}/rank` can require both `issue.rank` and `sprint.assign`, and the archived-project `409` now waits for both, so a caller missing `sprint.assign` sees the `403` on an archived project exactly as they would on a live one.
 
@@ -426,6 +503,208 @@ Assignability is validated **only on a new assignment**. Nothing is unassigned w
 
 It is **advisory, for rendering only — the API is the enforcement boundary.** It does not decide anything: the API performs its own check on every request, whatever the client drew. A call the caller may not make fails identically whether the button was hidden or not, and hiding a control is a UX decision, never a security control. The corollary is worth stating for integrators: **a client that gates nothing is still safe** — ignoring `myPermissions` entirely costs you a friendlier UI and a few avoidable `403`s, never an escalation. Use it to avoid dead ends, not to enforce them. Equally, `myRole` is display metadata — on a project it reports the caller's **explicit** project role (`VIEWER` when they have no project membership row of their own, even where that member can in fact do more), so it can be narrower than the truth. It is also a [role key string, not a closed enum](#role-values-are-keys-not-an-enum), so `myRole === 'MANAGER'` is not a question that can be answered correctly for every member. Gate on `myPermissions`.
 
+## Custom roles
+
+A workspace can define **its own roles** on top of the eight built-in ones, each a named bundle of [permissions](#permissions) and nothing more. There is no ordering on roles and no rung a custom role occupies; what a role can do is exactly the set of keys it holds.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/workspaces/{wsId}/roles?scope=&includeUsage=` | member | Built-in templates plus this workspace's own. `includeUsage=true` additionally requires `workspace.role.manage` |
+| `GET` | `/workspaces/{wsId}/roles/{roleId}` | member | Get one role |
+| `POST` | `/workspaces/{wsId}/roles/{sourceRoleId}/duplicate` | `workspace.role.manage` | **The only way to create a role.** `201` |
+| `PATCH` | `/workspaces/{wsId}/roles/{roleId}` | `workspace.role.manage` | Rename, re-describe or re-compose a custom role |
+| `DELETE` | `/workspaces/{wsId}/roles/{roleId}?reassignToRoleId=` | `workspace.role.manage` | Delete, optionally moving every holder to another role. `204` |
+| `GET` | `/workspaces/{wsId}/roles/{roleId}/usage` | `workspace.role.manage` | Where the role is currently in play |
+| `POST` | `/workspaces/{wsId}/roles/preview` | `workspace.role.manage` | Dry-run the assignment feedback for a permission list. **Persists nothing** |
+
+Every one of these resolves workspace membership **before** any permission is evaluated, so an unknown workspace and a caller who is not a member are one indistinguishable `404`, and a `403` is reachable only by a proven member — the same rule as everywhere else in the API.
+
+**Two permissions, deliberately separate.** Listing and reading roles needs nothing but membership: role names are rendered for everybody on a People tab, and putting the list behind an administrative gate would only push clients to fetch it another way. Everything else needs **`workspace.role.manage`**, which is *not* `workspace.member.manage`: defining what a role may do is strictly more dangerous than handing out one that already exists, and a workspace can grant the second without the first. The one exception is `includeUsage=true`, the sensitive half of an otherwise open endpoint — it turns `GET …/roles` into a `403` for a member who lacks `workspace.role.manage`.
+
+### Creating a role means duplicating one
+
+There is **no `POST /roles`**, and that is deliberate rather than an oversight. You create a role by duplicating a built-in template (or another custom role) and editing the copy:
+
+```bash
+curl -X POST "$BASE/workspaces/$WS/roles/$CONTRIBUTOR_ID/duplicate" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Team lead (QA)"}'
+```
+
+The reason is the [grant ceiling](#the-grant-ceiling): it is a **subset** rule, not a ladder. A role assembled from an empty checklist — say, `project.member.manage` and nothing else — can assign *nobody*: not the contributor role, not Commenter, not even Viewer-plus-anything, because it is a superset of none of them. Discovering that as a `403` six weeks after building the role is the exact failure this model exists to prevent, so the API has no door that starts from nothing. Duplication always starts from a superset. "From scratch" is still reachable — duplicate **Viewer**, which grants nothing — but it is then a named, deliberate act instead of the default.
+
+What is copied and what is not:
+
+- `scope` and the entire permission set come **from the source** and are not on the request.
+- `name` defaults to `"<source name> copy"`. It must be unique within (workspace, scope) and must not equal a built-in's display name in that scope, case-insensitively — `409` otherwise. Names are guarded, not keys, because names are the level users actually read.
+- `key` is **generated server-side** from the name (uppercased, `[A-Z0-9_]`, truncated to 40 characters, suffixed `_2`, `_3`… on collision) and is never accepted from a client. That generation is also what stops a custom role from reusing a built-in's key.
+- The source is addressed by **path**, so an unknown or foreign `sourceRoleId` is a `404`.
+- There is a per-workspace cap on custom roles (both scopes counted together, built-ins excluded); a workspace at its cap gets a `409` `errorType: "ROLE_LIMIT_REACHED"` before any other work is done. **The cap is exact, not advisory** — the count is taken under a row lock on the workspace, so concurrent duplicates cannot overshoot it. That lock is also why this is the one role endpoint that can lose a lock race and answer a *retryable* `409` with `Retry-After`; nothing is created when it does.
+
+### The grant ceiling
+
+**Everything you hand out, you hold.** Nobody may assign — or act on a member holding — a role that grants a permission they do not hold themselves. It compares *permission sets*, never role names, and it compares them **per grant width**: an unrestricted grant is not covered by an own-only one, so a holder of `label.manage:own` can never hand out unrestricted `label.manage`.
+
+The refusal is a `403` that **names the offending permission**:
+
+```json
+{ "type": "about:blank", "title": "Forbidden", "status": 403,
+  "detail": "You cannot assign or administer the role \"QA lead\", which includes issue.rank — a permission you do not hold in this workspace" }
+```
+
+The same rule bounds *defining* a role, not only assigning one: a `PATCH` or a duplicate that would produce a workspace-scoped role granting something the caller lacks is refused the same way, naming the same key. It also bounds a [delete-with-reassign](#deleting-a-role-and-reassigning-its-holders), which is neither — it is a grant to every holder at once.
+
+**The workspace Owner is above the ceiling in their own workspace**, for both defining and assigning. They are the root of trust: the ceiling exists to stop escalation *past* whoever is ultimately responsible, and inside one workspace that is the Owner. It is also the only reason `project.administer.all` is reachable at all — no built-in role holds it, so without the exemption it would be a permission the product ships and nobody can ever mint. **An `ADMIN` is not exempt**, which is the whole point of the distinction.
+
+The definition ceiling applies to **`WORKSPACE`-scoped roles only**. A project-scoped role has no comparand — an actor's project permissions differ from project to project — and inventing one at workspace level would forbid an admin from duplicating the contributor role, which is the product's primary recipe. Its entire practical effect is therefore *"only an Owner may mint `project.administer.all`"*, which is a small and exactly-right rule.
+
+**Both ends of a role write are bounded — the role as it stands today, not only the set you are sending.** This is the rule `PATCH …/members/{userId}` has always applied to a membership, where the ceiling is measured against the old role *and* the new one, because checking only the new one would let an `ADMIN` demote an `OWNER`. The role editor now applies the same rule: bounding only the incoming set would let an administrator **strip** a role that grants more than they hold — sabotage rather than escalation, and irreversible by the person who did it, since putting those grants back is exactly what this ceiling refuses.
+
+The consequence you will meet: a workspace `ADMIN` cannot strip, delete, **or even rename** a `WORKSPACE`-scoped role that grants something they do not hold themselves. An `OWNER` may do all three. An `ADMIN` still edits and deletes freely within their own set. The refusal is the same `403`, naming the same offending permission.
+
+Rename is included on purpose — a role's **name is what an administrator picks it by**, so relabelling "Deputy" as "Intern" leaves the next admin handing out something they believe they understand. Whatever you may not strip, you may not relabel. For that reason the current-role check runs on **every** `PATCH`, not only one carrying `permissions`, and its `403` is evaluated **before** the name-conflict `409`: a caller over the ceiling is told so first, even when the new name happens to be taken as well.
+
+`PROJECT`-scoped roles keep the drop described just above, at **both** ends — neither the role as it stands nor the incoming set is measured there. The asymmetry is deliberate rather than an oversight (there is no comparand at project scope), and the `SELF_HELD_ROLE` rules on [editing](#editing-a-role) and [deleting](#deleting-a-role-and-reassigning-its-holders) are what guard those instead.
+
+### Scope is immutable, and permissions must match it
+
+A role's `scope` is fixed at creation and is **not on the update request**. Were it editable, one `PATCH` would turn every existing assignment of that role into a wrong-scope row — a `WORKSPACE` role sitting in a project membership, putting `workspace.member.manage` into every holder's *project* permissions. A permission set carries no memory of where a grant came from, so nothing downstream could notice.
+
+The same reasoning gives the other half of the rule: **a permission's scope must equal the role's scope**. A `PROJECT` role carrying `workspace.edit` is a `422`, as is a `WORKSPACE` role carrying `issue.transition`.
+
+Three more `422`s on the same request, all about a *value* rather than the shape of the body:
+
+| Refusal | `detail` |
+|---|---|
+| Unknown permission key | `Unknown permission: <key>` |
+| Permission of the wrong scope | `Permission <key> cannot be granted by a PROJECT-scoped role — a role may only hold permissions of its own scope` |
+| `ownOnly: true` on a permission whose `supportsOwn` is `false` | `Permission <key> cannot be narrowed to objects you own` |
+| The same key listed twice | `Permission <key> is listed twice` |
+
+Note the asymmetry with `ownRequired`: `comment.edit` is **forced** own-only rather than refused — send it either way and it stores as own-only.
+
+### Built-in roles are read-only
+
+The eight built-in roles are product metadata shared by every workspace, not tenant data. They are visible everywhere, assignable everywhere, and **neither editable nor deletable**: a `PATCH` or `DELETE` on one is a `409` — *"Built-in roles cannot be edited or deleted — duplicate it to customise"*. It is a `409` rather than a `403` because the caller's permissions are fine; what refuses is the nature of the resource.
+
+Branch on the `builtIn` flag, never on the key: a workspace may legally own a custom role keyed `ADMIN` beside the built-in one, and **that** role is editable.
+
+### Editing a role
+
+```json
+// PATCH /workspaces/{wsId}/roles/{roleId}
+{
+  "name": "QA lead",
+  "permissions": [
+    { "key": "issue.transition" },
+    { "key": "comment.edit", "ownOnly": true }
+  ],
+  "version": 3
+}
+```
+
+- Every field is optional; omit one to leave it alone.
+- **`permissions` is a full replacement**, not a delta. An empty array is a real value — a role that grants nothing is legal, and the built-in Viewer is exactly that.
+- `ownOnly` defaults to `false`; an unqualified grant is the unrestricted one.
+- `version` is the optimistic-concurrency token from the role you loaded. Present and stale is a `409` *"Role was modified by someone else — refresh and retry"*; absent is last-writer-wins. **Send it.** A permission set is exactly the state where a silent lost update is unacceptable: two admins each unticking one box would otherwise restore each other's, and the loser's revocation would look like it had been applied.
+
+**You may not strip — or rename — a `WORKSPACE`-scoped role that grants more than you hold** (`403`). The [grant ceiling](#the-grant-ceiling) is measured against the role *as it stands today* as well as against the set you are sending, so an `ADMIN` editing a role that includes a permission they lack is refused whatever the body contains — including a body that changes nothing but `name` or `description`, because the name is what the next administrator picks the role by. An `OWNER` is exempt inside their own workspace, and this `403` is evaluated before the name-conflict `409`. `PROJECT`-scoped roles are not measured this way; the rule below is what guards them.
+
+**You may not widen a `PROJECT`-scoped role you hold yourself** — `409` `errorType: "SELF_HELD_ROLE"`. An edit is a grant to every holder of the role at once, evaluated against nobody, and the definition ceiling deliberately does not apply at project scope. Without this rule a member of a project carrying a custom role could `PATCH` twenty permissions into it and hand themselves `issue.delete`, `project.archive` and `project.taxonomy.manage` there — the "remove your own row, add it back bigger" route, reassembled out of one call. Narrowing, renaming and re-describing a role you hold all stay legal, and so does widening one you *do not* hold, which is the ordinary recipe. The remedy is the same as for the delete: move yourself to another role first, or ask another administrator to make the change.
+
+### Deleting a role, and reassigning its holders
+
+`DELETE …/roles/{roleId}` refuses with `409` `errorType: "ROLE_IN_USE"` when the role still has holders and no `reassignToRoleId` was given. The refusal carries the **whole usage object**, so a client renders the remap dialog straight from it rather than issuing a second request:
+
+```json
+{
+  "type": "about:blank", "title": "Conflict", "status": 409,
+  "detail": "This role is still assigned — pass reassignToRoleId to move its holders to another role, or change them individually first",
+  "errorType": "ROLE_IN_USE",
+  "usage": {
+    "roleId": "…", "members": 4, "invites": 1,
+    "projectMembers": 7, "projects": 2,
+    "defaultForProjects": 1, "defaultForWorkspace": false, "inUse": true
+  }
+}
+```
+
+Repeat with `?reassignToRoleId=…` and every holder is moved in the same transaction before the role is deleted. What gets moved depends on the scope: workspace memberships and pending invites for a `WORKSPACE` role; project memberships and the two default-project-role columns for a `PROJECT` one. The target must be assignable in this workspace **and of the same scope**; anything else — unknown, foreign, wrong scope, or the role being deleted — is one indistinguishable `422`.
+
+**The role being deleted is measured against your own permissions too** (`403`), and it is the first thing checked — before the self-held, in-use and stranding refusals. Deleting a role is the strongest possible edit of it, so an `ADMIN` may not delete a `WORKSPACE`-scoped role granting a permission they do not hold: otherwise `DELETE …?reassignToRoleId=…` would be the very demotion `PATCH …/members/{userId}` refuses, taken through a door that endpoint closes. An `OWNER` is exempt, the refusal names the offending permission, and at `PROJECT` scope this end is dropped exactly as it is on `PATCH` — the narrow-or-preserve rule below carries that scope instead.
+
+**You cannot delete a role you hold yourself** (`409` `errorType: "SELF_HELD_ROLE"`). Delete the custom "QA" role you hold in project P, reassigning to the built-in project `MANAGER`, and you would be that project's administrator — a widening no ceiling can see, because a ceiling is evaluated per assignment and this is one bulk update over every holder at once. The refusal is deliberately blunt, and its remedy is one call you can make yourself: move yourself to another role first, or ask another administrator to run the delete.
+
+**A reassign may narrow or preserve, never widen** (`403`). A bulk reassign is not an assignment, so the per-assignment [grant ceiling](#the-grant-ceiling) cannot see it — and without a rule of its own, one call would move every holder of a narrow role onto the built-in project `MANAGER`, in projects the caller is not even a member of. So:
+
+- at **`WORKSPACE`** scope the target is measured against the caller's own permissions — the identical ceiling a member role change applies, which means the Owner guardrail comes with it;
+- at **`PROJECT`** scope there is no such comparand (an actor's project permissions differ per project, and they may hold none anywhere), so the target is measured against **the role being deleted**: it must be covered by it, so every holder ends up with the same grants or fewer. A reassign then cannot manufacture authority that did not already exist on those very rows.
+
+The workspace Owner is exempt in their own workspace, as everywhere else, and the refusal names the offending permission: *Reassigning "QA lead" to "Project admin" would widen every holder's access: the replacement includes `issue.delete`, which "QA lead" does not grant.*
+
+**A reassign can never mint an Owner *invitation*** (`403`). `POST …/invites` has always refused to hand the built-in `OWNER` role to an invitation — not even one issued by an owner: ownership is handed over to an existing member, it is not offered to somebody who has not joined yet. Reassigning a `WORKSPACE`-scoped role that still has **pending invites** to the built-in `OWNER` would repoint those invites at it through the back door, so that is refused too, and the `detail` says how many are in the way:
+
+> This role has 2 pending invitations, and an invitation can never grant the Owner role — ownership is handed over to an existing member, not offered to somebody who has not joined yet. Reassign to another role, then promote them once they accept
+
+The invites are refused rather than quietly destroyed: they belong to somebody else, and you did not ask for them to be deleted. There are exactly two ways out, both named in the message — **reassign to any other role**, or let the invitees accept and then promote them with `PATCH …/members/{userId}`, which is the door ownership is meant to travel. This one applies to an owner as well, since the Owner exemption returns from the reassign ceiling before the Owner guardrail inside it can be reached, and that gap is what it closes.
+
+**`GET …/roles/{roleId}/usage`** returns the same object outside a refusal. `inUse` is the exact disjunction the delete guard uses (`members`, `invites`, `projectMembers`, `defaultForProjects`, `defaultForWorkspace` — **not** `projects`, which only counts how many distinct projects the project memberships are spread across), published so a client cannot compute a different answer from the parts and then be surprised by a `409`. Every count is filtered to this workspace: built-in roles are shared rows belonging to no workspace, so an unscoped count would publish another tenant's headcount.
+
+**`null` and a zeroed object are different answers, and the difference matters.** On the list, `usage` is `null` when you did not ask for it (`includeUsage` absent or `false`) — that says nothing at all about whether the role is in use. When you *did* ask, every role carries a full object, including one that is in play nowhere: all counts `0` and `inUse: false`, byte-identical to what `GET …/roles/{roleId}/usage` answers for it. So a client that asked never has to tell "unused" from "unknown", and a client that did not ask must never read `null` as "unused".
+
+### The `409` codes on role writes
+
+Role writes are the one place with several conflicts that share a status, so **branch on the response, never on the wording of `detail`, and in this order**:
+
+1. **`Retry-After` present** → [lock contention](#errors). Retry the *identical* request after that many seconds. It carries **no `errorType`**, which is exactly why the header has to be checked first: an absent discriminator otherwise reads as "no recovery I know about", the one wrong answer for a body that is only asking to be retried.
+2. **`errorType: "ROLE_IN_USE"`** → the role still has holders. Offer the remap dialog; the body already contains `usage`.
+3. **`errorType: "SELF_HELD_ROLE"`** → one rule, two doors: *you may not widen your own access in bulk.* Either you hold the role being deleted, or the `PATCH` widens a `PROJECT`-scoped role you hold. Offer "change my own role first"; there is no flag that clears this.
+4. **`errorType: "LAST_PROJECT_ADMIN_BULK"`** → the change would demote every administrator of the listed projects at once — a `PATCH` removing `project.member.manage` from a `PROJECT`-scoped role, or a `DELETE` reassigning to a role that does not grant it. The body carries the same uncapped `projects` array as the [member-removal conflict](#managing-members). **There is no adoption retry here**, unlike a member removal: the remedy is the caller's own, and it is **not the same on both doors** — the edit door says *keep that permission on the role, or give each of those projects another administrator first*, while the delete door additionally requires the replacement to be **no wider than the role being deleted** (naming only the first constraint would walk the caller straight into [the reassign ceiling](#deleting-a-role-and-reassigning-its-holders)'s `403`). Render `detail` rather than composing the sentence yourself.
+5. **`errorType: "ROLE_LIMIT_REACHED"`** → `POST …/duplicate` only: the workspace is at its custom-role cap. Offer "delete a role you no longer use"; do **not** retry. This is the discriminator that separates the cap from case 1 on the very same endpoint — they share a status, and only one of them is worth retrying.
+6. **No `errorType` at all** → one of the plain conflicts: the role is built-in, the `version` is stale, or the name is taken. Read `detail` and show it.
+
+Treat an `errorType` you do not recognise as case 6: render `detail`, offer no retry.
+
+### The assignment block — what a role could hand out
+
+Every role response carries a server-derived `assignment` block, and `POST …/roles/preview` returns the same block for a permission list that does not exist yet:
+
+```json
+"assignment": {
+  "managesMembers": true,
+  "canAssign":    [ { "roleId": "…", "name": "Viewer" } ],
+  "cannotAssign": [ { "roleId": "…", "name": "Contributor", "missing": "issue.rank" } ],
+  "warnings":     [ "MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING" ]
+}
+```
+
+It exists so the grant ceiling is visible **while a role is being composed** rather than as a `403` weeks later, and it is computed by the *same* server-side comparison the runtime ceiling makes — which is the only reason a preview and a refusal cannot disagree. `missing` is a permission **key**, never a rendered sentence, and it is the identical string the runtime `403` quotes.
+
+Three things to hold onto:
+
+- **It is advisory, for rendering only.** The API is the enforcement boundary and performs its own check on every request, exactly as with [`myPermissions`](#mypermissions-is-not-an-authorization-boundary). A client that ignores the block entirely is still safe; it just offers worse choices.
+- **It is a lower bound.** It is computed from the role *alone* and ignores what a real holder additionally gets from their workspace role (`project.curate.all` / `project.administer.all`), so a holder may in practice assign more than `canAssign` lists. That is the conservative direction on purpose. Phrase it as *"on its own, this role can assign: …"*.
+- **`warnings` are codes, not copy.** Today there is one: `MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING`, raised when the role manages a roster and yet every role it can assign grants nothing — somebody who can add people to a project and cannot give any of them the ability to do a single thing. Note it is *not* literally "`canAssign` is empty": the built-in Viewer grants the empty set, the empty set is covered by every set, so every role can assign Viewer. It **warns, never blocks** — a role granting nothing is legal, and an intermediate save is legitimate. Treat an unrecognised code as informational.
+
+`POST …/roles/preview` needs `workspace.role.manage`, persists nothing, and requires `scope` in the body (there is no stored role to take one from). It runs the **same validation a real write runs**, which is half its value: the same `422` for an unknown key, a wrong-scope permission, an illegal `ownOnly` or a duplicated key that `PATCH` would have produced — discovered while the checkboxes are being ticked instead of at Save.
+
+```json
+// POST /workspaces/{wsId}/roles/preview
+{ "scope": "PROJECT", "permissions": [ { "key": "issue.transition" } ] }
+// → 200 { "assignment": { … } }
+```
+
+### Role changes are not instant everywhere
+
+**A role's *contents* are cached per server node for up to 10 seconds.** On a multi-instance deployment that means a **revocation** — unticking a permission on a role — can still be honoured on another node for that long, and the same delay applies to widenings. It is a known, accepted property, and the window is deliberately short and not configurable, because a configurable TTL on an authorization cache is a per-deployment way to lengthen a security window.
+
+Two things are **not** subject to it:
+
+- **Membership is never cached.** Changing which role a person holds — `PATCH …/members/{userId}`, `PATCH …/projects/{p}/members/{userId}`, and the whole of `DELETE …/roles/{roleId}?reassignToRoleId=` — takes effect on that person's very next request, on every node.
+- **Permissions are never in the access token.** A demotion is not waiting for anyone's token to expire.
+
+Within a single request, permissions are resolved once and reused, so a role change committed mid-request is not observed by that request. If you need certainty after an edit — an integration test, an admin script — wait out the window rather than racing it.
+
 ## Instance metadata
 
 | Method | Path | Auth | Description |
@@ -452,7 +731,7 @@ Values reflect the [operator's configuration](#operator-settings-that-affect-the
 | `POST` | `/auth/reset-password` | — | Set a password with a one-time token; revokes all sessions. Backs both the forgot-password email and admin-generated account setup links |
 | `GET` | `/auth/me` | ✔ | The current user (`id`, `email`, `displayName`, `avatarUrl`, `systemRole`, `needsOnboarding`) |
 
-> `needsOnboarding` is **always `false`** on DC — the first-login create-or-join-a-team flow is a Cloud feature (`app.onboarding.enabled`, off here). The invite-acceptance endpoints below still work if a workspace admin sends invites. `GET /invites` lists pending invites addressed to your email; `POST /invites/{id}/accept` · `/decline` accept/remove them by id (accept stays email-bound → `404` otherwise).
+> `needsOnboarding` is **always `false`** on DC — the first-login create-or-join-a-team flow is a Cloud feature (`app.onboarding.enabled`, off here). The invite-acceptance endpoints below still work if a workspace admin sends invites. `GET /invites` lists pending invites addressed to your email; `POST /invites/{id}/accept` · `/decline` accept/remove them by id (accept stays email-bound → `404` otherwise). Accepting also re-checks the role the invite carries before writing it onto the new membership: an invite whose stored role is no longer a usable role of that workspace — a corrupt or hand-edited row, which a normal client never meets — is refused with that same `404` rather than creating a membership nobody could afterwards administer.
 
 **Register** — available only when `publicSignupEnabled` is true (`GET /meta`); disabled by default on DC, where an admin creates accounts and shares a setup link. `termsAccepted: true` is required unless the operator disabled `TERMS_ACCEPTANCE_REQUIRED`:
 
@@ -489,9 +768,10 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 | `GET` | `/workspaces` | ✔ | Workspaces the caller belongs to |
 | `GET` | `/workspaces/{id}` | member | Get one |
 | `GET` | `/workspaces/{id}/members` | member | List members |
-| `PATCH` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Change a member's role (`{"role"}`, subject to the grant ceiling on both the old and the new role). Returns the member |
+| `PATCH` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Change a member's role (`{"roleId"}`, or the deprecated `{"role"}` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling on both the old and the new role). Returns the member |
 | `DELETE` | `/workspaces/{id}/members/{userId}?adoptStrandedProjects=` | `workspace.member.manage` | Remove a member from the workspace — not their account. `204`; `409` when it would leave a project without an administrator, cleared by repeating the call with `adoptStrandedProjects=true` |
-| `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "role"}`; subject to the grant ceiling, never `OWNER`). `201` |
+| `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "roleId"}`, or the deprecated `role` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling, never `OWNER`). `201` |
+| `GET` | `/workspaces/{id}/roles` | member | The workspace's roles — see [Custom roles](#custom-roles) |
 | `POST` | `/workspaces/accept-invite?token=…` | ✔ | Accept an invite; must be signed in with the invited email |
 
 ```json
@@ -510,7 +790,7 @@ Every workspace response — create, list, get and invite acceptance — carries
 
 All three endpoints require [`workspace.member.manage`](#permissions) — held by the built-in `OWNER` and `ADMIN` and not by `MEMBER`, which is exactly who could use them before. There is no role *ladder* behind them any more (see [Roles](#roles)); what bounds an edit is the grant ceiling below.
 
-`PATCH …/members/{userId}` takes `{"role": "OWNER" | "ADMIN" | "MEMBER"}` — that is the whole body, and it is required (`400` otherwise; a value that is not an assignable workspace role key is [`422 "Unknown role"`](#unknown-role--a-422)) — and returns the updated membership in the same shape `GET …/members` lists:
+`PATCH …/members/{userId}` takes `{"roleId": "…"}` — the id of any assignable role, which is the only way to name one of the workspace's [custom roles](#custom-roles) — or the deprecated `{"role": "OWNER" | "ADMIN" | "MEMBER"}`. [Exactly one of the two is required](#naming-a-role-roleid-and-the-deprecated-role-key): neither and both are alike a `422`, as is a role reference that cannot be assigned here. It returns the updated membership in the same shape `GET …/members` lists:
 
 ```json
 { "userId": "…", "email": "mia@example.com", "displayName": "Mia", "avatarUrl": null, "role": "ADMIN", "joinedAt": "…" }
@@ -568,9 +848,11 @@ That retry exists because the other remedy is not available to the person being 
 
 Read `adoptedProjects` for what was actually taken over rather than re-deriving it (`myRole`/`myPermissions` on `GET …/projects` reflect it too, immediately). Where the caller already held a membership row in an adopted project that row is **promoted in place** — its role is replaced, not added alongside.
 
-**The adoption itself can be refused, with the same `409` — and this one deliberately offers no retry.** If the caller already holds a role in one of the stranded projects that grants something `TEAM_LEAD` does not, replacing that row would *demote* the very person doing the rescuing, and the [grant ceiling](#managing-members) would then refuse to give the missing rights back, since the departing member was the last holder of them. Skipping the project instead would strand it. So the whole removal is refused and nothing is written — not the adoption, not the unassignment, not the removal. The body is the familiar shape (`409`, a `projects` array), but it lists only the projects that block the adoption, and its `detail` names the obstacle instead of the retry, which would fail identically. This is unreachable with the built-in project roles — each is either covered by `TEAM_LEAD` or already holds `project.member.manage`, in which case the project was never stranded — so it takes a custom project role (a "QA lead" with `issue.delete` and no member management) to see it. **The remedy is somebody else's action, not yours:** ask the member you are removing — still active, still that project's administrator — to appoint a successor while they still can, or have a colleague who already administers the project run the removal instead. Appointing one yourself is not open to you here: `POST …/projects/{projectId}/members` needs `project.member.manage` **in that project**, and this branch is only reachable because you do not have it.
+**The adoption itself can be refused, with the same `409` — and this one deliberately offers no retry.** If the caller already holds a role in one of the stranded projects that grants something `TEAM_LEAD` does not, replacing that row would *demote* the very person doing the rescuing, and the [grant ceiling](#managing-members) would then refuse to give the missing rights back, since the departing member was the last holder of them. Skipping the project instead would strand it. So the whole removal is refused and nothing is written — not the adoption, not the unassignment, not the removal. The body is the familiar shape (`409`, a `projects` array), but it lists only the projects that block the adoption, and its `detail` names the obstacle instead of the retry, which would fail identically. This is unreachable with the built-in project roles — each is either covered by `TEAM_LEAD` or already holds `project.member.manage`, in which case the project was never stranded — so it takes a custom project role (a "QA lead" with `issue.delete` and no member management) to see it. **The remedy is somebody else's action, not yours:** ask the member you are removing — still active, still that project's administrator — to appoint a successor while they still can, or have another workspace administrator who does **not** already work in that project run the removal instead. Not one who already administers it: this branch is only reachable when the departing member is that project's single administrator, so that set is exactly the one just proven empty. Appointing one yourself is not open to you here: `POST …/projects/{projectId}/members` needs `project.member.manage` **in that project**, and this branch is only reachable because you do not have it.
 
 Tell this one apart by `errorType: "ADOPTION_BLOCKED"` (the ordinary refusal is `"STRANDED_PROJECTS"`) and **do not render an adopt button for it** — the flag is already set, and setting it again produces this same `409`.
+
+**A second, rarer stop on the same path — `errorType: "ADOPTION_ROLE_UNREADABLE"`.** The adoption also refuses when *your own* membership row in one of those projects refers to a role that cannot be resolved — a mis-scoped, foreign or hand-edited `role_id` — because overwriting a row the server cannot read is precisely what a rescue must not do. Nothing about your permissions is wrong, and the wording claims only what was tested: it names no cause (the code cannot tell which of those it is) and offers you no action, because you have none. **Neither you nor the member you are removing can clear it** — retrying fails the same way — so it takes a system administrator repairing that row; the server has already logged an ERROR and counted the fault. If one project blocks the adoption *and* another carries an unreadable row, the unreadable one is reported first, deliberately: leading with the other would send you to arrange a handover that then runs into this one anyway.
 
 Why the state is worth refusing a removal over in the first place: `project.member.manage` is **not** part of the workspace-wide curator set, so a workspace `OWNER`/`ADMIN` who holds no membership row in that project cannot add members back, archive it, or manage its project-private taxonomy — and no endpoint restores it, which is why the alternative (letting the removal proceed and silently orphaning those projects) was rejected. That is a property of the roles this release ships rather than a permanent one: the permission model does have workspace-wide and project-default routes that would grant `project.member.manage`, but neither is editable through the API yet. The guard behaves the same either way.
 
@@ -592,11 +874,11 @@ The account itself is untouched, as is their membership of every other workspace
 |---|---|
 | `200` | `PATCH`: the updated membership. `DELETE`: the member was removed **and** at least one project was adopted — the body is `{"adoptedProjects": […]}` |
 | `204` | `DELETE` only — the member was removed and nothing was granted (every removal without the flag, and a flagged one that stranded nothing) |
-| `400` | `PATCH` only — `role` is missing, null or empty |
+| `400` | Malformed JSON, or a field that fails ordinary validation (a `role` string over 40 characters). **Not** an unnamed role — see the `422` row |
 | `403` | The caller lacks `workspace.member.manage`, the change breaks the grant ceiling, or it involves the `OWNER` role and the caller is not an owner |
 | `404` | Unknown workspace, caller not a member, **or** the target holds no membership in *this* workspace |
-| `409` | The change would leave the workspace without an `OWNER` (no `errorType`); on `DELETE` only, would leave one or more projects without an administrator (`errorType: "STRANDED_PROJECTS"`), **or** the adoption those projects need would demote the caller (`errorType: "ADOPTION_BLOCKED"`) — both of those bodies also carry `projects`; or a lost row-lock race (no `errorType`, but a `Retry-After` header — just retry) |
-| `422` | `PATCH`: `role` is not an assignable workspace role key ([`"Unknown role"`](#unknown-role--a-422)). `DELETE`: the target is the caller (see below) |
+| `409` | The change would leave the workspace without an `OWNER` (no `errorType`); on `DELETE` only, would leave one or more projects without an administrator (`errorType: "STRANDED_PROJECTS"`), **or** the adoption those projects need would demote the caller (`errorType: "ADOPTION_BLOCKED"`) or stopped on a membership row whose stored role cannot be read (`errorType: "ADOPTION_ROLE_UNREADABLE"`) — all of those bodies also carry `projects`; or a lost row-lock race (no `errorType`, but a `Retry-After` header — just retry) |
+| `422` | `PATCH`: the role cannot be assigned here ([`"Unknown role"`](#unknown-role--a-422)), or the body named it with [neither or both](#naming-a-role-roleid-and-the-deprecated-role-key) of `roleId` / `role`. `DELETE`: the target is the caller (see below) |
 
 The two *invariant* `409`s cannot both be reported, and the last-owner one wins: a sole owner who is also the sole administrator of a project is told to promote another owner first, and sees the project list only once that is done. The self-removal `422` also precedes the project check. A further `409` — [lock contention](#errors) — is not an invariant at all and can arrive on any attempt.
 
@@ -605,9 +887,10 @@ The two *invariant* `409`s cannot both be reported, and the last-owner one wins:
 1. **`Retry-After` present** → lock contention. Retry the *identical* request unchanged after that many seconds. (No `errorType`, deliberately — this is why the header is checked first.)
 2. **`errorType: "STRANDED_PROJECTS"`** → the removal would strand the listed `projects`. Offer the `adoptStrandedProjects=true` retry.
 3. **`errorType: "ADOPTION_BLOCKED"`** → that retry was made and cannot work. Render `detail`; offer no retry. (Treat an unrecognised `errorType` as this case.)
-4. **Neither** → the last-owner invariant. Promote another owner first.
+4. **`errorType: "ADOPTION_ROLE_UNREADABLE"`** → the adoption stopped on a membership row whose stored role cannot be read. Render `detail`; offer no retry, and no self-service remedy either — it needs an operator.
+5. **Neither** → the last-owner invariant. Promote another owner first.
 
-Cases 2 and 3 are mutually exclusive — which one you get depends on the flag — and both carry `projects`, so a client that only lists the projects in the way can still treat them as one case; only a client that offers a retry has to distinguish them.
+Cases 2, 3 and 4 are mutually exclusive: case 2 depends on the flag, and when 3 and 4 both apply the server reports 4, because that is the one nobody present can clear. All three carry `projects`, so a client that only lists the projects in the way can still treat them as one case; only a client that offers a retry has to distinguish them.
 
 That third `404` case is about the **membership**, never about the account: an unknown id, an id belonging to someone in another workspace, and a member who was removed a second ago are one indistinguishable answer, so the endpoint cannot be used to probe which accounts exist. It also makes a repeated `DELETE` a clean `404` instead of an error — safe to retry.
 
@@ -624,7 +907,8 @@ That third `404` case is about the **membership**, never about the account: an u
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/archive` | `project.archive` | Archive (read-only afterwards). `204` |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `project.archive` | Restore. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members — **any workspace member**, no permission required |
-| `POST` | `/workspaces/{wsId}/projects/{projectId}/members` | `project.member.manage` | Add a workspace member (`{"userId", "role"}`; `422` for an unusable role). `201` |
+| `POST` | `/workspaces/{wsId}/projects/{projectId}/members` | `project.member.manage` | Add a workspace member (`{"userId", "roleId"}`, or the deprecated `role` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); `422` for an unusable role). `201` |
+| `PATCH` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `project.member.manage` | Change a member's project role (`{"roleId"}`). `409` if it would take the project's last administrator |
 | `DELETE` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `project.member.manage` | Remove a member. `204`; `409` if they are the project's last administrator, or on lost lock contention (that one carries `Retry-After` — just retry) |
 
 ```json
@@ -653,11 +937,15 @@ Every project response — create, list, get and update — carries [`myPermissi
 
 **Listing members needs nothing but membership.** `GET …/projects/{projectId}/members` is open to **any workspace member**, project member or not — the assignee picker, mention autocomplete and a People view all need it, and the workspace member list is already open the same way. Its old gate admitted everyone, so no caller's result changed.
 
-**Adding a member.** `role` is a [project role key](#role-values-are-keys-not-an-enum): `MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER` or `VIEWER`. Anything else is [`422 "Unknown role"`](#unknown-role--a-422) — including a *workspace* role key such as `ADMIN`, because scope is part of the question and `MEMBER` names a different role in each scope. A missing or empty `role` is a `400`. The grant ceiling applies here too: you cannot hand out a project role that grants a project permission you do not hold yourself, and it also bounds *removals* (the role a removed member falls back to must not exceed yours either).
+**Adding a member.** Name the role with `roleId` — the id of any assignable project role, and the only way to name one of the workspace's [custom roles](#custom-roles) — or with the deprecated `role` **key** (`MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER`, `VIEWER`). [Exactly one of the two](#naming-a-role-roleid-and-the-deprecated-role-key); neither and both are alike a `422`, as is a role reference this instance cannot assign in the **project** scope — including a *workspace* role such as `ADMIN`, because scope is part of the question and `MEMBER` names a different role in each scope. The grant ceiling applies here too: you cannot hand out a project role that grants a project permission you do not hold yourself, and it also bounds *removals* (the role a removed member falls back to must not exceed yours either).
+
+**One escape from that ceiling, and only one.** Any holder of `project.member.manage` may always grant the built-in project `MANAGER` role — **to somebody else, never to themselves**. Without it a project whose only member-managers hold a narrower custom role could never acquire what none of them holds, and `project.archive` / `project.taxonomy.manage` have no other route in: a workspace `OWNER` who is not a member there holds no `project.member.manage` either, so they cannot assign any project role in that project. The self-exclusion is the load-bearing half — without it `project.member.manage` would silently imply all twenty project permissions for its own holder. The residual is documented rather than hidden: two cooperating members can bootstrap a project administrator between them (A grants B, then B grants A by the ordinary ceiling). That *is* the recovery procedure, it needs a willing accomplice who already has an account, and both steps are logged. A secondary effect is intended — after A promotes B, A can no longer demote or remove B, because the ceiling is also checked against a target's *current* role.
+
+**Changing a member's role.** `PATCH …/projects/{projectId}/members/{userId}` takes `{"roleId": "…"}` and nothing else — there is no legacy `role` key here, because the endpoint is new and has no legacy client. It exists because the alternative was remove-then-add: two calls, each checked separately, with the member dropping onto the workspace default in between and a window in which the project genuinely had no administrator. The ceiling is checked on **both** the role they hold now and the one requested (checking only the new one would let a narrow member-manager demote somebody wider than themselves), the escape above applies, and re-sending the role they already hold is an accepted no-op. **The last-administrator guard applies to a demotion too** — it strands a project with no row removed at all — but is skipped for a *promotion*, since a role that itself grants `project.member.manage` cannot strand anything and requiring a second administrator before you may widen the only one would make the invariant unfixable. Self-demotion is allowed, and refused by that same guard exactly when it would orphan the project.
 
 > **`VIEWER` is accepted but stored as `MEMBER`.** The built-in project role keyed `VIEWER` now grants **nothing**, whereas it historically meant "no explicit row", which granted everything. Writing it literally would silently mint someone who is refused every write, so this endpoint maps it to the contributor role (`MEMBER`) — and the response echoes what was **stored**, not what you sent. Read the `role` you get back rather than assuming it round-trips. A genuinely read-only membership is not expressible through this endpoint yet.
 
-**Removing a member: the last administrator is protected.** `DELETE …/projects/{projectId}/members/{userId}` returns `409 "This is the project's last administrator — add another one first"` when the target is the only member of that project holding [`project.member.manage`](#permissions) — for the same reason the [workspace-level removal](#managing-members) refuses: nobody could manage the project's membership afterwards, and a workspace `OWNER`/`ADMIN` who is not a member of the project cannot step in, because that permission is not part of the workspace-wide curator set. Add another administrator first, then retry. The guard is about the **permission, not one particular role**: any role granting `project.member.manage` makes its holder an administrator here, and a role that does not grant it never does — so both built-in holders (`MANAGER` and `TEAM_LEAD`) are protected, and nothing else is. Unlike the workspace-level conflict this body carries no `projects` extension — the project is the one in the path. A project with no explicit administrator at all is a normal state and is left alone; only the step from one to none is refused.
+**Removing a member: the last administrator is protected.** `DELETE …/projects/{projectId}/members/{userId}` — and, since it strands a project just as effectively with no row removed at all, `PATCH …/projects/{projectId}/members/{userId}` — returns `409 "This is the project's last administrator — add another one first"` when the target is the only member of that project holding [`project.member.manage`](#permissions) — for the same reason the [workspace-level removal](#managing-members) refuses: nobody could manage the project's membership afterwards, and a workspace `OWNER`/`ADMIN` who is not a member of the project cannot step in, because that permission is not part of the workspace-wide curator set. Add another administrator first, then retry. The guard is about the **permission, not one particular role**: any role granting `project.member.manage` makes its holder an administrator here, and a role that does not grant it never does — so both built-in holders (`MANAGER` and `TEAM_LEAD`) are protected, and nothing else is. Unlike the workspace-level conflict this body carries no `projects` extension — the project is the one in the path. A project with no explicit administrator at all is a normal state and is left alone; only the step from one to none is refused.
 
 This removal takes row locks on the project's administrators and bounds how long it waits for one, so it has the same second, non-invariant `409` as the workspace-level removal: [lock contention](#errors), carrying `Retry-After` and worth retrying **unchanged**. The last-administrator invariant carries no such header, because retrying it unchanged cannot help; neither variant carries an `errorType`.
 

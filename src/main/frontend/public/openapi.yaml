@@ -71,8 +71,9 @@ info:
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
     query carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal
-    refused over project administrators carries `STRANDED_PROJECTS` or
-    `ADOPTION_BLOCKED`. Two rules for consuming it: treat a value you do not
+    refused over project administrators carries `STRANDED_PROJECTS`,
+    `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`. Two rules for consuming
+    it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
     not read its **absence** as an unknown value — a response that needs no
     discriminator simply has no `errorType` (the lock-contention `409` above is
@@ -114,11 +115,26 @@ tags:
   - name: Permissions
     description: >-
       The permission catalog — static product metadata describing every
-      permission this build defines. The per-caller answer ("what may *I* do
-      here?") is not here: it rides `myPermissions` on each workspace and
+      permission this build defines, and the exact vocabulary a custom role is
+      composed from (see the **Roles** tag). The per-caller answer ("what may
+      *I* do here?") is not here: it rides `myPermissions` on each workspace and
       project response.
   - name: Workspaces
     description: Tenancy boundary — members, invites
+  - name: Roles
+    description: >-
+      The workspace's roles — the eight built-in templates every workspace
+      sees, plus any custom roles it defines. A role is a named bundle of
+      permissions and nothing more: there is no ordering on roles, and no rung a
+      role occupies.
+
+
+      Reading the list is open to any workspace member (role names are rendered
+      on a People tab); everything else needs `workspace.role.manage`, which is
+      deliberately separate from `workspace.member.manage` — defining what a
+      role may do is strictly more dangerous than handing out one that already
+      exists. **There is no `POST /roles`:** creation is duplication of an
+      existing role, for the reason given on the duplicate operation.
   - name: Onboarding
     description: First-login flow — pending invites and create-or-join-a-team (Cloud)
   - name: Projects
@@ -524,11 +540,14 @@ paths:
         Requires `workspace.member.manage` — held by the built-in `OWNER` and
         `ADMIN` and not by `MEMBER`, which is exactly who could use this before.
         There is no role *ladder* behind it any more: the role enums are gone
-        and the permission model is the only authority. `role` is the whole body
-        and is required (`400` when missing/blank, `422` when it is not an
-        assignable workspace role key). Setting the role a member already holds
-        is an accepted no-op, not an error, so re-sending the current value is
-        safe.
+        and the permission model is the only authority.
+
+        **Name the role with `roleId`** — the assignable role's id, and the only
+        way to name one of the workspace's own custom roles. The legacy `role`
+        **key** still works and is now deprecated; **exactly one of the two must
+        be present**, and neither or both is a `422`. Setting the role a member
+        already holds is an accepted no-op, not an error, so re-sending the
+        current value is safe.
 
         **Grant ceiling.** Nobody may hand out — or act on a member holding — a
         role that grants a permission they do not hold themselves, and the check
@@ -688,12 +707,29 @@ paths:
         role (a "QA lead" with `issue.delete` and no member management). **The
         remedy is somebody else's action, not the caller's:** ask the member
         being removed — still ACTIVE, still that project's administrator — to
-        appoint a successor while they still can, or have a colleague who
-        already administers the project run the removal instead. Appointing one
+        appoint a successor while they still can, or have another workspace
+        administrator who does **not** already work in that project run the
+        removal instead — not one who already administers it, which is the set
+        this branch has just proven empty. Appointing one
         directly is not open to the caller, because
         `POST /workspaces/{workspaceId}/projects/{projectId}/members` needs
         `project.member.manage` **in that project**, which is exactly what this
         branch proves they do not have.
+
+        **A second stop on the same path, and a different reader**
+        (`errorType: "ADOPTION_ROLE_UNREADABLE"`). The adoption also refuses
+        when the caller's own membership row in a listed project refers to a
+        role that **cannot be resolved** — a mis-scoped, foreign or hand-edited
+        `role_id`, which a normal client never meets — because overwriting a row
+        the server cannot read is exactly what a rescue must not do. Nothing
+        about the caller's permissions is wrong. It is cleared by **nobody party
+        to the request**: retrying fails identically, and nothing the caller or
+        the member being removed can change affects it, so it needs an operator
+        to repair the stored row (already logged as an ERROR and counted before
+        the refusal). `detail` accordingly names no cause and prescribes no
+        action to its reader. When this and `ADOPTION_BLOCKED` both apply, this
+        one is reported **first** — either ends the request, and the second
+        should not be the one nobody present can clear.
 
         **Be precise about the size of that grant.** It is *not* the project
         `MANAGER` role, which an earlier build handed out: an adopter gets no
@@ -738,7 +774,8 @@ paths:
         Both the last-owner `409` and the self-removal `422` are checked
         **before** this one, so at most one *invariant* refusal is ever reported;
         the two stranded-project variants above are one such refusal and are told
-        apart by `errorType` (`"STRANDED_PROJECTS"` / `"ADOPTION_BLOCKED"`),
+        apart by `errorType` (`"STRANDED_PROJECTS"` / `"ADOPTION_BLOCKED"` /
+        `"ADOPTION_ROLE_UNREADABLE"`),
         never by the wording of `detail`. A further `409` is not an invariant at
         all and can arrive on any attempt: lock contention, which carries
         `Retry-After` and deliberately **no** `errorType` — the header is what
@@ -823,11 +860,17 @@ paths:
         Requires `workspace.member.manage` — the same permission and the same
         grant ceiling as `PATCH /workspaces/{workspaceId}/members/{userId}`, one
         implementation shared by both so they cannot drift. The granted role
-        must not grant a permission the caller lacks, and can never be `OWNER`
-        *even for an owner* — an existing member can still be promoted to
-        `OWNER` afterwards via that `PATCH`. A role key this instance cannot
-        assign is `422 "Unknown role"`. The invite is bound to the invited
-        email.
+        must not grant a permission the caller lacks, and can never be the
+        built-in `OWNER` *even for an owner* — an existing member can still be
+        promoted to `OWNER` afterwards via that `PATCH`. The invite is bound to
+        the invited email.
+
+
+        **Name the role with `roleId`** — the assignable role's id, and the only
+        way to invite somebody straight onto one of the workspace's own custom
+        roles. The legacy `role` **key** still works and is now deprecated;
+        **exactly one of the two must be present**, and neither or both is a
+        `422`, as is a role reference this instance cannot assign.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -851,11 +894,418 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422': { $ref: '#/components/responses/UnknownRole' }
 
+  /workspaces/{workspaceId}/roles:
+    get:
+      tags: [Roles]
+      summary: List the roles available in this workspace
+      description: |
+        The built-in role templates plus every custom role this workspace owns,
+        in one list.
+
+        **Open to any workspace member.** Role names are rendered for everybody
+        on a People tab, so keeping the list behind an administrative permission
+        would only force clients to fetch it another way. The sensitive half is
+        `includeUsage`, which additionally requires `workspace.role.manage` and
+        answers `403` without it. Nothing else here is gated.
+
+        Entries are grouped by `scope`, with built-in templates before custom
+        roles inside each group, then ordered by `position` and `name`. Each
+        entry carries the derived `assignment` block (see `RoleAssignmentView`).
+
+
+        **`usage` is `null` unless you asked for it, and a full object when you
+        did** — including for a role that is in play nowhere, which comes back
+        zeroed with `inUse: false` rather than `null`. The two states mean
+        genuinely different things: `null` is "not requested", and a zeroed
+        object is "requested, and the answer is none". Never read the first as
+        the second.
+      operationId: listRoles
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: scope
+          in: query
+          required: false
+          description: >-
+            Restrict the list to one scope. Absent means both, which is the
+            usual case for a role picker that has to show workspace and project
+            roles side by side.
+          schema: { $ref: '#/components/schemas/RoleScope' }
+        - name: includeUsage
+          in: query
+          required: false
+          description: >-
+            Attach the `usage` block to each role. **Requires
+            `workspace.role.manage`** — the counts are the sensitive half of
+            this endpoint, and the list itself is open to every member, so this
+            is the one parameter that can turn a `200` into a `403`. It costs a
+            constant four grouped queries, not one per role.
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/RoleResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/roles/preview:
+    post:
+      tags: [Roles]
+      summary: Dry-run the assignment feedback for a permission list
+      description: |
+        **Persists nothing.** Answers the derived `assignment` block for a
+        permission list that does not exist yet, so a role editor can show the
+        consequence of a checkbox while it is being ticked rather than after
+        Save — or, worse, as a `403` weeks later.
+
+        It runs the **same validation a real write runs**, which is half its
+        value: an unknown key, a permission of the wrong scope, an illegal
+        `ownOnly` and a duplicated key all answer the same `422` here that
+        `PATCH /workspaces/{workspaceId}/roles/{roleId}` would. The preview and
+        the write cannot disagree, because the block is computed by the same
+        server-side call the runtime grant ceiling makes.
+
+        Requires `workspace.role.manage`. `scope` is **required** in the body —
+        unlike the update request, there is no stored role to take it from. This
+        is not a way to change a role's scope: nothing is stored.
+      operationId: previewRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PreviewRoleRequest' }
+      responses:
+        '200':
+          description: OK — the derived block, wrapped so it matches the same key on a role
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleAssignmentPreviewResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/RolePermissionUnprocessable' }
+
+  /workspaces/{workspaceId}/roles/{roleId}:
+    get:
+      tags: [Roles]
+      summary: Get one role
+      description: >-
+        Open to any workspace member, like the list. `usage` is always `null`
+        here — fetch `GET /workspaces/{workspaceId}/roles/{roleId}/usage` for
+        the counts, which needs `workspace.role.manage`.
+
+
+        A role that is neither a built-in template nor one of this workspace's
+        own is a `404`, never a `403` and never a `422`: an id in a **path** is
+        an address, and answering anything else would make the endpoint an
+        oracle for whether a role exists in another tenant.
+      operationId: getRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/roleId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Roles]
+      summary: Rename, re-describe or re-compose a custom role
+      description: |
+        Requires `workspace.role.manage` — deliberately **not**
+        `workspace.member.manage`: defining what a role may do is strictly more
+        dangerous than handing out one that already exists.
+
+        `permissions` is a **full replacement** when present, and `null` leaves
+        the grants alone; an empty array is a real value, because a role that
+        grants nothing is legal (the built-in Viewer is exactly that). It cannot
+        be a delta.
+
+        **`scope`, `key` and `builtIn` are not on the request, and their absence
+        is the guard.** Scope is immutable: were it editable, one `PATCH` would
+        turn every existing assignment of the role into a wrong-scope row — a
+        WORKSPACE role sitting in `project_members.role_id`, putting
+        `workspace.member.manage` into every holder's project permissions. For
+        the same reason a permission's own scope must equal the role's scope
+        (`422` otherwise). `key` is server-generated, and identity rather than
+        configuration.
+
+        **The definition ceiling** applies to WORKSPACE-scoped roles: a caller
+        may not compose a role granting a permission they do not hold
+        themselves (`403`, naming that permission). The workspace **Owner is
+        exempt inside their own workspace**, which is the only reason
+        `project.administer.all` — held by no built-in role — is mintable at
+        all. An `ADMIN` is not exempt. PROJECT-scoped roles are not subject to
+        it: an actor's project permissions differ per project, so there is no
+        comparand, and a rule that refused an admin duplicating Contributor
+        would be the wrong rule.
+
+        **The ceiling is measured at both ends of the edit** — the role as it
+        stands today, not only the set you are sending. It is the rule
+        `PATCH /workspaces/{workspaceId}/members/{userId}` already applies to a
+        membership, where the old role and the new one are both bounded because
+        checking only the new one would let an `ADMIN` demote an `OWNER`.
+        Bounding only the incoming set here would likewise let an administrator
+        *strip* a role granting more than they hold, demoting its holders below
+        themselves with no way back — restoring those grants is exactly what
+        this ceiling refuses.
+
+        So a workspace `ADMIN` cannot strip, **or even rename**, a
+        WORKSPACE-scoped role that grants a permission they do not hold; an
+        `OWNER` may do both; and an `ADMIN` still edits freely within their own
+        set. The current-role end is checked on **every** `PATCH`, not only one
+        carrying `permissions` — a role's name is what an administrator picks it
+        by, so relabelling a role you may not strip is the same act one size
+        smaller — and its `403` is evaluated **before** the name-conflict `409`.
+        PROJECT-scoped roles keep the drop described above at **both** ends,
+        deliberately; `SELF_HELD_ROLE` below is what guards them instead.
+
+        `version` follows the same optimistic-concurrency convention as issues:
+        present and stale is `409`, absent is last-writer-wins with the entity
+        version still catching a true concurrent flush. A permission set is
+        exactly the state where a silent lost update is unacceptable — two
+        admins each unticking one box would otherwise restore each other's.
+
+        **You may not widen a `PROJECT`-scoped role you hold yourself** (`409`
+        `errorType: "SELF_HELD_ROLE"`). An edit is a grant to every holder at
+        once, evaluated against nobody, and the definition ceiling is
+        deliberately not applied at project scope — so without this rule a
+        member of a project carrying a custom role could `PATCH` twenty
+        permissions into it and hand themselves `issue.delete`,
+        `project.archive` and `project.taxonomy.manage` there. Narrowing,
+        renaming and re-describing a role you hold stay legal, and so does
+        widening one you do not hold, which is the ordinary recipe.
+
+        **Built-in roles are neither editable nor deletable** (`409`): they are
+        product metadata shared by every workspace. Duplicate one instead. The
+        check is on the `builtIn` flag and never on the key string — a workspace
+        may legally own a custom role keyed `ADMIN`, and that one *is* editable.
+      operationId: updateRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/roleId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateRoleRequest' }
+      responses:
+        '200':
+          description: OK — the updated role, with a fresh `version` and `assignment`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RoleConflict' }
+        '422': { $ref: '#/components/responses/RolePermissionUnprocessable' }
+    delete:
+      tags: [Roles]
+      summary: Delete a custom role, optionally reassigning its holders
+      description: |
+        Requires `workspace.role.manage`. Built-in roles cannot be deleted
+        (`409`).
+
+        **A role that is still in use is refused** with `409`
+        `errorType: "ROLE_IN_USE"`, and the refusal carries the whole
+        `RoleUsageResponse` as a `usage` extension so a client can render the
+        remap dialog straight from it, without a second round trip. Repeat the
+        call with `?reassignToRoleId=…` to move every holder to another role of
+        the **same scope** and then delete. What is reassigned depends on the
+        scope: workspace memberships and pending invites for a WORKSPACE role;
+        project memberships and the two default-project-role columns for a
+        PROJECT one.
+
+        **The role being deleted has a ceiling of its own** (`403`), checked
+        first — before the self-held, in-use and stranding refusals. Deleting a
+        role is the strongest possible edit of it, so a workspace `ADMIN` may
+        not delete a WORKSPACE-scoped role granting a permission they do not
+        hold: otherwise `DELETE …?reassignToRoleId=…` would be the very
+        demotion `PATCH /workspaces/{workspaceId}/members/{userId}` refuses,
+        taken through a door that endpoint closes. An `OWNER` is exempt, the
+        refusal names the offending permission, and at PROJECT scope this end is
+        dropped exactly as the definition ceiling on `PATCH` is — the
+        narrow-or-preserve rule below carries that scope instead.
+
+        **You cannot delete a role you hold yourself** (`409`
+        `errorType: "SELF_HELD_ROLE"`). A bulk reassign is otherwise a
+        self-escalation route no ceiling can see: delete the custom "QA" role
+        you hold in project P, reassigning to the built-in Project admin, and
+        you are Project admin of P — a ceiling is evaluated per assignment, and
+        this is one `UPDATE` over every holder at once. The remedy is one call
+        you can make yourself: move yourself to another role first, or ask
+        another administrator to run the delete.
+
+        `reassignToRoleId` is a **value, not an address**, so an unknown,
+        foreign or wrong-scope id — or the id of the role being deleted — is one
+        indistinguishable `422`, while the `roleId` in the path is a `404`.
+
+        **A reassign may narrow or preserve, never widen** (`403`). A bulk
+        reassign is not an assignment, so the per-assignment grant ceiling
+        cannot see it; without this rule one call would move every holder of a
+        narrow role onto the built-in Project admin, in projects the caller is
+        not even a member of. At `WORKSPACE` scope the target is measured
+        against the caller's own permissions — the identical ceiling a member
+        role change applies, so the Owner guardrail comes with it. At `PROJECT`
+        scope there is no such comparand, so the target is measured against
+        **the role being deleted**: it must be covered by it, i.e. every holder
+        ends up with the same grants or fewer. The workspace Owner is exempt in
+        their own workspace, as everywhere else. The refusal names the offending
+        permission.
+
+        **A reassign can never mint an Owner *invitation*** (`403`). An invite
+        never grants the built-in `OWNER` role — not even one issued by an
+        owner: ownership is handed over to an existing member, it is not offered
+        to somebody who has not joined yet. So
+        `?reassignToRoleId=<built-in OWNER>` on a WORKSPACE-scoped role that
+        still has **pending invites** is refused, since it would repoint those
+        invites at `OWNER` through the back door; `detail` says how many are in
+        the way. They are refused rather than silently destroyed — they belong
+        to somebody else. Two ways out, both named in the message: reassign to
+        any other role, or let the invitees accept and promote them afterwards
+        with `PATCH /workspaces/{workspaceId}/members/{userId}`. This one fires
+        for an `OWNER` too, because the Owner exemption returns from the
+        reassign ceiling before its Owner guardrail can be reached.
+
+        Finally, a reassign that would demote every administrator of one or more
+        projects at once is refused with `409`
+        `errorType: "LAST_PROJECT_ADMIN_BULK"`, listing them in `projects`.
+        There is deliberately no adoption flag here: unlike a member removal,
+        the remedy is satisfiable by the person refused, and `detail` names
+        **both** halves of it — *"Choose a replacement that also grants
+        `project.member.manage` and is no wider than the role being deleted, or
+        give each of those projects another administrator first."* Naming only
+        the first half would send the caller straight into the reassign
+        ceiling's `403`.
+      operationId: deleteRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/roleId'
+        - name: reassignToRoleId
+          in: query
+          required: false
+          description: >-
+            Move every holder of the role to this one, in the same transaction,
+            before deleting it. Must be a role assignable in this workspace **of
+            the same scope**, and must not be the role being deleted — anything
+            else is `422`. Omitting it is fine for a role nobody holds; for one
+            in use it produces the `409` `ROLE_IN_USE` above.
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: 'Deleted (with every holder reassigned, when asked)' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RoleConflict' }
+        '422': { $ref: '#/components/responses/UnknownRole' }
+
+  /workspaces/{workspaceId}/roles/{roleId}/usage:
+    get:
+      tags: [Roles]
+      summary: Where a role is currently in play
+      description: >-
+        Requires `workspace.role.manage`. These are the same counts the delete
+        guard itself uses, published so a client cannot compute a different
+        answer from the parts and then be surprised by a `409`.
+
+
+        **Every count is filtered to this workspace.** Built-in templates are
+        shared rows belonging to no workspace, so an unscoped count of their
+        holders would publish every other tenant's headcount from a
+        workspace-scoped endpoint.
+      operationId: getRoleUsage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/roleId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleUsageResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/roles/{sourceRoleId}/duplicate:
+    post:
+      tags: [Roles]
+      summary: Duplicate a role — the only way to create one
+      description: |
+        Requires `workspace.role.manage`.
+
+        **There is deliberately no `POST /roles`.** A custom role is made by
+        duplicating a built-in template (or another custom role) and editing the
+        copy. That is product posture, not an oversight: the grant ceiling is a
+        **subset** rule and not a ladder, so a role composed from an empty
+        checklist can assign nobody — not Contributor, not Commenter, not even
+        Viewer-plus-anything — and discovering that as a `403` six weeks later
+        is the exact complaint this model was built against. Duplication always
+        starts from a superset. "From scratch" stays reachable by duplicating
+        **Viewer**, which grants nothing; it is a named, deliberate act rather
+        than the default.
+
+        `scope` and the whole permission set are **copied from the source** and
+        are not on the request. Neither is `key`: it is generated server-side
+        from the name (uppercased, `[A-Z0-9_]`, truncated to 40 characters,
+        suffixed `_2`, `_3`… on collision), which is also how a custom role is
+        stopped from reusing a built-in's key. `name` defaults to
+        `"<source name> copy"`.
+
+        The source is addressed by **path**, so an unknown or foreign source is
+        `404`. The workspace's custom-role limit is counted first, before any
+        other work, so a workspace at its cap gets one cheap `409`
+        (`errorType: "ROLE_LIMIT_REACHED"`) rather than a validation tour.
+
+
+        **The cap is exact, not advisory.** The count is taken under a row lock
+        on the workspace, so concurrent duplicates cannot overshoot it. That
+        lock is also the reason this is the one role endpoint that can answer a
+        retryable `409` with `Retry-After`: how long it waits is the same
+        deployment-wide lock timeout the membership mutations use, and a lost
+        race means nothing was created — just retry.
+      operationId: duplicateRole
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - name: sourceRoleId
+          in: path
+          required: true
+          description: >-
+            The role to copy — a built-in template or one of this workspace's
+            own. Addressed as a resource, so unknown or foreign is `404`.
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DuplicateRoleRequest' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RoleResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/RoleConflict' }
+
   /workspaces/accept-invite:
     post:
       tags: [Workspaces]
       summary: Accept an invite
-      description: Must be signed in with the invited email address.
+      description: >-
+        Must be signed in with the invited email address. The role the invite
+        carries is re-validated before it is written onto the new membership,
+        so an invite whose stored role is no longer a usable role of that
+        workspace — a corrupt row a normal client never meets — is refused
+        with the same `404`.
       operationId: acceptInvite
       parameters:
         - name: token
@@ -897,7 +1347,11 @@ paths:
     post:
       tags: [Onboarding]
       summary: Accept an invite by id
-      description: Still bound to the invited email — a foreign invite id returns 404.
+      description: >-
+        Still bound to the invited email — a foreign invite id returns 404.
+        The role the invite carries is re-validated before it is written onto
+        the new membership; an invite whose stored role is no longer usable in
+        that workspace is refused with the same `404`.
       operationId: acceptInviteById
       parameters: [ { $ref: '#/components/parameters/adminId' } ]
       responses:
@@ -1160,17 +1614,30 @@ paths:
         user must already be a workspace member.
 
 
-        `role` is a project role **key** (`MANAGER`, `TEAM_LEAD`, `MEMBER`,
-        `COMMENTER`, `VIEWER`). Anything else — including a *workspace* role
-        key such as `ADMIN`, because scope is part of the question and `MEMBER`
-        names a different role in each scope — is `422 "Unknown role"`; a
-        missing or empty value is a `400`. The **grant ceiling** applies: you
-        may not hand out a project role that grants a project permission you do
-        not hold yourself (`403`, naming that permission).
+        **Name the role with `roleId`** — the assignable `PROJECT`-scoped role's
+        id, and the only way to name one of the workspace's own custom roles.
+        The legacy `role` **key** (`MANAGER`, `TEAM_LEAD`, `MEMBER`,
+        `COMMENTER`, `VIEWER`) still works and is now deprecated; **exactly one
+        of the two must be present**, and neither or both is a `422`. So is a
+        role reference this instance cannot assign here — including a
+        *workspace* role, because scope is part of the question and `MEMBER`
+        names a different role in each scope.
 
 
-        **`VIEWER` is accepted but stored as `MEMBER`** — see the `ProjectRole`
-        schema. The response echoes what was stored.
+        The **grant ceiling** applies: you may not hand out a project role that
+        grants a project permission you do not hold yourself (`403`, naming that
+        permission). One escape, shared with the `PATCH` below: any holder of
+        `project.member.manage` may always grant the built-in `MANAGER` role to
+        **somebody else**, never to themselves — otherwise a project whose only
+        member-managers hold a narrower role could never acquire what none of
+        them holds.
+
+
+        **`VIEWER` sent as `role` is stored as `MEMBER`** — see the
+        `ProjectRole` schema — while naming the built-in Viewer by `roleId`
+        stores it verbatim, which is how a genuinely read-only project
+        membership finally becomes expressible. The response echoes what was
+        stored either way.
       operationId: addProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1196,6 +1663,73 @@ paths:
         '422': { $ref: '#/components/responses/UnknownRole' }
 
   /workspaces/{workspaceId}/projects/{projectId}/members/{userId}:
+    patch:
+      tags: [Projects]
+      summary: Change a project member's role
+      description: |
+        Requires `project.member.manage` — the project twin of
+        `PATCH /workspaces/{workspaceId}/members/{userId}`, and **new**. Before
+        it existed, correcting somebody's project role meant remove-then-add:
+        two calls, each strand-checked separately, with the member dropped onto
+        the workspace default in between and a window in which the project
+        genuinely had no administrator.
+
+        Body is `{"roleId": "…"}` and nothing else — no legacy `role` key,
+        because there is no legacy client for a brand-new endpoint. The response
+        is the same `ProjectMemberResponse` the add returns.
+
+        **The grant ceiling applies to both ends** of the edit: the role the
+        member holds now *and* the one requested. Checking only the new role
+        would let a narrow member-manager demote somebody wider than themselves,
+        which is the same escalation by the other door.
+
+        **One deliberate escape:** any holder of `project.member.manage` may
+        always grant the built-in project `MANAGER` role — to somebody else,
+        never to themselves — regardless of the ceiling. Without it a project
+        whose only member-managers carry a role narrower than `MANAGER` could
+        never acquire what none of them holds, and `project.archive` /
+        `project.taxonomy.manage` have no other route: a workspace `OWNER` who
+        is not a member there holds no `project.member.manage` and so cannot
+        assign any project role in that project either. The `target != actor`
+        condition is load-bearing: without it `project.member.manage` would
+        imply all twenty project permissions for its own holder. The residual is
+        documented rather than hidden — two cooperating members can bootstrap a
+        project administrator between them, which *is* the recovery procedure,
+        performed by two willing people and logged at both steps.
+
+        **The last administrator is protected here too** (`409`): a demotion
+        strands a project with no row removed at all, which the removal guards
+        could not see. The check is skipped for a *promotion* — a role that
+        itself grants `project.member.manage` cannot strand anything, and
+        requiring a second administrator before you may widen the only one would
+        make the invariant unfixable. Self-demotion is allowed, and refused by
+        this same guard exactly when it would orphan the project.
+
+        Setting the role a member already holds is an accepted no-op. Like the
+        removal, this takes row locks on the project's administrators and bounds
+        how long it waits, so a lost race is a retryable `409` carrying
+        `Retry-After` rather than a hang.
+      operationId: updateProjectMember
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/memberUserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectMemberRequest' }
+      responses:
+        '200':
+          description: OK — the updated membership
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectMemberResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/LastProjectAdmin' }
+        '422': { $ref: '#/components/responses/UnknownRole' }
     delete:
       tags: [Projects]
       summary: Remove a project member
@@ -4614,6 +5148,18 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    roleId:
+      name: roleId
+      in: path
+      required: true
+      description: >-
+        A role **addressed as a resource**: a built-in template, or one of this
+        workspace's own custom roles. Anything else — unknown, or belonging to
+        another workspace — is a `404`, never a `422`. The opposite rule applies
+        to a role id sent as a *value* (`roleId` in a body, `reassignToRoleId`
+        in a query), which is `422`; unifying the two would make the pair an
+        oracle for whether a role exists in another tenant.
+      schema: { type: string, format: uuid }
     pageParam:
       name: page
       in: query
@@ -4658,7 +5204,12 @@ components:
         assign or administer the role …, which includes `<key>` — a permission
         you do not hold in this workspace") and the **Owner guardrail** ("Only
         an Owner can assign the Owner role or administer another Owner"). Both
-        are `403`, both apply only to member administration.
+        are `403`, and both apply to member administration **and** to the role
+        endpoints — composing a role you could not hand out, and reassigning a
+        role's holders onto a wider one, are refused the same way. The
+        project-scope variant of the latter reads "Reassigning … would widen
+        every holder's access: the replacement includes `<key>` …" and is
+        measured against the role being deleted rather than against the caller.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4677,11 +5228,28 @@ components:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
     UnknownRole:
       description: >-
-        The `role` value cannot be assigned here — `detail` is
-        `Unknown role: <what you sent>`. Covers an unknown key, a key from the
-        **other** scope (`MANAGER` on a workspace endpoint, `OWNER` on a project
-        one), the wrong case (`owner`), and — once workspace-defined roles
-        exist — a role belonging to a workspace the caller cannot see.
+        The role reference cannot be honoured. Two shapes:
+
+
+        **The role cannot be assigned here** — `detail` is
+        `Unknown role: <what you sent>`. Covers an unknown key or id, a
+        reference from the **other** scope (`MANAGER` on a workspace endpoint,
+        `OWNER` on a project one; a `WORKSPACE`-scoped `roleId` sent to a
+        project endpoint), the wrong case (`owner`), and a **custom role
+        belonging to a workspace the caller cannot see**. It also covers
+        `reassignToRoleId` on a role delete when it is unknown, foreign, of the
+        other scope, or equal to the role being deleted.
+
+
+        **The role was not named properly** — `Name the role with either roleId
+        or role`, or `Send either roleId or role, not both — they do not always
+        mean the same role`. Every membership endpoint accepts the new `roleId`
+        **and** the deprecated `role` key and requires **exactly one**. "Both"
+        is refused rather than resolved by precedence because the two do not
+        always mean the same role: the key resolves built-ins only and, on the
+        project side, still carries the `VIEWER → MEMBER` translation, so a
+        silent winner would store a role the caller did not ask for — in the one
+        part of the product where that is a privilege change.
 
 
         **One answer for all of them, on purpose.** A `404` for a role that does
@@ -4694,10 +5262,17 @@ components:
         same shape as `"Unknown label"` or `"Unknown sprint"`.
 
 
-        A **missing, null or empty** `role` is still a `400` (ordinary
-        validation), and the endpoint's own permission is checked **before** the
-        value is resolved, so a caller who lacks it sees `403` even when the
-        role they sent was also nonsense.
+        A body that omits **both** fields is now this `422` and no longer a
+        `400`: the body is well-formed and every field validates on its own, so
+        it is the combination that cannot be honoured. The endpoint's own
+        permission is still checked **before** the value is resolved, so a
+        caller who lacks it sees `403` even when the role they sent was also
+        nonsense.
+
+
+        The opposite rule applies to a role id in a **path**
+        (`/roles/{roleId}`, the duplicate source): that is an *address*, so it
+        answers `404`. See the `roleId` path parameter.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4745,28 +5320,53 @@ components:
         that would fail identically. Reachable only with a custom project role;
         the remedy is somebody else's action rather than the caller's — ask the
         member being removed, still ACTIVE and still that project's
-        administrator, to appoint a successor while they still can, or have a
-        colleague who already administers those projects run the removal instead.
-        Cases 2 and 3 are mutually exclusive — which one you get depends on the
-        flag — and are told apart by `errorType`: `"STRANDED_PROJECTS"` for
-        case 2, `"ADOPTION_BLOCKED"` for case 3. Case 1 carries none.
+        administrator, to appoint a successor while they still can, or have
+        another workspace administrator who does **not** already work in those
+        projects run the removal instead — not one who already administers them,
+        which is the set this branch has just proven empty.
+
+
+        4. the caller asked to adopt and their own membership row in a listed
+        project refers to a role that **cannot be resolved** — a mis-scoped,
+        foreign or hand-edited `role_id`, which a normal client never meets. The
+        server will not overwrite a row it cannot read, so the whole removal is
+        refused. Same body again, `errorType: "ADOPTION_ROLE_UNREADABLE"`. It is
+        split from case 3 because the two need different handling: case 3 is
+        cleared by a named third party, and this one by **nobody party to the
+        request** — retrying fails identically, and nothing the caller or the
+        member being removed can change affects it. It is a data-integrity fault
+        for an operator to repair, already logged as an ERROR and counted before
+        the refusal is written. `detail` therefore names no cause (the code
+        cannot tell which of them it is) and prescribes no action to its reader,
+        because they have none.
+
+
+        Cases 2, 3 and 4 are mutually exclusive and are told apart by
+        `errorType`: `"STRANDED_PROJECTS"` for case 2, `"ADOPTION_BLOCKED"` for
+        case 3, `"ADOPTION_ROLE_UNREADABLE"` for case 4. Case 2 depends on the
+        flag; when 3 and 4 both apply the server reports **4 first**, deliberately
+        — either refusal ends the request, so one is necessarily second, and it
+        should not be the one no present party can clear. Case 1 carries no
+        `errorType`.
 
 
         All are `409` rather than `403` for the same reason: the caller's
         permissions are fine, a state invariant is what refuses, and the identical
-        request succeeds once the state is fixed (case 3 excepted — there the
-        state has to be fixed by hand).
+        request succeeds once the state is fixed (cases 3 and 4 excepted — there
+        the state has to be fixed by a colleague and by an operator
+        respectively).
 
 
-        A fourth `409` is possible here and is **not** an invariant: lock
+        A fifth `409` is possible here and is **not** an invariant: lock
         contention, a plain `ProblemDetail` carrying `Retry-After` and no
-        `errorType` (app-wide — see **Errors** in the introduction). So all four
+        `errorType` (app-wide — see **Errors** in the introduction). So all five
         are told apart by the response and never by the wording of `detail` —
         in this order: `Retry-After` present means lock contention, so retry the
         **identical** request unchanged; otherwise `errorType` names the
         stranded-project variant (`"STRANDED_PROJECTS"` cleared by the
         `adoptStrandedProjects=true` retry, `"ADOPTION_BLOCKED"` cleared by
-        nothing the caller can do); and neither present means the last owner.
+        somebody else's action, `"ADOPTION_ROLE_UNREADABLE"` cleared only by an
+        operator repairing stored data); and neither present means the last owner.
         The header has to be checked **first**: an absent `errorType` otherwise
         reads as "no retry available", which is the one wrong answer for a
         lock-contention body.
@@ -4787,8 +5387,10 @@ components:
     LastProjectAdmin:
       description: >-
         The target is the project's only member holding
-        `project.member.manage`, so removing them would leave the project with
-        nobody able to manage its membership — and that permission is not part of
+        `project.member.manage`, so removing them — **or demoting them to a role
+        that does not grant it**, which strands the project with no row removed
+        at all — would leave the project with
+        nobody able to manage its membership. That permission is not part of
         the workspace-wide curator set, so a workspace `OWNER`/`ADMIN` who is not
         a member of the project cannot step in. `detail` is
         `This is the project's last administrator — add another one first`. The
@@ -4808,9 +5410,10 @@ components:
         nobody able to unarchive it.
 
 
-        This endpoint's other `409` is app-wide rather than specific to it: the
-        removal takes row locks on the project's administrators and bounds how
-        long it waits for one, so a lost race answers lock contention — a plain
+        The other `409` here is app-wide rather than specific to these
+        endpoints: both the removal and the role change take row locks on the
+        project's administrators and bound how
+        long they wait for one, so a lost race answers lock contention — a plain
         `ProblemDetail` carrying `Retry-After`, worth retrying **unchanged**
         (see **Errors** in the introduction). The invariant above carries no such
         header, because retrying it unchanged cannot help. Neither variant
@@ -4822,6 +5425,129 @@ components:
             on the last-administrator invariant.
           required: false
           schema: { type: integer, example: 1 }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    RoleConflict:
+      description: >-
+        A state invariant refused the role write. Four variants, and **three of
+        them carry an `errorType`** — branch on that, never on the wording of
+        `detail`:
+
+
+        * **built-in** — `Built-in roles cannot be edited or deleted —
+        duplicate it to customise`. A plain `ProblemDetail`, no `errorType`:
+        the caller's permissions are fine and nothing about the request is
+        unprocessable, it is the nature of the resource that refuses. Keyed on
+        the role's `builtIn` flag, never on its key, so a workspace's own custom
+        role keyed `ADMIN` is still editable.
+
+        * **stale `version`** — `Role was modified by someone else — refresh and
+        retry`. A plain `ProblemDetail`, no `errorType`.
+
+        * **name conflict** — another role of the same scope in this workspace
+        already uses this display name (case-insensitively), or it is a
+        built-in's display name. A plain `ProblemDetail`, no `errorType`. Keys
+        never conflict: they are server-generated and disambiguate themselves
+        with a `_2` suffix.
+
+        * `errorType: "ROLE_IN_USE"` — `DELETE` only: the role still has holders
+        and the request named no `reassignToRoleId`. This body additionally
+        carries the whole `usage` object (`RoleUsageProblemDetail`) so a client
+        renders the remap dialog straight from the refusal.
+
+        * `errorType: "SELF_HELD_ROLE"` — one rule, two doors: **you may not
+        widen your own access in bulk.** On `DELETE`, the caller holds the role
+        being deleted (their workspace membership, or any project membership of
+        theirs in this workspace), so a bulk reassign would silently change
+        their own access. On `PATCH`, the edit *widens* a `PROJECT`-scoped role
+        the caller holds — an edit is a grant to every holder at once, evaluated
+        against nobody, so it is otherwise "remove your own row, add it back
+        bigger" reassembled out of one call. Narrowing, renaming or
+        re-describing a role you hold all stay legal, as does widening one you
+        do not hold. No payload — the refusal is about a membership the caller
+        can already see.
+
+        * `errorType: "LAST_PROJECT_ADMIN_BULK"` — the change would demote every
+        administrator of one or more projects at once: removing
+        `project.member.manage` from a PROJECT-scoped role (`PATCH`), or
+        reassigning to a role that does not grant it (`DELETE`). Same
+        `StrandedProjectsProblemDetail` and `projects` list as the member
+        removal, but **no adoption retry exists** — the remedy is the caller's
+        own, and `detail` states it **per door**, because the two doors do not
+        share one: the edit door says *keep that permission on the role, or give
+        each of those projects another administrator first*, while the delete
+        door additionally requires the replacement to be **no wider than the
+        role being deleted** (naming only the first constraint would send the
+        caller into the reassign ceiling's `403`). Render `detail`; do not
+        compose the sentence yourself.
+
+        * `errorType: "ROLE_LIMIT_REACHED"` — `POST …/duplicate` only: the
+        workspace already holds `app.roles.max-custom-per-workspace` custom
+        roles (both scopes counted together; built-in templates belong to no
+        workspace and never count). Delete a role you no longer use first. The
+        count is taken under a row lock on the workspace, so the cap is
+        **exact** rather than advisory — concurrent duplicates cannot overshoot
+        it — and the same lock is why this endpoint can also lose a lock race,
+        below. The discriminator is what separates the two: they share a status
+        and only one of them is worth retrying.
+
+
+        A last `409` is possible on any of these endpoints and is not an
+        invariant at all: **lock contention**, a plain `ProblemDetail` carrying
+        `Retry-After` and no `errorType` (see **Errors** in the introduction).
+        **Check `Retry-After` first** — an absent `errorType` otherwise reads as
+        "no recovery I know about", which is the one wrong answer for a body
+        that is simply asking to be retried unchanged.
+      headers:
+        Retry-After:
+          description: >-
+            Seconds to wait. Present **only** on the lock-contention variant,
+            never on any of the invariants above, because retrying one of those
+            unchanged cannot help.
+          required: false
+          schema: { type: integer, example: 1 }
+      content:
+        application/problem+json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/RoleUsageProblemDetail'
+              - $ref: '#/components/schemas/StrandedProjectsProblemDetail'
+    RolePermissionUnprocessable:
+      description: >-
+        A permission entry cannot be honoured. Four cases, all `422` and all
+        about a *value* rather than the shape of the request — the body is
+        well-formed JSON and every field validates on its own:
+
+
+        * an unknown key (`Unknown permission: <key>`) — the write-path half of
+        a rule whose read-path half is the opposite: a stored grant this build
+        no longer understands is dropped and logged rather than throwing,
+        because dropping can only ever narrow a role while throwing on a read
+        would take the instance down for one bad row;
+
+        * a permission whose scope is not the role's (`Permission <key> cannot
+        be granted by a PROJECT-scoped role …`). This is the load-bearing one: a
+        permission set carries no memory of where a grant came from, so a
+        PROJECT-scoped role holding `workspace.member.manage` would put it
+        straight into every holder's project permissions — an escalation
+        assembled entirely from legitimate ids;
+
+        * `ownOnly: true` on a permission whose `supportsOwn` is `false`
+        (`Permission <key> cannot be narrowed to objects you own`). Honouring it
+        silently would *narrow* the grant behind the administrator's back;
+        ignoring it silently would store something other than what was ticked.
+        Note the opposite case is **not** an error: a permission with
+        `ownRequired: true` (`comment.edit`) is forced own-only rather than
+        refused;
+
+        * the same key listed twice (`Permission <key> is listed twice`) —  the
+        two entries could disagree about `ownOnly`, and one would win invisibly.
+
+
+        `POST /workspaces/{workspaceId}/roles/preview` produces exactly these
+        same four, which is the point of the endpoint.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -5002,11 +5728,13 @@ components:
 
     StrandedProjectsProblemDetail:
       description: >-
-        The `409` body of a workspace member removal refused because it would
-        leave one or more projects without any member holding
-        `project.member.manage` — or, when `adoptStrandedProjects=true` was
-        sent, because one of those projects cannot be adopted without demoting
-        the caller. **Both refusals share this body** — same status, same
+        The `409` body of a change refused because it would leave one or more
+        projects without any member holding `project.member.manage`: a workspace
+        member removal, a role edit that strips that permission from a
+        `PROJECT`-scoped role, or a role delete whose reassignment target does
+        not grant it — or, when `adoptStrandedProjects=true` was sent on a
+        removal, because one of those projects cannot be adopted without
+        demoting the caller. **All of those share this body** — same status, same
         `projects` extension — so a client that only renders "these projects are
         in the way" stays correct without telling them apart. One that offers a
         retry **must** tell them apart, and `errorType` is how: the two demand
@@ -5020,17 +5748,32 @@ components:
           properties:
             errorType:
               type: string
-              enum: [STRANDED_PROJECTS, ADOPTION_BLOCKED]
+              enum: [STRANDED_PROJECTS, ADOPTION_BLOCKED, ADOPTION_ROLE_UNREADABLE, LAST_PROJECT_ADMIN_BULK]
               description: >-
-                Which of the two refusals this is — **always present** on this
-                body, and the only supported way to tell them apart.
-                `STRANDED_PROJECTS` is the ordinary refusal: repeating the
-                request with `adoptStrandedProjects=true` will clear it, so an
-                adopt button is safe to offer. `ADOPTION_BLOCKED` means that
-                retry has already been made and fails identically, so do not
-                offer one. Treat a value you do not recognise as
-                `ADOPTION_BLOCKED` — "no recovery I know about" is the only
-                default that cannot invent a button that `409`s.
+                Which refusal this is — **always present** on this body, and the
+                only supported way to tell them apart. `STRANDED_PROJECTS` is
+                the ordinary refusal: repeating the request with
+                `adoptStrandedProjects=true` will clear it, so an adopt button
+                is safe to offer. `ADOPTION_BLOCKED` means that retry has
+                already been made and fails identically, so do not offer one;
+                the way out is a named third party's action.
+                `ADOPTION_ROLE_UNREADABLE` is the same stop reached for a
+                different reason — a membership row whose stored role cannot be
+                resolved — and it is cleared by nobody party to the request:
+                no retry, no action by the caller or by the member being
+                removed, only an operator repairing the row. When it and
+                `ADOPTION_BLOCKED` both apply, this one is reported first, so
+                the caller is not sent to arrange a handover that would then hit
+                a refusal they cannot clear either.
+                `LAST_PROJECT_ADMIN_BULK` comes from the **role** endpoints
+                instead of a member removal — an edit or a delete-with-reassign
+                that would demote every administrator of the listed projects at
+                once — and has no retry flag at all. Its remedy differs per
+                door and is spelled out in `detail`, which is why a client
+                should render that sentence rather than composing one. Treat a value
+                you do not recognise as `ADOPTION_BLOCKED` — "no recovery I know
+                about" is the only default that cannot invent a button that
+                `409`s.
 
 
                 Do not read the **absence** of `errorType` as an unrecognised
@@ -5052,8 +5795,13 @@ components:
                 lead" does, so taking it over would take that away from you and
                 nobody could give it back. Ask the member you are removing to
                 appoint another administrator there while they still can, or have
-                someone who already administers that project remove them
-                instead.`
+                another workspace administrator who does not already work in that
+                project run the removal instead.` The unreadable variant
+                (`errorType: "ADOPTION_ROLE_UNREADABLE"`) names no retry and no
+                remedy its reader can perform, only the operator repair: `Your
+                membership in Alpha (P17) refers to a role that cannot be read,
+                so that project cannot be taken over automatically and the
+                removal has been left untouched. …`
               example: 'Removing this member would leave 4 projects without an administrator: Alpha (P17), Bravo (P42), Charlie (P8) and 1 more. Give each another administrator first, or repeat this request with adoptStrandedProjects=true to take them over yourself.'
             projects:
               type: array
@@ -5184,15 +5932,17 @@ components:
 
 
         **Deliberately not an `enum`.** The field is an open string because a
-        workspace will be able to define roles of its own, whose key travels in
-        exactly this field — a client that switches exhaustively, or generates a
-        closed union / enum deserializer from this schema, breaks the first time
-        it meets one. Display an unrecognized role; never decide with it. For
-        decisions use `myPermissions`.
+        workspace **can now define roles of its own** (see the **Roles** tag),
+        whose key travels in exactly this field — a client that switches
+        exhaustively, or generates a closed union / enum deserializer from this
+        schema, breaks the first time it meets one. Display an unrecognized
+        role; never decide with it. For decisions use `myPermissions`.
 
 
         A value this instance cannot assign is `422 "Unknown role"` (see the
-        `UnknownRole` response), never a silent fallback and never a `404`.
+        `UnknownRole` response), never a silent fallback and never a `404`. As a
+        **request** field it is now deprecated in favour of `roleId`, which is
+        the only way to name a custom role.
 
     ProjectRole:
       type: string
@@ -5222,7 +5972,14 @@ components:
         is accepted but **stored as `MEMBER`** — the built-in role keyed
         `VIEWER` now grants nothing, whereas it used to mean "no explicit row",
         which granted everything. The response echoes what was stored, so this
-        value does not round-trip.
+        value does not round-trip. Sending the built-in Viewer's **`roleId`**
+        instead stores it verbatim, which is how a genuinely read-only project
+        membership is expressed.
+
+
+        As a **request** field this key is now deprecated in favour of `roleId`,
+        which is also the only way to name one of the workspace's own custom
+        project roles.
 
     PermissionScope:
       type: string
@@ -5314,6 +6071,347 @@ components:
         every request regardless of what a client rendered; `myPermissions` only
         lets the client hide what would be refused anyway. Hiding a control is a
         UX decision, never a security control.
+
+    RoleScope:
+      type: string
+      enum: [WORKSPACE, PROJECT]
+      description: >-
+        Which object a role is held on, and therefore which permissions it may
+        contain: a `WORKSPACE` role may only hold `WORKSPACE`-scoped
+        permissions, a `PROJECT` role only `PROJECT`-scoped ones (`422`
+        otherwise). It is **immutable after creation** and is not on any update
+        request — a role whose scope could change would turn every existing
+        assignment of it into a wrong-scope row, which is the one corruption
+        this model has no way to detect after the fact.
+
+
+        Scope is also part of every role lookup rather than a hint: `MEMBER`
+        names a different built-in in each scope.
+
+    RolePermissionEntry:
+      type: object
+      description: >-
+        One grant on a role, in the **object form** —
+        `{"key": "comment.edit", "ownOnly": true}`. Deliberately not
+        `myPermissions`' flat `"comment.edit:own"` wire form: a role editor
+        needs the own toggle as a field it can render and send back, while the
+        suffix encoding exists so a client gate can do one string comparison
+        against a flat list. Both are produced from the same stored grants, so
+        they cannot disagree.
+      required: [key]
+      properties:
+        key:
+          type: string
+          maxLength: 64
+          example: issue.transition
+          description: >-
+            A permission key exactly as `GET /permissions` publishes it. An
+            unknown key is `422`.
+        ownOnly:
+          type: boolean
+          default: false
+          description: >-
+            Narrow the grant to objects the caller owns. Optional and defaults
+            to `false` — an unqualified grant is the unrestricted one, which is
+            also the common case. `true` on a permission whose `supportsOwn` is
+            `false` is a `422` rather than being silently ignored. A permission
+            with `ownRequired: true` (`comment.edit`) is **forced** own-only on
+            the way in, so it always reads back as `true`.
+
+    RoleRef:
+      type: object
+      description: >-
+        The smallest useful reference to a role: enough to render a chip and
+        enough to send back as an assignment. Every role named in one of these
+        is one the caller can already list through
+        `GET /workspaces/{workspaceId}/roles`.
+      properties:
+        roleId: { type: string, format: uuid }
+        name: { type: string, example: Contributor }
+
+    RoleBlocker:
+      type: object
+      description: >-
+        A role this one **cannot** assign, and the first permission that is
+        why.
+      properties:
+        roleId: { type: string, format: uuid }
+        name: { type: string, example: Contributor }
+        missing:
+          type: string
+          example: issue.rank
+          description: >-
+            The offending permission **key** — never a rendered sentence, so
+            the client owns the copy. It is the same string the runtime `403`
+            quotes when a real assignment is refused, because both come from
+            the same server-side comparison.
+
+    RoleAssignmentView:
+      type: object
+      description: |-
+        **What this role could hand out, derived by the server.** It exists so
+        the grant ceiling is visible while a role is being composed rather than
+        as a `403` six weeks later, and it is computed by the *same* call the
+        runtime ceiling makes — which is the only reason a preview and a
+        refusal cannot disagree. Do not re-implement it in a client: the
+        own-only/unrestricted asymmetry is subtle, and a second implementation
+        of a server predicate is a bug by construction.
+
+        **Advisory, for rendering only** — exactly like `myPermissions`. The API
+        is the enforcement boundary and performs its own check on every request,
+        whatever a client drew from this block.
+
+        **It is a lower bound.** It is computed from the role *alone*, and
+        ignores what a real holder additionally gets from their workspace role
+        (`project.curate.all` / `project.administer.all`), so a holder may in
+        practice assign more than `canAssign` lists. That is the conservative
+        direction, and the one `warnings` is about. Render it as "on its own,
+        this role can assign: …".
+
+        Computed against every role of the **same scope** available in this
+        workspace (built-ins plus custom), excluding the role itself.
+      properties:
+        managesMembers:
+          type: boolean
+          description: >-
+            Whether the role holds `workspace.member.manage` /
+            `project.member.manage` **unrestricted** for its own scope — i.e.
+            whether it can assign anybody at all.
+        canAssign:
+          type: array
+          description: Roles this one entirely covers, and may therefore hand out.
+          items: { $ref: '#/components/schemas/RoleRef' }
+        cannotAssign:
+          type: array
+          description: >-
+            Roles it does not cover, each with the first permission it is
+            missing.
+          items: { $ref: '#/components/schemas/RoleBlocker' }
+        warnings:
+          type: array
+          description: >-
+            Machine-readable codes, so a client renders copy rather than
+            re-deriving the condition. Today there is exactly one:
+            `MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING`, which fires when the role
+            manages a roster and yet every role it can assign grants nothing —
+            somebody who can add people to a project and cannot give any of them
+            the ability to do a single thing. (Note this is not literally
+            "`canAssign` is empty": the built-in Viewer grants the empty set and
+            the empty set is covered by every set, so every role can assign
+            Viewer.) **Warn, never block** — a role granting nothing is legal
+            and an intermediate save is legitimate. Treat an unrecognised code
+            as informational.
+          items: { type: string }
+          example: [MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING]
+
+    RoleAssignmentPreviewResponse:
+      type: object
+      description: >-
+        The body of `POST /workspaces/{workspaceId}/roles/preview` — the derived
+        block on its own, wrapped rather than returned bare so the shape matches
+        the same key on a `RoleResponse` and one component renders both.
+      properties:
+        assignment: { $ref: '#/components/schemas/RoleAssignmentView' }
+
+    RoleUsageResponse:
+      type: object
+      description: >-
+        Where a role is currently in play. The body of
+        `GET /workspaces/{workspaceId}/roles/{roleId}/usage`, the optional
+        `usage` block on the roles list, and the `usage` extension on the
+        `ROLE_IN_USE` `409`.
+
+
+        **Every count is filtered to this workspace** — built-in roles are
+        shared rows belonging to no workspace, so an unscoped count would
+        publish another tenant's headcount.
+      properties:
+        roleId: { type: string, format: uuid }
+        members:
+          type: integer
+          format: int64
+          description: Workspace memberships holding it (`WORKSPACE` scope).
+        invites:
+          type: integer
+          format: int64
+          description: Pending, not-yet-accepted invites carrying it (`WORKSPACE` scope).
+        projectMembers:
+          type: integer
+          format: int64
+          description: Project memberships holding it in this workspace (`PROJECT` scope).
+        projects:
+          type: integer
+          format: int64
+          description: >-
+            How many distinct projects those memberships are spread across —
+            the number a "used in N projects" line wants. It is not an
+            independent kind of usage and does not feed `inUse`.
+        defaultForProjects:
+          type: integer
+          format: int64
+          description: Projects naming it as their default project role.
+        defaultForWorkspace:
+          type: boolean
+          description: Whether the workspace names it as its default project role.
+        inUse:
+          type: boolean
+          description: >-
+            The exact disjunction the delete guard uses (`members`, `invites`,
+            `projectMembers`, `defaultForProjects`, `defaultForWorkspace` —
+            **not** `projects`), published so a client cannot compute a
+            different answer from the parts and then be surprised by a `409`.
+
+    RoleResponse:
+      type: object
+      description: >-
+        One role, as a roles screen and a role editor see it.
+      properties:
+        id: { type: string, format: uuid }
+        scope: { $ref: '#/components/schemas/RoleScope' }
+        key:
+          type: string
+          maxLength: 40
+          example: QA_LEAD
+          description: >-
+            The stable key. For a built-in it is the value that travels in every
+            `role` / `myRole` field (`OWNER`, `MANAGER`, …). For a custom role
+            it is **server-generated** from the name and never accepted from a
+            client — a client-chosen key could collide with a built-in's, which
+            the database would permit and every operator reading it would
+            misread.
+        name: { type: string, maxLength: 80, example: QA lead }
+        description:
+          type: string
+          maxLength: 500
+          nullable: true
+        builtIn:
+          type: boolean
+          description: >-
+            A built-in template, visible to every workspace because it is
+            product metadata rather than tenant data, and neither editable nor
+            deletable (`409`). Branch on **this flag**, never on the key: a
+            workspace may legally own a custom role keyed `ADMIN`.
+        position:
+          type: integer
+          format: int32
+          description: Display order within the scope. Server-assigned.
+        version:
+          type: integer
+          format: int64
+          description: >-
+            Echo it back on a `PATCH` to get a `409` instead of silently
+            overwriting somebody else's edit.
+        permissions:
+          type: array
+          description: >-
+            The role's grants, in catalog order, in the object form. Rendered
+            from the *resolved* permission set rather than from stored rows, so
+            a grant this build no longer understands is dropped here exactly as
+            it is dropped on the authorization path — this shows what the role
+            actually does.
+          items: { $ref: '#/components/schemas/RolePermissionEntry' }
+        assignment: { $ref: '#/components/schemas/RoleAssignmentView' }
+        usage:
+          allOf:
+            - $ref: '#/components/schemas/RoleUsageResponse'
+          nullable: true
+          description: >-
+            Present only when it was asked for: on
+            `GET …/roles/{roleId}/usage`, and on the list with
+            `includeUsage=true` for a caller holding `workspace.role.manage`.
+            Otherwise `null`.
+
+
+            **`null` and a zeroed object are different answers.** `null` means
+            "not requested" and says nothing about whether the role is in use; a
+            role that is in play nowhere comes back as a full object with every
+            count `0` and `inUse: false`, identical to what
+            `GET …/roles/{roleId}/usage` answers for it. So a client that asked
+            for usage never has to distinguish "unused" from "unknown", and one
+            that did not ask must not read `null` as "unused".
+
+    DuplicateRoleRequest:
+      type: object
+      description: >-
+        The body of the only creation door. `scope`, the permission set and
+        `key` are all absent on purpose: the first two are copied from the
+        source, and the key is generated server-side.
+      properties:
+        name:
+          type: string
+          maxLength: 80
+          description: >-
+            Defaults to `"<source name> copy"`. Must be unique within
+            (workspace, scope) and must not equal a built-in's display name in
+            that scope, case-insensitively — `409` otherwise. Names are guarded
+            rather than keys because names are what users read.
+        description:
+          type: string
+          maxLength: 500
+          description: Defaults to the source's description.
+
+    UpdateRoleRequest:
+      type: object
+      description: >-
+        Every field is optional; omit one to leave it alone. `scope`, `key`,
+        `builtIn` and the owning workspace are deliberately not here — they are
+        identity, not configuration.
+      properties:
+        name: { type: string, maxLength: 80 }
+        description: { type: string, maxLength: 500 }
+        permissions:
+          type: array
+          maxItems: 64
+          description: >-
+            **A full replacement** when present; omit it (or send `null`) to
+            leave the grants untouched. An empty array is a real value — a role
+            granting nothing is legal. It cannot be a delta: a partial list
+            would be indistinguishable from a role that should lose everything
+            not mentioned.
+          items: { $ref: '#/components/schemas/RolePermissionEntry' }
+        version:
+          type: integer
+          format: int64
+          description: >-
+            The `version` from the role you loaded. Present and stale is `409`
+            "Role was modified by someone else"; absent is last-writer-wins.
+            Send it — two administrators each unticking one box would otherwise
+            silently restore each other's, and the loser's revocation would look
+            like it had been applied.
+
+    PreviewRoleRequest:
+      type: object
+      description: >-
+        The dry-run body. Same permission shape as an update, plus a required
+        `scope` because there is no stored role to take one from. Nothing is
+        persisted, and this is not a way to change a role's scope.
+      required: [scope]
+      properties:
+        scope: { $ref: '#/components/schemas/RoleScope' }
+        permissions:
+          type: array
+          maxItems: 64
+          items: { $ref: '#/components/schemas/RolePermissionEntry' }
+
+    RoleUsageProblemDetail:
+      description: >-
+        The `409` body of a role delete refused because the role still has
+        holders and no `reassignToRoleId` was given. It carries the complete
+        usage counts so a client can render the remap dialog **from the
+        refusal**, without a second request. Naming them discloses nothing:
+        every count is scoped to the workspace the caller is already
+        administering, and they hold `workspace.role.manage` or they would not
+        have reached this at all.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [ROLE_IN_USE]
+              description: Always `ROLE_IN_USE` on this body.
+              example: ROLE_IN_USE
+            usage: { $ref: '#/components/schemas/RoleUsageResponse' }
 
     Priority:
       type: object
@@ -5603,11 +6701,22 @@ components:
         myRole:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
+          nullable: true
           description: >-
             The caller's workspace role **key**. Fine to display; to decide what
             to show, read `myPermissions` instead — this is an open string and
             `myRole === 'ADMIN'` is not a question that can be answered
             correctly for every member.
+
+
+            **`null` on `GET /workspaces` only**, when the caller's own
+            membership row fails the role scope/ownership assertion: the
+            workspace stays in the directory with `myPermissions: []` rather
+            than vanishing, and the refused role is never named. The detail read
+            (`GET /workspaces/{workspaceId}`) still `404`s that same
+            workspace — a list is a directory, a detail read is an
+            authorization, and degrading the latter would leave the caller
+            silently inheriting a project role everywhere instead of nothing.
         myPermissions:
           allOf:
             - $ref: '#/components/schemas/MyPermissions'
@@ -5623,31 +6732,86 @@ components:
         email: { type: string, format: email }
         displayName: { type: string }
         avatarUrl: { type: string, nullable: true }
-        role: { $ref: '#/components/schemas/WorkspaceRole' }
+        role:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          nullable: true
+          description: >-
+            The member's role **key**. **`null` is possible** and means the
+            server refused to describe this membership's role: the stored role
+            failed its scope/ownership assertion, which the list survives rather
+            than `404`-ing the whole People tab over one row. The role that was
+            just refused is emphatically not rendered in its place — that name
+            is the one thing the assertion exists to keep out. Render such an
+            entry with no role rather than guessing one.
         joinedAt: { type: string, format: date-time }
 
     InviteMemberRequest:
       type: object
-      required: [email, role]
+      required: [email]
+      description: >-
+        **Exactly one of `roleId` and `role` must be present** — neither and
+        both are alike a `422`. See `roleId` for why both fields exist and why
+        "both" is refused rather than resolved by precedence.
       properties:
         email: { type: string, format: email }
-        role: { $ref: '#/components/schemas/WorkspaceRole' }
+        roleId:
+          type: string
+          format: uuid
+          description: >-
+            The assignable `WORKSPACE`-scoped role's id — **the only way to name
+            a custom role**, since `role` resolves built-ins only. Unknown,
+            foreign or `PROJECT`-scoped is one indistinguishable `422`.
 
-    UpdateWorkspaceMemberRequest:
-      type: object
-      required: [role]
-      properties:
+
+            It exists **beside** the legacy `role` key rather than replacing it
+            because the shipped web client's invite screen is already live and a
+            release must be independently deployable. Exactly one of the two is
+            required. "Both" is refused rather than resolved by precedence
+            because the two fields do not always mean the same thing — the key
+            resolves built-ins only and, on the project side, still carries the
+            `VIEWER → MEMBER` translation, while an id addresses any assignable
+            role verbatim. A silent winner would store a role the caller did not
+            ask for, in the one part of the product where that is a privilege
+            change.
         role:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
+          deprecated: true
           description: >-
-            The role key the member should end up with. Required — a `PATCH`
-            with nothing to change (missing, `null` or empty) is rejected with
-            `400`, and a key this instance cannot assign with `422`. It must not
-            grant a permission the caller lacks, and neither may the member's
-            current role; the `OWNER` role additionally requires the caller to
-            be an owner. Sending the role they already hold is an accepted
-            no-op.
+            **Deprecated — send `roleId` instead.** It still works exactly as
+            before and is not going away in this release, but it can only name
+            a built-in role, so it cannot express a workspace's own custom ones.
+            Never `OWNER`, even for an owner.
+
+    UpdateWorkspaceMemberRequest:
+      type: object
+      description: >-
+        **Exactly one of `roleId` and `role` must be present** — neither and
+        both are alike a `422`. Neither field is individually required any more,
+        precisely because the other may carry the answer: "a `PATCH` with
+        nothing to change" is now that `422` rather than a `400`, since the body
+        is well-formed and it is the *combination* that cannot be honoured.
+      properties:
+        roleId:
+          type: string
+          format: uuid
+          description: >-
+            The assignable `WORKSPACE`-scoped role's id the member should end up
+            with — the only way to name a custom role. Unknown, foreign or
+            `PROJECT`-scoped is one indistinguishable `422`. It must not grant a
+            permission the caller lacks, and neither may the member's current
+            role; the built-in `OWNER` additionally requires the caller to be an
+            owner. Sending the role they already hold is an accepted no-op.
+        role:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          deprecated: true
+          description: >-
+            **Deprecated — send `roleId` instead.** Unchanged behaviour: a
+            built-in role key, `422` when it is not one this instance can assign
+            here. It cannot name a custom role. See `InviteMemberRequest.roleId`
+            for why the two fields coexist.
 
     CreateProjectRequest:
       type: object
@@ -5846,6 +7010,7 @@ components:
         myRole:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'
+          nullable: true
           description: >-
             The caller's **explicit** project role **key** — `VIEWER` when they
             have no project membership row of their own, even where that member
@@ -5853,6 +7018,14 @@ components:
             `myRole === 'MANAGER'` cannot express every role a member might
             hold. `myPermissions` carries the effective answer and is the field
             to gate on.
+
+
+            **`null` on `GET …/projects` only**, when the caller's explicit
+            project membership fails the role scope/ownership assertion. The
+            project stays in the list; the explicit role then contributes
+            **nothing** to `myPermissions`, deliberately rather than falling
+            back to the workspace default, which would *widen* a member whose
+            narrow row is exactly what was lost.
         myPermissions:
           allOf:
             - $ref: '#/components/schemas/MyPermissions'
@@ -5870,22 +7043,68 @@ components:
         email: { type: string, format: email }
         displayName: { type: string }
         avatarUrl: { type: string, nullable: true }
-        role: { $ref: '#/components/schemas/ProjectRole' }
+        role:
+          allOf:
+            - $ref: '#/components/schemas/ProjectRole'
+          nullable: true
+          description: >-
+            The member's role **key**. **`null` is possible** on the member
+            *list*, for the same reason and with the same meaning as on
+            `WorkspaceMemberResponse.role`: the stored role failed its
+            scope/ownership assertion, the entry survives, and the refused role
+            is not named. The write responses (add / change role) always carry
+            a key.
         joinedAt: { type: string, format: date-time }
 
     AddProjectMemberRequest:
       type: object
-      required: [userId, role]
+      required: [userId]
+      description: >-
+        **Exactly one of `roleId` and `role` must be present** — neither and
+        both are alike a `422`. See `InviteMemberRequest.roleId` for why both
+        fields exist.
       properties:
         userId: { type: string, format: uuid }
+        roleId:
+          type: string
+          format: uuid
+          description: >-
+            The assignable `PROJECT`-scoped role's id. Unknown, foreign or
+            `WORKSPACE`-scoped is one indistinguishable `422`. Bounded by the
+            grant ceiling, plus the escape described on the operation.
+
+
+            **This path does not translate.** The legacy `role` key maps
+            `VIEWER` onto the contributor role, so until now a genuinely
+            read-only project member was inexpressible; naming the built-in
+            Viewer by id stores the built-in Viewer.
         role:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'
+          deprecated: true
           description: >-
-            The project role key to grant. Required (`400` when missing or
-            blank); a key this instance cannot assign in the **project** scope
-            is `422 "Unknown role"`. Bounded by the grant ceiling, and `VIEWER`
-            is stored as `MEMBER` — see the `ProjectRole` schema.
+            **Deprecated — send `roleId` instead.** Unchanged behaviour: a
+            built-in project role key, `422` when it is not one this instance
+            can assign in the **project** scope, and `VIEWER` still stored as
+            `MEMBER` (see the `ProjectRole` schema). It cannot name a custom
+            role.
+
+    UpdateProjectMemberRequest:
+      type: object
+      description: >-
+        **`roleId` only, and required.** There is deliberately no legacy `role`
+        key here because there is no legacy client: the endpoint is new, so
+        nothing is mid-migration, and accepting a key would import the
+        `VIEWER → MEMBER` translation into a surface that never had it.
+      required: [roleId]
+      properties:
+        roleId:
+          type: string
+          format: uuid
+          description: >-
+            The assignable **PROJECT**-scoped role the member should end up
+            with. Unknown, foreign or `WORKSPACE`-scoped is one
+            indistinguishable `422`.
 
     ProjectRef:
       type: object

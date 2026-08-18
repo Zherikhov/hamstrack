@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.util.TokenUtils;
@@ -104,10 +105,17 @@ public class WorkspaceService {
         // comes from the cache, so myPermissions costs nothing per row (§9.2).
         // The role goes through the same scope+ownership assertion `get()` applies (H3) —
         // a list that skipped it would report a myPermissions the detail path refuses.
+        //
+        // DEGRADED rather than refusing (HD-127 §3b): this is a directory of N workspaces
+        // and one corrupt role_id must not cost the caller every other entry. `get()` on
+        // that same workspace still 404s, which is the intended asymmetry — a list is a
+        // directory, a detail read is an authorization.
         return memberRepository.findAllByUserIdWithWorkspace(actor.getId()).stream()
-                .map(m -> WorkspaceResponse.of(m.getWorkspace(),
-                        workspaceAccess.requireRole(m.getRole().getId(), RoleScope.WORKSPACE,
-                                m.getWorkspace().getId(), "workspace_members")))
+                .map(m -> workspaceAccess.resolveRoleOrDegrade(m.getRole().getId(),
+                                RoleScope.WORKSPACE, m.getWorkspace().getId(),
+                                RoleScopeViolationSource.WORKSPACE_MEMBERS)
+                        .map(role -> WorkspaceResponse.of(m.getWorkspace(), role))
+                        .orElseGet(() -> WorkspaceResponse.degraded(m.getWorkspace())))
                 .toList();
     }
 
@@ -126,10 +134,16 @@ public class WorkspaceService {
         // non-built-in role, which made this fail closed by accident; `.key()` answers for
         // anything, so a foreign or corrupt role_id would otherwise print another
         // workspace's role name into the People tab once S4 ships custom roles.
+        //
+        // Degraded, not refused, for that very reason: the whole People tab must not 404
+        // because of one other member's row — and the refused role's key is exactly what
+        // must NOT appear, so the entry renders with `role: null`.
         return memberRepository.findAllByWorkspaceWithUser(workspace).stream()
-                .map(m -> WorkspaceMemberResponse.of(m, workspaceAccess.requireRole(
-                        m.getRole().getId(), RoleScope.WORKSPACE, workspace.getId(),
-                        "workspace_members").key()))
+                .map(m -> WorkspaceMemberResponse.of(m,
+                        workspaceAccess.resolveRoleOrDegrade(m.getRole().getId(),
+                                        RoleScope.WORKSPACE, workspace.getId(),
+                                        RoleScopeViolationSource.WORKSPACE_MEMBERS)
+                                .map(RoleView::key).orElse(null)))
                 .toList();
     }
 
@@ -147,7 +161,8 @@ public class WorkspaceService {
         var workspace = ctx.workspace();
         memberService.requireMemberAdmin(ctx.permissions());
         // 422 for a role key this build cannot assign, before anything is judged about it.
-        var granted = roleCatalog.requireAssignable(RoleScope.WORKSPACE, req.role());
+        var granted = roleCatalog.requireAssignable(
+                RoleScope.WORKSPACE, workspace.getId(), req.roleId(), req.role());
         // OWNER is never grantable via INVITE — not even by an Owner (you promote a
         // colleague to owner, you do not invite a stranger as one). The one rule specific
         // to this call site; the ceiling's Owner guardrail is the weaker, general form.
@@ -195,7 +210,18 @@ public class WorkspaceService {
                 .filter(i -> !i.isExpired())
                 // Already a member (e.g. accepted a different invite to the same ws) — hide it
                 .filter(i -> !memberRepository.existsByWorkspaceAndUser(i.getWorkspace(), actor))
-                .map(i -> PendingInviteResponse.of(i, roleCatalog.view(i.getRole().getId()).key()))
+                // The one bare view() left in the product was here, and it is the worst
+                // place for one: invites are fetched BY EMAIL across every workspace, so
+                // this renders a role key to somebody who is not yet a member of the
+                // workspace that owns it — a corrupt or foreign role_id would print another
+                // tenant's role name onto a stranger's onboarding screen. Degraded rather
+                // than refused, like every other collection read: one bad invite must not
+                // empty the whole "join a team" list.
+                .map(i -> PendingInviteResponse.of(i,
+                        workspaceAccess.resolveRoleOrDegrade(i.getRole().getId(),
+                                        RoleScope.WORKSPACE, i.getWorkspace().getId(),
+                                        RoleScopeViolationSource.WORKSPACE_INVITES)
+                                .map(RoleView::key).orElse(null)))
                 .toList();
     }
 
@@ -233,10 +259,31 @@ public class WorkspaceService {
         if (memberRepository.existsByWorkspaceAndUser(workspace, actor)) {
             throw new AlreadyWorkspaceMemberException();
         }
+        // ---- the invite seam (HD-127 round-3 review) ----
+        //
+        // This is the one write path that copies a role id from one table to another
+        // without ever having judged it: `workspace_invites.role_id` was resolved through
+        // requireAssignable when the invite was ISSUED, and then trusted here, possibly
+        // weeks later. Fails closed either way — requireMember runs requireRole on every
+        // subsequent request, so a wrong-scope or foreign id yields 404 rather than
+        // workspace.* grants in a ProjectContext — but "fails closed later" is not the same
+        // as "cannot be written", and the row it would write is UNREMOVABLE THROUGH THE API:
+        // WorkspaceMemberService.requireWorkspaceRole refuses rather than degrades, so
+        // nobody can DELETE the member this let in. Validate before the insert instead, and
+        // refuse (this is a single-resource write about the caller, not a collection read).
+        // The source tag is WORKSPACE_INVITES so the ERROR names the table the wrong row is
+        // actually in.
+        var granted = workspaceAccess.requireRole(invite.getRole().getId(), RoleScope.WORKSPACE,
+                workspace.getId(), RoleScopeViolationSource.WORKSPACE_INVITES);
         var member = new WorkspaceMember();
         member.setWorkspace(workspace);
         member.setUser(actor);
-        member.setRole(invite.getRole());
+        // `granted`, not `invite.getRole()`. The same id today — requireRole resolves the one
+        // it was handed — but writing the unasserted reference would leave the guard above
+        // decorative, one refactor away from a row nobody judged. The rule is the one
+        // ProjectService.addMember and WorkspaceMemberService.updateRole already follow:
+        // resolve, then write what you resolved.
+        member.setRole(roleCatalog.reference(granted.id()));
         memberRepository.save(member);
 
         invite.setAcceptedAt(Instant.now());
@@ -246,7 +293,10 @@ public class WorkspaceService {
         // Joining a team completes first-login onboarding (Cloud; no-op otherwise)
         userRepository.markOnboarded(actor.getId(), Instant.now());
 
-        return WorkspaceResponse.of(workspace, roleCatalog.view(invite.getRole().getId()));
+        // The view asserted above, not a fresh bare read: this response carries
+        // myPermissions, and deriving it from an unjudged role id would echo a permission
+        // set the caller's very next request refuses.
+        return WorkspaceResponse.of(workspace, granted);
     }
 
     // Marks first-login onboarding complete (the "Create a team" choice; joining

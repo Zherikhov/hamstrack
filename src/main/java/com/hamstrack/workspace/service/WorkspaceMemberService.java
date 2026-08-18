@@ -2,6 +2,7 @@ package com.hamstrack.workspace.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.event.WorkspaceMemberRemoved;
+import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.PermissionSet;
@@ -174,14 +175,15 @@ public class WorkspaceMemberService {
         // 422 for a role key this build cannot assign — resolved before the lock for the
         // same reason, and before the target is read so a bad key never depends on who it
         // was aimed at.
-        var requested = roleCatalog.requireAssignable(RoleScope.WORKSPACE, req.role());
+        var requested = roleCatalog.requireAssignable(
+                RoleScope.WORKSPACE, ctx.workspace().getId(), req.roleId(), req.role());
 
         // THEN the owner-set lock, unconditionally and before the target is read — see
         // lockOwners for why deciding whether to lock from an unlocked read is the bug.
         var owners = lockOwners(ctx.workspace());
 
         var target = requireMembership(ctx.workspace(), userId);
-        var currentRole = roleCatalog.view(target.getRole().getId());
+        var currentRole = requireWorkspaceRole(ctx, target);
 
         // The ceiling applies to BOTH ends of the edit. Only checking the new role would
         // let an ADMIN demote an OWNER — which is not "granting a role above your own",
@@ -241,7 +243,7 @@ public class WorkspaceMemberService {
 
         var target = requireMembership(workspace, userId);
         var targetUser = target.getUser();
-        var targetRole = roleCatalog.view(target.getRole().getId());
+        var targetRole = requireWorkspaceRole(ctx, target);
         requireWithinGrantCeiling(ctx, targetRole);
         // Deliberately BEFORE the self-check: a sole owner deleting themselves trips both
         // rules, and "promote another member to owner first" is the more actionable of the
@@ -334,6 +336,25 @@ public class WorkspaceMemberService {
     }
 
     /**
+     * The <em>target's</em> {@code workspace_members.role_id}, resolved with the
+     * scope/ownership assertion rather than a bare {@code roleCatalog.view}.
+     *
+     * <p>Both mutations here act on somebody else's row and then render or compare the role
+     * they found: {@link #updateRole} logs its key and {@link #remove} does too, and the
+     * grant ceiling puts its <strong>name</strong> into a 403 the caller reads. A foreign
+     * row would leak that name across tenants, and a PROJECT-scoped one would hand the
+     * ceiling a comparand assembled from the wrong scope. Both mutations are
+     * single-resource writes, so this refuses (404) rather than degrading the way the list
+     * reads do — see {@code WorkspaceAccessService.resolveRoleOrDegrade} for the split.
+     * Unreachable today: every write door goes through
+     * {@code RoleRepository.findAssignable}. Costs no query on a warm cache.
+     */
+    private RoleView requireWorkspaceRole(WorkspaceContext ctx, WorkspaceMember target) {
+        return workspaceAccess.requireRole(target.getRole().getId(), RoleScope.WORKSPACE,
+                ctx.workspace().getId(), RoleScopeViolationSource.WORKSPACE_MEMBERS);
+    }
+
+    /**
      * The grant ceiling (roles-permissions-proposal §11.2): nobody may hand out — or act
      * on a member holding — a role that grants something they do not hold themselves.
      *
@@ -359,6 +380,28 @@ public class WorkspaceMemberService {
      * invite call site.
      */
     public void requireWithinGrantCeiling(WorkspaceContext ctx, RoleView role) {
+        // ---- the workspace Owner is the root of trust, within their own workspace ----
+        //
+        // The ceiling exists to stop escalation PAST whoever is ultimately responsible, and
+        // inside one workspace that is the Owner. Exempting them is also the only reason
+        // Permission.PROJECT_ADMINISTER_ALL is reachable at all: no built-in role holds it,
+        // so a custom role carrying it is not covered by ANY role's set — including the
+        // Owner's — and without this the product would ship a permission that could be
+        // minted (S4's definition ceiling exempts the Owner too) and then never assigned to
+        // anybody. A capability nothing can grant is dead code that lies.
+        //
+        // It is narrow on purpose: the built-in Owner ROLE ID (never the key string — a
+        // workspace may own a custom role keyed OWNER, and that role is not this
+        // guardrail), in this workspace only, and at WORKSPACE scope only. The project-scope
+        // ceiling continues to bind between project members, where the Owner is just another
+        // member; an Owner who is not a project member holds only project.curate.all's four
+        // permissions there and is refused accordingly.
+        //
+        // The Owner-is-not-grantable guardrail below is unaffected: its second condition is
+        // already false for an Owner, so this return changes nothing about it.
+        if (ctx.workspaceRole().isBuiltIn(BuiltInRoles.WORKSPACE_OWNER)) {
+            return;
+        }
         ctx.permissions().firstNotCovered(role.permissions()).ifPresent(missing -> {
             throw new WorkspaceGrantCeilingException(role.name(), missing);
         });

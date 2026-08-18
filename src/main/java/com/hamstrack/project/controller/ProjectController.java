@@ -138,6 +138,32 @@ public class ProjectController {
         return projectService.addMember(actor, workspaceId, projectId, req);
     }
 
+
+    /**
+     * Change an existing project member's role (HD-127, M4) — the project twin of
+     * {@code PATCH /api/workspaces/{ws}/members/{userId}}.
+     *
+     * <p>Gate: {@code project.member.manage}, plus the grant ceiling on <em>both</em> the
+     * target's current role and the requested one, plus the §4 escape (any holder of
+     * {@code project.member.manage} may always grant the built-in Project admin — to somebody
+     * else, never to themselves), plus the last-administrator invariant, which a demotion can
+     * break with no row removed at all.
+     *
+     * <p>200 · <strong>403</strong> missing the permission, or a ceiling refusal naming the
+     * permission · <strong>404</strong> unknown workspace, caller not a member, project not
+     * in this workspace, or the target holds no project membership here ·
+     * <strong>409</strong> it would take the project's last administrator, or a lost row-lock
+     * race (with {@code Retry-After}) · <strong>422</strong> a {@code roleId} that is
+     * unknown, foreign or WORKSPACE-scoped.
+     */
+    @PatchMapping("/{projectId}/members/{userId}")
+    public ProjectMemberResponse updateMember(@AuthenticationPrincipal User actor,
+                                              @PathVariable UUID workspaceId,
+                                              @PathVariable UUID projectId,
+                                              @PathVariable UUID userId,
+                                              @Valid @RequestBody UpdateProjectMemberRequest req) {
+        return projectService.updateMember(actor, workspaceId, projectId, userId, req);
+    }
     @DeleteMapping("/{projectId}/members/{userId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void removeMember(@AuthenticationPrincipal User actor,

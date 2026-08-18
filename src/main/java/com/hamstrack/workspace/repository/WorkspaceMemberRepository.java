@@ -2,11 +2,13 @@ package com.hamstrack.workspace.repository;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.project.entity.Project;
+import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -145,4 +147,49 @@ public interface WorkspaceMemberRepository extends JpaRepository<WorkspaceMember
 
     @Query("SELECT m FROM WorkspaceMember m JOIN FETCH m.workspace JOIN FETCH m.role WHERE m.user.id = :userId")
     List<WorkspaceMember> findAllByUserIdWithWorkspace(UUID userId);
+
+    // ---------------------------------------------------- S4: role usage & reassign
+    //
+    // Every one of these carries a workspace filter. Built-in roles are SHARED rows
+    // (workspace_id IS NULL), so an unscoped `WHERE role_id = :roleId` on this table would
+    // publish every other tenant's headcount from a workspace-scoped endpoint — the single
+    // most likely tenancy defect in this slice (§7.1 R6).
+
+    /** How many members of THIS workspace hold this role. */
+    long countByWorkspaceIdAndRoleId(UUID workspaceId, UUID roleId);
+
+    /**
+     * Does the caller hold this role in this workspace? The workspace half of the
+     * self-held delete refusal (§7.1 R5) — deleting a role you hold and reassigning it in
+     * bulk is a self-escalation route no per-assignment ceiling can see.
+     */
+    boolean existsByWorkspaceIdAndUserIdAndRoleId(UUID workspaceId, UUID userId, UUID roleId);
+
+    /** {@code roleId -> headcount} for every role in use in this workspace, in one statement. */
+    @Query("""
+            SELECT m.role.id, COUNT(m) FROM WorkspaceMember m
+             WHERE m.workspace.id = :workspaceId
+             GROUP BY m.role.id
+            """)
+    List<Object[]> countMembersByRole(@Param("workspaceId") UUID workspaceId);
+
+    /**
+     * Point this workspace's holders of {@code fromRoleId} at {@code toRole}, as one
+     * statement, before the role row is deleted.
+     *
+     * <p><strong>Plain {@code @Modifying}</strong>: nothing in the deleting transaction
+     * re-reads these rows, so {@code clearAutomatically} would buy nothing and
+     * {@code em.clear()} mid-transaction is the documented way to lose pending inserts. It
+     * is also safe as a bulk UPDATE precisely because the rows are NOT materialized here —
+     * had they been loaded (to write history, say) the L1 cache would hold stale copies
+     * that a later flush would write back.
+     */
+    @Modifying
+    @Query("""
+            UPDATE WorkspaceMember m SET m.role = :toRole
+             WHERE m.workspace.id = :workspaceId AND m.role.id = :fromRoleId
+            """)
+    int reassignRole(@Param("workspaceId") UUID workspaceId,
+                     @Param("fromRoleId") UUID fromRoleId,
+                     @Param("toRole") Role toRole);
 }
