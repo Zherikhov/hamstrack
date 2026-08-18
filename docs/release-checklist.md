@@ -141,6 +141,122 @@ they are created per run) — the only correct fix is a **new** migration. **Say
 in the PR description which you did**, because after the fact the only evidence
 is the file's mtime, and the justification expires silently at merge.
 
+## Release notes — what a user or integrator will notice
+
+The tag build cuts the GitHub Release with `generate_release_notes: true`, which lists
+merged PRs and new contributors and **nothing about behaviour**. Anything an upgrader has
+to be told is written by hand into that Release body (edit it after the build — a later
+re-run never overwrites an existing body). That is the place: `docs/self-hosting.md` sends
+every upgrader to the Releases page before a minor upgrade, and it is the only page a
+Cloud user or an API integrator will look at.
+
+The rule for what belongs there: **every behaviour change that looks like a bug when it is
+met without warning** — a status code that moved, a response shape that grew, a value that
+is now rejected, a new mode. Additive endpoints do not need a line each; the API reference
+already has them.
+
+Below is that text for the **roles & permissions** release (HD-123, V13–V16), which is also
+the worked example of the shape. See "Releases carrying a destructive migration" above for
+what this particular release needs operationally.
+
+### The one new capability
+
+- **A project administrator can now delete other people's comments.** Nobody could before,
+  at any role — not a project manager, not a workspace owner — because the only rule was
+  authorship. The built-in **Project admin** role holds `comment.delete` unrestricted, so
+  moderation is possible for the first time. This is the release's one deliberate
+  divergence from previous behaviour that *grants* something rather than reorganising what
+  already existed. `comment.edit` stays own-only at every role and is not grantable any
+  other way: deleting someone's comment is moderation, editing it is impersonation. A
+  workspace Owner/Admin holding no project membership row does **not** get this.
+
+### Status codes that moved
+
+- **`403` where `409` used to be, on an archived project.** The permissions a request needs
+  are now checked **before** the project's state, so a caller who lacks the permission on an
+  archived project gets `403 "Requires permission: …"` instead of `409 "Project is
+  archived"`. It shows up on issue deletes, attachment deletes, commenting and ranking. The
+  rule is that whether you *may* do a thing must never depend on the state of the thing you
+  are asking about. A caller who **has** the permission still gets the `409`.
+- **`409` where `204` used to be, removing the last project administrator.**
+  `DELETE …/projects/{p}/members/{u}` — and a demotion through the new
+  `PATCH …/projects/{p}/members/{u}`, which strands a project just as effectively with no
+  row removed — is refused when the target is the only ACTIVE member holding
+  `project.member.manage`. It used to succeed and leave the project unmanageable by
+  *anyone*, workspace Owner included, because that permission is deliberately not part of
+  the workspace-wide curator set: nobody could add a member back. Add another administrator
+  first. A project with no explicit administrator at all remains a normal state; only the
+  step from one to none is refused.
+- **`403` where `404` used to be, on `/api/workspaces/{ws}/projects/{p}/admin/**`.** A
+  workspace member who is not a member of *that project* used to get `404` from this
+  endpoint family, while its sibling `/workspaces/{ws}/admin/**` answered `403` for the
+  identical failure. It is `403` everywhere now. **Tenancy is unchanged and absolute:**
+  somebody who is not a member of the *workspace*, or a workspace that does not exist, is
+  still `404`. If you were treating a `404` here as "no such project", read it as "not your
+  workspace".
+- **`200` with a body where a bare `204` used to be, on workspace member removal.**
+  `DELETE …/workspaces/{ws}/members/{u}?adoptStrandedProjects=true` answers
+  `200 {"adoptedProjects": [ {id, key, name}, … ]}` when the removal took one or more
+  projects over on the caller's behalf, and stays `204` when nothing was adopted. **Branch
+  on the status, and show the user what they were granted:** the flag is accepted without a
+  prior `409`, so a client that wires it on once — or a script that retries on any conflict
+  — would otherwise accumulate project roles for its user with nothing on the wire saying
+  so. The same call answers `409` with an `errorType` of `STRANDED_PROJECTS` (retry with the
+  flag clears it), `ADOPTION_BLOCKED`, `ADOPTION_ROLE_UNREADABLE` or
+  `STRANDED_BY_INHERITANCE` (no retry exists — offer none).
+- **`422` where `400` used to be, naming a role.** `role` was a closed enum, so an unknown
+  or absent value failed deserialization or validation with `400`. Every endpoint that names
+  a role now answers **`422`** for an unknown key or id, a correctly-spelled key from the
+  *other* scope, the wrong case, and for a body that names the role in neither way or in
+  both. `400` still covers malformed JSON and ordinary field validation.
+
+### New behaviour to know about
+
+- **`STRICT` project access exists.** One workspace switch (`projectAccessMode` on
+  `PATCH /api/workspaces/{id}`, needs `workspace.edit`) decides exactly one thing: whether
+  people who were never added to a project inherit that project's default role. **`OPEN` is
+  the default, and behaviour under it is identical to the previous release** — every
+  workspace this release upgrades is `OPEN`, so nothing changes until somebody flips it. In
+  `STRICT`, only people explicitly added to a project can change anything in it; everyone
+  can still **see** every project, so no read is lost, and flipping back restores every
+  member's permissions byte for byte (neither direction writes a membership row or touches
+  an issue). Two things to publish with it: a workspace Owner is **not** a rescue — their
+  workspace-wide grants are `project.edit`, `component.manage`, `version.manage` and
+  `sprint.manage`, with no issue or comment permission, so in a `STRICT` project nobody has
+  been added to, nobody can file an issue — and `POST …/project-access/preview` counts
+  exactly that (`projectsWithNoWriters`) before you commit. Self-hosters get
+  `DEFAULT_PROJECT_ACCESS_MODE` for *newly created* workspaces only.
+- **Names containing invisible or bidi-reordering characters are now rejected** where they
+  were previously accepted: the display name at registration and at `POST /admin/users`, a
+  workspace name, a project name and description, and a role name and description.
+  Zero-width characters, bidi marks/overrides/isolates, NEL and LINE/PARAGRAPH SEPARATOR,
+  the interlinear annotation characters and the supplementary tag block are refused with the
+  ordinary validation `400`. Visible homoglyphs are deliberately **not** touched — this is
+  not a confusables rule and it rejects no real name. Values already stored are unaffected.
+- **Role values are open strings from now on.** `TEAM_LEAD` ("Team lead") is a new built-in
+  project role you can assign and will meet in `role` and `myRole`; `COMMENTER` became
+  assignable; and a workspace can define roles of its own, whose keys travel in exactly
+  those fields. **Do not switch exhaustively on a role value** — display it, and decide with
+  `myPermissions`. `role` and `myRole` can now also be `null`, which means "this row's role
+  is not nameable", never "this member has no role".
+- **`roleId` beside `role`.** Every endpoint that assigns a role accepts `roleId` — the only
+  way to name a custom role — and exactly one of `roleId` / `role` must be present. The
+  `role` key is deprecated but works unchanged, including its project-side `VIEWER → MEMBER`
+  mapping; naming the built-in Viewer by **id** is what makes a genuinely read-only project
+  membership expressible. Member listings carry `roleId` beside `role`, because a key is
+  unique only within one (workspace, scope) pair: `MEMBER` names the workspace Member role
+  *and* the project Contributor role, two different permission sets.
+
+### Say this positively — it is the headline for an operator
+
+- **`myPermissions` is advisory, for rendering only. The API is the enforcement boundary.**
+  It tells a client which controls to show; it authorizes nothing. **A client that hides
+  nothing is still safe** — the worst it can produce is a button that answers `403`, and
+  that `403` names the permission it needed. The same rule covers the `settable` block on
+  the default-role pickers and the project-access preview: **counts are advisory, refusals
+  are authoritative**, and every ceiling and stranding check is re-derived inside the
+  write's own transaction whether or not anyone previewed.
+
 ## Tracker bookkeeping
 
 Independent of git, and easy to forget:

@@ -19,7 +19,8 @@ One codebase ships in two deployment models:
 ## Features
 
 - **Workspaces** — the tenancy boundary; invite members by email with role-based access (OWNER / ADMIN / MEMBER)
-- **Projects** — per-workspace, with keys (`DEMO-42`), archiving and project-level roles (MANAGER / MEMBER / VIEWER)
+- **Projects** — per-workspace, with keys (`DEMO-42`), archiving and project-level roles (Project admin / Team lead / Contributor / Commenter / Viewer)
+- **Roles & permissions** — every gate is a permission, not a rung: 29 permission keys, eight built-in roles, and workspace-defined **custom roles** built by duplicating one; a workspace switch decides whether people who were never added to a project can work in it
 - **Issues** — issue types, statuses, priorities and custom fields, plus assignees, due dates, sub-task links, change history and optimistic locking
 - **Kanban board** — drag-and-drop between status columns, workflow-transition rules enforced on drop
 - **Backlog** — flat table of all unfinished work

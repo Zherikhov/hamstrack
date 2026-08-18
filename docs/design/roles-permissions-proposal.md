@@ -201,6 +201,9 @@ Consequences, all intended:
   rule applied to time instead of deployment.
 - Per-project strictness is expressible without the workspace switch at all: set that project's
   default role to **None**. That is also the exact seam private projects will use (§8.5).
+  > **"None" is not a value — see [§20.3](#203-default-role--none-is-not-expressible-and-does-not-need-to-be-found-in-s7-hd-130).**
+  > A NULL `default_project_role_id` means *inherit*. Read this bullet (and §8.5, and §15 AC 12)
+  > as "set that project's default role to **Viewer**", the built-in role that grants ∅.
 
 ### 5.3 Rule P3 — hiding a control is never a permission, and a permission is never a capability
 
@@ -743,6 +746,11 @@ needed.
 
 ### 11.2 Grant ceiling
 
+> **Incomplete as written — see [§20.1](#201-112-states-the-grant-ceiling-without-the-owner-exemption-found-in-s4-hd-127).**
+> The built-in workspace **Owner is exempt** in their own workspace (an `ADMIN` is not), the
+> *definition* ceiling applies to WORKSPACE-scoped roles only, and the ceiling bounds both ends of
+> a write. The text below is kept as written.
+
 Preserved from today's invite rule and extended to role changes: **nobody may grant a role that
 holds a permission they do not themselves hold**, and `OWNER` is never grantable by an Admin
 (only by an Owner). Prevents self-escalation via a custom role. Violation → **403**.
@@ -940,6 +948,11 @@ applies, while it is off, or nobody who does not already use it will ever find i
 …and, on switching to Restricted, a confirmation showing the impact: *"In 3 of your 5 projects,
 nobody has been added explicitly. Only workspace Owners/Admins will be able to change anything
 there."* (§16 OQ 5 covers whether the impact preview ships in the same slice.)
+
+> **That last sentence is false — see [§20.2](#202-142s-strict-impact-copy-is-false-found-in-s7-hd-130).**
+> `project.curate.all` holds no issue or comment permission, so in a `STRICT` project with no
+> explicit members **nobody can file an issue, the Owner included**. What shipped is the counted
+> preview's `projectsWithNoWriters`, with the wording in `roles-permissions-s7-spec.md` §9.1.
 
 ### 14.3 Existing surfaces that must react
 
@@ -1171,3 +1184,85 @@ Each with a recommendation and the cost of being wrong. None blocks S1.
    protects nothing and is the codebase's only permission-failure-as-404. **Cost if wrong:** a
    trivially observable behaviour change on one endpoint family. Low, but it is a behaviour change
    and the owner should say yes out loud.
+---
+
+## 20. Corrections — where this document was wrong (recorded in S8, HD-131)
+
+Recorded **as corrections rather than as edits**: the original sentences are left standing
+above, each with a pointer down here. A spec that is quietly rewritten to match what was
+built teaches nobody anything, and in all three cases below the reasoning that produced the
+mistake is worth keeping — two of them are wrong in the same direction, by treating a
+workspace role as a floor under project work.
+
+The build recorded eleven reconciliation items in total (`roles-permissions-s4-spec.md` §11,
+`roles-permissions-s7-spec.md` §12). The three below are the ones that would mislead a
+reader of *this* document into building — or authorizing — the wrong thing. The remaining
+eight are refinements the two slice specs already state correctly and are best read there.
+
+### 20.1 §11.2 states the grant ceiling without the Owner exemption (found in S4, HD-127)
+
+§11.2 says flatly that **nobody** may grant a role holding a permission they do not
+themselves hold. What shipped: the built-in workspace **Owner is exempt inside their own
+workspace**, for both *defining* and *assigning* a role. An **`ADMIN` is not** exempt (owner
+decision, 2026-08-17), and that distinction is the point of it.
+
+Why this is load-bearing rather than a softening: the ceiling exists to stop escalation
+*past* whoever is ultimately responsible, and inside one workspace that person is the Owner.
+More concretely — **the exemption is the only reason `project.administer.all` is mintable at
+all.** No built-in role holds it (§7.1 seeds it on nothing deliberately, because it is wider
+than anything that exists today), so under a ceiling with no exemption the product would
+ship a permission that *every possible actor* is forbidden to grant: dead on arrival, in a
+catalog whose premise is that a permission nothing can reach is meaningless.
+
+Three things §11.2 also does not say, and the code does:
+
+- The **definition** ceiling applies to **WORKSPACE-scoped roles only**. A project-scoped
+  role has no comparand at workspace level, and inventing one would forbid an Admin from
+  duplicating Contributor — the product's primary recipe. Its entire practical effect at
+  workspace scope is therefore *"only an Owner may mint `project.administer.all`"*, which is
+  a small and exactly-right rule.
+- Project scope is guarded instead by the `SELF_HELD_ROLE` rules on editing and deleting
+  (you may not widen a project role you hold yourself), plus the one named escape on
+  membership writes: a holder of `project.member.manage` may grant the built-in Project
+  admin role **to somebody else, never to themselves**.
+- The ceiling bounds **both ends** of a write — the role as it stands today as well as the
+  set being sent — so it forbids *stripping* and even *renaming* a role wider than yours,
+  not only widening one. Sabotage is as reachable as escalation, and irreversible by the
+  person who did it.
+
+### 20.2 §14.2's `STRICT` impact copy is false (found in S7, HD-130)
+
+§14.2 proposes the confirmation text *"In 3 of your 5 projects, nobody has been added
+explicitly. **Only workspace Owners/Admins will be able to change anything there.**"* The
+bolded half is **wrong**, and shipping it would have told an owner the opposite of the truth
+at the exact moment they were deciding.
+
+Workspace Owners and Admins hold `project.curate.all`, which is exactly
+`{project.edit, component.manage, version.manage, sprint.manage}` — **no issue permission
+and no comment permission anywhere in it**. So in a `STRICT` project that nobody has been
+added to, *nobody can file an issue, edit one, move it on the board or comment on it,
+including the Owner*. What they can do is rename the project and cut a version.
+
+What shipped instead of the sentence is a counted preview
+(`POST …/workspaces/{id}/project-access/preview`) whose **`projectsWithNoWriters`** field
+names that population directly — live projects where, after the change, nobody at all holds
+`issue.create` — with the UI wording in `roles-permissions-s7-spec.md` §9.1. The general
+lesson outlives the copy: **`project.curate.all` is a curation bypass, not an administration
+one.** Any statement that treats a workspace role as a floor under project work is wrong in
+this same way — §11.2's missing exemption above and the stranding hole HD-136 closed are
+both the same misreading from other directions.
+
+### 20.3 "Default role = None" is not expressible, and does not need to be (found in S7, HD-130)
+
+§5.2's last consequence bullet — echoed by §8.5 and by §15 AC 12 — says per-project
+strictness is available by setting *"that project's default role to **None**"*. There is no
+such value, and there must not be one: `projects.default_project_role_id IS NULL` means
+**inherit** (fall through to the workspace default, then to the built-in Contributor), which
+is the opposite of none. Had NULL been given the "none" meaning, V14's upgrade — every
+workspace `OPEN` with both default columns NULL — would have been a mass revocation instead
+of the provable no-op §8.4 promises.
+
+The capability itself is real; it already had a name. The built-in **Viewer** grants ∅, so
+read all three places as *"set that project's default role to **Viewer**"* — a role a picker
+can offer, a user can read, and `myPermissions` reports honestly. §8.5's private-projects
+seam is unaffected and still needs no new column.
