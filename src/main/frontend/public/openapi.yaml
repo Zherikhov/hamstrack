@@ -30,7 +30,11 @@ info:
     `detail` reads `Requires permission: <key>`, always the bare catalog key,
     never the `:own` form. Every `role` / `myRole` field is an **open role key
     string**, not an enum — never switch exhaustively on one, and gate on
-    `myPermissions` instead. The permissions a request's
+    `myPermissions` instead. A member listing also carries `roleId` beside
+    `role` — the role's **identity**, and the only safe way to match a member
+    against `GET /workspaces/{workspaceId}/roles`, since a key is unique only
+    within one *(workspace, scope)* and `MEMBER` already names two different
+    built-in roles. The permissions a request's
     own shape determines are checked **before** the project's state, so a
     caller who lacks one on an archived project gets `403`, not the
     `409 "Project is archived"`. A single request may need several — see
@@ -6732,6 +6736,38 @@ components:
         email: { type: string, format: email }
         displayName: { type: string }
         avatarUrl: { type: string, nullable: true }
+        roleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The member's role **identity** — the id of the row in
+            `GET /workspaces/{workspaceId}/roles`, and the field to match a
+            member against that catalog. Purely additive: `role` stays beside
+            it, is **not** deprecated, and still carries the key.
+
+
+            **A key is not an identity.** Keys are unique per
+            *(workspace, scope)* only, so one string can name two different
+            roles across scopes: `MEMBER` is already the key of both the
+            built-in workspace **Member** and the built-in project
+            **Contributor** — two roles, two ids, two different permission
+            sets. A client that resolves a member's role by key against a
+            catalog covering both scopes can therefore name the wrong privilege
+            today, with no custom role involved. Within a single
+            *(workspace, scope)* a duplicate or built-in-colliding key cannot
+            currently be created (custom keys are server-generated and suffixed
+            on collision), so this is about identity being the wrong shape —
+            not about a live collision.
+
+
+            **`null` exactly when `role` is `null`, and never on its own.**
+            The two degrade together: on the member list a row whose stored
+            role fails its scope/ownership assertion answers `role: null`
+            **and** `roleId: null`. Emitting the id would hand back the
+            withheld name by proxy — the client would resolve it in the role
+            catalog and print it — so `roleId: null` means exactly what
+            `role: null` means: this row's role is not nameable.
         role:
           allOf:
             - $ref: '#/components/schemas/WorkspaceRole'
@@ -6982,6 +7018,71 @@ components:
             affordance only — the API answers `200` with no confirmation, and
             nothing is ever destroyed.
 
+    DefaultRoleResponse:
+      type: object
+      description: >-
+        The **default project role** a workspace member inherits in a project
+        when they hold no project membership row of their own — which is most
+        members. Both links of the chain are published, so a client can say not
+        only *what* the default is but *where it came from*: this project's own
+        override → the workspace-wide default → the built-in **Contributor**,
+        first non-null wins.
+
+
+        It rides every `ProjectResponse` for the same reason `delivery` does:
+        every surface that needs it already fetches that response, so a
+        default-access card costs no extra request.
+
+
+        **Read-only on the project endpoints, and there is no write path there
+        in this release** — do not look for the `PATCH`. A
+        `PATCH /workspaces/{workspaceId}/projects/{projectId}` body carrying
+        `defaultRole` (or a flattened `defaultProjectRoleId`) is **ignored**:
+        neither is part of the update body, the call succeeds as if they had not
+        been sent, and both stored columns stay null — there is a test asserting
+        exactly that. The picker ships together with the bound it needs: this
+        role is handed to *every* workspace member without an explicit row, so a
+        write unbounded by the grant ceiling would let a workspace administrator
+        grant, workspace-wide and in a single request, permissions they do not
+        hold themselves.
+
+
+        **Read-only is not the same as immutable.** One endpoint does move these
+        values: `DELETE /workspaces/{workspaceId}/roles/{roleId}?reassignToRoleId=`
+        repoints every project — and the workspace itself — that named the
+        deleted `PROJECT`-scoped role as its default onto the replacement, in
+        the same transaction that moves the role's holders. That is deliberate
+        (it is how a delete avoids leaving a dangling default), so a project's
+        default access can change without anything having touched the project.
+        Re-read this object after a role deletion rather than assuming it is
+        frozen.
+
+
+        One caveat worth stating honestly: the workspace's project-access mode
+        is not exposed yet, so in a future `STRICT` workspace these ids would
+        describe a chain nobody walks. That mode does not exist in this release
+        — every workspace inherits — so today the chain always applies.
+      properties:
+        projectRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            This project's own override, or `null` when the project inherits
+            the workspace default. Emitted verbatim from the stored column, so
+            a client that cannot find the id in
+            `GET /workspaces/{workspaceId}/roles` should render a placeholder
+            rather than a guess. Only an id ever leaves through this field —
+            never a name, never a permission.
+        workspaceRoleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The workspace-wide default, or `null` when the chain falls through
+            to the built-in **Contributor**. Same column semantics as
+            `projectRoleId`.
+
     ProjectResponse:
       type: object
       properties:
@@ -7007,6 +7108,17 @@ components:
             How this team delivers — `board`, `releases`, `estimation` and the
             derived `preset`. Presentation only: nothing in it changes what the
             API accepts or which status code it returns.
+        defaultRole:
+          allOf:
+            - $ref: '#/components/schemas/DefaultRoleResponse'
+          description: >-
+            The default-role chain for members of this project who have **no
+            explicit membership row** — this project's override and the
+            workspace default behind it. **Read-only on this endpoint**: no
+            project endpoint accepts it in this release (a `DELETE` of a
+            `PROJECT`-scoped role with `reassignToRoleId` does move the stored
+            values), and like `delivery` it changes nothing about what any
+            endpoint accepts or returns.
         myRole:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'
@@ -7043,6 +7155,29 @@ components:
         email: { type: string, format: email }
         displayName: { type: string }
         avatarUrl: { type: string, nullable: true }
+        roleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The member's role **identity**, with the same meaning and the same
+            degrade rule as `WorkspaceMemberResponse.roleId`: the id of the row
+            in `GET /workspaces/{workspaceId}/roles`, additive beside the
+            `role` key, which stays and is not deprecated.
+
+
+            It matters most here, because **a key is not an identity** and this
+            is the scope where that bites: `MEMBER` names the built-in
+            workspace **Member** *and* the built-in project **Contributor** —
+            different roles, different ids, different permissions — so a client
+            matching a project member's `role` against a catalog spanning both
+            scopes can name the wrong privilege with no custom role involved.
+
+
+            `null` **only together with `role`**, on the member list, when the
+            stored role fails its scope/ownership assertion: publishing the id
+            of a role whose name was just withheld would give the name back by
+            proxy. The write responses (add / change role) always carry both.
         role:
           allOf:
             - $ref: '#/components/schemas/ProjectRole'

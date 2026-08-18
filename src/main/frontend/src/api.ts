@@ -7,6 +7,8 @@ import type {
   SearchResultRow, SearchSchema, SavedFilter, Label, MergeLabelsResult, Component,
   Version, VersionUsage, BoardMode, ProjectDeliveryUpdate, Sprint, SprintState, BacklogView,
   SprintCompletionPreview, SprintCompletionResult, UnfinishedDisposition,
+  Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
+  PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -23,7 +25,36 @@ export interface HqlError {
   field?: string
 }
 
-export class ApiResponseError extends Error {
+/**
+ * The ProblemDetail extensions a **conflict** carries, and the ONLY order they
+ * may be read in (HD-123 S4 / HD-136).
+ *
+ * `Retry-After` first, always: a 409 carrying that header is transient lock
+ * contention and is fixed by re-sending the identical request. It deliberately
+ * has **no** `errorType`, so a client that branches on the discriminator first
+ * reads its absence as "no recovery I know about" — the one wrong answer for a
+ * body that is only asking to be retried.
+ *
+ * Then, and only then, `errorType`. An unrecognised or absent value means
+ * "render `detail`, offer no retry".
+ */
+export interface ConflictInfo {
+  /** Seconds from the `Retry-After` header. Present ⇒ retry the identical request. */
+  retryAfter?: number
+  /**
+   * `STRANDED_PROJECTS` · `ADOPTION_BLOCKED` · `ADOPTION_ROLE_UNREADABLE` ·
+   * `LAST_PROJECT_ADMIN_BULK` · `ROLE_IN_USE` · `SELF_HELD_ROLE` ·
+   * `ROLE_LIMIT_REACHED`. Typed as an open string on purpose — the server may
+   * add one, and an unknown code must degrade to "render `detail`".
+   */
+  errorType?: string
+  /** Projects in the way — uncapped, ordered by key. `detail` names at most three. */
+  projects?: ProjectRef[]
+  /** Where the role is still in play — attached to a `ROLE_IN_USE` refusal. */
+  usage?: RoleUsage
+}
+
+export class ApiResponseError extends Error implements ConflictInfo {
   // Present only for an HQL 422 (search/saved-filter validation) — lets the UI
   // underline the bad span and read errorType/field without re-parsing.
   hql?: HqlError
@@ -31,11 +62,55 @@ export class ApiResponseError extends Error {
   // the row that already holds the name, so the picker can attach the existing
   // label in ONE round-trip instead of re-listing the whole workspace.
   existingId?: string
-  constructor(public status: number, public detail: string, hql?: HqlError, existingId?: string) {
+  // ── Conflict discriminators (HD-123 S6). See ConflictInfo for the read order.
+  retryAfter?: number
+  errorType?: string
+  projects?: ProjectRef[]
+  usage?: RoleUsage
+  constructor(
+    public status: number,
+    public detail: string,
+    hql?: HqlError,
+    existingId?: string,
+    conflict?: ConflictInfo,
+  ) {
     super(detail)
     this.hql = hql
     this.existingId = existingId
+    this.retryAfter = conflict?.retryAfter
+    this.errorType = conflict?.errorType
+    this.projects = conflict?.projects
+    this.usage = conflict?.usage
   }
+}
+
+/**
+ * `errorType` / `projects` / `usage` off a ProblemDetail body.
+ *
+ * Deliberately tolerant: an `errorType` this build has never heard of is carried
+ * through verbatim so the caller can fall back to rendering `detail`, and a
+ * malformed extension is dropped rather than thrown on — a refusal must never
+ * become a crash.
+ */
+function conflictOf(body: unknown, res: Response): ConflictInfo {
+  const info: ConflictInfo = {}
+  const header = res.headers.get('Retry-After')
+  if (header) {
+    const seconds = Number(header)
+    if (Number.isFinite(seconds) && seconds >= 0) info.retryAfter = seconds
+  }
+  if (body && typeof body === 'object') {
+    const b = body as Record<string, unknown>
+    // The HQL 422 uses the same extension name for its own vocabulary; hqlErrorOf
+    // claims those two values, so they never reach a conflict branch.
+    if (typeof b.errorType === 'string'
+        && b.errorType !== 'PARSE_ERROR' && b.errorType !== 'SEMANTIC_ERROR') {
+      info.errorType = b.errorType
+    }
+    if (Array.isArray(b.projects)) info.projects = b.projects as ProjectRef[]
+    if (b.usage && typeof b.usage === 'object') info.usage = b.usage as RoleUsage
+  }
+  return info
 }
 
 // A body carrying errorType is an HqlProblemDetail — pull the highlight fields.
@@ -101,19 +176,23 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let detail = res.statusText
     let hql: HqlError | undefined
     let existingId: string | undefined
+    let body: unknown = null
     try {
-      const body = await res.json()
-      detail = body.detail ?? body.message ?? body.title ?? detail
+      body = await res.json()
+      const b = body as Record<string, string | undefined>
+      detail = b.detail ?? b.message ?? b.title ?? detail
       // Carry through the HQL 422 highlight fields (position/length/token/field/
       // errorType) so the search UI can underline the offending span.
       hql = hqlErrorOf(body)
       // ProblemDetail extension on a duplicate-name 409 (labels, HD-30).
-      if (typeof body.existingId === 'string') existingId = body.existingId
+      if (typeof b.existingId === 'string') existingId = b.existingId
     } catch { /* ignore */ }
     // Never surface an empty message — statusText is blank over HTTP/2, which
     // would render as a silent, invisible error in the UI.
     if (!detail) detail = `Request failed (${res.status})`
-    throw new ApiResponseError(res.status, detail, hql, existingId)
+    // Conflict discriminators (HD-123 S6). Read off the HEADERS as well as the
+    // body, because the one retryable 409 is identified by `Retry-After` alone.
+    throw new ApiResponseError(res.status, detail, hql, existingId, conflictOf(body, res))
   }
 
   return res.status === 204 ? (undefined as T) : res.json()
@@ -811,17 +890,197 @@ export async function apiListWorkspaceMembers(wsId: string): Promise<WorkspaceMe
   return request(`/workspaces/${wsId}/members`)
 }
 
-// Invite by email. The invite is bound to the address; role is the WorkspaceRole.
-// Returns { message } on success (201). No endpoint exists yet to list pending
-// invites or to change/remove members — that's a backend-dependent follow-up.
+/**
+ * Invite by email; the invite is bound to the address. Returns `{ message }` (201).
+ *
+ * **Name the role with `roleId`.** The legacy `role` KEY still works but can only
+ * ever address a built-in, so it cannot express one of the workspace's own roles
+ * — and exactly one of the two must be present (neither and both are alike a
+ * 422). Refusals: 403 for the grant ceiling (the detail names the offending
+ * permission) and for OWNER, which is never invitable, not even by an owner.
+ */
 export async function apiInviteWorkspaceMember(
   wsId: string,
-  payload: { email: string; role: 'MEMBER' | 'ADMIN' }
+  payload: { email: string; roleId: string },
 ): Promise<{ message: string }> {
   return request(`/workspaces/${wsId}/invites`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+/**
+ * Change a member's workspace role. Re-sending the role they already hold is an
+ * accepted no-op, so a form may submit its current value.
+ *
+ * Refusals worth distinct copy: **403** for the grant ceiling (checked against
+ * the target's CURRENT role as well as the new one) and for the Owner guardrail;
+ * **409** for the last-Owner invariant; **422** for a role id that cannot be
+ * assigned here.
+ */
+export async function apiUpdateWorkspaceMemberRole(
+  wsId: string, userId: string, roleId: string,
+): Promise<WorkspaceMember> {
+  return request(`/workspaces/${wsId}/members/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ roleId }),
+  })
+}
+
+/**
+ * Remove a member from the **workspace** — not their account, and not their
+ * other workspaces.
+ *
+ * **Two success shapes, and the difference is the point.** 204 when the removal
+ * granted the caller nothing (every ordinary removal, and a flagged one that
+ * turned out to strand nothing) — resolves `null`. **200** when it granted the
+ * caller the built-in Team lead role in the projects it took over — resolves
+ * `{ adoptedProjects }`. That body exists so a durable grant is visible to the
+ * person who caused it; surface it rather than swallowing it.
+ *
+ * `adoptStrandedProjects` is **consent, not an instruction**: the server
+ * recomputes the set inside the transaction, so it is exactly what is about to be
+ * stranded *now*, never the array an earlier 409 returned. Show the user that
+ * list; do not assume it is what they will get.
+ *
+ * Conflicts are read via `ConflictInfo` — `Retry-After` first, then `errorType`.
+ */
+export async function apiRemoveWorkspaceMember(
+  wsId: string, userId: string, adoptStrandedProjects = false,
+): Promise<MemberRemovalResult | null> {
+  const qs = adoptStrandedProjects ? '?adoptStrandedProjects=true' : ''
+  const body = await request<MemberRemovalResult | undefined>(
+    `/workspaces/${wsId}/members/${userId}${qs}`, { method: 'DELETE' })
+  return body ?? null
+}
+
+// ── Roles & permissions — HD-123 ──────────────────────────────────────────────
+
+/**
+ * The permission catalog — **static product metadata**: no workspace context, no
+ * tenant data, the same body for every caller on a given version. Fetch it once
+ * and cache it for the session.
+ *
+ * Drive the role editor from THIS, never from a hard-coded list: the catalog
+ * grows between releases and the endpoint is always in sync with what the server
+ * enforces.
+ */
+export async function apiPermissionCatalog(): Promise<PermissionCatalogEntry[]> {
+  return request('/permissions')
+}
+
+/** Body of `PATCH …/roles/{id}` — every field optional, `permissions` a FULL replacement. */
+export interface UpdateRolePayload {
+  name?: string
+  description?: string
+  /**
+   * Replaces the whole set (an empty array is a real value — the built-in Viewer
+   * is exactly that). Never a delta.
+   */
+  permissions?: RolePermissionEntry[]
+  /**
+   * The optimistic-concurrency token from the role you loaded. **Send it.** A
+   * permission set is exactly the state where a silent lost update is
+   * unacceptable: two admins each unticking one box would otherwise restore each
+   * other's, and the loser's revocation would look like it had been applied.
+   */
+  version?: number
+}
+
+/**
+ * Workspace roles — built-in templates plus the workspace's own.
+ *
+ * **Creation is duplication.** There is no `POST /roles`, deliberately: the grant
+ * ceiling is a *subset* rule, so a role assembled from an empty checklist can
+ * assign nobody. Duplication always starts from a superset; "from scratch" is
+ * duplicating Viewer, which is then a named, deliberate act.
+ *
+ * Reading is open to any member (a People tab renders role names for everybody);
+ * everything else needs `workspace.role.manage`, and so does `includeUsage`.
+ */
+export const rolesApi = {
+  list: (wsId: string, opts?: { scope?: RoleScope; includeUsage?: boolean }) => {
+    const params = new URLSearchParams()
+    if (opts?.scope) params.set('scope', opts.scope)
+    // Only ever sent when the caller holds `workspace.role.manage` — it turns an
+    // otherwise-open endpoint into a 403 for everyone else.
+    if (opts?.includeUsage) params.set('includeUsage', 'true')
+    const qs = params.toString()
+    return request<Role[]>(`/workspaces/${wsId}/roles${qs ? `?${qs}` : ''}`)
+  },
+  get: (wsId: string, roleId: string) =>
+    request<Role>(`/workspaces/${wsId}/roles/${roleId}`),
+  /** The only way to create a role. `name` defaults to "<source> copy"; the key is server-generated. */
+  duplicate: (wsId: string, sourceRoleId: string, payload: { name?: string; description?: string } = {}) =>
+    request<Role>(`/workspaces/${wsId}/roles/${sourceRoleId}/duplicate`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  update: (wsId: string, roleId: string, payload: UpdateRolePayload) =>
+    request<Role>(`/workspaces/${wsId}/roles/${roleId}`, {
+      method: 'PATCH', body: JSON.stringify(payload),
+    }),
+  /**
+   * 409 `ROLE_IN_USE` (carrying the whole `usage` object, so the remap dialog
+   * renders straight off the refusal) when the role still has holders and no
+   * `reassignToRoleId`; 409 `SELF_HELD_ROLE` when the caller holds it; 409
+   * `LAST_PROJECT_ADMIN_BULK` when the move would demote every administrator of
+   * the listed projects at once.
+   */
+  remove: (wsId: string, roleId: string, reassignToRoleId?: string) => {
+    // Encoded, like every other query this client builds — the values are
+    // server-issued ids today, which is a fact about the caller and not a
+    // property of the function.
+    const qs = reassignToRoleId ? `?${new URLSearchParams({ reassignToRoleId })}` : ''
+    return request<void>(`/workspaces/${wsId}/roles/${roleId}${qs}`, { method: 'DELETE' })
+  },
+  usage: (wsId: string, roleId: string) =>
+    request<RoleUsage>(`/workspaces/${wsId}/roles/${roleId}/usage`),
+  /**
+   * Dry-run the assignment block for a set being composed — **persists nothing**,
+   * and runs the same validation a real write runs, so an unknown key, a
+   * wrong-scope permission or an illegal `ownOnly` surfaces as the identical 422
+   * while the checkboxes are being ticked rather than at Save.
+   */
+  preview: (wsId: string, payload: { scope: RoleScope; permissions: RolePermissionEntry[] }) =>
+    request<{ assignment: RoleAssignmentView }>(`/workspaces/${wsId}/roles/preview`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+}
+
+// ── Project members — HD-123 ──────────────────────────────────────────────────
+// The SPA had never called these before S6. Listing is open to any WORKSPACE
+// member (the assignee picker and mention autocomplete need it); every write
+// needs `project.member.manage` IN THIS PROJECT — a workspace Owner/Admin who is
+// not a member here does not hold it, which is why the workspace-level removal
+// has an adoption flow at all.
+
+export const projectMembersApi = {
+  list: (wsId: string, projectId: string) =>
+    request<ProjectMember[]>(`/workspaces/${wsId}/projects/${projectId}/members`),
+  /**
+   * Add a workspace member to the project. `roleId` names any assignable
+   * PROJECT-scoped role — including one of the workspace's own, and including the
+   * built-in Viewer, which the legacy `role` key could never store.
+   */
+  add: (wsId: string, projectId: string, payload: { userId: string; roleId: string }) =>
+    request<ProjectMember>(`/workspaces/${wsId}/projects/${projectId}/members`, {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+  /**
+   * Change a member's project role in one call. It exists because the alternative
+   * was remove-then-add: two checks, the member dropping onto the workspace
+   * default in between, and a window in which the project genuinely had no
+   * administrator. 409 when it would demote the last administrator (a demotion
+   * strands a project with no row removed at all); skipped for a promotion, which
+   * cannot strand anything.
+   */
+  updateRole: (wsId: string, projectId: string, userId: string, roleId: string) =>
+    request<ProjectMember>(`/workspaces/${wsId}/projects/${projectId}/members/${userId}`, {
+      method: 'PATCH', body: JSON.stringify({ roleId }),
+    }),
+  /** 409 when the target is the project's last administrator — add another one first. */
+  remove: (wsId: string, projectId: string, userId: string) =>
+    request<void>(`/workspaces/${wsId}/projects/${projectId}/members/${userId}`, { method: 'DELETE' }),
 }
 
 // ── Labels — HD-30 ────────────────────────────────────────────────────────────

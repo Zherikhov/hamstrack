@@ -25,7 +25,10 @@ import java.util.List;
  * <p><strong>No control characters in {@code name} or {@code description}</strong> — see
  * {@link DuplicateRoleRequest}, which states the reasoning once: no log-injection path
  * exists today, and a display string that will eventually reach an email or an export is
- * not where to find out that one appeared.
+ * not where to find out that one appeared. The two fields take different patterns for the
+ * reason spelled out there — {@code name} is a label ({@link DisplayText#SINGLE_LINE}),
+ * {@code description} is prose typed into a textarea ({@link DisplayText#MULTI_LINE}, which
+ * re-admits TAB/LF/CR and nothing else).
  *
  * @param permissions <strong>a full replacement</strong> when present, {@code null} to
  *                    leave the grants alone. It cannot be a delta: {@code RolePermission}
@@ -42,7 +45,7 @@ import java.util.List;
 public record UpdateRoleRequest(
         @Size(max = 80) @Pattern(regexp = DisplayText.SINGLE_LINE,
                 message = "Name must not contain control characters") String name,
-        @Size(max = 500) @Pattern(regexp = DisplayText.SINGLE_LINE,
+        @Size(max = 500) @Pattern(regexp = DisplayText.MULTI_LINE,
                 message = "Description must not contain control characters") String description,
         @Valid @Size(max = 64) List<RolePermissionEntry> permissions,
         Long version

@@ -183,6 +183,62 @@ class RoleApiTest extends SprintTestBase {
                 .andExpect(status().isCreated());
     }
 
+    /**
+     * <strong>A description is a paragraph, and the field it is typed into is a textarea.</strong>
+     *
+     * <p>S4 gave {@code description} the same {@link com.hamstrack.common.util.DisplayText#SINGLE_LINE}
+     * pattern as {@code name}, whose class starts at {@code \p{Cntrl}} — and {@code \n} is in
+     * {@code \p{Cntrl}}. The role editor renders the field as a {@code <Textarea rows={2}>}, so
+     * pressing Enter while explaining what a role is for produced
+     * {@code 400 "Description must not contain control characters"} on save. The rule that was
+     * wanted is "nothing invisible or reordering", not "nothing but one line".
+     *
+     * <p>So {@code MULTI_LINE} keeps the whole invisible/bidi class and re-admits exactly the
+     * three whitespace controls a person can type: {@code \n}, {@code \r}, {@code \t}. Note
+     * what stays out — NEL and LINE/PARAGRAPH SEPARATOR are line terminators <em>to some
+     * readers and not others</em>, which is the property that makes them useful for hiding a
+     * second line inside a CSV cell, and no keyboard produces them.
+     */
+    @Test
+    void aRoleDescriptionMayWrapAcrossLinesButNotCarryInvisibleControls() throws Exception {
+        var ctx = newProject();
+
+        // The Enter key on the create dialog…
+        var body = duplicate(ctx, ctx.token(), BuiltInRoles.PROJECT_MEMBER,
+                json.writeValueAsString(java.util.Map.of(
+                        "name", "Team lead (sprints)",
+                        "description", "Runs the sprint.\nCannot change the workflow.")))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        var role = UUID.fromString(json.readTree(body).get("id").asText());
+        assertThat(json.readTree(body).get("description").asText())
+                .as("the newline must survive the round trip, not be stripped")
+                .isEqualTo("Runs the sprint.\nCannot change the workflow.");
+
+        // …and on the editor, with the other two typeable whitespace controls alongside it.
+        patchRole(ctx, ctx.token(), role, json.writeValueAsString(java.util.Map.of(
+                        "description", "One\r\nTwo\tindented\n\nFour")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.description").value("One\r\nTwo\tindented\n\nFour"));
+
+        // Everything invisible or reordering is still refused — including the line
+        // terminators that only some readers honour, and the ASCII controls nobody types.
+        for (var sneaky : new int[]{0x85, 0x2028, 0x2029, 0x202E, 0x200F, 0xFEFF,
+                0x61C, 0x200B, 0x200C, 0x200D, 0x2060, 0x00, 0x07, 0x1B, 0x7F}) {
+            patchRole(ctx, ctx.token(), role, json.writeValueAsString(java.util.Map.of(
+                            "description", "Runs" + (char) sneaky + "the sprint")))
+                    .andExpect(status().isBadRequest());
+        }
+
+        // The name is not a paragraph and did not move: it stays single-line.
+        patchRole(ctx, ctx.token(), role, json.writeValueAsString(java.util.Map.of(
+                        "name", "Team\nlead")))
+                .andExpect(status().isBadRequest());
+        duplicate(ctx, ctx.token(), BuiltInRoles.PROJECT_MEMBER, json.writeValueAsString(java.util.Map.of(
+                        "name", "Team\tlead")))
+                .andExpect(status().isBadRequest());
+    }
+
     /** The cap counts custom roles across BOTH scopes; built-ins never count. */
     @Test
     void theCustomRoleCapSpansBothScopesAndIgnoresBuiltIns() throws Exception {

@@ -12,6 +12,7 @@ import AdminWorkflowsPage from '../admin/AdminWorkflowsPage'
 import ProjectBindingsPage from './ProjectBindingsPage'
 import ProjectDeliverySettingsPage from './ProjectDeliverySettingsPage'
 import ProjectComponentsPage from './ProjectComponentsPage'
+import ProjectPeoplePage from './ProjectPeoplePage'
 
 /**
  * Project settings area (/w/:wsId/p/:projectId/settings/**). Renders inside the
@@ -68,6 +69,14 @@ export default function ProjectSettingsArea() {
     { to: `${settingsBase}/delivery`, label: 'Delivery', end: false },
   ]
 
+  // Who works here, and under what role. Conditionally mounted on the permission
+  // the endpoints themselves check — `project.member.manage` is NOT part of the
+  // workspace-wide curator set, so a workspace admin who is not a member of this
+  // project genuinely does not have it and must not be shown the tab.
+  if (permissions.can('project.member.manage')) {
+    TABS.push({ to: `${settingsBase}/people`, label: 'People', end: false })
+  }
+
   // Never redirect on a not-yet-known answer: `isLoading` is the difference
   // between "you may not" and "we have not asked yet", and bouncing on the
   // latter would throw an entitled curator out of their own settings page.
@@ -110,6 +119,7 @@ export default function ProjectSettingsArea() {
             <Route path="priorities" element={<AdminPrioritiesPage />} />
             <Route path="fields" element={<AdminFieldsPage />} />
             <Route path="components" element={<ProjectComponentsPage />} />
+            <Route path="people" element={<ProjectPeoplePage />} />
             <Route path="delivery" element={<ProjectDeliverySettingsPage />} />
             {/* The tab was "Board" until HD-106 renamed it. Bookmarks, the link
                 the Scrum blurb has always carried and anything a user pasted into

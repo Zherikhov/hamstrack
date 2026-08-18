@@ -2,6 +2,7 @@ import { Navigate, NavLink, Route, Routes, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { apiGetWorkspace, makeAdminApi } from '../../api'
 import { canOpenWorkspaceSettings, usePermissions } from '../../hooks/usePermissions'
+import type { WorkspacePermission } from '../../hooks/usePermissions'
 import { AdminApiProvider } from '../admin/AdminApiContext'
 import type { AdminScopeValue } from '../admin/AdminApiContext'
 import AdminStatusesPage from '../admin/AdminStatusesPage'
@@ -11,9 +12,26 @@ import AdminFieldsPage from '../admin/AdminFieldsPage'
 import AdminWorkflowsPage from '../admin/AdminWorkflowsPage'
 import WorkspaceProjectsMatrix from './WorkspaceProjectsMatrix'
 import WorkspaceLabelsPage from './WorkspaceLabelsPage'
+import WorkspacePeoplePage from './WorkspacePeoplePage'
+import WorkspaceRolesPage from './WorkspaceRolesPage'
 
-const SECTIONS = [
+// The People/Roles pair is gated on the permissions the SERVER checks, not on a
+// role name: People renders for anyone who can act on a member, Roles only for a
+// holder of `workspace.role.manage` (the two are deliberately separate grants).
+// Both are conditionally mounted, so the loading rule is "not yet mounted" —
+// they can only pop in, never flash in and vanish under a pointer.
+interface SettingsSection {
+  path: string
+  label: string
+  end: boolean
+  /** Absent = open to anyone who can open workspace settings at all. */
+  permission?: WorkspacePermission
+}
+
+const SECTIONS: SettingsSection[] = [
   { path: '', label: 'Projects', end: true },
+  { path: 'people', label: 'People', end: false, permission: 'workspace.member.manage' as const },
+  { path: 'roles', label: 'Roles', end: false, permission: 'workspace.role.manage' as const },
   { path: 'statuses', label: 'Statuses', end: false },
   { path: 'workflows', label: 'Workflows', end: false },
   { path: 'issue-types', label: 'Issue types', end: false },
@@ -68,7 +86,7 @@ export default function WorkspaceSettingsArea() {
         <div className="text-sm font-semibold px-3 pb-2 truncate" title={workspace?.name}>
           {workspace?.name ?? '…'}
         </div>
-        {SECTIONS.map(s => (
+        {SECTIONS.filter(s => !s.permission || permissions.can(s.permission)).map(s => (
           // Absolute paths: inside a splat route relative links resolve after the splat
           <NavLink key={s.path} to={s.path ? `${base}/${s.path}` : base} end={s.end}
                    className="block px-3 py-1.5 rounded text-sm mb-0.5"
@@ -92,6 +110,8 @@ export default function WorkspaceSettingsArea() {
               <Route path="priorities" element={<AdminPrioritiesPage />} />
               <Route path="fields" element={<AdminFieldsPage />} />
               <Route path="labels" element={<WorkspaceLabelsPage />} />
+              <Route path="people" element={<WorkspacePeoplePage />} />
+              <Route path="roles" element={<WorkspaceRolesPage />} />
               <Route path="*" element={<Navigate to={base} replace />} />
             </Routes>
           </AdminApiProvider>

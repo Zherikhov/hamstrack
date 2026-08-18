@@ -289,9 +289,31 @@ Get the ids from [`GET /workspaces/{wsId}/roles`](#custom-roles), which is open 
 
 **Unusable ids answer the same `422` as unusable keys** — one indistinguishable answer for unknown, foreign and wrong-scope, so the endpoint cannot be used to probe what exists in a workspace you cannot see. The one place a role id answers `404` instead is when it is a **path** segment (`/roles/{roleId}`, and the duplicate source): that is an address, not a value, and it behaves like every other addressed resource.
 
+### Reading a role: `roleId` beside the key
+
+Every member listing carries **`roleId`** beside `role` — a UUID naming the exact role row in [`GET /workspaces/{wsId}/roles`](#custom-roles), and the only field you should match a member against that catalog with. It is purely additive: `role` stays, is **not** deprecated, and still carries the key.
+
+| Response | Where you see it |
+|---|---|
+| workspace member | `GET /workspaces/{wsId}/members`, `PATCH /workspaces/{wsId}/members/{userId}` |
+| project member | `GET`, `POST` and `PATCH` on `/workspaces/{wsId}/projects/{pId}/members` |
+
+```json
+{ "userId": "…", "email": "mia@example.com", "displayName": "Mia", "avatarUrl": null,
+  "roleId": "0198c4a1-…", "role": "ADMIN", "joinedAt": "…" }
+```
+
+**Why it exists: a key is not an identity.** A key is unique only within one *(workspace, scope)* pair, so one string can name two entirely different roles — `MEMBER` is the key of the built-in **workspace Member** *and* of the built-in **project Contributor**: two roles, two ids, two different permission sets. A client that resolves a member's role by key against a catalog covering both scopes can therefore name the wrong privilege **today**, with no custom role involved anywhere. Within a single *(workspace, scope)* a duplicate key — or a custom role colliding with a built-in one — cannot currently be created, because custom keys are [generated server-side and suffixed on collision](#creating-a-role-means-duplicating-one). So this is about identity being the wrong shape, not about a live collision.
+
+Display `role`, resolve `roleId`. Keys remain useful as labels, and as the legacy way to *send* a built-in role ([deprecated on the request side](#naming-a-role-roleid-and-the-deprecated-role-key)); they are not identifiers.
+
+`myRole` on a workspace or project response has no id counterpart in this release — it stays display-only, and the field to decide with is [`myPermissions`](#permissions).
+
 ### When a role reads `null`
 
 `role` on a member listing, and `myRole` on a workspace or project **list**, can be `null`. It means the server refused to describe that row's role — the stored role failed an internal scope/ownership check — and deliberately did not substitute anything in its place, because the refused role's name is precisely what must not be rendered.
+
+**`roleId` degrades with `role`, never past it.** On a member listing the two are `null` together and never separately: a row whose stored role was refused answers `role: null` **and** `roleId: null`. That is deliberate — emitting the id would hand the withheld name straight back, because the client would resolve it in the role catalog and print it. So read `roleId: null` as meaning exactly what `role: null` means: **this row's role is not nameable** — not "this member has no role".
 
 The entry is kept rather than dropped: one bad row must not `404` an entire People tab or workspace list. Where permissions are involved they degrade to the floor — a degraded workspace entry carries `myPermissions: []`, and a degraded project membership contributes nothing rather than falling back to a default that would *widen* the member. Render such an entry with no role rather than guessing one; nothing else about it changes.
 
@@ -600,6 +622,8 @@ Branch on the `builtIn` flag, never on the key: a workspace may legally own a cu
 
 Repeat with `?reassignToRoleId=…` and every holder is moved in the same transaction before the role is deleted. What gets moved depends on the scope: workspace memberships and pending invites for a `WORKSPACE` role; project memberships and the two default-project-role columns for a `PROJECT` one. The target must be assignable in this workspace **and of the same scope**; anything else — unknown, foreign, wrong scope, or the role being deleted — is one indistinguishable `422`.
 
+**A `PROJECT`-scope reassign moves more than the role's holders.** Alongside the project memberships it repoints every project — and the workspace itself — that named the deleted role as its [default project role](#the-default-project-role) onto the replacement. That is a change in what **non-members** get, which is broader than "its holders were moved" suggests: a project whose default was that role now hands the replacement to every workspace member who has no explicit row there. It is also why `defaultForProjects` and `defaultForWorkspace` count towards `inUse` — read them in the `409` to see how many defaults are about to move and show them beside the headcounts. And it is the **only** write path that changes a default project role in this release, since the project endpoints accept none.
+
 **The role being deleted is measured against your own permissions too** (`403`), and it is the first thing checked — before the self-held, in-use and stranding refusals. Deleting a role is the strongest possible edit of it, so an `ADMIN` may not delete a `WORKSPACE`-scoped role granting a permission they do not hold: otherwise `DELETE …?reassignToRoleId=…` would be the very demotion `PATCH …/members/{userId}` refuses, taken through a door that endpoint closes. An `OWNER` is exempt, the refusal names the offending permission, and at `PROJECT` scope this end is dropped exactly as it is on `PATCH` — the narrow-or-preserve rule below carries that scope instead.
 
 **You cannot delete a role you hold yourself** (`409` `errorType: "SELF_HELD_ROLE"`). Delete the custom "QA" role you hold in project P, reassigning to the built-in project `MANAGER`, and you would be that project's administrator — a widening no ceiling can see, because a ceiling is evaluated per assignment and this is one bulk update over every holder at once. The refusal is deliberately blunt, and its remedy is one call you can make yourself: move yourself to another role first, or ask another administrator to run the delete.
@@ -760,7 +784,8 @@ All three endpoints require [`workspace.member.manage`](#permissions) — held b
 `PATCH …/members/{userId}` takes `{"roleId": "…"}` — the id of any assignable role, which is the only way to name one of the workspace's [custom roles](#custom-roles) — or the deprecated `{"role": "OWNER" | "ADMIN" | "MEMBER"}`. [Exactly one of the two is required](#naming-a-role-roleid-and-the-deprecated-role-key): neither and both are alike a `422`, as is a role reference that cannot be assigned here. It returns the updated membership in the same shape `GET …/members` lists:
 
 ```json
-{ "userId": "…", "email": "mia@example.com", "displayName": "Mia", "avatarUrl": null, "role": "ADMIN", "joinedAt": "…" }
+{ "userId": "…", "email": "mia@example.com", "displayName": "Mia", "avatarUrl": null,
+  "roleId": "0198c4a1-…", "role": "ADMIN", "joinedAt": "…" }
 ```
 
 Setting the role a member already holds is an accepted no-op rather than an error, so re-sending the current value from a form is safe.
@@ -905,6 +930,10 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
     "estimation": false,
     "preset": "KANBAN"                         // DERIVED, read-only — never send it back
   },
+  "defaultRole": {                             // READ-ONLY — the default-role chain
+    "projectRoleId": null,                     // this project's own override
+    "workspaceRoleId": null                    // the workspace-wide default behind it
+  },
   "myRole": "MANAGER",                         // the caller's EXPLICIT project role KEY
   "myPermissions": ["issue.create", "issue.transition", "comment.edit:own", "…"],
   "createdAt": "…"
@@ -996,6 +1025,35 @@ The practical consequence: **you cannot blindly `PATCH` back the `delivery` obje
 This rejection is total too — the rest of the body is not applied. Create has no `boardMode` field at all, so the disagreement case is `PATCH`-only. When the mirror is eventually dropped, nothing about behavior changes: `delivery.board` already carries the identical value, so migrating off it is a rename. New clients should read and write `delivery` only.
 
 **Defaults, and why an old project looks different.** A project created without a `delivery` object gets the lean defaults — `board: KANBAN`, `releases: false`, `estimation: false`. Projects that existed **before** delivery capabilities shipped were migrated to keep everything they already had: `releases: true`, `estimation: true`, and `board: SCRUM` if the project already owned a sprint. So an older project will legitimately look more capable than a freshly created one; that is the migration rule ("an upgrade never takes away a capability a project already had"), not a bug.
+
+### The default project role
+
+Every project response carries a `defaultRole` object — **read-only on the project endpoints** — naming the role a workspace member holds in this project when they have **no explicit project membership row**, which is most members.
+
+```json
+"defaultRole": {
+  "projectRoleId": null,      // this project's own override
+  "workspaceRoleId": null     // the workspace-wide default behind it
+}
+```
+
+**Both links ship because a single value cannot say where it came from.** Default access resolves along a chain, first non-null winning:
+
+> this project's `projectRoleId` → the workspace's `workspaceRoleId` → the built-in **Contributor**
+
+| `projectRoleId` | `workspaceRoleId` | What a member with no row gets |
+|---|---|---|
+| set | anything | this project's own override |
+| `null` | set | the workspace-wide default |
+| `null` | `null` | the built-in **Contributor** |
+
+A client given only the effective value could not tell "this project overrides the workspace" from "this project inherits" — which is exactly the sentence a default-access card has to write — so both links are published and the caller renders the chain. Resolve either id through [`GET /workspaces/{wsId}/roles`](#custom-roles); only ids travel here, never a name and never a permission list, so an id you cannot find in that catalog should render as a placeholder rather than a guess. For the **caller's own** effective rights there is nothing to compute: [`myPermissions`](#permissions) on the same response already accounts for whatever the chain gave them.
+
+**No write path on the project endpoints — do not go looking for the `PATCH`.** `PATCH …/projects/{projectId}` carrying `defaultRole`, or a flattened `defaultProjectRoleId`, is **ignored**: neither is part of the update body, the call succeeds as though you had not sent them, and both stored values stay `null` (there is a test asserting exactly that). The reason is the [grant ceiling](#the-grant-ceiling): this role is handed to *every* workspace member without an explicit row, so a write unbounded by that ceiling would let a workspace administrator grant permissions they do not themselves hold — workspace-wide, in a single request. The picker ships together with the bound.
+
+**Read-only here is not the same as immutable.** One endpoint does move these values: [`DELETE …/roles/{roleId}?reassignToRoleId=…`](#deleting-a-role-and-reassigning-its-holders) repoints every project — and the workspace — that used the deleted `PROJECT`-scoped role as its default onto the replacement, in the same transaction that moves the role's holders. That is deliberate: it is how a role deletion avoids leaving a dangling default. So a project's default access can change with nothing having touched the project — re-read `defaultRole` after a role deletion rather than treating it as frozen.
+
+**One caveat, stated plainly.** A workspace's project-access mode is not exposed by the API yet, and in a future `STRICT` workspace there would be no inheritance at all — these ids would then describe a chain nobody walks. That mode does not exist in this release: every workspace inherits, so today the chain always applies.
 
 ## Project configuration
 

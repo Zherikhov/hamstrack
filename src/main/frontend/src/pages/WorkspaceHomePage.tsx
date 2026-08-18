@@ -216,7 +216,7 @@ export default function WorkspaceHomePage() {
       {showMembers && wsId && (
         <WorkspaceMembersModal
           wsId={wsId}
-          canInvite={canInvite}
+          canManage={canInvite}
           onClose={() => setShowMembers(false)}
         />
       )}

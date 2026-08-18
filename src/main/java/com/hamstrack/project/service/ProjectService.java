@@ -103,7 +103,7 @@ public class ProjectService {
         metrics.projectCreated();
 
         var managerRole = roleCatalog.builtIn(RoleScope.PROJECT, PROJECT_ADMIN_KEY);
-        return ProjectResponse.of(project, PROJECT_ADMIN_KEY,
+        return ProjectResponse.of(project, workspace, PROJECT_ADMIN_KEY,
                 workspaceAccess.effectiveProjectPermissions(ws.permissions(), managerRole));
     }
 
@@ -143,7 +143,7 @@ public class ProjectService {
                     } else if (!degraded) {
                         effectiveRole = roleCatalog.view(explicit.getRole().getId());
                     }
-                    return ProjectResponse.of(p, degraded ? null : legacyRole(explicit),
+                    return ProjectResponse.of(p, workspace, degraded ? null : legacyRole(explicit),
                             workspaceAccess.effectiveProjectPermissions(ws.permissions(), effectiveRole));
                 })
                 .toList();
@@ -154,7 +154,7 @@ public class ProjectService {
         var ws = workspaceAccess.requireMember(actor, workspaceId);
         var project = projectInWorkspace(ws.workspace(), projectId);
         var ctx = workspaceAccess.projectContext(actor, ws, project);
-        return ProjectResponse.of(project, legacyRole(ctx), ctx.permissions());
+        return ProjectResponse.of(project, ws.workspace(), legacyRole(ctx), ctx.permissions());
     }
 
     /**
@@ -210,7 +210,7 @@ public class ProjectService {
         // MANAGER back would make the SPA render project-manager-only actions for them.
         // Read off the context resolved above — the old second resolveProject call was a
         // whole extra round of queries for an answer we already held (§9.2: −1).
-        return ProjectResponse.of(project, legacyRole(ctx), ctx.permissions());
+        return ProjectResponse.of(project, ctx.workspace(), legacyRole(ctx), ctx.permissions());
     }
 
     @Transactional
@@ -267,7 +267,7 @@ public class ProjectService {
                         workspaceAccess.resolveRoleOrDegrade(m.getRole().getId(),
                                         RoleScope.PROJECT, ownerWorkspaceId,
                                         RoleScopeViolationSource.PROJECT_MEMBERS)
-                                .map(RoleView::key).orElse(null)))
+                                .orElse(null)))
                 .toList();
     }
 
@@ -316,7 +316,7 @@ public class ProjectService {
         member.setRole(roleCatalog.reference(granted.id()));
         projectMemberRepository.save(member);
         // Echo what was STORED, which on the roleId path is simply the role that was named.
-        return ProjectMemberResponse.of(member, granted.key());
+        return ProjectMemberResponse.of(member, granted);
     }
 
     /**
@@ -476,7 +476,7 @@ public class ProjectService {
             // SPA re-sends the current value on any partial edit, and the last-administrator
             // guard must not fire on a change that changes nothing. Step 7 is naturally
             // skipped because the grant is unchanged.
-            return ProjectMemberResponse.of(member, current.key());
+            return ProjectMemberResponse.of(member, current);
         }
         if (!requested.permissions().has(Permission.PROJECT_MEMBER_MANAGE)) {
             projectAdminGuard.requireNotLastAdmin(admins, userId);
@@ -488,7 +488,7 @@ public class ProjectService {
         log.info("project.member.role_changed workspace={} project={} actor={} target={} from={} to={}",
                 ctx.workspace().getId(), project.getId(), actor.getId(), userId,
                 current.id(), requested.id());
-        return ProjectMemberResponse.of(member, requested.key());
+        return ProjectMemberResponse.of(member, requested);
     }
 
     /**

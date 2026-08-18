@@ -107,7 +107,31 @@ export interface Project {
   // Optional on the wire only for pre-HD-102 responses / hand-built fixtures —
   // every consumer goes through `deliveryOf()` / `useProjectDelivery`.
   delivery?: ProjectDelivery;
+  /**
+   * Who gets what here **without** an explicit project membership — for most
+   * workspaces the primary grant mechanism, since almost nobody has a
+   * `project_members` row. Optional only for fixtures predating HD-129.
+   */
+  defaultRole?: ProjectDefaultRole;
   createdAt: string;
+}
+
+/**
+ * Both links of the default-access chain — project override → workspace default
+ * → the built-in Contributor — so a card can say not just *what* people get but
+ * *where that came from*. Read-only: the picker and the grant ceiling that has
+ * to bound it ship together in S7, and a control that always fails is worse than
+ * none.
+ *
+ * Each id is emitted verbatim from a plain FK column the database cannot
+ * constrain to "a PROJECT role of THIS workspace", so an id that is not in
+ * `GET …/roles` renders a placeholder rather than a guess.
+ */
+export interface ProjectDefaultRole {
+  /** This project's own override, or `null` when it inherits the workspace default. */
+  projectRoleId: string | null;
+  /** The workspace-level default, or `null` when the chain falls through to Contributor. */
+  workspaceRoleId: string | null;
 }
 
 export interface IssueType {
@@ -636,7 +660,171 @@ export interface WorkspaceMember {
   email: string;
   displayName: string;
   avatarUrl?: string;
-  role: string;
+  /**
+   * The id of the role this member holds — **the only safe way to identify it**,
+   * and what a role picker binds to.
+   *
+   * A key cannot do this job: `MEMBER` is a built-in key in *both* scopes
+   * (workspace Member and project Contributor are two different roles, with two
+   * different ids and two different permission sets), so resolving a member's
+   * role by key against a catalog spanning both scopes can name the wrong
+   * privilege — today, with no custom role involved at all.
+   *
+   * **Nullable, and it degrades WITH `role`, never past it.** A wrong-scope or
+   * foreign row yields `null` here *and* in `role`, deliberately: emitting the id
+   * alone would hand the withheld name straight back, since a client would look
+   * it up in the catalog and print it. So `roleId === null` means exactly what
+   * `role === null` means — this row's role is not nameable; render a
+   * placeholder, never a guess.
+   */
+  roleId: string | null;
+  /**
+   * The same role's KEY — **display only**. Kept beside `roleId` rather than
+   * replaced, so nothing that already renders it breaks; decide with the id.
+   */
+  role: string | null;
+  joinedAt?: string;
+}
+
+/** A project membership row (`GET …/projects/{p}/members`); both fields null together, as above. */
+export interface ProjectMember {
+  userId: string;
+  email: string;
+  displayName: string;
+  avatarUrl?: string;
+  roleId: string | null;
+  role: string | null;
+  joinedAt?: string;
+}
+
+// ── Roles & permissions — HD-123 ─────────────────────────────────────────────
+
+/** Which object a role — and every permission inside it — is granted on. */
+export type RoleScope = 'WORKSPACE' | 'PROJECT';
+
+/**
+ * The delivery capability a permission is *about* — a labelling hint the role
+ * editor groups and hides by, **never a check**. Enforcement never consults a
+ * capability: a project with `releases` off still accepts and returns version
+ * data, so the hiding must never reach a request body.
+ */
+export type CapabilityHint = 'BOARD' | 'RELEASES';
+
+/** One entry of `GET /api/permissions` — static product metadata, same for every caller. */
+export interface PermissionCatalogEntry {
+  key: string;
+  scope: RoleScope;
+  /** Whether this grant may be narrowed to objects the actor owns. */
+  supportsOwn: boolean;
+  /** Whether it may ONLY ever be granted own-only (`comment.edit` today). */
+  ownRequired: boolean;
+  capability: CapabilityHint | null;
+}
+
+/**
+ * A grant in the role editor's OBJECT form — deliberately not `myPermissions`'
+ * flat `"comment.edit:own"` wire form. The editor needs the toggle as a field;
+ * the suffix encoding exists for the flat client gate. Both are produced from
+ * the same server-side grants; do not converge them.
+ */
+export interface RolePermissionEntry {
+  key: string;
+  ownOnly: boolean;
+}
+
+export interface RoleRef {
+  roleId: string;
+  name: string;
+}
+
+/** A role this one cannot hand out, and the first permission that blocks it. */
+export interface RoleBlocker extends RoleRef {
+  /** A catalog KEY — the identical string the runtime 403 quotes. */
+  missing: string;
+}
+
+/**
+ * What a role could hand out — **server-derived**, carried by every role
+ * response and answered by `POST …/roles/preview` for a set being composed.
+ *
+ * Never re-derived in TypeScript: the ceiling is set containment with per-grant
+ * width (an unrestricted grant is not covered by an own-only one), and a second
+ * implementation of a server predicate in the SPA is the HD-98/HD-116 bug class
+ * by construction.
+ *
+ * **It is a lower bound**, computed from the role alone and ignoring what a real
+ * holder additionally gets from their workspace role — so the copy reads "on its
+ * own, this role can assign: …".
+ */
+export interface RoleAssignmentView {
+  managesMembers: boolean;
+  canAssign: RoleRef[];
+  cannotAssign: RoleBlocker[];
+  /** Codes, not copy; an unrecognised one is informational. */
+  warnings: string[];
+}
+
+/** Manages a roster and can hand out nothing that does anything. Warns, never blocks. */
+export const MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING = 'MANAGES_MEMBERS_BUT_ASSIGNS_NOTHING';
+
+/**
+ * Where a role is in play. Every count is filtered to the asking workspace —
+ * built-ins are shared rows, so an unscoped count would publish another tenant's
+ * headcount.
+ *
+ * `inUse` is the exact disjunction the delete guard applies (`members`,
+ * `invites`, `projectMembers`, `defaultForProjects`, `defaultForWorkspace` —
+ * **not** `projects`, which only counts how many distinct projects the project
+ * memberships spread across), published so a client cannot compute a different
+ * answer and then be surprised by a 409.
+ */
+export interface RoleUsage {
+  roleId: string;
+  members: number;
+  invites: number;
+  projectMembers: number;
+  projects: number;
+  defaultForProjects: number;
+  defaultForWorkspace: boolean;
+  inUse: boolean;
+}
+
+export interface Role {
+  id: string;
+  scope: RoleScope;
+  key: string;
+  name: string;
+  description?: string;
+  /** Product metadata shared by every workspace: neither editable nor deletable. */
+  builtIn: boolean;
+  position: number;
+  /** Optimistic-concurrency token — send it back on PATCH. */
+  version: number;
+  permissions: RolePermissionEntry[];
+  assignment: RoleAssignmentView;
+  /**
+   * `null` when it was not asked for (`includeUsage` absent or false) — which
+   * says NOTHING about whether the role is in use. When it *was* asked for every
+   * role carries a full object, including one in play nowhere (all zeroes,
+   * `inUse: false`). Never read `null` as "unused".
+   */
+  usage: RoleUsage | null;
+}
+
+/** `{id, key, name}` — the shape of both the 409 `projects` extension and `adoptedProjects`. */
+export interface ProjectRef {
+  id: string;
+  key: string;
+  name: string;
+}
+
+/**
+ * `DELETE …/workspaces/{ws}/members/{userId}` answered **200**: it granted the
+ * caller a role in the projects it took over. A removal that granted nothing
+ * answers 204 and this is absent — branch on the body, never assume 204.
+ */
+export interface MemberRemovalResult {
+  adoptedProjects: ProjectRef[];
 }
 
 export interface ApiError {

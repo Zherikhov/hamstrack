@@ -209,7 +209,7 @@ public class WorkspaceMemberService {
         // Ids only — no emails or display names, so the line is safe to ship to Loki.
         log.info("workspace.member.role_changed workspace={} actor={} target={} from={} to={}",
                 ctx.workspace().getId(), actor.getId(), userId, currentRole.key(), requested.key());
-        return WorkspaceMemberResponse.of(target, requested.key());
+        return WorkspaceMemberResponse.of(target, requested);
     }
 
     /**

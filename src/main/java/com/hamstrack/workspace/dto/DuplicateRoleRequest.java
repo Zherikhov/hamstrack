@@ -39,6 +39,13 @@ import jakarta.validation.constraints.Size;
  * SEPARATOR and the bidi overrides — precisely the characters the paragraph above is about —
  * went straight through it (round-3 review).
  *
+ * <p><strong>{@code description} takes {@link DisplayText#MULTI_LINE}, not the same pattern
+ * as {@code name}.</strong> It is prose, and the editor renders it as a textarea, so
+ * {@code \p{Cntrl}} (which contains {@code \n}) turned every Enter keypress into a 400 —
+ * the shipped bug this split fixes. The invisible and reordering characters are still
+ * refused there; only TAB/LF/CR are re-admitted. A role <em>name</em> is a label that lands
+ * in single-line contexts and stays {@code SINGLE_LINE}.
+ *
  * @param name defaults to {@code "<source name> copy"}. Must be unique within
  *             {@code (workspace, scope)} and must not equal a built-in's display name in
  *             that scope, case-insensitively → 409
@@ -46,6 +53,6 @@ import jakarta.validation.constraints.Size;
 public record DuplicateRoleRequest(
         @Size(max = 80) @Pattern(regexp = DisplayText.SINGLE_LINE,
                 message = "Name must not contain control characters") String name,
-        @Size(max = 500) @Pattern(regexp = DisplayText.SINGLE_LINE,
+        @Size(max = 500) @Pattern(regexp = DisplayText.MULTI_LINE,
                 message = "Description must not contain control characters") String description
 ) {}

@@ -143,7 +143,7 @@ public class WorkspaceService {
                         workspaceAccess.resolveRoleOrDegrade(m.getRole().getId(),
                                         RoleScope.WORKSPACE, workspace.getId(),
                                         RoleScopeViolationSource.WORKSPACE_MEMBERS)
-                                .map(RoleView::key).orElse(null)))
+                                .orElse(null)))
                 .toList();
     }
 

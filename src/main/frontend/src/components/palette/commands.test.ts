@@ -37,7 +37,10 @@ const FILTER: SavedFilter = {
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 }
 
-const MEMBER: WorkspaceMember = { userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee', role: 'MEMBER' }
+const MEMBER: WorkspaceMember = {
+  userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee',
+  roleId: 'r-ws-member', role: 'MEMBER',
+}
 
 function input(over: Partial<CommandInput> = {}): CommandInput {
   const base = {

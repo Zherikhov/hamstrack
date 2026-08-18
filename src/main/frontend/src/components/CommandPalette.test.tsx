@@ -42,7 +42,10 @@ const FILTER: SavedFilter = {
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 }
 
-const MEMBER: WorkspaceMember = { userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee', role: 'MEMBER' }
+const MEMBER: WorkspaceMember = {
+  userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee',
+  roleId: 'r-ws-member', role: 'MEMBER',
+}
 
 const ISSUE: Issue = {
   id: 'i1', number: 42, key: 'BOA-42', title: 'Hull leaks under load',
