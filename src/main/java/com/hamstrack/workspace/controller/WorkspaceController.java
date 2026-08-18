@@ -7,6 +7,7 @@ import com.hamstrack.workspace.service.WorkspaceService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -30,6 +31,35 @@ import java.util.UUID;
  * role that grants something they do not hold themselves, plus the built-in Owner
  * guardrail) and the <em>last-Owner</em> guard (409 — a workspace must never lose its last
  * owner, including when an owner acts on themselves).
+ *
+ * <p>{@code DELETE} carries one guard the {@code PATCH} cannot need: it deletes the
+ * member's {@code project_members} rows, so it is refused with a <strong>409 naming every
+ * affected project</strong> ({@code projects} extension, HD-136) when it would leave a
+ * project with no holder of {@code project.member.manage}. Checked after the last-Owner
+ * and self-removal guards, so at most one refusal is reported.
+ *
+ * <p>That 409 is <strong>satisfiable by the caller who received it</strong>, which is what
+ * {@code ?adoptStrandedProjects=true} is for: repeating the DELETE with it makes the
+ * <em>caller</em> an administrator of each named project inside the same transaction and
+ * then removes the member. It has to exist, because the refusal’s own remedy — give those
+ * projects another administrator — needs {@code project.member.manage} <em>in</em> them,
+ * which no workspace-scoped role grants; without it an insider could make themselves
+ * unremovable. The flag names no projects on purpose: the set adopted is the one the server
+ * recomputes under lock in that transaction, so a client cannot widen it, and the response is
+ * <strong>200 with the list of what it granted</strong> rather than a silent 204. What it
+ * grants is deliberately narrow — the built-in <em>Team lead</em> (Contributor plus
+ * {@code project.member.manage}), never Project admin: enough to appoint a real
+ * administrator and to keep working in the project, with no authority over its settings, its
+ * archive state, its taxonomy, or anything irreversible ({@code issue.delete}, unrestricted
+ * {@code attachment.delete}).
+ *
+ * <p>Two narrowings decide what "without an administrator" means here, and both can change
+ * the answer a caller sees: only <strong>ACTIVE</strong> accounts count (a deactivated sole
+ * administrator does not hold the project, so removing them is not refused — and a
+ * deactivated co-administrator does not save one), and <strong>archived</strong> projects
+ * are excluded entirely, since a frozen project must never block an offboarding. The
+ * project-scoped {@code DELETE /projects/{p}/members/{u}} deliberately does NOT share that
+ * archived exclusion — see {@code ProjectAdminGuard}.
  */
 @RestController
 @RequestMapping("/api/workspaces")
@@ -93,19 +123,37 @@ public class WorkspaceController {
      * button the moment the membership row is gone), and their open SSE streams are closed
      * once the transaction commits.
      *
-     * <p>204 · 403/404/409 exactly as {@code PATCH} above, plus <strong>422</strong> when the
-     * target is the caller: self-removal ("leave workspace") is a different feature with its
-     * own UX and is not built yet, so this endpoint refuses rather than quietly doing it. A
-     * sole owner deleting themselves gets the 409 instead — "promote another owner first" is
-     * the answer that will still be true once leaving exists. A second DELETE for an
-     * already-removed member is a clean 404, not a 500.
+     * <p><strong>{@code 204}</strong> for an ordinary removal; <strong>{@code 200}</strong>
+     * with {@code {"adoptedProjects":[…]}} when {@code adoptStrandedProjects=true} actually
+     * granted the caller a role somewhere. The asymmetry is deliberate: an adoption is the
+     * one thing this endpoint <em>grants</em>, and a 204 would leave the actor to discover
+     * it from a log line they cannot read (HD-136).
+     *
+     * <p>403/404 exactly as {@code PATCH} above. <strong>409</strong> covers four
+     * different states, and only two of them carry an {@code errorType}:
+     * {@code STRANDED_PROJECTS} — the removal would leave the listed projects with no
+     * administrator, so retry with {@code adoptStrandedProjects=true} to take them over —
+     * and {@code ADOPTION_BLOCKED}, where that retry has already been tried and cannot
+     * work. The other two carry no extension at all and are told apart by
+     * {@code Retry-After}: a lost row-lock race has it, and means retry the identical
+     * request; the workspace's last owner does not, and means change something first
+     * (promote another owner).
+     * <strong>422</strong> when the target is the caller: self-removal ("leave workspace")
+     * is a different feature with its own UX and is not built yet, so this endpoint refuses
+     * rather than quietly doing it. A sole owner deleting themselves gets the 409 instead —
+     * "promote another owner first" is the answer that will still be true once leaving
+     * exists. A second DELETE for an already-removed member is a clean 404, not a 500.
      */
     @DeleteMapping("/{id}/members/{userId}")
-    @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void removeMember(@AuthenticationPrincipal User user,
-                             @PathVariable UUID id,
-                             @PathVariable UUID userId) {
-        workspaceMemberService.remove(user, id, userId);
+    public ResponseEntity<MemberRemovalResponse> removeMember(
+            @AuthenticationPrincipal User user,
+            @PathVariable UUID id,
+            @PathVariable UUID userId,
+            @RequestParam(defaultValue = "false") boolean adoptStrandedProjects) {
+        var adopted = workspaceMemberService.remove(user, id, userId, adoptStrandedProjects);
+        return adopted.isEmpty()
+                ? ResponseEntity.noContent().build()
+                : ResponseEntity.ok(new MemberRemovalResponse(adopted));
     }
 
     @PostMapping("/{id}/invites")

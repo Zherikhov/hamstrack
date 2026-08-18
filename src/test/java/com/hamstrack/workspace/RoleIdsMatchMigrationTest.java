@@ -20,7 +20,8 @@ import java.util.UUID;
  * RoleIdsMatchMigrationTest} pins the two lists together so they cannot drift". It did not,
  * until now.
  *
- * <p>The seven built-in role ids are written out three times: in {@code V13__roles.sql},
+ * <p>The eight built-in role ids (seven from {@code V13__roles.sql}, one from
+ * {@code V16__team_lead_role.sql}) are written out three times: in the migrations,
  * in {@link BuiltInRoles}, and (deliberately, so a change has to be made twice) in
  * {@link com.hamstrack.migration.V15RoleBackfillMigrationTest}. Nothing in the database
  * ties the constant to the row: {@code roles.id} is seeded, not generated, and
@@ -95,6 +96,15 @@ class RoleIdsMatchMigrationTest {
                 "issue.assignable", "comment.create", "comment.edit:own", "comment.delete:own",
                 "attachment.create", "attachment.delete:own"));
         m.put(BuiltInRoles.PROJECT_VIEWER, List.of());
+        // V16 (HD-136) — Contributor, verbatim, PLUS project.member.manage. Both halves are
+        // load-bearing and the assertion is over the EXACT set for the usual reason: drop
+        // project.member.manage and the adoption path stops satisfying the invariant it
+        // exists for; drop a Contributor grant and adopting a project silently DEMOTES the
+        // adopter in it, on a row the grant ceiling will not then let them leave.
+        var teamLead = new java.util.ArrayList<String>();
+        teamLead.add("project.member.manage");
+        teamLead.addAll(CONTRIBUTOR);
+        m.put(BuiltInRoles.PROJECT_TEAM_LEAD, List.copyOf(teamLead));
         return Map.copyOf(m);
     }
 
@@ -127,13 +137,16 @@ class RoleIdsMatchMigrationTest {
 
     @Test
     @Transactional
-    void thereAreExactlySevenBuiltInRolesAndNothingElseIsGlobal() {
+    void thereAreExactlyEightBuiltInRolesAndNothingElseIsGlobal() {
         var builtIns = ((Number) em.createNativeQuery(
                 "SELECT count(*) FROM roles WHERE built_in").getSingleResult()).longValue();
-        assert builtIns == 7
-                : "the install holds " + builtIns + " built-in roles, not the 7 of §7. A built-in "
-                  + "is offered in every workspace of the instance and cannot be edited or deleted "
-                  + "through the S4 editor, so seeding an eighth is a product decision.";
+        assert builtIns == 8
+                : "the install holds " + builtIns + " built-in roles, not the 8 this build ships "
+                  + "(§7's seven, plus V16's Team lead). A built-in is offered in every workspace "
+                  + "of the instance and cannot be edited or deleted through the S4 editor, so "
+                  + "seeding a ninth is a product decision — as the eighth was (HD-136: the "
+                  + "adoption path has to have a role to grant, and granting Project admin for it "
+                  + "was an escalation).";
 
         var globalButCustom = ((Number) em.createNativeQuery(
                 "SELECT count(*) FROM roles WHERE workspace_id IS NULL AND NOT built_in")

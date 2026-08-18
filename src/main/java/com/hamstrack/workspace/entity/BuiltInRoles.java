@@ -7,8 +7,9 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * The fixed identities of the seven built-in role templates seeded by
- * {@code V13__roles.sql} (roles-permissions-proposal §7).
+ * The fixed identities of the built-in role templates — the seven seeded by
+ * {@code V13__roles.sql} (roles-permissions-proposal §7), plus
+ * {@link #PROJECT_TEAM_LEAD} from {@code V16} (HD-136).
  *
  * <p><strong>Why the ids are literals and not looked up.</strong> Built-in roles are
  * product constants, not data: the same seven rows exist in every install and every
@@ -57,6 +58,23 @@ public final class BuiltInRoles {
     public static final UUID PROJECT_COMMENTER = UUID.fromString("00000000-0000-7000-8000-000000000013");
     /** "Viewer" — grants nothing. Note this CHANGES MEANING versus the legacy enum (§7.2). */
     public static final UUID PROJECT_VIEWER    = UUID.fromString("00000000-0000-7000-8000-000000000014");
+    /**
+     * "Team lead" — <strong>Contributor plus {@code project.member.manage}</strong> (V16,
+     * HD-136). The eighth built-in, and the only one seeded after S1; §7.2 already described
+     * it as the role every workspace would build by hand once the S4 editor shipped.
+     *
+     * <p>It is what {@code ProjectAdminGuard.adoptAll} grants an admin who takes over a
+     * project that a member removal would otherwise leave with nobody able to manage its
+     * membership. It grants none of the authority that escalation argument was about —
+     * no {@code issue.delete}, no unrestricted {@code attachment.delete}, no
+     * {@code project.archive}/{@code edit}/{@code taxonomy.manage}, no sprint, version or
+     * component lifecycle. Measured against the §5.2 fallback that already applies in an
+     * OPEN workspace, the delta of an adoption is exactly {@code project.member.manage};
+     * V16 explains at length why a role narrower than that fallback is a one-way demotion
+     * rather than a smaller grant.
+     */
+    public static final UUID PROJECT_TEAM_LEAD =
+            UUID.fromString("00000000-0000-7000-8000-000000000015");
 
     private static final Map<String, UUID> WORKSPACE_BY_KEY = Map.of(
             "OWNER", WORKSPACE_OWNER,
@@ -67,7 +85,8 @@ public final class BuiltInRoles {
             "MANAGER", PROJECT_MANAGER,
             "MEMBER", PROJECT_MEMBER,
             "COMMENTER", PROJECT_COMMENTER,
-            "VIEWER", PROJECT_VIEWER);
+            "VIEWER", PROJECT_VIEWER,
+            "TEAM_LEAD", PROJECT_TEAM_LEAD);
 
     private BuiltInRoles() {
     }
@@ -100,7 +119,7 @@ public final class BuiltInRoles {
                 (scope == RoleScope.WORKSPACE ? WORKSPACE_BY_KEY : PROJECT_BY_KEY).get(key));
     }
 
-    /** All seven, for tests and for the seed-integrity assertions. */
+    /** All of them, for tests and for the seed-integrity assertions. */
     public static Map<RoleScope, Map<String, UUID>> all() {
         return Map.of(RoleScope.WORKSPACE, WORKSPACE_BY_KEY, RoleScope.PROJECT, PROJECT_BY_KEY);
     }

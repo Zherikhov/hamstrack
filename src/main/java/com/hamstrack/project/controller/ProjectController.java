@@ -29,6 +29,16 @@ import java.util.UUID;
  * so they stay MANAGER-only. Listing members is open to any workspace member
  * (§10.3.1): its old {@code requireRole(VIEWER)} gate passed for everybody.
  *
+ * <p>{@code DELETE /{projectId}/members/{userId}} additionally answers
+ * <strong>409</strong> when the target is the project's last administrator. Since HD-136
+ * that means the last member holding {@code project.member.manage} <em>whatever role
+ * carries it</em> — the guard asks the permission, not the built-in MANAGER role id, so a
+ * sole administrator on a custom role is protected too ({@code ProjectAdminGuard}). A lost
+ * row-lock race is <em>also</em> a 409 here — this is the third of the three transactions
+ * bounded by {@code LockTimeout} — and the two are told apart by {@code Retry-After}: the
+ * contention one carries it and means retry the identical request, the last-administrator
+ * one does not and means change something first (appoint another administrator).
+ *
  * <p>An <strong>archived</strong> project is frozen: {@code PATCH /{projectId}}
  * returns <strong>409 "Project is archived"</strong>, the same answer every issue
  * edit, sprint mutation and rank move already gives. That includes

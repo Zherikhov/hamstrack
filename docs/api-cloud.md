@@ -135,6 +135,10 @@ Rules worth coding against:
 
 Uploads have two size ceilings and the `413` wording tells them apart: the in-app per-file limit answers `"File exceeds the 20 MB limit"`, while the servlet multipart ceiling answers `"File is too large"`.
 
+**A lost row-lock race is a retryable `409`, not a `500`.** A few mutations take row locks so that an invariant holds under concurrency — membership changes are the main ones — and when two of them overlap the database resolves it by rolling one back (a deadlock or a lock timeout). Those transactions also **bound how long they will wait** for a lock (3 s by default), so a pile-up drains instead of hanging until a client gives up; exceeding the bound is this same `409`, never a `500`. Nothing is left half-applied, so the loser is told to try again rather than shown a fault: `409` with `detail: "Someone else is changing this right now — try again in a moment"` and a `Retry-After: 1` header, the same retry shape [rate limiting](#rate-limits) uses. This is app-wide, not a property of one endpoint, and it is the **only** `409` worth retrying automatically: an invariant conflict (a stale `version`, a name in use, the last owner) will answer identically until something changes. Retry the **identical** request after the header's seconds — change nothing about it.
+
+Tell this variant apart by the **`Retry-After` header**, never by the wording of `detail` — and note that it deliberately carries **no `errorType`**. It needs no discriminator: the header is the signal, and it is the one place where the "unknown or absent `errorType` means no retry" rule below would give exactly the wrong answer. Check the header first, then `errorType`.
+
 Some conflicts carry an **extra machine-readable member** so a client can recover in one round-trip. Creating a [label](#labels) whose name is taken — or renaming one into a taken name — returns `409` with the id of the label that already owns it:
 
 ```json
@@ -147,13 +151,59 @@ Some conflicts carry an **extra machine-readable member** so a client can recove
 }
 ```
 
+**`errorType` says which failure a body is**, wherever one status covers more than one. It is a plain string extension, stable and safe to branch on where the wording of `detail` is not: an [invalid HQL query](#search-hql) carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal refused over project administrators carries `STRANDED_PROJECTS` or `ADOPTION_BLOCKED`. Two rules for consuming it: treat a value you do **not** recognise as "no recovery I know about" rather than guessing at one, and do **not** read its *absence* as an unknown value — a response that needs no discriminator simply has none (the lock-contention `409` above is exactly that case, and is identified by `Retry-After` instead).
+
+[Removing a workspace member](#managing-members) that would leave projects without an administrator follows the same precedent, with an array instead of a single id — plus an `errorType` saying which of that endpoint's two stranded-project refusals it is:
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Removing this member would leave 4 projects without an administrator: Alpha (P17), Bravo (P42), Charlie (P8) and 1 more. Give each another administrator first, or repeat this request with adoptStrandedProjects=true to take them over yourself.",
+  "errorType": "STRANDED_PROJECTS",
+  "projects": [
+    { "id": "0198c4a1-…", "key": "P17", "name": "Alpha" },
+    { "id": "0198c4a2-…", "key": "P42", "name": "Bravo" },
+    { "id": "0198c4a3-…", "key": "P8",  "name": "Charlie" },
+    { "id": "0198c4a4-…", "key": "P90", "name": "Delta" }
+  ]
+}
+```
+
+**The three parts have three audiences.** `detail` is prose meant to be rendered verbatim, and it is **capped at three project names** followed by `and N more`. `projects` is **uncapped** — it lists every affected project, ordered by `key`, with the ids a client needs to render them as links. `errorType` is the discriminator your code branches on. Read `projects` and `errorType`; never parse `detail`, whose wording is not part of the contract. `detail` also names the retry that clears the refusal (`adoptStrandedProjects=true`), so the sentence stands on its own for a human who never sees the extensions — see [Managing members](#managing-members) for what that retry actually does. `errorType: "STRANDED_PROJECTS"` is the machine-readable statement that this retry is available.
+
+**The same body carries a second, different refusal.** When the caller *did* ask to take those projects over (`adoptStrandedProjects=true`) but at least one of them cannot be taken over — the caller's own role there already grants something the adoption role does not, so adopting would demote them — the answer is again `409` with the same `projects` array, this time listing only the projects that block it. What differs is `errorType`, which is `"ADOPTION_BLOCKED"` rather than `"STRANDED_PROJECTS"`, and `detail`, which names the obstacle instead of offering the retry — because retrying with the flag would fail in exactly the same way.
+
+```json
+{
+  "type": "about:blank",
+  "title": "Conflict",
+  "status": 409,
+  "detail": "Your own role in Alpha (P17) holds more than “Team lead” does, so taking it over would take that away from you and nobody could give it back. Ask the member you are removing to appoint another administrator there while they still can, or have someone who already administers that project remove them instead.",
+  "errorType": "ADOPTION_BLOCKED",
+  "projects": [
+    { "id": "0198c4a1-…", "key": "P17", "name": "Alpha" }
+  ]
+}
+```
+
+**`errorType` tells the two apart** — they share a status and a `projects` extension, and a client that only renders "these projects are in the way" stays correct without knowing which one it received, but one that offers a *retry* must know, because the two demand opposite behaviour:
+
+| `errorType` | What it means | What a client should offer |
+|---|---|---|
+| `STRANDED_PROJECTS` | The ordinary refusal | Repeating the request with `adoptStrandedProjects=true` **will** clear it — an adopt button is safe |
+| `ADOPTION_BLOCKED` | That retry has already been made and cannot work | **No retry.** Render `detail`; the way out is somebody else's action |
+
+Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no retry available**. It is the only safe default, because it is the one that cannot invent a button that `409`s again. Do not branch on the wording of `detail`, which is prose and may change. And do not confuse an unknown value with an *absent* one — a `409` from this endpoint with no `errorType` at all is a different failure entirely (the last-owner invariant, or [lock contention](#errors), which **is** retryable and says so with `Retry-After`). See [Managing members](#managing-members) for the way out of each.
+
 | Status | Meaning |
 |---|---|
 | `400` | Malformed request or failed validation |
 | `401` | Missing/expired/invalid access token |
 | `403` | Authenticated and a member, but missing a [permission](#permissions) — the failure names it in `detail` |
 | `404` | Not found — or not a member of the containing workspace |
-| `409` | Conflict: stale `version`, duplicate name/key, resource in use |
+| `409` | Conflict: stale `version`, duplicate name/key, resource in use, or a state invariant (the last owner, the last project administrator) — **plus** the one retryable case above, a lost row-lock race, which carries `Retry-After` |
 | `413` | Attachment exceeds the per-file size limit (default 20 MB) or the servlet upload ceiling (default 25 MB) |
 | `415` | Attachment file extension is not in the allow-list |
 | `422` | Semantically invalid reference (unknown status/type/assignee, a user who [may not be assigned](#assignability--a-422-not-a-403) in this project, workflow-forbidden transition, an [unusable `role` value](#unknown-role--a-422)) |
@@ -167,7 +217,7 @@ One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank
 
 ## Roles
 
-**System role** (`ADMIN` — instance-wide, maintains the global taxonomy via [`/admin/**`](#system-administration)), **workspace roles** (`OWNER`, `ADMIN`, `MEMBER`) and **project roles** (`MANAGER`, `MEMBER`, `COMMENTER`, `VIEWER`). `GET /auth/me` returns your `systemRole`.
+**System role** (`ADMIN` — instance-wide, maintains the global taxonomy via [`/admin/**`](#system-administration)), **workspace roles** (`OWNER`, `ADMIN`, `MEMBER`) and **project roles** (`MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER`, `VIEWER`). `GET /auth/me` returns your `systemRole`.
 
 These are the **built-in** roles, and what follows is what each one *grants* — not a rung it occupies. The server no longer compares roles anywhere: every gate is a [permission](#permissions) check, the role is just the bundle of permissions a member happens to hold.
 
@@ -180,14 +230,15 @@ These are the **built-in** roles, and what follows is what each one *grants* —
 | Manage **workspace-scoped** taxonomy and the bindings of projects in the workspace | `workspace.taxonomy.manage` — workspace `OWNER`/`ADMIN` ([delegated](#delegated-administration)) |
 | Manage **project-private** taxonomy and this project's bindings | `project.taxonomy.manage` — project `MANAGER` only ([delegated](#delegated-administration)) |
 | Edit a project | `project.edit` — project `MANAGER`, plus workspace `OWNER`/`ADMIN` across every project of their workspace |
-| Archive a project / manage its members | `project.archive` / `project.member.manage` — project `MANAGER` only |
-| Create / edit issues, move them on the board, rank the backlog | `issue.create`, `issue.edit`, `issue.transition`, `issue.assign`, `issue.rank` — project `MANAGER` and `MEMBER` |
+| Archive a project | `project.archive` — project `MANAGER` only |
+| Manage a project's members | `project.member.manage` — project `MANAGER` and `TEAM_LEAD` |
+| Create / edit issues, move them on the board, rank the backlog | `issue.create`, `issue.edit`, `issue.transition`, `issue.assign`, `issue.rank` — project `MANAGER`, `TEAM_LEAD` and `MEMBER` |
 | Delete an issue | `issue.delete` — project `MANAGER` |
-| Comment on an issue | `comment.create` — project `MANAGER`, `MEMBER`, `COMMENTER` |
+| Comment on an issue | `comment.create` — project `MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER` |
 | Edit a comment | `comment.edit`, **own-only at every role** — nobody may edit another person's words |
-| Delete a comment | `comment.delete` — your own for `MEMBER`/`COMMENTER`, **anyone's** for project `MANAGER` (moderation) |
-| Attach a file | `attachment.create` — project `MANAGER`, `MEMBER`, `COMMENTER` |
-| Delete an attachment | `attachment.delete` — your own uploads for `MEMBER`/`COMMENTER`, anyone's for project `MANAGER` |
+| Delete a comment | `comment.delete` — your own for `TEAM_LEAD`/`MEMBER`/`COMMENTER`, **anyone's** for project `MANAGER` (moderation) |
+| Attach a file | `attachment.create` — project `MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER` |
+| Delete an attachment | `attachment.delete` — your own uploads for `TEAM_LEAD`/`MEMBER`/`COMMENTER`, anyone's for project `MANAGER` |
 | Create a [label](#labels) (and attach labels to issues) | `label.create` — every workspace role (attaching is `issue.edit`) |
 | Rename / recolor / describe a label | `label.manage` — unrestricted for workspace `OWNER`/`ADMIN`, own-only (labels you created) for `MEMBER` |
 | Archive / unarchive / merge / delete a label | `label.manage` **unrestricted** — workspace `OWNER`/`ADMIN` |
@@ -196,9 +247,13 @@ The table is the human summary; the machine-readable form of the same idea is [p
 
 **A project administrator can now delete other people's comments.** Until this release nobody could — not a project `MANAGER`, not a workspace `OWNER` — because the only rule was authorship. The built-in project `MANAGER` holds `comment.delete` unrestricted, so moderation is finally possible. Note the deliberate asymmetry with `comment.edit`, which stays own-only *at every role and is not grantable any other way*: deleting someone's comment is moderation, editing it is impersonation. A workspace `OWNER`/`ADMIN` who holds no project membership row does **not** get this — `comment.delete` is not part of the workspace-wide curator set.
 
+**`TEAM_LEAD` ("Team lead") is a new built-in project role.** It grants everything the contributor role (`MEMBER`) grants — create, edit, transition, assign and rank issues, comment, attach files, put issues into a sprint — **plus `project.member.manage`**, and nothing else. It deliberately holds none of the authority that destroys or reconfigures a project: no `issue.delete`, no unrestricted `attachment.delete`, no `project.archive`, `project.edit` or `project.taxonomy.manage`, and none of `sprint.manage` / `version.manage` / `component.manage`. A team lead runs the roster, not the work.
+
+**Why contributor-plus-one, rather than `project.member.manage` on its own** — which looks like the tighter role and is not. An explicit project membership row *replaces* whatever a member would otherwise hold in that project, so a membership-only role would silently strip the issue and comment rights they already had, and the [grant ceiling](#projects) (which also bounds the role a removal leaves someone on) would then stop them undoing it. Measured against what an ordinary member can already do in a project, the delta of `TEAM_LEAD` is exactly `project.member.manage`. It is the role an [adoption](#managing-members) grants.
+
 ### Role values are keys, not an enum
 
-Every `role` field on the wire — the `role` you send to `POST …/invites`, `PATCH …/members/{userId}` and `POST …/projects/{pId}/members`, the `role` in a member response, and `myRole` on a workspace or project — is a **role key string**. The values above (`OWNER`, `ADMIN`, `MEMBER`; `MANAGER`, `MEMBER`, `COMMENTER`, `VIEWER`) are the keys of the built-in roles and are spelled exactly as they always were, so nothing that reads or sends them breaks. Two notes on the project side: `COMMENTER` is **newly assignable** through the API (it was rejected before), and `VIEWER` is accepted but [stored as `MEMBER`](#projects).
+Every `role` field on the wire — the `role` you send to `POST …/invites`, `PATCH …/members/{userId}` and `POST …/projects/{pId}/members`, the `role` in a member response, and `myRole` on a workspace or project — is a **role key string**. The values above (`OWNER`, `ADMIN`, `MEMBER`; `MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER`, `VIEWER`) are the keys of the built-in roles, and every key that existed before this release is spelled exactly as it always was, so nothing that reads or sends them breaks. Three notes on the project side: `TEAM_LEAD` is a **new value in both directions** — assignable through `POST …/projects/{pId}/members`, and returned in a member's `role` and in a project's `myRole`, so a client that enumerates project role values exhaustively will meet one it has never seen; `COMMENTER` is **newly assignable** through the API (it was rejected before); and `VIEWER` is accepted but [stored as `MEMBER`](#projects).
 
 **Do not switch exhaustively on a role value.** It is a string, not a closed set: the field is typed as an open string precisely because a workspace will be able to define roles of its own, and the key of such a role will travel in exactly these fields. A `switch` with no default, a TypeScript union that fails to parse an unrecognized value, or an enum deserializer that throws will break the day it meets one. Treat an unrecognized role as "a role I do not have a label for" — display it, do not decide with it. For decisions there is `myPermissions`, which is a flat list of keys and needs no such exhaustiveness.
 
@@ -403,7 +458,7 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 | `GET` | `/workspaces/{id}` | member | Get one |
 | `GET` | `/workspaces/{id}/members` | member | List members |
 | `PATCH` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Change a member's role (`{"role"}`, subject to the grant ceiling on both the old and the new role). Returns the member |
-| `DELETE` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Remove a member from the workspace — not their account. `204` |
+| `DELETE` | `/workspaces/{id}/members/{userId}?adoptStrandedProjects=` | `workspace.member.manage` | Remove a member from the workspace — not their account. `204`; `409` when it would leave a project without an administrator, cleared by repeating the call with `adoptStrandedProjects=true` |
 | `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "role"}`; subject to the grant ceiling, never `OWNER`). `201` |
 | `POST` | `/workspaces/accept-invite?token=…` | ✔ | Accept an invite; must be signed in with the invited email |
 
@@ -449,6 +504,44 @@ For the built-in roles all of this behaves exactly as the old "never above your 
 - deletes every **unaccepted invite** for their address in this workspace. Duplicate pending invites are normal (a re-send), and they stay hidden while the person is a member — so without this, removing them would make a leftover invite *reappear* on their "join a team" screen, and one click would put them straight back. Accepted invites are kept as the record of how they originally joined;
 - closes any **live event stream** (SSE) they hold on this workspace. Membership is only checked when a stream is opened, so an open one would otherwise keep delivering activity metadata until it timed out. Their browser reconnects, that reconnect re-checks membership, and it gets the `404`.
 
+**A removal that would leave a project without an administrator is refused (`409`).** Because the removal deletes that person's project memberships, offboarding the only member who can manage a project's membership would leave that project with nobody able to. So the endpoint refuses instead, and **nothing at all happens** — not the workspace membership, not the project rows, not an unassignment. "Administrator" here means *a member holding [`project.member.manage`](#permissions) in that project*: the built-in project `MANAGER` and `TEAM_LEAD` are its built-in holders, but the check is on the **permission**, so any role granting it counts and any role that does not, does not. A workspace `OWNER`/`ADMIN` holding no membership row in the project is **not** one of its administrators — that permission sits outside the workspace-wide curator set — and a project that already has no administrator is not affected either: what is refused is only the transition from one to none.
+
+The body names **every** affected project in the uncapped `projects` array (id, `key`, `name`, ordered by `key`) while `detail` is a sentence capped at three names — see [Errors](#errors) for the shape, and read `projects` rather than parsing `detail`.
+
+**Two kinds of project no longer count**, and both narrowings mean fewer removals are refused:
+
+- an **archived** project is frozen, so there is nothing left to administer in it and it never blocks an offboarding — including one a year later;
+- only **active accounts** count as administrators. A project whose sole administrator has been deactivated is treated as already having none, so disabling an account (the ordinary revocation step) never leaves a permanent `409` behind, and a disabled administrator never masks a project that is in truth unmanaged.
+
+**Resolving it: repeat the request with `?adoptStrandedProjects=true`.** That two-step flow is the intended path, not an escape hatch — the first call answers `409` listing the projects, a human reviews the list, and the second call carries the flag. In the same transaction as the removal, the **caller** is granted the built-in project role [`TEAM_LEAD`](#roles) ("Team lead" — a contributor's everyday rights plus `project.member.manage`) in each project that would otherwise be stranded, and the removal then proceeds. It is a **query parameter** (`DELETE` here takes no body), it defaults to `false`, and it is accepted on a *first* attempt as well — you never have to collect the `409` first.
+
+**An adoption changes the success status: `200` with a body, not `204`.** A removal that grants nothing answers `204 No Content` exactly as before — that covers every ordinary removal *and* a flagged one that turned out to strand nothing. Only a removal that actually granted the caller a role answers `200`, and the body names what was granted:
+
+```json
+{
+  "adoptedProjects": [
+    { "id": "0198c4a1-…", "key": "P17", "name": "Alpha" },
+    { "id": "0198c4a2-…", "key": "P42", "name": "Bravo" }
+  ]
+}
+```
+
+`adoptedProjects` is every project taken over, ordered by `key`, in the same `{id, key, name}` shape as the `409`'s `projects`. The status differs on purpose: because the flag is accepted without a prior `409`, a client that wires it on once — or a script that retries on any conflict — could otherwise accumulate project roles for its user with nothing on the wire ever saying so, the grant being visible only in a server log the actor cannot read. So **branch on the status** rather than assuming `204`, and show the user what they were given.
+
+**Be precise about the size of that grant.** It is *not* the project `MANAGER` role, which is what an earlier build handed out: an adopter gets no `issue.delete`, no unrestricted `attachment.delete`, and none of `project.archive`, `project.edit`, `project.taxonomy.manage`, `sprint.manage`, `version.manage` or `component.manage` — control of the roster, never of the work. It is also not `project.member.manage` alone, which would be *narrower* than what an ordinary member of that project already holds, and would therefore demote the adopter into a state they could not undo. But it is not literally "the right to appoint an administrator, and nothing else" either: measured against what an ordinary member can already do there the delta is exactly `project.member.manage`, while a caller who held a **narrower explicit role** in an adopted project (a `COMMENTER` row, say) has that row replaced and gains the contributor rights along with it. Either way it is a durable takeover of somebody else's project — resolve the `409` deliberately, not reflexively.
+
+That retry exists because the other remedy is not available to the person being refused: giving a listed project another administrator through `POST …/projects/{projectId}/members` needs `project.member.manage` **in that project**, which no workspace-scoped role grants — a workspace `OWNER` who is not a member there gets a `403`. Without the flag the only way out of the `409` would be a database edit. Note the deliberate consequence: the [grant ceiling](#managing-members) is **not** applied to the adoption. It could not be — in a project they never joined, a workspace `OWNER` holds only the four workspace-wide curator permissions, and `project.member.manage` is not among them, so a ceiling check would refuse every adoption and leave the refusal unsatisfiable again. What bounds the adoption instead is that it only ever reaches a project this very request is about to strand, that the caller has already passed the grant ceiling against the departing member's workspace role, and that it is explicit and server-logged per project.
+
+**The flag is consent, not an instruction, and a client never names a project.** The set adopted is recomputed on the server inside the transaction, so it is exactly what is about to be stranded *now* — never the array the earlier `409` returned. A project that gained another administrator between the two calls is silently dropped; a flagged removal that strands nothing grants nothing at all (setting the flag on every request does not accumulate project rights); and no project the client merely fancies can be added to the set. Show the user the `409`'s `projects`, but do not assume it is what you will get.
+
+Read `adoptedProjects` for what was actually taken over rather than re-deriving it (`myRole`/`myPermissions` on `GET …/projects` reflect it too, immediately). Where the caller already held a membership row in an adopted project that row is **promoted in place** — its role is replaced, not added alongside.
+
+**The adoption itself can be refused, with the same `409` — and this one deliberately offers no retry.** If the caller already holds a role in one of the stranded projects that grants something `TEAM_LEAD` does not, replacing that row would *demote* the very person doing the rescuing, and the [grant ceiling](#managing-members) would then refuse to give the missing rights back, since the departing member was the last holder of them. Skipping the project instead would strand it. So the whole removal is refused and nothing is written — not the adoption, not the unassignment, not the removal. The body is the familiar shape (`409`, a `projects` array), but it lists only the projects that block the adoption, and its `detail` names the obstacle instead of the retry, which would fail identically. This is unreachable with the built-in project roles — each is either covered by `TEAM_LEAD` or already holds `project.member.manage`, in which case the project was never stranded — so it takes a custom project role (a "QA lead" with `issue.delete` and no member management) to see it. **The remedy is somebody else's action, not yours:** ask the member you are removing — still active, still that project's administrator — to appoint a successor while they still can, or have a colleague who already administers the project run the removal instead. Appointing one yourself is not open to you here: `POST …/projects/{projectId}/members` needs `project.member.manage` **in that project**, and this branch is only reachable because you do not have it.
+
+Tell this one apart by `errorType: "ADOPTION_BLOCKED"` (the ordinary refusal is `"STRANDED_PROJECTS"`) and **do not render an adopt button for it** — the flag is already set, and setting it again produces this same `409`.
+
+Why the state is worth refusing a removal over in the first place: `project.member.manage` is **not** part of the workspace-wide curator set, so a workspace `OWNER`/`ADMIN` who holds no membership row in that project cannot add members back, archive it, or manage its project-private taxonomy — and no endpoint restores it, which is why the alternative (letting the removal proceed and silently orphaning those projects) was rejected. That is a property of the roles this release ships rather than a permanent one: the permission model does have workspace-wide and project-default routes that would grant `project.member.manage`, but neither is editable through the API yet. The guard behaves the same either way.
+
 The unassignment bumps each affected issue's `version`, so a client that loaded one of those issues **before** the removal and then saves an edit gets the usual `409` — asking it to refresh and retry — instead of silently writing the old assignee back. That holds whether the client sent `version` (rejected by the issue endpoint's own check) or omitted it and simply lost the race (rejected by the database's).
 
 The account itself is untouched, as is their membership of every other workspace — including issues assigned to them there.
@@ -465,11 +558,24 @@ The account itself is untouched, as is their membership of every other workspace
 
 | Status | When |
 |---|---|
+| `200` | `PATCH`: the updated membership. `DELETE`: the member was removed **and** at least one project was adopted — the body is `{"adoptedProjects": […]}` |
+| `204` | `DELETE` only — the member was removed and nothing was granted (every removal without the flag, and a flagged one that stranded nothing) |
 | `400` | `PATCH` only — `role` is missing, null or empty |
 | `403` | The caller lacks `workspace.member.manage`, the change breaks the grant ceiling, or it involves the `OWNER` role and the caller is not an owner |
 | `404` | Unknown workspace, caller not a member, **or** the target holds no membership in *this* workspace |
-| `409` | The change would leave the workspace without an `OWNER` |
+| `409` | The change would leave the workspace without an `OWNER` (no `errorType`); on `DELETE` only, would leave one or more projects without an administrator (`errorType: "STRANDED_PROJECTS"`), **or** the adoption those projects need would demote the caller (`errorType: "ADOPTION_BLOCKED"`) — both of those bodies also carry `projects`; or a lost row-lock race (no `errorType`, but a `Retry-After` header — just retry) |
 | `422` | `PATCH`: `role` is not an assignable workspace role key ([`"Unknown role"`](#unknown-role--a-422)). `DELETE`: the target is the caller (see below) |
+
+The two *invariant* `409`s cannot both be reported, and the last-owner one wins: a sole owner who is also the sole administrator of a project is told to promote another owner first, and sees the project list only once that is done. The self-removal `422` also precedes the project check. A further `409` — [lock contention](#errors) — is not an invariant at all and can arrive on any attempt.
+
+**Tell them apart by the response, never by the wording of `detail`, and in this order:**
+
+1. **`Retry-After` present** → lock contention. Retry the *identical* request unchanged after that many seconds. (No `errorType`, deliberately — this is why the header is checked first.)
+2. **`errorType: "STRANDED_PROJECTS"`** → the removal would strand the listed `projects`. Offer the `adoptStrandedProjects=true` retry.
+3. **`errorType: "ADOPTION_BLOCKED"`** → that retry was made and cannot work. Render `detail`; offer no retry. (Treat an unrecognised `errorType` as this case.)
+4. **Neither** → the last-owner invariant. Promote another owner first.
+
+Cases 2 and 3 are mutually exclusive — which one you get depends on the flag — and both carry `projects`, so a client that only lists the projects in the way can still treat them as one case; only a client that offers a retry has to distinguish them.
 
 That third `404` case is about the **membership**, never about the account: an unknown id, an id belonging to someone in another workspace, and a member who was removed a second ago are one indistinguishable answer, so the endpoint cannot be used to probe which accounts exist. It also makes a repeated `DELETE` a clean `404` instead of an error — safe to retry.
 
@@ -500,7 +606,7 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/unarchive` | `project.archive` | Restore. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{projectId}/members` | member | List project members — **any workspace member**, no permission required |
 | `POST` | `/workspaces/{wsId}/projects/{projectId}/members` | `project.member.manage` | Add a workspace member (`{"userId", "role"}`; `422` for an unusable role). `201` |
-| `DELETE` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `project.member.manage` | Remove a member. `204` |
+| `DELETE` | `/workspaces/{wsId}/projects/{projectId}/members/{userId}` | `project.member.manage` | Remove a member. `204`; `409` if they are the project's last administrator, or on lost lock contention (that one carries `Retry-After` — just retry) |
 
 ```json
 // project shape
@@ -522,15 +628,21 @@ Completing onboarding clears `needsOnboarding` (afterwards `/auth/me` reports `f
 
 Every project response — create, list, get and update — carries [`myPermissions`](#permissions): the caller's effective **project-scoped** permissions in that project, including any they hold through their workspace role rather than a project membership. It is always present, and it can be **wider than `myRole` suggests** — `myRole` reports only the caller's explicit project membership row, and reads `VIEWER` when they have none. Gate on `myPermissions`; display `myRole`.
 
-**Update permission.** `PATCH …/projects/{projectId}` needs [`project.edit`](#permissions) — held by a project `MANAGER` and, across every project of their workspace, by a workspace `OWNER`/`ADMIN` who need not be a project member; any other member gets a [`403` naming it](#what-a-403-says). That is the same permission every other project-content write asks for ([components](#components), [versions](#versions), [sprints](#sprints--backlog) have their own `*.manage` keys with the identical holders). Archiving (`project.archive`) and member management (`project.member.manage`) are **not** part of that set, so they remain the project `MANAGER`'s alone.
+**Update permission.** `PATCH …/projects/{projectId}` needs [`project.edit`](#permissions) — held by a project `MANAGER` and, across every project of their workspace, by a workspace `OWNER`/`ADMIN` who need not be a project member; any other member gets a [`403` naming it](#what-a-403-says). That is the same permission every other project-content write asks for ([components](#components), [versions](#versions), [sprints](#sprints--backlog) have their own `*.manage` keys with the identical holders). Archiving (`project.archive`) and member management (`project.member.manage`) are **not** part of that set: `project.archive` remains the project `MANAGER`'s alone, and `project.member.manage` is held by the built-in `MANAGER` and `TEAM_LEAD`.
 
 **Creating a project needs `project.create`.** Every built-in workspace role grants it, so every workspace member can still open a project exactly as before; it exists as its own key so that "only admins open new projects" becomes expressible. A caller without it gets a [`403` naming it](#what-a-403-says).
 
 **Listing members needs nothing but membership.** `GET …/projects/{projectId}/members` is open to **any workspace member**, project member or not — the assignee picker, mention autocomplete and a People view all need it, and the workspace member list is already open the same way. Its old gate admitted everyone, so no caller's result changed.
 
-**Adding a member.** `role` is a [project role key](#role-values-are-keys-not-an-enum): `MANAGER`, `MEMBER`, `COMMENTER` or `VIEWER`. Anything else is [`422 "Unknown role"`](#unknown-role--a-422) — including a *workspace* role key such as `ADMIN`, because scope is part of the question and `MEMBER` names a different role in each scope. A missing or empty `role` is a `400`. The grant ceiling applies here too: you cannot hand out a project role that grants a project permission you do not hold yourself, and it also bounds *removals* (the role a removed member falls back to must not exceed yours either).
+**Adding a member.** `role` is a [project role key](#role-values-are-keys-not-an-enum): `MANAGER`, `TEAM_LEAD`, `MEMBER`, `COMMENTER` or `VIEWER`. Anything else is [`422 "Unknown role"`](#unknown-role--a-422) — including a *workspace* role key such as `ADMIN`, because scope is part of the question and `MEMBER` names a different role in each scope. A missing or empty `role` is a `400`. The grant ceiling applies here too: you cannot hand out a project role that grants a project permission you do not hold yourself, and it also bounds *removals* (the role a removed member falls back to must not exceed yours either).
 
 > **`VIEWER` is accepted but stored as `MEMBER`.** The built-in project role keyed `VIEWER` now grants **nothing**, whereas it historically meant "no explicit row", which granted everything. Writing it literally would silently mint someone who is refused every write, so this endpoint maps it to the contributor role (`MEMBER`) — and the response echoes what was **stored**, not what you sent. Read the `role` you get back rather than assuming it round-trips. A genuinely read-only membership is not expressible through this endpoint yet.
+
+**Removing a member: the last administrator is protected.** `DELETE …/projects/{projectId}/members/{userId}` returns `409 "This is the project's last administrator — add another one first"` when the target is the only member of that project holding [`project.member.manage`](#permissions) — for the same reason the [workspace-level removal](#managing-members) refuses: nobody could manage the project's membership afterwards, and a workspace `OWNER`/`ADMIN` who is not a member of the project cannot step in, because that permission is not part of the workspace-wide curator set. Add another administrator first, then retry. The guard is about the **permission, not one particular role**: any role granting `project.member.manage` makes its holder an administrator here, and a role that does not grant it never does — so both built-in holders (`MANAGER` and `TEAM_LEAD`) are protected, and nothing else is. Unlike the workspace-level conflict this body carries no `projects` extension — the project is the one in the path. A project with no explicit administrator at all is a normal state and is left alone; only the step from one to none is refused.
+
+This removal takes row locks on the project's administrators and bounds how long it waits for one, so it has the same second, non-invariant `409` as the workspace-level removal: [lock contention](#errors), carrying `Retry-After` and worth retrying **unchanged**. The last-administrator invariant carries no such header, because retrying it unchanged cannot help; neither variant carries an `errorType`.
+
+Only **active** accounts count as an administrator here too, exactly as at the workspace level: a project whose sole administrator has been deactivated is treated as already having none, so this `409` never outlives the account it was about. What does **not** carry over is the archived-project exclusion. A workspace member removal skips archived projects so a frozen project can never block an offboarding; this endpoint keeps protecting them, because a project administrator holds `project.archive` and could otherwise archive their project and then remove themselves — leaving it frozen with nobody able to unarchive it, and no endpoint able to repair that. So on an archived project, `DELETE …/projects/{projectId}/members/{userId}` still refuses to take the last administrator while `DELETE …/workspaces/{workspaceId}/members/{userId}` ignores the project entirely.
 
 **Archived projects are frozen.** `PATCH …/projects/{projectId}` on an archived project returns `409 "Project is archived"` — the same answer every issue edit, sprint mutation and rank move already gives. That covers `delivery` too, which changes how the board, the backlog, the rail and the issue detail render. Unarchive it first (`POST …/unarchive`, `project.archive`); reads keep working throughout. A caller who lacks the permission **and** hits an archived project gets the `403`, not this `409` — [permission first, project state second](#what-a-403-says).
 
@@ -840,11 +952,11 @@ Assigning has a second half that is *not* about the caller: the target must hold
 
 `@DisplayName` mentions in a comment body notify the mentioned workspace members.
 
-**Commenting is a permission now.** It used to be ungated — any workspace member could comment on any issue in any project. It is `comment.create`, granted by the project `MANAGER`, `MEMBER` and `COMMENTER` roles, so everyone who could comment before still can; what changed is that a project can now have a role that reads but does not comment. Reading the list needs nothing beyond project access.
+**Commenting is a permission now.** It used to be ungated — any workspace member could comment on any issue in any project. It is `comment.create`, granted by the project `MANAGER`, `TEAM_LEAD`, `MEMBER` and `COMMENTER` roles, so everyone who could comment before still can; what changed is that a project can now have a role that reads but does not comment. Reading the list needs nothing beyond project access.
 
 **Editing is own-only, at every role.** `comment.edit` is the one permission in the catalog that can *only* be granted own-only — putting words in someone else's mouth is not a capability this product ships, so `comment.edit:own` is what even a project administrator holds. Editing another person's comment is a `403` for everybody, exactly as before; the difference is that the refusal now [names the permission](#what-a-403-says) instead of being an empty `403` with no body at all.
 
-**Deleting is own — or, for a project administrator, anyone's.** `comment.delete` is granted own-only to `MEMBER` and `COMMENTER` (your own comments, as before) and **unrestricted** to the project `MANAGER`. That is a new user-visible capability: until this release nobody could delete another person's comment. A workspace `OWNER`/`ADMIN` who is not a member of the project does **not** get it. Deleting is soft — the comment disappears from the list rather than being erased.
+**Deleting is own — or, for a project administrator, anyone's.** `comment.delete` is granted own-only to `TEAM_LEAD`, `MEMBER` and `COMMENTER` (your own comments, as before) and **unrestricted** to the project `MANAGER`. That is a new user-visible capability: until this release nobody could delete another person's comment. A workspace `OWNER`/`ADMIN` who is not a member of the project does **not** get it. Deleting is soft — the comment disappears from the list rather than being erased.
 
 Both refusals precede the archived-project check, so on an archived project a caller who lacks the permission gets the `403` rather than `409 "Project is archived"` — [permission first, project state second](#what-a-403-says). An author acting on their own comment in an archived project still gets the `409`.
 

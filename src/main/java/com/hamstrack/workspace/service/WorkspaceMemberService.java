@@ -2,13 +2,16 @@ package com.hamstrack.workspace.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.event.WorkspaceMemberRemoved;
+import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.PermissionSet;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.issue.entity.IssueHistory;
 import com.hamstrack.issue.repository.IssueHistoryRepository;
 import com.hamstrack.issue.repository.IssueRepository;
+import com.hamstrack.project.dto.ProjectRef;
 import com.hamstrack.project.repository.ProjectMemberRepository;
+import com.hamstrack.project.service.ProjectAdminGuard;
 import com.hamstrack.workspace.dto.UpdateWorkspaceMemberRequest;
 import com.hamstrack.workspace.dto.WorkspaceMemberResponse;
 import com.hamstrack.workspace.entity.BuiltInRoles;
@@ -25,7 +28,10 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -50,7 +56,14 @@ import java.util.UUID;
  * <ol>
  *   <li>unassign their issues (with an {@code assignee} history row each, so it is
  *       auditable);</li>
- *   <li>delete their {@code project_members} rows;</li>
+ *   <li>delete their {@code project_members} rows — <strong>unless that would leave a
+ *       project without an administrator</strong>, in which case the whole removal is
+ *       refused with a 409 naming every such project (HD-136). Dropping those rows was
+ *       breaking, wholesale and silently, the invariant {@code ProjectService.removeMember}
+ *       refuses to break one project at a time; and a project with no holder of
+ *       {@code project.member.manage} cannot be repaired through the API by anybody,
+ *       workspace Owner included, because that permission is not part of the curator
+ *       bypass;</li>
  *   <li>delete every unaccepted invite for their address — otherwise removing them makes a
  *       leftover invite <em>re</em>appear as a live join button and they walk straight back
  *       in;</li>
@@ -99,6 +112,14 @@ import java.util.UUID;
  * {@link #requireNotLastOwner} — which does not care who the actor is — already refuses the
  * case that would orphan the workspace.
  *
+ * <p><strong>Both mutations bound their lock waits.</strong> Each takes {@code FOR UPDATE}
+ * on the owner set — and a removal additionally on every project-administrator row in the
+ * workspace, held across the unbounded {@link #writeUnassignHistory} write — so the first
+ * statement of each is {@link LockTimeout#applyToCurrentTransaction()}. The locking reads
+ * are ordered so overlapping transactions queue rather than deadlock, which is exactly why
+ * a bound is needed: the common outcome is a wait, and PostgreSQL's default wait is
+ * infinite. Exceeding it is a 409 + {@code Retry-After}, not a 500.
+ *
  * <p><strong>Neither mutation is recorded in a table.</strong> There is no audit log yet (a
  * follow-up ticket), so both methods emit a structured INFO line with actor/target/workspace
  * ids and the roles involved. Ids only, never emails or names — the lines ship to Loki.
@@ -112,9 +133,22 @@ public class WorkspaceMemberService {
     private final WorkspaceMemberRepository memberRepository;
     private final WorkspaceInviteRepository inviteRepository;
     private final ProjectMemberRepository projectMemberRepository;
+    /**
+     * HD-136: the last-administrator invariant, shared with {@code ProjectService} rather
+     * than reimplemented — the whole bug was that only one of the two endpoints that can
+     * break it enforced it.
+     */
+    private final ProjectAdminGuard projectAdminGuard;
     private final IssueRepository issueRepository;
     private final IssueHistoryRepository historyRepository;
     private final RoleCatalog roleCatalog;
+    /**
+     * HD-136 review round 4: both mutations below take {@code FOR UPDATE} row locks, and
+     * PostgreSQL waits for one for ever by default. See {@link LockTimeout} — and note that
+     * the ordered reads make a plain unbounded WAIT the common outcome, not the deadlock
+     * the original safety argument was written about.
+     */
+    private final LockTimeout lockTimeout;
     /** HD-80: SSE side effects run AFTER COMMIT, via {@code SseEventListener}. */
     private final ApplicationEventPublisher events;
 
@@ -130,6 +164,9 @@ public class WorkspaceMemberService {
     @Transactional
     public WorkspaceMemberResponse updateRole(User actor, UUID workspaceId, UUID userId,
                                               UpdateWorkspaceMemberRequest req) {
+        // Bound every lock wait in this transaction BEFORE anything can queue on one —
+        // this method takes the owner-set lock, and a lock wait has no bound of its own.
+        lockTimeout.applyToCurrentTransaction();
         // ---- reads first (the @Version rule): resolve, then judge, then mutate ----
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
         // Before the lock, so an unauthorized caller never takes one.
@@ -176,9 +213,22 @@ public class WorkspaceMemberService {
     /**
      * Remove a member from the workspace and clean up everything that must not outlive their
      * access. See the class javadoc for what is deliberately left alone.
+     *
+     * @param adoptStrandedProjects the caller's explicit answer to a previous 409: make
+     *        <em>me</em> the administrator of every project this removal would otherwise
+     *        strand, and then remove them. False on a first attempt; see the
+     *        {@code project.adopted} branch below and {@code ProjectAdminGuard.adoptAll}
+     *        for why the flag carries no project list.
      */
     @Transactional
-    public void remove(User actor, UUID workspaceId, UUID userId) {
+    public List<ProjectRef> remove(User actor, UUID workspaceId, UUID userId,
+                                   boolean adoptStrandedProjects) {
+        // FIRST statement, before any read and long before either lock: this transaction
+        // takes two lock sets and then holds both across writeUnassignHistory, whose size
+        // is the departing member's assigned work. Two overlapping removals therefore queue
+        // (the reads are ordered so they do not cycle) — and an unbounded queue on a pooled
+        // connection is how one tenant's offboarding takes the instance down for everyone.
+        lockTimeout.applyToCurrentTransaction();
         // ---- reads first ----
         var ctx = workspaceAccess.requireMember(actor, workspaceId);
         var workspace = ctx.workspace();
@@ -202,6 +252,30 @@ public class WorkspaceMemberService {
             throw new CannotRemoveSelfException();
         }
 
+        // ---- the project-administrator lock, as late as the rule allows (HD-136) ----
+        // Deliberately here and not beside lockOwners: this read locks every project-admin
+        // row in the WORKSPACE, so taking it earlier would let any member-manager freeze
+        // them all on a request that ends in 404 (an unknown target) or 403, and would
+        // serialise two removals of two unrelated people workspace-wide. It still precedes
+        // the only read it protects, because that read IS this statement.
+        var stranded = projectAdminGuard.lockStrandedProjects(workspace, userId);
+        // Last of the guards, because it is the only one the ACTOR cannot fix by choosing a
+        // different target: a permission or ceiling failure is about who is asking, and this
+        // is about what the workspace would be left with.
+        //
+        // Two answers, and the caller picks which one they asked for. Without the flag it is
+        // a 409 naming every affected project, so the fix is a list to work through rather
+        // than a hunt. With it, the actor adopts those projects here and now — because the
+        // 409's own remedy ("give each another administrator") needs a permission the
+        // workspace Owner reading it does not have, and a refusal only its own target can
+        // satisfy is a lock-out, not a guard (security review H1).
+        List<ProjectRef> adopted = List.of();
+        if (adoptStrandedProjects) {
+            adopted = projectAdminGuard.adoptAll(actor, workspace, stranded);
+        } else {
+            projectAdminGuard.requireNothingStranded(stranded);
+        }
+
         // The issues to unassign are read as scalar (id, number) refs BEFORE the bulk
         // update — materializing them would leave stale managed copies that write the
         // departed assignee back on the next flush (the documented bulk-UPDATE desync).
@@ -220,11 +294,25 @@ public class WorkspaceMemberService {
         // committed, hence a domain event rather than a direct registry call (§HD-80).
         events.publishEvent(new WorkspaceMemberRemoved(workspace.getId(), targetUser.getId()));
 
+        // An adoption is a privilege change, and the one part of this transaction that is
+        // NOT a revocation — so it gets its own line rather than a field on the removal's,
+        // one per project, ids only. Without it "how did the workspace admin become
+        // administrator of that project?" has no answer anywhere (HD-136 / H1).
+        for (var project : adopted) {
+            log.info("project.admin_adopted workspace={} project={} actor={} reason=member_removal target={}",
+                    workspace.getId(), project.id(), actor.getId(), userId);
+        }
+
         // Removals leave only an indirect trace today (unassign history rows), and none at
         // all when the member held no assigned work — so this is the only place that can
         // answer "who removed this person, and when". Ids only, safe for Loki.
-        log.info("workspace.member.removed workspace={} actor={} target={} role={} unassignedIssues={}",
-                workspace.getId(), actor.getId(), userId, targetRole.key(), assignedRefs.size());
+        log.info("workspace.member.removed workspace={} actor={} target={} role={} unassignedIssues={} "
+                 + "adoptedProjects={}",
+                workspace.getId(), actor.getId(), userId, targetRole.key(), assignedRefs.size(),
+                adopted.size());
+        // Returned, not just logged: a grant the actor cannot see is a side effect, not
+        // consent — the controller answers 200 with this list when it is non-empty.
+        return adopted;
     }
 
     // ============================================================ guards
@@ -317,7 +405,25 @@ public class WorkspaceMemberService {
      * from pre-existing bad data) locks nothing and serialises nothing — it is already in the
      * state this guard exists to prevent, and cannot be pushed further into it.
      */
+    @Transactional(propagation = Propagation.MANDATORY)
     public LockedOwners lockOwners(Workspace workspace) {
+        // INVARIANT, convention-only (HD-136 review round 6): every transaction that calls
+        // this must ALREADY have called LockTimeout.applyToCurrentTransaction(). Nothing
+        // here enforces it — this method is public and MANDATORY, so a future caller can
+        // take the lock with no bound on the wait, and PostgreSQL then waits for ever. The
+        // omission compiles, passes review and stays invisible until a production pile-up
+        // exhausts the pool. Keep the two paired: bound first, then lock.
+        //
+        // The annotation above cannot fire for the two calls in THIS class — they are
+        // self-invocations and do not pass through the proxy — so the invariant is also
+        // asserted directly. Both matter: the annotation refuses an external caller who has
+        // no transaction, this refuses a future method here that forgets @Transactional.
+        // Without either, such a caller gets a transaction that commits on return and
+        // releases every FOR UPDATE before requireNotLastOwner reads the result, which is
+        // the unlocked read this whole shape exists to delete (HD-132, third time).
+        Assert.state(TransactionSynchronizationManager.isActualTransactionActive(),
+                "lockOwners must run inside the caller's transaction — a lock released "
+                + "before the guard that reads it is not a lock");
         var rows = memberRepository.lockAllByWorkspaceAndRoleId(workspace, BuiltInRoles.WORKSPACE_OWNER);
         var userIds = new HashSet<UUID>(rows.size());
         // getUser() is an uninitialised proxy and reading its id does not load the row —

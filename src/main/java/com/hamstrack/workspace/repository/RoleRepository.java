@@ -1,5 +1,6 @@
 package com.hamstrack.workspace.repository;
 
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.workspace.entity.Role;
 import org.springframework.data.jpa.repository.Query;
@@ -77,6 +78,42 @@ public interface RoleRepository extends Repository<Role, UUID> {
     Optional<Role> findAssignable(@Param("id") UUID id,
                                   @Param("workspaceId") UUID workspaceId,
                                   @Param("scope") RoleScope scope);
+
+    /**
+     * <strong>Which roles actually carry one permission</strong> — built-ins plus this
+     * workspace's own, at one scope. The lookup behind {@code ProjectAdminGuard}: the
+     * last-administrator invariant is "at least one member who can manage members", and
+     * the only honest way to ask that is to name the role ids that grant
+     * {@code project.member.manage} rather than one hardcoded built-in id (HD-136).
+     *
+     * <p>Scoped, per §12, and for the same reason {@link #findAssignable} is: a WORKSPACE
+     * role granting {@code project.member.manage} cannot exist (the catalog fixes each
+     * permission's scope), but a role of <em>another</em> workspace could, and a guard
+     * that counted holders of a foreign role would be reading another tenant's data to
+     * decide this one's invariant.
+     *
+     * <p><strong>{@code own_only} grants do not count.</strong> A permission narrowed to
+     * objects the actor owns is not the permission: {@code PermissionSet.has(p)} answers
+     * false for an own-only holder, so counting one here would make the guard protect
+     * somebody the rest of the codebase agrees cannot administer anything — and, since
+     * HD-136’s adoption path, would let a project be judged stranded (or not) on a grant
+     * that grants nothing. Unreachable today ({@code project.member.manage} is
+     * {@code Own.NONE} and no write path can set the flag), which is exactly when a
+     * predicate like this is cheap to add.
+     *
+     * <p>Ids, not entities: the caller only ever feeds them to an {@code IN} predicate, and
+     * a projection cannot accidentally be mutated or lazily navigated.
+     */
+    @Query("""
+            SELECT r.id FROM Role r JOIN r.permissions p
+             WHERE r.scope = :scope
+               AND p.permission = :permission
+               AND p.ownOnly = false
+               AND (r.workspaceId IS NULL OR r.workspaceId = :workspaceId)
+            """)
+    List<UUID> findIdsGranting(@Param("workspaceId") UUID workspaceId,
+                               @Param("scope") RoleScope scope,
+                               @Param("permission") Permission permission);
 
     /** Built-ins plus this workspace's custom roles, for the Roles screen (S4). */
     @Query("""

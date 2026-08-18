@@ -4,13 +4,13 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.exception.UserNotFoundException;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.project.dto.*;
 import com.hamstrack.project.entity.*;
 import com.hamstrack.project.exception.*;
 import com.hamstrack.project.repository.*;
-import com.hamstrack.workspace.entity.BuiltInRoles;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.service.ProjectContext;
@@ -25,7 +25,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -51,6 +50,13 @@ public class ProjectService {
     private final ProductMetrics metrics;
     /** HD-123: project memberships carry a {@code roles} row; views come from the cache. */
     private final RoleCatalog roleCatalog;
+    /**
+     * HD-136: the last-administrator invariant, shared verbatim with the workspace-side
+     * removal that can break it for many projects at once.
+     */
+    private final ProjectAdminGuard projectAdminGuard;
+    /** HD-136 review round 4: {@code removeMember} takes a row lock, so it bounds the wait. */
+    private final LockTimeout lockTimeout;
 
     /**
      * <strong>Permission: {@code project.create}</strong> (HD-126 S3, §10.1) — a
@@ -299,10 +305,20 @@ public class ProjectService {
      * {@code OPEN} workspace, deleting a {@code project_members} row does not remove anyone
      * from the project — it drops them onto the default role chain, which ends at
      * Contributor (§5.2). So the role the removal <em>leaves behind</em> is checked too.
-     * Without that, a future "Team lead" (member management plus a set narrower than
-     * Contributor) could delete its own row, pass a ceiling comparing its role against
-     * itself, miss the last-administrator guard — it is not the built-in Project admin —
-     * and inherit the {@code issue.rank} it was deliberately denied. The mirror is worse:
+     * Without that, a custom role holding <em>member management plus a set narrower than
+     * Contributor</em> — a "QA lead", say, with {@code project.member.manage} and no
+     * {@code issue.rank} — could delete its own row, pass a ceiling comparing its role
+     * against itself, pass the last-administrator guard (which since HD-136 counts custom
+     * roles too — it resolves the administering role ids from the <em>grant</em>, so a
+     * custom role carrying {@code project.member.manage} IS counted; it refuses only when
+     * the caller is the project's <strong>last</strong> administrator, and with a second one
+     * present it lets the removal through) and inherit the {@code issue.rank} it was
+     * deliberately denied.
+     * <strong>Deliberately not called "Team lead"</strong>: the built-in of that name (V16)
+     * is Contributor <em>plus</em> member management, i.e. wider than the fallback and
+     * therefore not this shape at all — V16 spends twenty lines explaining that a role
+     * narrower than the fallback is a one-way trap, which is exactly what this guard
+     * catches, and naming the trap after the role that avoids it inverted the argument. The mirror is worse:
      * the same permission would become "promote anybody to the project default" by
      * deleting their narrow row. In {@code STRICT} there is no inherited role, so
      * {@code defaultProjectRole} answers {@code null} and there is nothing to bound.
@@ -310,13 +326,23 @@ public class ProjectService {
      * <p>Ordering is HD-132's: the administrator set is locked <em>first and
      * unconditionally</em>, before the target row is read, because deciding whether to
      * lock from an unlocked read is the race the lock exists to close.
+     *
+     * <p><strong>Both guards now live in {@link ProjectAdminGuard}</strong> (HD-136), which
+     * asks who holds {@code project.member.manage} rather than who carries the built-in
+     * Project admin role id — so a project whose sole administrator holds a custom role is
+     * protected too — and which the workspace-side member removal calls as well, because
+     * that endpoint deletes these very rows and was breaking this invariant freely.
      */
     @Transactional
     public void removeMember(User actor, UUID workspaceId, UUID projectId, UUID userId) {
+        // Before anything, because lockAdmins below is a FOR UPDATE and a lock wait has no
+        // bound of its own — the ordered read makes overlapping removals QUEUE, and an
+        // unbounded queue on a pooled connection is the failure mode, not the deadlock.
+        lockTimeout.applyToCurrentTransaction();
         var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
         ctx.permissions().require(Permission.PROJECT_MEMBER_MANAGE);
         var project = ctx.project();
-        var admins = lockProjectAdmins(project);
+        var admins = projectAdminGuard.lockAdmins(project);
         var user = userRepository.findById(userId)
                 .orElseThrow(ProjectNotFoundException::new);
         var member = projectMemberRepository.findByProjectAndUser(project, user)
@@ -328,7 +354,7 @@ public class ProjectService {
         if (inherited != null) {
             requireWithinGrantCeiling(ctx, inherited, GrantCeilingAction.LEAVING_DEFAULT);
         }
-        requireNotLastProjectAdmin(admins, user.getId());
+        projectAdminGuard.requireNotLastAdmin(admins, user.getId());
         projectMemberRepository.delete(member);
     }
 
@@ -362,26 +388,6 @@ public class ProjectService {
         ctx.permissions().firstNotCovered(role.permissions()).ifPresent(missing -> {
             throw new ProjectGrantCeilingException(action, role.name(), missing);
         });
-    }
-
-    /**
-     * The project's administrators, read under a row lock. See
-     * {@code ProjectMemberRepository.lockAllByProjectAndRoleId} for why the lock is
-     * unconditional; the returned ids are read off {@code getUser()} proxies, which does
-     * not load the user rows.
-     */
-    private Set<UUID> lockProjectAdmins(Project project) {
-        return projectMemberRepository.lockAllByProjectAndRoleId(project, BuiltInRoles.PROJECT_MANAGER)
-                .stream()
-                .map(m -> m.getUser().getId())
-                .collect(Collectors.toSet());
-    }
-
-    /** A project that has an administrator must not lose its last one (HD-132's shape). */
-    private void requireNotLastProjectAdmin(Set<UUID> admins, UUID targetUserId) {
-        if (admins.contains(targetUserId) && admins.size() <= 1) {
-            throw new LastProjectAdminException();
-        }
     }
 
     // ---- helpers ----

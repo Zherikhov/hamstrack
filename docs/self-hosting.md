@@ -141,6 +141,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
+| `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction that takes row locks (workspace member role change, workspace member removal, project member removal) may wait for one, in ms. Applied with `SET LOCAL` inside those transactions only — **not** a server-wide PostgreSQL `lock_timeout`, so Flyway migrations on the same pool are unaffected and still wait as long as they need. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default |
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |

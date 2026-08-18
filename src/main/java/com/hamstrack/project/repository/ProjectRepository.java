@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -17,6 +18,25 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
     List<Project> findAllByWorkspaceAndArchivedAtIsNull(Workspace workspace);
 
     Optional<Project> findByIdAndWorkspace(UUID id, Workspace workspace);
+
+    /**
+     * The workspace-scoped batch form of {@link #findByIdAndWorkspace} — used by
+     * {@code ProjectAdminGuard} to name the projects a workspace member removal would
+     * strand. Scoped rather than {@code findAllById} even though the ids come from a query
+     * that was itself workspace-scoped: a finder that carries its own scope cannot be
+     * misused later by a caller who assumes someone else already checked.
+     *
+     * <p><strong>Live projects only.</strong> An archived project is frozen — there is
+     * nothing left to administer in it — so it must never be the reason an offboarding is
+     * refused. The filter is repeated here rather than left to the locking read alone
+     * because this load is what the 409 body is built from, and a list that disagreed with
+     * the decision would name projects the caller cannot act on. (Consequence, recorded
+     * rather than hidden: an archived project whose last administrator leaves cannot be
+     * unarchived through the API, because {@code project.archive} is project-scoped and
+     * outside the curator bypass. That is the same gap HD-136's audit reports for the other
+     * uncovered project permissions, and it is a seed decision, not this query's to make.)
+     */
+    List<Project> findAllByWorkspaceAndIdInAndArchivedAtIsNull(Workspace workspace, Collection<UUID> ids);
 
     boolean existsByWorkspaceAndKey(Workspace workspace, String key);
 
