@@ -10,7 +10,7 @@ import type {
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
-  FlowReport, ReportInterval,
+  FlowReport, ReportInterval, CycleTimeReport, AgingReport,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1660,6 +1660,22 @@ export interface FlowReportParams {
   labelId?: string
 }
 
+/**
+ * The finished-work half of the cycle-time report (HD-138). Same window and the
+ * same three filters as the flow report — and deliberately **no `measure`**: one
+ * response carries `cycleDays` AND `leadDays` plus both percentile pairs, so the
+ * page's toggle is a re-render rather than a second round trip. Keeping the
+ * measure out of the request is also what keeps it out of the cache key, so
+ * flipping it back and forth never refetches.
+ */
+export interface CycleTimeReportParams {
+  from?: string
+  to?: string
+  typeId?: string
+  componentId?: string
+  labelId?: string
+}
+
 export const reportsApi = {
   flow: (wsId: string, projectId: string, params: FlowReportParams = {}) => {
     const qs = new URLSearchParams()
@@ -1668,4 +1684,21 @@ export const reportsApi = {
     return request<FlowReport>(
       `/workspaces/${wsId}/projects/${projectId}/reports/flow${q ? `?${q}` : ''}`)
   },
+
+  cycleTime: (wsId: string, projectId: string, params: CycleTimeReportParams = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<CycleTimeReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/cycle-time${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * Aging work in progress — **the current state, so it takes no parameters at
+   * all**: no window, no filters. That asymmetry with `cycleTime` is a fact the
+   * page has to state rather than hide; a reader who set a type filter above
+   * would otherwise read these columns as filtered too.
+   */
+  aging: (wsId: string, projectId: string) =>
+    request<AgingReport>(`/workspaces/${wsId}/projects/${projectId}/reports/aging`),
 }

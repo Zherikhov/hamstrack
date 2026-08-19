@@ -1146,3 +1146,117 @@ export interface FlowReport {
   totals: FlowTotals;
   meta: ReportMeta;
 }
+
+// ── Cycle time, lead time & aging WIP (epic HD-5, slice R3) ──────────────────
+// Mirrors `com.hamstrack.report.dto`. Two endpoints, one page: `/cycle-time` is
+// windowed and filtered, `/aging` is the CURRENT state and takes no parameters
+// at all — a difference the UI has to state out loud, because a reader with a
+// type filter set would otherwise read the aging columns as filtered too.
+
+/**
+ * Which duration the finished-work half plots. Purely a CLIENT concern: one
+ * response carries both measures and both percentile pairs, so the toggle is a
+ * re-render, never a refetch — but it still lives in the URL, because a link
+ * that loses the measure shows a colleague a different report.
+ */
+export type CycleMeasure = 'CYCLE' | 'LEAD';
+
+/**
+ * One completed issue in the window.
+ *
+ * `startedAt`/`cycleDays` are **null for an issue that has no recorded start**
+ * (`issues.started_at` was backfilled best-effort, so old issues legitimately
+ * lack one). Those issues are not plotted in the cycle measure and are counted
+ * in `missingStartCount`. We never substitute `createdAt` for a missing start —
+ * that turns a cycle-time report into a lead-time report wearing a false name
+ * (reports-proposal §2.2).
+ */
+export interface CycleTimeItem {
+  issueId: string;
+  key: string;
+  title: string;
+  typeId: string;
+  startedAt: string | null;
+  closedAt: string;
+  cycleDays: number | null;
+  /** Always defined: `created_at → closed_at` exists for every completed issue. */
+  leadDays: number;
+}
+
+/**
+ * A p50/p85 pair, or nothing.
+ *
+ * Nullable at BOTH levels on purpose: below the 5-issue floor the server
+ * suppresses percentiles rather than printing noise (§2.2), and the UI must
+ * behave identically whether that suppression arrives as a null pair or as null
+ * members. Reading it through one tolerant helper means a shape change on the
+ * server can never draw a reference line at `0` days.
+ */
+export interface Percentiles {
+  p50: number | null;
+  p85: number | null;
+}
+
+/** Both measures' percentiles, computed server-side (`percentile_cont`). */
+export interface CycleTimePercentiles {
+  cycle: Percentiles | null;
+  lead: Percentiles | null;
+}
+
+export interface CycleTimeReport {
+  /** Echoed back exactly as requested — an over-long window is a 400, not a clamp. */
+  from: string;
+  to: string;
+  /** One row per completed issue in the window; row-capped like every R3 report. */
+  items: CycleTimeItem[];
+  percentiles: CycleTimePercentiles | null;
+  /** Completed issues in the window — the denominator of the honesty sentence. */
+  sampleSize: number;
+  /**
+   * How many of those have **no recorded start**, i.e. no cycle time. Printed,
+   * always: *"cycle time available for 812 of 940 completed issues"*. A
+   * cycle-time chart that quietly rests on a subset is the exact failure this
+   * whole epic is built to avoid.
+   */
+  missingStartCount: number;
+  meta: ReportMeta;
+}
+
+/** One open issue in the aging half, aged from `startedAt` (or from creation). */
+export interface AgingItem {
+  issueId: string;
+  key: string;
+  title: string;
+  ageDays: number;
+  assigneeId: string | null;
+  /** Null when the issue was never started — it is then aged from its creation. */
+  startedAt: string | null;
+}
+
+/**
+ * One column of the aging half: a non-DONE status of the project's **effective**
+ * workflow, in board order.
+ *
+ * The trailing **"Not on this board"** column — an issue stranded in a status the
+ * workflow no longer carries — arrives here too, and is deliberate: those issues
+ * must not vanish (§6). It is recognised by a `statusId` the project config does
+ * not list (or none at all), never by matching its name.
+ */
+export interface AgingColumn {
+  statusId: string | null;
+  name: string;
+  category: 'TODO' | 'IN_PROGRESS' | 'DONE' | null;
+  items: AgingItem[];
+}
+
+export interface AgingReport {
+  columns: AgingColumn[];
+  /**
+   * The completed-work baseline the aging dots are read against. It comes with
+   * THIS response, so it does not move when the window above changes — which the
+   * page says, rather than letting the reader assume the two halves share a
+   * window.
+   */
+  percentiles: Percentiles | null;
+  meta: ReportMeta;
+}

@@ -239,6 +239,15 @@ tags:
       budget is keyed on the caller and never on the project, which is what keeps
       that refusal free of tenancy information — the `429` is identical for a
       real project, a nonexistent one and somebody else's.
+
+
+      Two things vary between reports rather than across them. **Not every
+      report has a window**: `/aging` answers a current-state question and takes
+      no parameters at all, which makes it the only endpoint here that cannot
+      return a `400`. And a report's **filter** ids (`typeId`, `componentId`,
+      `labelId`) are predicates, not addressed resources — an unknown or foreign
+      id narrows the report to an empty result and is named in
+      `meta.unmatchedFilters`; it is never a `404` or a `422`.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -5073,69 +5082,233 @@ paths:
         '200':
           description: OK — the zero-filled series, the window totals and the shared `meta` block
           headers:
-            Cache-Control:
-              description: >-
-                Always `private, max-age=60`. `private` is the load-bearing
-                half: a report is one tenant's data and must never be held by a
-                shared cache.
-              schema: { type: string, example: 'private, max-age=60' }
-            Vary:
-              description: >-
-                Always `Authorization`. A browser's HTTP cache keys on (method,
-                URL) and **ignores request headers unless `Vary` names them**, so
-                without this a shared-profile browser could replay a cached `200`
-                to a different bearer token inside the 60 s — one the server
-                would have answered `404`. `private` is a promise the cache has
-                to be told how to keep.
-              schema: { type: string, example: Authorization }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FlowReportResponse' }
-        '400':
-          description: >-
-            `from` is after `to`; the window is wider than
-            `app.reports.max-window-days` (the `detail` names the cap, the
-            property key and the measured length — the window is **never**
-            silently clamped); `from` or `to` falls outside the supported band
-            `1970-01-01`…`2200-12-31` (refused in the same name-the-bound
-            wording, **before** any date arithmetic runs — an extreme but
-            perfectly parseable year used to overflow into a `500`); or `from`,
-            `to` or `interval` cannot be parsed.
-
-
-            Tenancy is resolved **before** the window is validated, so a caller
-            who cannot see the project gets `404` for a malformed window too — a
-            `400` would confirm the project exists.
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '400': { $ref: '#/components/responses/ReportWindowRejected' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '429':
+        '429': { $ref: '#/components/responses/ReportThrottled' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/reports/cycle-time:
+    get:
+      tags: [Reports]
+      summary: Cycle time — how long finished work took
+      description: >-
+        The finished-work half of the cycle time page: one entry per issue
+        **completed inside the window**, plus the p50/p85 of both measures.
+        Access, caching, the `meta` block, the window rules and the throttle are
+        the family's — see the `Reports` tag; only what is specific to this
+        report is stated here.
+
+
+        **The window is a range on `closed_at`.** An issue created two years ago
+        and closed yesterday is in yesterday's report; an issue created inside
+        the window and still open is in no report here at all. That is the only
+        reading under which the x-axis (completion date) *is* the window.
+        Parameters are optional and default exactly as `/flow`'s do — no
+        parameters means *the last 90 days, unfiltered*, with `from` derived
+        from `min(90, app.reports.max-window-days)`. The window arithmetic and
+        both refusals are literally the same implementation as `/flow`'s
+        (`ReportWindow`), messages included, so a client that handles one
+        handles the other.
+
+
+        **The honesty rule: cycle time is defined only for issues that have a
+        recorded start.** `startedAt` arrived in an earlier slice and was
+        backfilled best-effort (the backfill matches history rows to statuses by
+        display *name*, so a renamed status is invisible to it, and an issue
+        filed directly into an in-progress status wrote no history row at all),
+        so a project with history has completed issues with no start. Those
+        issues carry `cycleDays: null` — not `0`, not the lead time — and
+        contribute to `leadDays`, to `sampleSize` and to `missingStartCount`,
+        and to nothing else. **`created_at` is never substituted for a missing
+        `started_at`**: that single substitution would turn this into a
+        lead-time report wearing the label "cycle time", move the p85 that
+        `/aging` draws across its columns, and say so nowhere. Surface
+        `missingStartCount` — "cycle time available for 812 of 940 completed
+        issues" is the sentence it exists for.
+
+
+        **Percentiles are suppressed below five samples, per measure,
+        independently.** `percentiles.cycle` and `percentiles.lead` are computed
+        over *different* sets — `sampleSize - missingStartCount` and
+        `sampleSize` — which on an upgraded install differ wildly, so one may be
+        suppressed while the other is not. Suppression is `null`s **inside** the
+        pair; the containers `percentiles`, `percentiles.cycle` and
+        `percentiles.lead` are **always present**, so read
+        `percentiles.cycle.p50 == null` and never code for a missing object.
+
+
+        **The lines describe the whole matching set even when the dots are
+        truncated.** Percentiles are aggregates computed by PostgreSQL over
+        every matching issue, not over the page that survived `meta.cap`; a p85
+        over "the most recent 20 000" would be a different statistic wearing the
+        same label. So `sampleSize` versus `items.length` — not `meta.truncated`
+        alone — is what tells a client it is drawing a subset, and **what
+        survives truncation is the most recent work** (`items` are ordered most
+        recently closed first). A client that assumes the other end draws a
+        wrong chart from a correct response.
+      operationId: getCycleTimeReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: from
+          in: query
           description: >-
-            Past this caller's report budget
-            (`app.reports.requests-per-minute`, 60/min by default, in-memory per
-            app node and disabled wholesale by `app.rate-limit.enabled=false`).
-            A **retryable throttle, not a fault**: nothing was computed, and
-            retrying after the number of seconds in `Retry-After` succeeds — a
-            report is never narrowed or approximated to fit a budget.
-
-
-            The budget covers the whole `…/reports/**` path per principal, and it
-            is spent **before** the workspace and project are resolved. This is
-            therefore the one place in this API where `429` **precedes** `404`:
-            an over-budget caller is refused even for a project they cannot see.
-            Keying on the caller rather than the project is what keeps that
-            refusal free of tenancy information — and it means the budget bounds
-            one **user**, not one workspace: aggregate report load still scales
-            with the number of members asking.
+            First day of the window, **inclusive**, as an ISO date interpreted
+            in UTC — a bound on `closed_at`. Defaults to
+            `min(90, app.reports.max-window-days)` days before `to`, counting
+            both endpoints. An unparseable value, or one outside the supported
+            band `1970-01-01`…`2200-12-31`, is a `400`.
+          schema: { type: string, format: date, example: 2026-05-21 }
+        - name: to
+          in: query
+          description: >-
+            Last day of the window, **inclusive**. Defaults to today in UTC.
+            `from=X&to=X` is one whole UTC day, not an empty range. Same
+            `1970-01-01`…`2200-12-31` band as `from`.
+          schema: { type: string, format: date, example: 2026-08-19 }
+        - name: typeId
+          in: query
+          description: >-
+            Narrow to one issue type. Filters here are **predicates, not
+            addressed resources**: an id that does not exist — or belongs to
+            another project or tenant — matches nothing and yields an empty
+            `items` with `200`, never a `404` or a `422`, exactly as on `/flow`.
+            A filter that matched nothing is named in `meta.unmatchedFilters`.
+          schema: { type: string, format: uuid }
+        - name: componentId
+          in: query
+          description: Narrow to one component. Same "unknown id narrows to empty" rule as `typeId`.
+          schema: { type: string, format: uuid }
+        - name: labelId
+          in: query
+          description: >-
+            Narrow to issues carrying this label. Same "unknown id narrows to
+            empty" rule as `typeId`. A multi-label issue is counted once — and
+            counted once in the percentiles too, which a join instead of an
+            `EXISTS` would have skewed toward the most-labelled issues.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK — the dots, both percentile pairs, the two counts and the shared `meta` block
           headers:
-            Retry-After:
-              description: Seconds to wait before retrying
-              schema: { type: integer }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
           content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
+            application/json:
+              schema: { $ref: '#/components/schemas/CycleTimeReportResponse' }
+        '400': { $ref: '#/components/responses/ReportWindowRejected' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/reports/aging:
+    get:
+      tags: [Reports]
+      summary: Aging work in progress — which open item is rotting right now
+      description: >-
+        The unfinished-work half of the cycle time page: one column per non-DONE
+        status of the project's effective workflow, each holding its open issues
+        **oldest first**, with a cycle-time p50/p85 to draw across them. Access,
+        caching, the `meta` block and the throttle are the family's — see the
+        `Reports` tag.
+
+
+        **No parameters, and no window — deliberately.** "Which open item is
+        rotting *right now*" is a question about current state: a window on it
+        would be meaningless (every open issue is open today) or actively
+        misleading (a window on `created_at` hides exactly the oldest items,
+        which are the entire point). This is therefore **the one endpoint on
+        this base path that cannot return a `400`**; the only failures available
+        to it are `401`, `404` and `429`.
+
+
+        **"Open" is `status.category <> DONE`** — the same question the columns
+        are keyed on — and not `closed_at IS NULL`. The two agree today only
+        because the application maintains that invariant; asking the category
+        keeps an issue from being in the report but in no column, or the
+        reverse.
+
+
+        **An issue whose status has left the workflow is not dropped.** Statuses
+        gate *transitions*, not existing rows, so a workflow swap strands
+        whatever was mid-flight. Those issues arrive in a single trailing column
+        with `statusId: null`, `category: null` and the name
+        `"Not on this board"`. **A client must render that column**: a report
+        whose purpose is to name the item nobody is looking at must not begin by
+        hiding the items nobody is looking at. Empty columns are present too — a
+        status nobody is in is a fact about the board, and a report that draws
+        only the columns it found rows for redraws its own axis every day.
+
+
+        **`ageDays` falls back to `created_at` when there is no `started_at`,
+        and the asymmetry with `/cycle-time` is deliberate.** Cycle time
+        measures finished work, where substituting filing time for start time
+        produces a number that is simply wrong. Age asks how long something has
+        been waiting, and "filed 40 days ago, never picked up" is a true,
+        useful and materially *different* fact from "in progress for 40 days".
+        Both belong on this board, so `ageDays` is never `null` and the nullable
+        `startedAt` is returned beside it precisely so a reader can tell the two
+        apart.
+
+
+        **The percentile lines belong to the other half, and are deliberately
+        unwindowed.** `percentiles` here is the **cycle time** p50/p85 of this
+        project's *whole completed history* — not a window, and not the measure
+        the reader toggled. That is what makes the report actionable: an item
+        past the p85 line is visibly older than 85% of everything the team has
+        ever finished, a statement in the team's own units with no target, no
+        SLA and nothing configured. The same two field names therefore mean
+        different things on `/cycle-time` (that request's window, one pair per
+        measure) and here (all time, cycle only) — a client showing both must
+        not label them alike. Suppression is the family's: below five completed
+        issues *with a start* the pair is `null`s, the columns still render (the
+        lines are an overlay, not a precondition), and a project whose history
+        predates the `started_at` backfill can legitimately have full columns and
+        no lines.
+
+
+        **The lines are served from a 60-second per-project snapshot; the columns
+        never are.** Their aggregate is the one statement in this feature bounded
+        by nothing the caller can narrow — no window, no cap, and it grows for the
+        life of the project — so it runs at most once per project per minute per
+        node. The claim is unchanged (the pass still covers the whole history when
+        it runs) and the staleness is one this response already advertises with
+        `Cache-Control: max-age=60`; a reference line drawn from years of history
+        does not visibly move in a minute. The open half — the columns, the items
+        and `meta.basedOnIssues` — is computed live on every request, because a
+        minute-old count printed above a live item list is exactly the "these
+        numbers don't match" failure the `meta` block exists to prevent.
+
+
+        **Truncation keeps the oldest.** Open issues are ordered oldest-first
+        **project-wide** and the cap is applied to that single ordering *before*
+        the rows are grouped into columns, so what survives is the aging end of
+        the whole queue — the opposite end from `/cycle-time`'s, and the right one
+        for each; a truncated response thins the freshest items out of every
+        column at once rather than trimming each column separately.
+        `meta.basedOnIssues` is how many open issues the report was *about*,
+        which when `meta.truncated` is larger than the number of items shipped.
+      operationId: getAgingReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: OK — the columns, the lifetime cycle-time lines and the shared `meta` block
+          headers:
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgingReportResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
 
   /notifications:
     get:
@@ -6344,6 +6517,71 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    ReportWindowRejected:
+      description: >-
+        `from` is after `to`; the window is wider than
+        `app.reports.max-window-days` (the `detail` names the cap, the property
+        key and the measured length — the window is **never** silently
+        clamped); `from` or `to` falls outside the supported band
+        `1970-01-01`…`2200-12-31` (refused in the same name-the-bound wording,
+        **before** any date arithmetic runs — an extreme but perfectly parseable
+        year used to overflow into a `500`); or a date cannot be parsed. On
+        `/flow` an unknown `interval` is a fourth `400` of the same shape.
+
+
+        Every windowed report shares one implementation of these rules
+        (`ReportWindow`) down to the wording of the messages, so `/flow` and
+        `/cycle-time` refuse identically. `/aging` has no window and therefore no
+        `400` at all.
+
+
+        Tenancy is resolved **before** the window is validated, so a caller who
+        cannot see the project gets `404` for a malformed window too — a `400`
+        would confirm the project exists.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ReportThrottled:
+      description: >-
+        Past this caller's report budget (`app.reports.requests-per-minute`,
+        60/min by default, in-memory per app node and disabled wholesale by
+        `app.rate-limit.enabled=false`). A **retryable throttle, not a fault**:
+        nothing was computed, and retrying after the number of seconds in
+        `Retry-After` succeeds — a report is never narrowed or approximated to
+        fit a budget.
+
+
+        The budget covers the whole `…/reports/**` path per principal, and it is
+        spent **before** the workspace and project are resolved. This is
+        therefore the one place in this API where `429` **precedes** `404`: an
+        over-budget caller is refused even for a project they cannot see. Keying
+        on the caller rather than the project is what keeps that refusal free of
+        tenancy information — and it means the budget bounds one **user**, not
+        one workspace: aggregate report load still scales with the number of
+        members asking.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  headers:
+    ReportCacheControl:
+      description: >-
+        Always `private, max-age=60`. `private` is the load-bearing half: a
+        report is one tenant's data and must never be held by a shared cache.
+      schema: { type: string, example: 'private, max-age=60' }
+    ReportVary:
+      description: >-
+        Always `Authorization`. A browser's HTTP cache keys on (method, URL) and
+        **ignores request headers unless `Vary` names them**, so without this a
+        shared-profile browser could replay a cached `200` to a different bearer
+        token inside the 60 s — one the server would have answered `404`.
+        `private` is a promise the cache has to be told how to keep.
+      schema: { type: string, example: Authorization }
 
   schemas:
     ProblemDetail:
@@ -9670,11 +9908,19 @@ components:
           format: int64
           example: 1842
           description: >-
-            How many **distinct issues** the numbers were computed from — the
-            issues touching the window, i.e. created in it **or** closed in it.
-            Deliberately **not** `created + resolved`: an issue created and
-            closed inside the same window appears on both lines but is one issue
-            of evidence, not two.
+            How many **distinct issues** the numbers were computed from. Which
+            population that is follows from the report's own question, so each
+            report says: on `/flow` the issues *touching* the window — created
+            in it **or** closed in it, deliberately **not**
+            `created + resolved`, since an issue created and closed inside the
+            same window appears on both lines but is one issue of evidence, not
+            two; on `/cycle-time` the completed issues in the window after
+            filters (i.e. `sampleSize`); on `/aging` the project's open issues.
+
+
+            It is never `items.length`: when the cap bites this is deliberately
+            the larger number, because it must state how many issues the report
+            was *about* — which is exactly what the reader can no longer see.
         truncated:
           type: boolean
           description: >-
@@ -9682,6 +9928,16 @@ components:
             and the client must say so. **Always `false` on `/flow`**, which
             aggregates in SQL and returns at most one row per bucket, so the row
             cap physically cannot bite there.
+
+
+            It does bite on the row-level reports, and **which end survives
+            differs by report, on purpose**: `/cycle-time` keeps the **most
+            recent** rows (its reader wants the latest work) and `/aging` keeps
+            the **oldest** (its reader wants the most rotten item). A client that
+            assumes the wrong end draws a wrong chart from a correct response.
+            On both, the aggregates — percentiles, counts — are computed over the
+            *whole* matching set, so truncation shortens the list and never moves
+            a line.
         cap:
           type: integer
           example: 20000
@@ -9695,17 +9951,33 @@ components:
           nullable: true
           example: '2024-11-04T08:31:00Z'
           description: >-
-            When the earliest issue this report could ever have shown was
-            created, or `null` when there is none. This is what "we only have N
-            days of history" must be measured from — the project's own
-            `createdAt` is a different date, often years off, and fetching it
-            took a second request for a number that was never the right one.
+            When the earliest issue **the project holds that this report's
+            filters admit** was created, or `null` when there is none. This is
+            what "we only have N days of history" must be measured from — the
+            project's own `createdAt` is a different date, often years off, and
+            fetching it took a second request for a number that was never the
+            right one.
 
 
-            **It is filtered exactly like the rest of the response.** With
-            `typeId` set it is the first issue *of that type*; with a
-            `componentId` or `labelId` it is the first issue carrying that
-            component or label. Do not read it as the project's age.
+            **Filters yes, window never — on every report, without exception.**
+            It is a property of the *project*, not of the sample a given report
+            happens to be describing, so it is **not bounded by `from`/`to` and
+            routinely predates `from`**. That is the whole use of it: it is what
+            tells a reader whether the window they chose is wider than the data
+            behind it. Computing it over the window would not merely be
+            inconsistent between reports, it would be **circular** — the earliest
+            issue inside a 14-day window is at most 14 days old, so a five-year-old
+            project asking for a fortnight would report a fortnight of history and
+            a client's thin-data warning would fire on every project. A number
+            read over the window can only ever return the window.
+
+
+            **Filters do still apply**, so on a filtered chart it reads "the first
+            issue this chart could ever have shown" — with `typeId` set it is the
+            first issue *of that type*, and with a `componentId` or `labelId` the
+            first issue carrying it. A filter that matches **nothing** therefore
+            makes this `null`, beside that filter's name in `unmatchedFilters`.
+            It is the first *issue*, not the project's own creation date.
         unmatchedFilters:
           type: array
           items: { type: string }
@@ -9813,6 +10085,313 @@ components:
           items: { $ref: '#/components/schemas/FlowBucket' }
         totals: { $ref: '#/components/schemas/FlowTotals' }
         meta: { $ref: '#/components/schemas/ReportMeta' }
+
+    ReportPercentiles:
+      type: object
+      description: >-
+        A p50/p85 pair in **days** — percentiles, never a rolling average, and
+        both fields may legitimately be `null`.
+
+
+        **The pair is always present as an object, even when suppressed.** Below
+        **five** samples both fields are `null` and the client prints "not
+        enough completed work to compute percentiles (need 5, have 3)" rather
+        than drawing a line: a p85 over three issues is arithmetically defined
+        and informationally worthless. Suppression is a fact about the data, not
+        a change of response shape — read `p50 == null`, never test the parent
+        for existence. The threshold is not configurable, deliberately: it is a
+        statement about what is meaningful, and a line whose threshold differs
+        between installs is worse than a missing one.
+      properties:
+        p50:
+          type: number
+          format: double
+          nullable: true
+          example: 4.1
+          description: The median, in days to two decimals, or `null` when suppressed for want of samples.
+        p85:
+          type: number
+          format: double
+          nullable: true
+          example: 12.6
+          description: >-
+            The 85th percentile, in days to two decimals, or `null` on the same
+            terms. 85 rather than 90 or 95 because it is the number the
+            flow-metrics literature uses for a "most work finishes within"
+            statement, and because at realistic team sample sizes a p95 is two
+            issues wide.
+
+    CycleTimePercentiles:
+      type: object
+      description: >-
+        The two reference lines of `/cycle-time`, one pair per measure. **Both
+        containers are always present**; either may hold `null`s.
+
+
+        **They are suppressed independently, and that is not an oversight.**
+        They are computed over different sample sets — `lead` over every
+        completed issue in the window (`sampleSize`), `cycle` over only those
+        that also have a `started_at` (`sampleSize - missingStartCount`) — and
+        on an install whose history predates the `started_at` backfill the
+        second set can be a small fraction of the first. So a window can
+        legitimately produce a usable `lead` pair and a suppressed `cycle` pair.
+        Suppressing both when either is thin would hide a number we have;
+        suppressing neither would print a p85 drawn from two issues.
+      properties:
+        cycle:
+          allOf:
+            - $ref: '#/components/schemas/ReportPercentiles'
+          description: >-
+            p50/p85 of `closed_at - started_at`, over the completed issues in
+            the window that **have a start**. Never over a substituted
+            `created_at`.
+        lead:
+          allOf:
+            - $ref: '#/components/schemas/ReportPercentiles'
+          description: p50/p85 of `closed_at - created_at`, over every completed issue in the window.
+
+    CycleTimeItem:
+      type: object
+      description: >-
+        One dot on the finished-work scatter: x = `closedAt`, y = `cycleDays` or
+        `leadDays` depending on the page's toggle.
+      properties:
+        issueId:
+          type: string
+          format: uuid
+          description: The issue, so the dot links through to the issue detail.
+        key: { type: string, example: DEMO-14, description: The project-scoped issue key. }
+        title: { type: string, example: Search returns stale results }
+        typeId:
+          type: string
+          format: uuid
+          description: >-
+            The issue type, so a client can shape or colour by type without a
+            second request. The id only — this response carries no taxonomy, and
+            the project config endpoint already resolves it.
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When work began, or `null` when unknown — the provenance of
+            `cycleDays`, and the reason that field can be `null`.
+        closedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the issue was closed. Never `null`: the window is a range on
+            this column.
+        cycleDays:
+          type: number
+          format: double
+          nullable: true
+          example: 4.2
+          description: >-
+            `closedAt - startedAt` in days to two decimals, or **`null` when the
+            issue has no recorded start** — not `0`, and not the lead time.
+            `created_at` is never substituted; such issues are counted in
+            `missingStartCount` instead. A client must not coerce this to `0`,
+            which would put a dot on the floor of the chart for every issue we
+            simply do not know about.
+        leadDays:
+          type: number
+          format: double
+          example: 11.7
+          description: >-
+            `closedAt - createdAt` in days to two decimals. Defined for every
+            completed issue, which is why this page is never empty even on an
+            install that upgraded yesterday.
+
+    CycleTimeReportResponse:
+      type: object
+      description: >-
+        `GET …/reports/cycle-time`. The window is a range on `closed_at` and is
+        echoed back **exactly as requested** — an over-long one is refused with a
+        `400` naming the cap rather than narrowed.
+
+
+        **Three counts, three different questions — read them together.**
+        `sampleSize` is the completed issues in the window after filters and is
+        what the `lead` percentiles were computed from; `missingStartCount` is
+        how many of those have no start, so the `cycle` percentiles came from
+        `sampleSize - missingStartCount`; `items.length` is how many dots were
+        actually shipped, which equals `sampleSize` unless `meta.truncated`, in
+        which case it is `meta.cap` and the client must say so above the chart.
+      properties:
+        from: { type: string, format: date, example: 2026-05-21 }
+        to: { type: string, format: date, example: 2026-08-19 }
+        items:
+          type: array
+          description: >-
+            One entry per completed issue in the window, **most recently closed
+            first** (ties broken by id, so a truncated report is deterministic).
+            That order is what gives truncation a meaning a reader can state:
+            what survives the cap is *the most recent N*.
+          items: { $ref: '#/components/schemas/CycleTimeItem' }
+        percentiles: { $ref: '#/components/schemas/CycleTimePercentiles' }
+        sampleSize:
+          type: integer
+          format: int64
+          example: 214
+          description: >-
+            Completed issues in the window after filters — the population the
+            percentiles were computed over, **not** `items.length`. When the cap
+            bites, the dots are a recent sample and the lines still describe the
+            whole set; comparing these two numbers is how a client knows.
+        missingStartCount:
+          type: integer
+          format: int64
+          example: 128
+          description: >-
+            How many issues in `sampleSize` have no recorded `started_at`. They
+            contribute to lead time, to `sampleSize` and to this count — and to
+            nothing else. Never zero because a fallback filled the gap; there is
+            no fallback. Surface it: "cycle time available for 812 of 940
+            completed issues" is the sentence it exists for.
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance. Here `basedOnIssues` equals `sampleSize`. `firstIssueAt`
+            is the family's, unchanged by this report: the project's earliest
+            issue that the filters admit, **not** windowed — so it routinely
+            predates `from`, which is exactly how a client tells that the window
+            asked for is wider than the history behind it.
+
+    AgingItem:
+      type: object
+      description: >-
+        One open issue in an aging column — **the named rotting item**, which is
+        why this report exists instead of a cumulative flow diagram. A CFD shades
+        an area and asks the reader to infer a queue; this names DEMO-31, says it
+        has been open 19.4 days, and lets the p85 line say that is longer than
+        85% of everything the team has ever finished.
+      properties:
+        issueId: { type: string, format: uuid }
+        key: { type: string, example: DEMO-31 }
+        title: { type: string, example: Flaky import on large CSVs }
+        ageDays:
+          type: number
+          format: double
+          example: 19.4
+          description: >-
+            How long this issue has been in flight, in days to two decimals,
+            measured from `startedAt` when it exists and from `created_at` when
+            it does not. **Never `null`** — and the fallback is correct *here*
+            precisely because it is wrong on `/cycle-time`: "filed 40 days ago,
+            never picked up" is a true and materially different fact from "in
+            progress for 40 days", and both belong on this board. Every item in
+            one response is aged against the same instant, which is
+            `meta.computedAt`.
+        assigneeId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Who holds it, or `null`. An id only: this report labels each item so
+            somebody can be asked about it, and it deliberately never aggregates
+            by assignee — no percentile here is per-person.
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When work began, or `null` for an item never started — the
+            provenance of `ageDays`, returned precisely so a client can
+            distinguish "19 days in progress" from "19 days sitting in To Do".
+
+    AgingColumn:
+      type: object
+      description: >-
+        One column of the aging board: a non-DONE status of the project's
+        effective workflow, holding its open issues oldest-first. **Empty columns
+        are present** — a status nobody is in is a fact about the board, and a
+        report that draws only the columns it found rows for redraws its own axis
+        every day.
+      properties:
+        statusId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The status, or **`null` for the trailing "Not on this board"
+            column** that gathers issues whose status has left the project's
+            workflow. The `null` is the client's signal that this column has no
+            workflow position — it is the one column that cannot be dragged to,
+            and it must still be rendered.
+        name:
+          type: string
+          example: In Progress
+          description: >-
+            The status name, or `"Not on this board"`. Deliberately one trailing
+            column rather than one per off-workflow status: the reader's question
+            is "what is stranded", not "which retired status is it stranded in",
+            and per-status columns would let a workflow swap add a dozen columns
+            to a chart.
+        category:
+          allOf:
+            - $ref: '#/components/schemas/StatusCategory'
+          nullable: true
+          description: >-
+            The status category, or `null` for the trailing column (whose members
+            may come from several statuses of different categories, so there is
+            no single honest answer). `DONE` is never a column here — this report
+            is about unfinished work.
+        items:
+          type: array
+          description: >-
+            The column's open issues, **oldest first**, so the item most in need
+            of attention is the first one a reader's eye lands on and the last one
+            the row cap would drop.
+          items: { $ref: '#/components/schemas/AgingItem' }
+
+    AgingReportResponse:
+      type: object
+      description: >-
+        `GET …/reports/aging`. No window and no parameters — "what is rotting
+        now" is a current-state question — which makes this the one report on
+        this base path that cannot return a `400`.
+      properties:
+        columns:
+          type: array
+          description: >-
+            One column per non-DONE status of the effective workflow, in board
+            order, followed by at most one trailing `"Not on this board"` column
+            when anything is stranded outside the workflow. Empty columns
+            included.
+          items: { $ref: '#/components/schemas/AgingColumn' }
+        percentiles:
+          allOf:
+            - $ref: '#/components/schemas/ReportPercentiles'
+          description: >-
+            The lines drawn across the columns: **cycle time over the project's
+            whole completed history** — unwindowed, and the cycle measure only,
+            whatever the page's toggle says. That is what makes the report
+            actionable ("older than 85% of everything the team has ever
+            finished") and it means these two field names mean something
+            different here than on `/cycle-time`, where they belong to the
+            requested window and come in one pair per measure. Computed from
+            completed issues that have a `started_at`, so a project whose history
+            predates the backfill can have full columns and suppressed (`null`)
+            lines — the columns still render; the lines are an overlay, not a
+            precondition.
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance. Here `basedOnIssues` is the number of **open** issues the
+            report was about — larger than the number of items shipped when
+            `truncated` — and `unmatchedFilters` is always empty because this
+            endpoint takes no filters. `firstIssueAt` is the family's: the
+            project's earliest issue, **not** the earliest open one. The earliest
+            open issue is not lost by that — items come back oldest-first, so it
+            is literally the first item of the first non-empty column, with its
+            key, title and age, which is strictly more than a bare timestamp in
+            `meta`. The depth of the project's **completed** history is not
+            derivable from this response at all, and it is the provenance this
+            report actually needs, since its `percentiles` are computed over
+            precisely that history.
 
     NotificationResponse:
       type: object

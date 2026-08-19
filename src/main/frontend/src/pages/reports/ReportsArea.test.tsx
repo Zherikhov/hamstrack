@@ -20,6 +20,7 @@ import ReportsArea from './ReportsArea'
  */
 
 vi.mock('./FlowReportPage', () => ({ default: () => <div data-testid="flow-page">flow</div> }))
+vi.mock('./CycleTimeReportPage', () => ({ default: () => <div data-testid="cycle-page">cycle</div> }))
 
 vi.mock('../../api', () => ({
   apiGetProject: vi.fn(async () => ({
@@ -66,14 +67,23 @@ describe('ReportsArea', () => {
     expect(screen.getByTestId('loc')).toHaveTextContent('/w/w1/p/p1/reports/flow')
   })
 
+  it('links the cycle-time report absolutely too, and renders it', async () => {
+    renderArea('/w/w1/p/p1/reports/cycle-time')
+    expect(await screen.findByTestId('cycle-page')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Cycle & lead time' }))
+      .toHaveAttribute('href', '/w/w1/p/p1/reports/cycle-time')
+  })
+
   it('lists the reports that are not built yet, labelled', async () => {
     renderArea('/w/w1/p/p1/reports/flow')
     await screen.findByTestId('flow-page')
-    for (const label of ['Cycle & lead time', 'Sprint burn-up', 'Sprint review', 'Velocity']) {
+    for (const label of ['Sprint burn-up', 'Sprint review', 'Velocity']) {
       expect(screen.getByText(label)).toBeInTheDocument()
     }
-    expect(screen.getAllByText('SOON')).toHaveLength(4)
-    // …and none of them pretends to be a destination.
+    // R3 took 'Cycle & lead time' out of the SOON list and made it a link — the
+    // list shrinks as the epic lands, and an entry that is still SOON must never
+    // pretend to be a destination.
+    expect(screen.getAllByText('SOON')).toHaveLength(3)
     expect(screen.queryByRole('link', { name: 'Velocity' })).toBeNull()
   })
 })

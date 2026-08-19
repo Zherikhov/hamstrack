@@ -24,7 +24,7 @@
  * Read `buckets[].partial` off the response.
  */
 
-import type { ReportInterval } from '../../types'
+import type { CycleMeasure, ReportInterval } from '../../types'
 
 /**
  * The offered windows, in days (inclusive of both endpoints).
@@ -190,3 +190,78 @@ export function historyDays(firstIssueAt: string | null | undefined, today: stri
 
 /** Below this, a report has no trend to show yet — only a short history (§2.1). */
 export const THIN_HISTORY_DAYS = 14
+
+// ── Cycle time / lead time (HD-138, slice R3) ────────────────────────────────
+
+/**
+ * The cycle-time page's parameter set.
+ *
+ * Same window and same three filters as the flow report, with `interval`
+ * replaced by `measure` — and `measure` is the one parameter here that is
+ * **client-only**: the response carries both durations and both percentile
+ * pairs, so the toggle re-renders rather than refetches. It still lives in the
+ * URL, because a link that drops the measure shows the next reader a different
+ * report and calls it the same one.
+ *
+ * The aging half takes NO parameters at all — no window, no filters — so nothing
+ * on this state object reaches it. That is deliberate (it is the current state,
+ * not a window), and the page says so out loud rather than letting the reader
+ * assume the columns below are filtered like the chart above.
+ */
+export interface CycleState {
+  /** Window start, or `''` for "the server picks" — see `FlowState.from`. */
+  from: string
+  to: string
+  measure: CycleMeasure
+  typeId: string
+  componentId: string
+  labelId: string
+}
+
+/**
+ * Read the cycle-time state out of the URL. Anything absent or unusable stays
+ * absent, so the defaults remain the server's; an unrecognised `measure`
+ * degrades to `CYCLE` rather than to a blank page.
+ */
+export function readCycleState(params: URLSearchParams): CycleState {
+  const from = params.get('from')
+  const to = params.get('to')
+  const measure: CycleMeasure = params.get('measure') === 'LEAD' ? 'LEAD' : 'CYCLE'
+  return {
+    from: parseIso(from) != null ? from! : '',
+    to: parseIso(to) != null ? to! : '',
+    measure,
+    typeId: params.get('typeId') ?? '',
+    componentId: params.get('componentId') ?? '',
+    labelId: params.get('labelId') ?? '',
+  }
+}
+
+/**
+ * The REQUEST parameters — window and filters only.
+ *
+ * `measure` is deliberately absent: it is not part of the contract, and leaving
+ * it out is what keeps the two measures on one cache entry (the query key is
+ * built from exactly this object). An unset member is omitted rather than sent
+ * empty, so the first load is a genuinely parameterless request the server
+ * always answers from its own default window.
+ */
+export function writeCycleParams(state: CycleState): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (state.from) out.from = state.from
+  if (state.to) out.to = state.to
+  if (state.typeId) out.typeId = state.typeId
+  if (state.componentId) out.componentId = state.componentId
+  if (state.labelId) out.labelId = state.labelId
+  return out
+}
+
+/**
+ * The URL parameters — the request's, plus the measure the request has no
+ * business carrying. One function per destination, so the two cannot drift: the
+ * address bar describes the whole report, the wire carries only what the
+ * endpoint accepts.
+ */
+export function writeCycleUrl(state: CycleState): Record<string, string> {
+  return { ...writeCycleParams(state), measure: state.measure }
+}

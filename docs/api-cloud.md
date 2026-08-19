@@ -1935,11 +1935,13 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/rank \
 
 ## Reports
 
-Read-only analytics over one project, all under `/workspaces/{wsId}/projects/{pId}/reports`. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`.
+Read-only analytics over one project, all under `/workspaces/{wsId}/projects/{pId}/reports`. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`. Cycle time and aging WIP are the two halves of one page and read best together; `/aging` is also the one endpoint here that takes no parameters at all.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/workspaces/{wsId}/projects/{pId}/reports/flow?from=&to=&interval=&typeId=&componentId=&labelId=` | member | Created vs resolved over a window, plus the open-count line and the window totals |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/cycle-time?from=&to=&typeId=&componentId=&labelId=` | member | One dot per issue completed in the window, plus the p50/p85 of cycle time and lead time |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/aging` | member | The open issues, oldest first, in the columns of the project's workflow, under the project's lifetime cycle-time percentiles |
 
 ### How every report behaves
 
@@ -1965,10 +1967,14 @@ Read-only analytics over one project, all under `/workspaces/{wsId}/projects/{pI
 It exists because the classic complaint about a reporting feature is *"these numbers don't match what I expected"*, and what produces it is a report that quietly left data out. A response that states **when** it was computed, **how many issues** it was computed from, **whether a cap bit**, **how far back its data goes** and **whether a filter it was given matched nothing** cannot fail that way silently.
 
 - `computedAt` — reports are live reads, so two tabs opened minutes apart legitimately disagree. This is how a reader tells which is which.
-- `basedOnIssues` — how many **distinct issues** the numbers came from: the issues *touching* the window, i.e. created in it **or** closed in it. It is deliberately **not** `created + resolved`. An issue created and closed inside the same window appears on both lines but is one issue of evidence, not two, and adding the lines together would overstate the report's own evidence — the exact species of quiet wrongness `meta` exists to prevent.
-- `truncated` — whether `cap` actually bit. When `true` the report is a partial view and a client must say so above the chart. **On `/flow` it is always `false`, and that is a fact rather than a stub:** the flow report aggregates inside PostgreSQL and returns at most one row per bucket, so the row cap physically cannot bite there. It will bite on the row-level reports that follow.
+- `basedOnIssues` — how many **distinct issues** the numbers came from. Which population that is follows from the report's own question, so each report says: on `/flow` the issues *touching* the window, i.e. created in it **or** closed in it; on `/cycle-time` the completed issues in the window after filters (the same number as `sampleSize`); on `/aging` the project's open issues. On `/flow` it is deliberately **not** `created + resolved` — an issue created and closed inside the same window appears on both lines but is one issue of evidence, not two, and adding the lines together would overstate the report's own evidence, the exact species of quiet wrongness `meta` exists to prevent. It is never `items.length`: when a cap bites this is deliberately the larger number, because it must state how many issues the report was *about*, which is precisely what the reader can no longer see.
+- `truncated` — whether `cap` actually bit. When `true` the report is a partial view and a client must say so above the chart. **On `/flow` it is always `false`, and that is a fact rather than a stub:** the flow report aggregates inside PostgreSQL and returns at most one row per bucket, so the row cap physically cannot bite there. It does bite on the row-level reports, and **which end survives differs by report, on purpose**: `/cycle-time` keeps the **most recent** rows, because its reader wants the latest work, and `/aging` keeps the **oldest**, because its reader wants the most rotten item. A client that assumes the wrong end draws a wrong chart from a correct response. On both, the aggregates — percentiles, counts — are computed over the *whole* matching set, so truncation shortens the list and never moves a line.
 - `cap` — the row budget that *would* bite. Reported by every report **including the ones that cannot hit it**, so a client never has to guess which budget a number was measured against.
-- `firstIssueAt` — when the **earliest issue this report could ever have shown** was created, or `null` when there is none. This is what "we only have N days of history" has to be measured from: the project's own `createdAt` is a different date, often years off, and getting it used to cost a second request for a number that was never the right one. **It is filtered exactly like the rest of the response** — with `typeId` set it is the first issue *of that type*, and with a `componentId` or `labelId` the first issue carrying that component or label. It is not the project's age, and reading it that way is the mistake this bullet exists to prevent.
+- `firstIssueAt` — when the **earliest issue the project holds that this report's filters admit** was created, or `null` when there is none. This is what "we only have N days of history" has to be measured from: the project's own `createdAt` is a different date, often years off, and getting it used to cost a second request for a number that was never the right one.
+
+  **Filters yes, window never — on every report, without exception.** It is a property of the **project**, not of the sample a given report happens to be describing, so it is **not bounded by `from`/`to` and routinely predates `from`**. That is the entire use of it: it is what tells a reader whether the window they chose is wider than the data behind it. Reading it over the window would not merely make one report disagree with another — it would be **circular**. The earliest issue inside a 14-day window is at most 14 days old, so a five-year-old project asking for a fortnight would report a fortnight of history, and a client's thin-data warning would fire on every project. A number read over the window can only ever return the window.
+
+  **Filters do still apply**, so on a filtered chart it reads "the first issue this chart could ever have shown" — with `typeId` set it is the first issue *of that type*, and with a `componentId` or `labelId` the first issue carrying that component or label. A filter that matches **nothing** therefore makes this `null`, beside that filter's name in `unmatchedFilters`. And it is the first **issue**: not the project's own creation date, and reading it as the project's age is the mistake this bullet exists to prevent.
 - `unmatchedFilters` — which of the filter parameters you sent match **no issue in this project at all**; never `null`, and empty when every filter matched something or none was sent. Entries are the query-parameter names themselves (`typeId`, `componentId`, `labelId`), so you can map one straight back to the control the user touched. It exists because a typo'd or stale filter id otherwise renders a complete, plausible, **all-zero** chart: *"no bugs were created in Q1"* and *"your filter matched nothing"* are the same picture without it. Note the deliberately weak and exact claim — **"no issue in this project carries this id"**, *not* "this id does not exist". A perfectly valid issue type nobody here has ever used is reported too, and saying nothing about whether the id exists elsewhere in the taxonomy is what keeps the disclosure limited to data you can already see.
 
 **A window over the cap is a `400` that names the cap. Nothing is ever silently clamped.** Windows are bounded (`app.reports.max-window-days`, 365 days by default, counting both endpoints), and a request wider than that is refused with a problem document whose `detail` names three things — the cap, the property key, and the length it actually measured:
@@ -1980,6 +1986,8 @@ It exists because the classic complaint about a reporting feature is *"these num
 
 The cap is a **maximum, not a strict inequality** — a window exactly that long is served. `from` after `to` is a second `400`, and it echoes both dates back, because the caller of a report API is usually a chart that did the date arithmetic itself and needs to know which end it got wrong. Since nothing is clamped, the `from`/`to` in a `200` are always exactly the ones you sent.
 
+**Every windowed report shares one implementation of these rules, down to the wording of the messages**, so `/flow` and `/cycle-time` default, measure and refuse identically and a client that handles one handles the other. **Not every report has a window**, though: `/aging` asks a current-state question, takes no parameters at all, and is therefore the only endpoint on this path that cannot return a `400`.
+
 **A date outside the supported band is a third `400`, refused before any arithmetic.** Report dates must fall in `1970-01-01`…`2200-12-31`, and one that does not is refused in the same refuse-and-name-it wording as the cap — naming the parameter, the value and the band. The floor is the epoch (issue history is written by this application and cannot predate it); the ceiling is deliberately loose, because a window may legitimately end in the future, and deliberately far below the largest representable date, because the point is a sane band rather than the last instant a database can store. The check runs **before** the window is measured and before any date is incremented: an extreme-but-perfectly-parseable year such as `+999999999-12-31` binds happily and used to overflow into a `500` on an endpoint whose contract promises `400`.
 
 **Tenancy is resolved before the window is validated.** A caller who cannot see the project gets `404` even when the window is also malformed. A `400` there would tell an outsider that the project exists — cheaply, repeatably, and without ever authenticating as anyone entitled to know.
@@ -1987,6 +1995,8 @@ The cap is a **maximum, not a strict inequality** — a window exactly that long
 **Reports are throttled per principal, and that `429` comes *before* the `404`.** The whole `…/reports/**` path shares one budget per caller — 60 requests per minute by default — and a request past it is refused with `429` and a `Retry-After` header (seconds). It is a **retryable throttle, not a fault**: nothing was computed, and the identical request succeeds after the wait; a report is never narrowed or approximated to fit a budget. A report needs this when no other read does because its cost is not bounded by what it returns: the flow report's opening balance counts history from before the window, so asking for a narrower window does not make it cheaper, and `private` caching means no shared cache ever absorbs a repeat.
 
 The budget is spent **before** the workspace and project are resolved, so this is the one place in this API where `429` precedes `404` — an over-budget caller is refused even for a project they cannot see. That ordering is deliberate, and so is keying the budget on the **caller** rather than the project: a per-project key would answer differently depending on whether a project exists, turning a throttle into an existence oracle, and would let one colleague's open dashboard tab throttle everyone else on the project. Keyed on you, the `429` is identical for a real project, a nonexistent one and somebody else's.
+
+One thing to know if you are sizing against this number: **the counters live in memory on each app node**, so a deployment running several instances gives each caller that budget *per instance* rather than one budget overall. With requests spread across replicas, the effective ceiling is the configured rate multiplied by the number of nodes. The throttle exists to keep a single caller from monopolising the database, and it still does that on every node — but it is not a global quota, and it should not be quoted as one.
 
 One consequence worth stating for anyone sizing a deployment: because the key is the **principal**, this budget bounds **one user, not one workspace**. Ten members each get 60 report requests a minute, so aggregate report load still scales with member count — that is what a per-user limit does and does not promise, and it is not a defect. Size on members × budget, not on the budget alone.
 
@@ -2032,6 +2042,114 @@ curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/flow?from=2026-05-21&to=202
 **`resolved` means "issues closed *now*, dated by their latest closure" — so past numbers can move.** This is an honest limitation of the data model rather than a bug, and it is worth stating plainly. The series are built from an issue's `createdAt` and `closedAt` and from nothing else; there is no resolution-event ledger. `closedAt` is **cleared** when an issue leaves a DONE status, so reopening an issue removes it from the bucket it used to sit in, and closing it again puts it in a new one. `openAtEnd` inherits the same caveat, one integral further on. The same window queried a week apart can therefore report different history, and a client rendering this report is expected to footnote it: *"Resolved counts issues that are closed now, dated by their latest closure. Reopened issues move."*
 
 **The filter ids narrow the series; they never `404` or `422`.** `typeId`, `componentId` and `labelId` are ordinary equality filters over the project's own data (an issue carrying several labels is still counted once). An id that does **not** exist — or that exists but belongs to another project or another workspace — simply matches nothing and yields an **empty series with a `200`**. This is deliberate, and it is the opposite of what the rest of this API does with a request-supplied id: the report queries are project-scoped first, so an unknown filter can only ever narrow, and answering `404`/`422` instead would turn the endpoint into an existence oracle for another tenant's types and labels. You are not left guessing, though: **`meta.unmatchedFilters` names every filter that matched nothing in this project**, so an all-zero chart is never ambiguous — read that array before concluding it was a quiet quarter.
+
+### Cycle time — how long finished work took
+
+`GET …/reports/cycle-time` answers "how long does our work take?": one dot per issue **completed inside the window**, and the p50/p85 of both measures to draw across them.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/cycle-time?from=2026-05-21&to=2026-08-19" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "from": "2026-05-21", "to": "2026-08-19",
+  "items": [
+    { "issueId": "0192f3…", "key": "DEMO-14", "title": "Search returns stale results",
+      "typeId": "0192a1…", "startedAt": "2026-08-13T09:02:11Z", "closedAt": "2026-08-17T14:47:03Z",
+      "cycleDays": 4.24, "leadDays": 11.7 },
+    { "issueId": "0192f2…", "key": "DEMO-9", "title": "Importer times out on large CSVs",
+      "typeId": "0192a1…", "startedAt": null, "closedAt": "2026-08-16T08:12:44Z",
+      "cycleDays": null, "leadDays": 31.05 }
+  ],
+  "percentiles": {
+    "cycle": { "p50": 4.1, "p85": 12.6 },
+    "lead":  { "p50": 9.0, "p85": 28.4 }
+  },
+  "sampleSize": 214,
+  "missingStartCount": 128,
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 214,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**The window is a range on `closed_at`.** This report is about work that *finished* in the window, so an issue created two years ago and closed yesterday is in yesterday's report, and an issue created inside the window and still open is in no report here at all. That is the only reading under which the x-axis — completion date — *is* the window you asked for.
+
+**Every parameter is optional and the window behaves exactly as [`/flow`](#flow--created-vs-resolved)'s does**: no parameters means *the last 90 days, unfiltered*, `to` defaults to today in UTC and `from` to `min(90, app.reports.max-window-days) - 1` days before it, both endpoints counted. The defaulting, the never-clamp rule, the `400` naming the cap, the `from > to` refusal and the `1970-01-01`…`2200-12-31` band are **one implementation shared with `/flow`**, messages included — a client that handles one handles the other, and there is nothing report-specific to re-read above.
+
+**The honesty rule: cycle time is defined only for issues that have a recorded start.** `startedAt` was added in an earlier slice and backfilled best-effort — the backfill matches history rows to statuses by display *name*, so a renamed status is invisible to it, and an issue filed straight into an in-progress status wrote no history row at all — so any project with history has completed issues with no start. Those issues come back with **`cycleDays: null`**: not `0`, not "the same as lead". They contribute to `leadDays`, to `sampleSize` and to `missingStartCount`, and to nothing else.
+
+**`created_at` is never substituted for a missing `started_at`**, and that is the single most important sentence on this endpoint. The substitution does not produce one wrong number in one place — it converts the whole report into a lead-time report wearing the label "cycle time", moves the p85 that [`/aging`](#aging-work-in-progress--what-is-rotting-now) draws across its columns, and says so nowhere in the response. What you get instead is the gap, counted. **Surface `missingStartCount`**: "cycle time available for 812 of 940 completed issues" is the sentence it exists for, and a client that hides it hands the reader a chart with a silent hole in it.
+
+**Percentiles are suppressed below five samples, and the two measures are gated independently.** `percentiles.cycle` is computed over `sampleSize - missingStartCount` issues and `percentiles.lead` over `sampleSize` — different sets, and on an upgraded install wildly different sizes — so a window can legitimately return a usable `lead` pair beside a suppressed `cycle` one. Gating them together would either hide a number we have or print a p85 drawn from two issues.
+
+**Suppression is `null`s inside the containers, never a missing container.** `percentiles`, `percentiles.cycle` and `percentiles.lead` are **always emitted**; read `percentiles.cycle.p50 === null` and do not code for an absent object. Suppression is a fact about the data, not a change of response shape. The threshold is fixed at five and is not configurable: it is a statement about what is meaningful, and a line whose threshold differs between installs is worse than a missing line.
+
+**The lines describe the whole matching set even when the dots are truncated.** The percentiles are aggregates computed by PostgreSQL over every matching issue, not over the page of rows that survived `meta.cap` — a p85 over "the most recent 20 000" would be a different statistic wearing the same label. So on a truncated report the dots are a sample and the lines are the population, and **`sampleSize` versus `items.length` is what tells a client it received a subset** (`meta.truncated` says the same thing in one bit). **What survives truncation is the most recent work**: `items` are ordered most recently closed first, ties broken by id so a truncated report is deterministic. Assume the other end and you draw a wrong chart from a correct response.
+
+**The filter ids narrow the scatter; they never `404` or `422`.** `typeId`, `componentId` and `labelId` behave exactly as they do on `/flow`: predicates applied inside an already project-scoped query, so an id that does not exist — or belongs to another project or tenant — matches nothing and yields an empty `items` with `200`, and `meta.unmatchedFilters` names it. A multi-label issue is counted once, in the counts and in the percentiles alike.
+
+One `meta` field is worth reading with this report's own definitions in hand: **`basedOnIssues` equals `sampleSize`** here — the completed issues in the window after filters, not the shipped rows. **`firstIssueAt` is the family's and is *not* windowed**: it is the project's earliest issue that the filters admit, so on any project older than the window it predates `from`, and that is the point — it is what tells the reader whether the window they picked is wider than the history behind it. A value clipped to the window could only ever report the window back.
+
+### Aging work in progress — what is rotting now
+
+`GET …/reports/aging` is the other half of the same page and the one almost nobody ships: not "how long did finished work take" but **"which open item is rotting right now"**. A column per non-DONE status of the project's workflow, each holding its open issues oldest first, under the project's lifetime cycle-time percentiles.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/aging" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "columns": [
+    { "statusId": "0192b0…", "name": "To Do", "category": "TODO", "items": [] },
+    { "statusId": "0192b1…", "name": "In Progress", "category": "IN_PROGRESS",
+      "items": [
+        { "issueId": "0192f7…", "key": "DEMO-31", "title": "Flaky import on large CSVs",
+          "ageDays": 19.4, "assigneeId": "0192c4…", "startedAt": "2026-07-31T07:15:00Z" },
+        { "issueId": "0192f9…", "key": "DEMO-44", "title": "Audit log paging",
+          "ageDays": 6.02, "assigneeId": null, "startedAt": null }
+      ] },
+    { "statusId": null, "name": "Not on this board", "category": null,
+      "items": [
+        { "issueId": "0192e2…", "key": "DEMO-12", "title": "Legacy migration spike",
+          "ageDays": 74.8, "assigneeId": "0192c9…", "startedAt": "2026-06-05T10:00:00Z" }
+      ] }
+  ],
+  "percentiles": { "p50": 4.1, "p85": 12.6 },
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 37,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**No parameters, and no window — deliberately.** "What is rotting *now*" is a question about current state. A window on it would be meaningless (every open issue is open today) or actively misleading (a window on `created_at` hides exactly the oldest items, which are the entire point). This is therefore **the only endpoint on this path that cannot return a `400`**: the failures available to it are `401`, `404` and `429`, and nothing else. Its cost is bounded by work *in flight* rather than by history, which is a far smaller number on any healthy project — and capped anyway.
+
+**"Open" means `status.category <> DONE`** — the same question the columns are keyed on — and *not* `closed_at IS NULL`. The two agree today only because the application maintains that invariant (stamped on entering DONE, cleared on leaving); asking the category is what keeps an issue from being in the report but in no column, or in a column but not the report.
+
+**Columns come from the workflow, items come from the issues, and the two can disagree in both directions.** Columns are the project's *effective* statuses in board order minus the DONE category, **including the empty ones**: a status nobody is currently in is a fact about the board, and a report that draws only the columns it found rows for silently redraws its own axis every day. The reverse disagreement is the interesting one — an issue can sit in a status that is no longer in the project's workflow, because Hamstrack gates *transitions*, not existing rows, so a workflow swap strands whatever was mid-flight. **Those issues arrive in a single trailing column with `statusId: null`, `category: null` and the name `"Not on this board"`, and a client must render it.** A report whose purpose is to name the item nobody is looking at must not begin by hiding the items nobody is looking at. It is one column rather than one per retired status on purpose: the reader's question is "what is stranded", not "which dead status is it stranded in", and per-status columns would let a workflow swap add a dozen columns to a chart. It is also the one column that cannot be dragged to — that is what the `null` `statusId` is telling you.
+
+**`ageDays` falls back to `created_at` when there is no `started_at`, and the asymmetry with `/cycle-time` is deliberate.** Cycle time is a measurement of finished work, where substituting filing time for start time produces a number that is simply wrong. Age is a question about something that has *not* happened yet, and "filed 40 days ago and nobody has picked it up" is a true, useful and materially **different** fact from "in progress for 40 days". Both belong on this board, so `ageDays` is never `null` — and the nullable `startedAt` is returned beside it precisely so a reader can tell the two apart rather than being handed a number with no account of where it came from. Every item in one response is aged against the same instant, and that instant is `meta.computedAt`.
+
+**The percentile lines belong to the other half, and are deliberately unwindowed.** `percentiles` here is the **cycle time** p50/p85 of this project's *whole completed history* — not a window, and not whichever measure the page's toggle is showing. That is what makes the report actionable rather than a list: an item past the p85 line is visibly older than 85% of everything the team has ever finished, a statement about *this item*, in the team's own units, with no target, no SLA and nothing configured.
+
+Two consequences, because both look like bugs from outside:
+
+- **The same two field names mean different things on the two endpoints.** On `/cycle-time`, `p50`/`p85` belong to the window you requested and come as one pair *per measure*; here they are all-time and cycle-only. A client showing both must not label them alike.
+- **They are computed from completed issues that have a `started_at`**, so a project whose history predates the backfill can have full columns and suppressed (`null`) lines. The columns still render — the lines are an overlay, not a precondition — and the client prints the same "not enough completed work to compute percentiles (need 5, have 3)" sentence the other half uses, off the same five-sample threshold.
+
+**The lines are served from a 60-second per-project snapshot; the columns never are.** Their aggregate is the one statement in this feature that nothing the caller sends can narrow — no window, no cap, and it grows for the life of the project — so it runs at most once per project per minute per node. The claim is unchanged (the pass still covers the whole history when it runs), and the staleness is one this response already advertises to the browser with `Cache-Control: max-age=60`; a line drawn from years of history does not visibly move in a minute. The open half — the columns, the items and `meta.basedOnIssues` — is computed live on every request, because a minute-old count printed above a live item list is exactly the "these numbers don't match" failure `meta` exists to prevent.
+
+**Truncation keeps the oldest.** Open issues are ordered oldest-first **project-wide** and the cap is applied to that single ordering *before* the rows are grouped into columns, so what survives is the aging end of the whole queue — the opposite end from `/cycle-time`'s, and the right one for each. (A truncated response therefore thins the freshest items out of every column at once, rather than trimming each column separately.) `meta.basedOnIssues` is how many open issues the report was *about*, which is larger than the number of items shipped when `meta.truncated` is true, and `meta.unmatchedFilters` is always empty because this endpoint takes no filters to leave unmatched.
+
+**`meta.firstIssueAt` here is the project's earliest issue, not the earliest open one** — the family's definition, identical on all three reports. Nothing is lost by that: the earliest open issue is already in the body, since items come back oldest-first, so it is literally the first item of the first non-empty column, with its key, its title and its age — strictly more than a bare timestamp in `meta` could say. The depth of the project's **completed** history, by contrast, is not derivable from this response at all, and it is exactly the provenance this report needs, because its `p50`/`p85` lines are computed over that entire history.
 
 ## Search (HQL)
 

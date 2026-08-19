@@ -51,7 +51,7 @@ The brief asked whether "scope change mid-sprint" is really the accusation. It i
 
 And the accusation the brief asked about, verified with an important wrinkle: Jira's burndown counts **estimate changes as scope change**, so the Sprint Report and the Burndown Chart disagree with each other about how much scope changed — *"the Burndown Chart reflects both issues added to a sprint after it has started **and estimate changes**"* ([community thread](https://community.atlassian.com/forums/Jira-questions/Scope-change-in-Burndown-vs-Issues-added-to-sprint-in-Sprint/qaq-p/2891998)), producing the reported symptom of *"burndown shows scope change even after estimating hours before starting the sprint"* ([thread](https://community.atlassian.com/forums/Jira-questions/Issue-with-scope-changes-in-the-burndown-chart-when-sprint-is/qaq-p/1292547)).
 
-**Conclusion — and it decides whether we ship one at all:** three of the four failure modes are properties of the *burndown form itself* (a single descending line whose slope confounds "work done", "scope changed" and "somebody updated a status"). Only #4 is fixable by configuration. **We do not ship a burndown.** We ship a burn-up whose scope line and completed line are separate series, and — decisively — **we define scope change as membership change only, never as an estimate change.** A re-estimate moves the height of the scope line going forward and is never drawn as an event. That single rule deletes the disagreement documented above.
+**Conclusion — and it decides whether we ship one at all:** three of the four failure modes are properties of the *burndown form itself* (a single descending line whose slope confounds "work done", "scope changed" and "somebody updated a status"). Only #4 is fixable by configuration. **We do not ship a burndown.** We ship a burn-up whose scope line and completed line are separate series, and — decisively — **we define scope change as membership change only, never as an estimate change.** A re-estimate is never drawn as an event. That single rule deletes the disagreement documented above. (It moves the scope line as a whole, past included, because points are read current — see §2.3, where that trade is stated and why the alternative is not buildable.)
 
 ### 1.3 Disliked — cumulative flow diagrams
 
@@ -155,11 +155,15 @@ A Hamstrack team can see *what* is in a project — board, backlog, search — a
 
 *Finished work* — a scatter: x = completion date, y = days, each dot one issue, clickable. Two horizontal reference lines: **p50 and p85** of the window, with sample size printed (`based on 214 issues`). Toggle between **cycle time** (`started_at → closed_at`) and **lead time** (`created_at → closed_at`). No rolling average, ever (§1.7).
 
-*Unfinished work — aging WIP* — a column per non-DONE status of the project's effective workflow; each column a stack of dots by **age since `started_at`** (or since `created_at` for items never started), oldest at top, each labelled with issue key and assignee. The p50/p85 lines from the finished half are drawn across it, so an item above p85 is visibly older than 85% of everything the team has ever finished. That is the point: it names the item.
+*Unfinished work — aging WIP* — a column per non-DONE status of the project's effective workflow; each column a stack of dots by **age since `started_at`** (or since `created_at` for items never started), oldest at top, each labelled with issue key and assignee. Reference lines are drawn across it too, so an item above p85 is visibly older than 85% of everything the team has ever finished. That is the point: it names the item.
+
+**Those reference lines are cycle time over the project's whole completed history — not the window, and not the selected measure.** Deliberately: aging has no window of its own, so a windowed percentile here would be an arbitrary comparison. They therefore differ from the lines on the finished half, which means both halves must say which they are showing. The suppression threshold is shared, though: a reader told "not enough completed work" on the scatter must not find a confident p85 painted across the columns beside it.
 
 **Data:** `created_at`, `closed_at`, and a **new column `issues.started_at`** (§5.1) stamped on first entry into an `IN_PROGRESS`-category status. Aging WIP additionally reads the project's effective statuses through `ProjectConfigService` (already cached).
 
-**Cost:** one bounded native query per half. Percentiles via `percentile_cont(...) WITHIN GROUP (ORDER BY ...)` in PostgreSQL, not in Java. Row cap (`app.reports.max-rows`, default 20 000) with `meta.truncated`, never silent truncation.
+**Cost:** the finished half is two statements (the bounded row query and one combined aggregate). The aging half is **two on the steady-state path and three on a cold one**, and the split is deliberate — see below. Percentiles via `percentile_cont(...) WITHIN GROUP (ORDER BY ...)` in PostgreSQL, not in Java. Row cap (`app.reports.max-rows`, default 20 000) with `meta.truncated`, never silent truncation.
+
+**Why aging's third statement exists, and why it is cached** (HD-138 R3 round 2 — do not "simplify" it back into one query): the reference lines above are computed over the project's *entire* completed history, so that statement has **no window, no row cap, and nothing the caller can narrow**, and it grows for the life of the project. It is the only unbounded read in the feature; every other one is bounded by a validated window or by the row cap, while the per-principal throttle charges one unit for it exactly as for a cheap request. It is therefore split out of the open-work aggregate and fronted by a **60-second per-project cache** — the same freshness the response already advertises to the client as `Cache-Control: private, max-age=60`, so nothing is staler than the contract already permitted. The claim in bold above is preserved exactly: the pass still covers the whole history when it runs, it just runs at most once per project per minute per node. Only that half is cacheable; the open counts stay live, because a minute-old open count printed above a live item list could disagree with the rows underneath it. Measured on a 100k-issue project: ~120 ms of database time per request before, ~65 ms warm, and the old ~120 ms on a miss.
 
 **Capability:** none.
 
@@ -180,10 +184,18 @@ Plus a faint **ideal** guide from (start, 0) to (end, scope-at-start) — a guid
 Measure toggle: **issue count** (default) or **story points**.
 
 **The two rules that make it different from a burndown:**
-1. **Scope change is membership change only.** A re-estimate is never a scope event; it changes the scope line's height going forward and is not drawn as a step. This deletes the documented Jira disagreement (§1.2).
+1. **Scope change is membership change only.** A re-estimate is never a scope event and is not drawn as a step. This deletes the documented Jira disagreement (§1.2).
+
+   An earlier draft of this rule said a re-estimate "changes the scope line's height going forward". **It does not, and it cannot** — the ledger (§5.2) records a row only when membership changes, so a re-estimate that moves no issue leaves no trace and a per-day estimate history is not reconstructible from anything we store. The rule below is the one that governs.
 2. **The line ends where it ends.** No projection, no "at this rate you'll finish Thursday". Forecasting lives in §2.5 with a stated sample size.
 
-**Data:** `sprint_scope_events` (§5.2) for the scope line, `issues.closed_at` for the completed line, `issues.story_points` for points. Points are the issue's **current** points — footnoted *"Points reflect current estimates."*
+**Data:** `sprint_scope_events` (§5.2) for the scope line, `issues.closed_at` for the completed line, `issues.story_points` for points.
+
+**Points are the issue's CURRENT points** (decision, 2026-08-19). The consequence is worth stating plainly rather than burying in a footnote: **a re-estimate moves the whole scope line, including its past**, so a chart read yesterday can look different today. That is the honest trade. The alternative — freezing each issue's points at the moment it entered the sprint, which the ledger's `story_points` column does snapshot — buys an immovable history at the price of a re-estimate never being visible anywhere, and it would make a sprint's scope disagree with the same issues' current estimates on every other screen in the product.
+
+The UI footnotes it: *"Points reflect current estimates."*
+
+The ledger's snapshot is **not** made redundant by this. It answers a different question, and the one the sprint review (§2.4) actually asks: *what did this issue weigh when it entered this sprint* — which is exactly what a retrospective needs and what current points destroy.
 
 **Cost:** two queries. The ledger for one sprint is O(sprint size + changes) — hundreds of rows. Cheapest report in the set.
 
@@ -450,7 +462,7 @@ app.reports.max-window-days=${REPORTS_MAX_WINDOW_DAYS:365}
 app.reports.max-rows=${REPORTS_MAX_ROWS:20000}
 ```
 
-`@ConfigurationProperties` in `common.config`, `@Min`-validated, **identical in `dc` and `cloud` with no profile override** — reporting depth is a product property, not a plan property; if it were ever limited it would be by lowering a number, never by a second code path. Both go in the DC operator-settings table in `docs/api-dc.md`, `.env.prod.example` and the README config table (`dc-cloud-guard` checklist).
+`@ConfigurationProperties` in `common.config`, `@Min`-validated, **identical in `dc` and `cloud` with no profile override** — reporting depth is a product property, not a plan property; if it were ever limited it would be by lowering a number, never by a second code path. Both go through the full wiring checklist below. Note it names **four** files and no README table — there is no config table in the README, and the two most easily missed are the declaration site itself and the operator reference.
 
 ---
 
@@ -462,7 +474,7 @@ app.reports.max-rows=${REPORTS_MAX_ROWS:20000}
 | `from > to` | 400. |
 | Row cap bites | 200 with `meta.truncated = true`; the UI prints *"showing the most recent 20 000 issues"* above the chart. |
 | Project has 0 issues | 200, empty series, a specific empty-state sentence per report (§2). Never a blank panel. |
-| Fewer than 5 completed issues (cycle time) | Percentiles suppressed, sample size stated. |
+| Fewer than 5 completed issues (cycle time) | Percentiles suppressed, sample size stated. **Cycle and lead are gated independently** — they are computed over different sets (`sampleSize - missingStartCount` vs `sampleSize`), which on an upgraded install differ widely, so one may be suppressed while the other is not. |
 | Fewer than 3 completed sprints (velocity) | Forecast band suppressed, sample size stated. |
 | Sprint from another project | 404 (`findByIdAndProject`). |
 | Sprint deleted while a report URL is open | 404 on refetch; the UI offers the sprint picker. |
@@ -505,7 +517,7 @@ app.reports.max-rows=${REPORTS_MAX_ROWS:20000}
 
 - No scheduler, no background job, no queue, no second read model, no external warehouse — a direct consequence of refusing the CFD and scheduled delivery (§3).
 - No object storage, no email, no third-party service.
-- The two new properties (§5.3) are identical in `dc` and `cloud` with no profile override, and go through the full wiring checklist: `application.properties` → `docker-compose.prod.yml` (via `env_file`, so nothing to add) → `.env.prod.example` → README config table → `docs/api-dc.md` operator settings.
+- The two new properties (§5.3) are identical in `dc` and `cloud` with no profile override, and go through the full wiring checklist: `application.properties` (**the declaration site — its comment sits one line above the value and is the one that goes stale**) → `docker-compose.prod.yml` (via `env_file`, so nothing to add) → `.env.prod.example` → `docs/self-hosting.md` (**the operator reference; README has no config table and delegates here**) → `docs/api-dc.md` operator settings.
 - PNG export is client-side, so there is no headless-browser dependency on the server (which *would* have been a DC problem — and is one of the reasons scheduled PDF is refused).
 - If scheduled delivery is ever built, its DC answer is the existing single-node `@Scheduled` infrastructure (the same one the rate limiter uses) plus `MailService`, with the single-node caveat documented exactly as rate limiting documents it. Recorded here so the follow-up epic does not rediscover it.
 
@@ -580,7 +592,11 @@ Why R1 before R2 even though R2 is "foundations": R1 has zero data dependencies 
 
 **Performance**
 - [ ] Each report is a bounded, fixed number of queries (query-count test in the style of `PermissionResolutionQueryCountTest`) — no N+1 over issues, sprints or the ledger.
-- [ ] `EXPLAIN` shows index usage on `(project_id, created_at)`, `(project_id, closed_at)`, `(project_id, started_at)` and `(sprint_id, occurred_at)`.
+- [ ] `EXPLAIN` shows index usage, per slice and named — an index no shipped query uses is not a passing checkbox, it is a write cost on the hottest table in the product:
+  - `(project_id, created_at)` and `(project_id, closed_at)` — R1 (flow), R3 (cycle time). **Confirmed.**
+  - `(sprint_id, occurred_at)` — R4/R5, once the ledger has a reader.
+  - `(project_id, started_at)` — **used by nothing so far.** R3 was expected to exercise it and does not: neither half filters or sorts on `started_at` alone (cycle time ranges on `closed_at`, aging orders by `COALESCE(started_at, created_at)`). If R4 and R5 do not use it either, drop it rather than carry it.
+- [ ] Index-only scans are expected of the **aggregate** halves only. A report that returns per-issue rows carries a heap fetch per shipped row by construction — the range scan is index-only, the payload is not. Do not write an acceptance criterion a row-returning report cannot meet.
 - [ ] On a seeded 100k-issue project, every report responds in under 1 s warm.
 
 **Migration**
@@ -591,5 +607,5 @@ Why R1 before R2 even though R2 is "foundations": R1 has zero data dependencies 
 
 **Docs & config**
 - [ ] `openapi.yaml` validates (`swagger-cli`); both `docs/api-*.md` updated.
-- [ ] `REPORTS_MAX_WINDOW_DAYS` / `REPORTS_MAX_ROWS` documented in the README table, `.env.prod.example`, and `docs/api-dc.md` operator settings; identical defaults in `dc` and `cloud`.
+- [ ] `REPORTS_MAX_WINDOW_DAYS` / `REPORTS_MAX_ROWS` documented — and **agreeing on the valid range** — in all four places: `application.properties` (the comment above the declaration), `.env.prod.example`, `docs/self-hosting.md` and `docs/api-dc.md` operator settings; identical defaults in `dc` and `cloud`. A bound changed in the validator but not in these is a documented value that aborts the boot — R3 shipped exactly that miss, in two of the four, because this list previously named a README table that does not exist and omitted the other two.
 - [ ] `DESIGN.md` gains a data-visualisation palette section before any chart ships.

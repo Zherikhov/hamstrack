@@ -36,6 +36,20 @@ import java.util.List;
  *                         request for a number that was never the right one. Filtered like
  *                         everything else in the response, so on a filtered chart it reads
  *                         "the first issue this chart could ever have shown".
+ *                         <p><strong>Filters yes, window NO — on every report, without
+ *                         exception</strong> (HD-138 R3 round 3). It is a property of the
+ *                         PROJECT, not of the sample the report happens to be describing,
+ *                         and this record is shared by every report while the SPA reads
+ *                         the field through a single shared helper. Each report computed
+ *                         it its own way once and the field silently meant three things:
+ *                         project-wide on flow, the windowed completed sample on cycle
+ *                         time, currently-open issues on aging — three populations, one
+ *                         name, and every one of them a plausible date, so nothing looked
+ *                         wrong. Applying the window is also circular: the earliest issue
+ *                         inside a fortnight is at most a fortnight old, so a five-year-old
+ *                         project reported a fortnight of history and the thin-data banner
+ *                         fired on every project. Any later report on this base path
+ *                         computes it the same way or does not populate it.
  * @param unmatchedFilters the names of the supplied filter parameters that match
  *                         <strong>no issue in this project at all</strong> — never null,
  *                         empty when every filter matched something or none was sent.

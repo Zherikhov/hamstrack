@@ -42,6 +42,27 @@ public class CacheConfig {
     public static final String ROLE_VIEW_CACHE = "roleView";
 
     /**
+     * The aging report's lifetime cycle-time percentiles, per project (HD-138 R3 round 2).
+     *
+     * <p><strong>On the shared 60 s spec above, deliberately</strong> — the opposite decision from
+     * {@link #ROLE_VIEW_CACHE}, for the opposite reason. That one is an authorization answer, so
+     * its staleness window is a security property and it needs its own shorter, unreachable TTL.
+     * This one is an <em>availability</em> measure over a read every member is already entitled
+     * to: it fronts the only O(project-history) statement in the reports feature, which has no
+     * window and no {@code LIMIT} and grows forever. Sixty seconds is also exactly the
+     * {@code Cache-Control: private, max-age=60} that {@code ReportController} already puts on
+     * the response, so the server-side snapshot is no staler than what the client was already
+     * told it may show. Nothing is evicted; the TTL is the whole invalidation strategy — see
+     * {@code LifetimeCycleTimeCache} for why there is no sensible event to evict on.
+     *
+     * <p>Not registered via {@code registerCustomCache}: {@link CaffeineCacheManager} creates a
+     * cache on first use from {@link #cacheManager()}'s default spec, and that spec <em>is</em>
+     * the intent here. It is named here rather than as a string literal in the report package so
+     * that this class stays the one place listing what this process holds in memory.
+     */
+    public static final String REPORT_LIFETIME_CYCLE_TIME_CACHE = "reportLifetimeCycleTime";
+
+    /**
      * How long an <strong>authorization</strong> answer may be stale — six times shorter
      * than the taxonomy caches above, because it is a security property rather than a
      * config-freshness one.

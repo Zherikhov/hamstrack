@@ -1,9 +1,14 @@
 package com.hamstrack.report.controller;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.report.dto.AgingReportResponse;
+import com.hamstrack.report.dto.CycleTimeQuery;
+import com.hamstrack.report.dto.CycleTimeReportResponse;
 import com.hamstrack.report.dto.FlowQuery;
 import com.hamstrack.report.dto.FlowReportResponse;
 import com.hamstrack.report.dto.ReportInterval;
+import com.hamstrack.report.service.AgingReportService;
+import com.hamstrack.report.service.CycleTimeReportService;
 import com.hamstrack.report.service.FlowReportService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
@@ -44,9 +49,18 @@ import java.util.UUID;
  *       <strong>never</strong> silently clamped), a date outside the supported band
  *       ({@code FlowQuery.MIN_DATE}..{@code MAX_DATE} — an extreme year parses but cannot be
  *       computed with), or an unparseable date/interval;</li>
+ *   <li>{@code 400} — also, on <em>every</em> endpoint here including the parameterless one,
+ *       a path id that is not a UUID: that is a {@code MethodArgumentTypeMismatchException}
+ *       raised while binding, before any handler method runs. It discloses nothing (a
+ *       malformed id names no resource, so there is no existence to confirm) and it is not
+ *       specific to reports, but it belongs in a list the next reader will trust;</li>
  *   <li>{@code 401} — anonymous;</li>
  *   <li>{@code 404} — workspace or project not visible to the caller;</li>
- *   <li>{@code 429} — past this caller's report budget, with {@code Retry-After}.</li>
+ *   <li>{@code 429} — past this caller's report budget, with {@code Retry-After};</li>
+ *   <li>{@code 500} — a broken install: a project whose effective workflow cannot be
+ *       resolved (no system default workflow) fails the same way on every project endpoint
+ *       in the product, not just here. Stated so the list is what can actually happen
+ *       rather than what was designed to happen.</li>
  * </ul>
  *
  * <p>Responses are {@code Cache-Control: private, max-age=60} <strong>and
@@ -79,9 +93,18 @@ import java.util.UUID;
  * the answer is 429 + {@code Retry-After} — a report is never narrowed or approximated to fit
  * a budget.
  *
- * <p>Only {@code /flow} exists so far (slice R1). The rest of §4.3 — cycle time, aging WIP,
- * sprint burn-up, sprint review, velocity and the {@code .csv} variants — land in later
+ * <p>{@code /flow} (R1), {@code /cycle-time} and {@code /aging} (R3) exist so far. The rest of
+ * §4.3 — sprint burn-up, sprint review, velocity and the {@code .csv} variants — land in later
  * slices on this same base path and reuse this class's conventions.
+ *
+ * <p>R3 adds one distinction to the list above rather than a new rule: <strong>not every report
+ * has a window</strong>. {@code /aging} answers a current-state question and therefore takes no
+ * parameters at all, so it is the only endpoint here with <strong>no 400 of its own</strong> —
+ * there is nothing for a caller to state wrongly, and an unknown query parameter is ignored
+ * rather than refused. It is <em>not</em> "the endpoint that cannot return a 400", which is what
+ * this note said until round 2 and is not true: a malformed path UUID 400s here as it does
+ * everywhere, before the handler runs. That is a property of the question, not an omission — see
+ * the method.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/reports")
@@ -92,6 +115,8 @@ public class ReportController {
     private static final Duration CACHE_TTL = Duration.ofSeconds(60);
 
     private final FlowReportService flowReportService;
+    private final CycleTimeReportService cycleTimeReportService;
+    private final AgingReportService agingReportService;
 
     /**
      * {@code GET …/reports/flow} — created vs resolved, bucketed on UTC day/week
@@ -125,6 +150,70 @@ public class ReportController {
                 .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
                 // The credential is part of the cache key or `private` is a promise the
                 // browser was never told how to keep — see the class javadoc.
+                .varyBy(HttpHeaders.AUTHORIZATION)
+                .body(report);
+    }
+
+    /**
+     * {@code GET …/reports/cycle-time} — the finished-work half of the cycle time page (§2.2):
+     * one entry per issue completed inside the window, plus the p50/p85 of both measures.
+     *
+     * <p>The window is a range on <strong>{@code closed_at}</strong> and follows the same rules as
+     * {@code /flow} down to the wording of its refusals (they are one implementation —
+     * {@code ReportWindow}). The three filters behave identically too: an id that names nothing
+     * narrows the report to an empty series and is reported in {@code meta.unmatchedFilters},
+     * rather than 404ing.
+     *
+     * <p>Two fields exist because the data is honest about a gap: {@code sampleSize} is the
+     * completed issues in the window and {@code missingStartCount} is how many of them have no
+     * {@code started_at} — they contribute to lead time and to nothing else, because
+     * {@code created_at} is never substituted for a missing start. Below five samples the
+     * matching percentile pair comes back as nulls instead of noise.
+     */
+    @GetMapping("/cycle-time")
+    public ResponseEntity<CycleTimeReportResponse> cycleTime(
+            @AuthenticationPrincipal User actor,
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
+            @RequestParam(required = false) UUID typeId,
+            @RequestParam(required = false) UUID componentId,
+            @RequestParam(required = false) UUID labelId) {
+        var report = cycleTimeReportService.cycleTime(actor, workspaceId, projectId,
+                new CycleTimeQuery(from, to, typeId, componentId, labelId));
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
+                .varyBy(HttpHeaders.AUTHORIZATION)
+                .body(report);
+    }
+
+    /**
+     * {@code GET …/reports/aging} — the unfinished-work half (§2.2): a column per non-DONE status
+     * of the project's effective workflow, each holding its open issues oldest-first, with the
+     * cycle-time p50/p85 of the project's completed work to draw across them.
+     *
+     * <p><strong>No parameters, and no window — deliberately.</strong> "Which open item is rotting
+     * right now" is a question about current state; a window on it would either be meaningless
+     * (every open issue is open today) or actively misleading (a window on {@code created_at}
+     * hides exactly the oldest items, which are the entire point). This is therefore the one
+     * endpoint on this base path with <strong>no 400 of its own</strong>: it validates nothing,
+     * because there is nothing here for a caller to get wrong, and a stray query parameter is
+     * ignored rather than refused. Its failures are 401, 404 and 429 — plus the two that belong
+     * to every endpoint rather than to this one: a 400 from binding a malformed path UUID, and a
+     * 500 on an install with no system default workflow. See the class note.
+     *
+     * <p>An issue whose status has left the workflow appears in a trailing "Not on this board"
+     * column ({@code statusId: null}) rather than vanishing from the report.
+     */
+    @GetMapping("/aging")
+    public ResponseEntity<AgingReportResponse> aging(
+            @AuthenticationPrincipal User actor,
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId) {
+        var report = agingReportService.aging(actor, workspaceId, projectId);
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
                 .varyBy(HttpHeaders.AUTHORIZATION)
                 .body(report);
     }

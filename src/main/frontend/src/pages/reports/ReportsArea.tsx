@@ -2,6 +2,7 @@ import { NavLink, Navigate, Route, Routes, useParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { apiGetProject } from '../../api'
 import FlowReportPage from './FlowReportPage'
+import CycleTimeReportPage from './CycleTimeReportPage'
 
 /**
  * Reports area — `/w/:wsId/p/:projectId/reports/*` (epic HD-5, slice R1).
@@ -74,6 +75,20 @@ export default function ReportsArea() {
               Flow
             </NavLink>
 
+            <NavLink
+              to={`${base}/cycle-time`}
+              className="text-sm no-underline"
+              style={({ isActive }) => ({
+                padding: '8px 11px',
+                borderRadius: 'var(--radius-md)',
+                background: isActive ? 'color-mix(in srgb, var(--color-brand) 10%, white)' : 'transparent',
+                color: isActive ? 'var(--color-brand)' : 'var(--color-text-secondary)',
+                fontWeight: isActive ? 700 : 500,
+              })}
+            >
+              Cycle &amp; lead time
+            </NavLink>
+
             {/* Not yet built. Listed, dimmed and labelled — the house rule for a
                 surface whose backend does not exist yet (CLAUDE.md: draw a
                 visible "coming soon" stub rather than omit it). R3/R4/R5 replace
@@ -103,6 +118,7 @@ export default function ReportsArea() {
             <Routes>
               <Route index element={<Navigate to={`${base}/flow`} replace />} />
               <Route path="flow" element={<FlowReportPage />} />
+              <Route path="cycle-time" element={<CycleTimeReportPage />} />
               <Route path="*" element={<Navigate to={`${base}/flow`} replace />} />
             </Routes>
           </div>
@@ -114,7 +130,6 @@ export default function ReportsArea() {
 
 /** The rest of the epic, visible while unbuilt so the shape of the area is honest. */
 const UPCOMING = [
-  { label: 'Cycle & lead time', hint: 'How long work takes, and which open item is rotting right now — coming soon' },
   { label: 'Sprint burn-up', hint: 'Scope and completed as separate lines, with a real scope-change log — coming soon' },
   { label: 'Sprint review', hint: 'Committed / added / completed / carried over — coming soon' },
   { label: 'Velocity', hint: 'A forecast band over recent sprints, never a scoreboard — coming soon' },

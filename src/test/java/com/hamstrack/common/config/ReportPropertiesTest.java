@@ -81,20 +81,30 @@ class ReportPropertiesTest {
      * letter must be able to boot — and one over is a refusal. The window bound matters
      * most: at daily buckets the window length IS the number of points in the response, so
      * an unbounded value is an unbounded response.
+     *
+     * <p><strong>{@code max-rows} was lowered from 200 000 to 50 000 in round 2 of R3</strong>, and
+     * the point of a ceiling is that it be survivable. A ceiling is a promise that every value
+     * under it boots AND runs; at 200 000 one authenticated GET materialised roughly 380 MB of
+     * transient heap worst case (~1.9 KB per shipped row, three copies alive at once — the
+     * arithmetic is in {@link ReportProperties}), so an operator who stayed inside the documented
+     * range could OOM the instance with a single request, and the throttle bounds request rate
+     * rather than concurrency. 50 000 is ~95 MB, against an ASSUMED 512 MB reference heap — no
+     * heap bound is configured anywhere (HD-152), so what an instance actually has follows host
+     * RAM. The default of 20 000 is unchanged and was never the problem.
      */
     @Test
     void upperBoundsAreInclusiveAndOneOverRefusesToStart() {
-        runner.withPropertyValues("app.reports.max-window-days=3650", "app.reports.max-rows=200000",
+        runner.withPropertyValues("app.reports.max-window-days=3650", "app.reports.max-rows=50000",
                         "app.reports.requests-per-minute=10000")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     var props = context.getBean(ReportProperties.class);
                     assertThat(props.maxWindowDays()).isEqualTo(3650);
-                    assertThat(props.maxRows()).isEqualTo(200_000);
+                    assertThat(props.maxRows()).isEqualTo(50_000);
                     assertThat(props.requestsPerMinute()).isEqualTo(10_000);
                 });
         assertRejected("app.reports.max-window-days=3651", "maxWindowDays");
-        assertRejected("app.reports.max-rows=200001", "maxRows");
+        assertRejected("app.reports.max-rows=50001", "maxRows");
         assertRejected("app.reports.requests-per-minute=10001", "requestsPerMinute");
     }
 

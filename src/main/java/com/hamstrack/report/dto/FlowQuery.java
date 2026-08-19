@@ -3,7 +3,6 @@ package com.hamstrack.report.dto;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
-import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 
 /**
@@ -46,33 +45,19 @@ public record FlowQuery(
         UUID labelId
 ) {
 
-    /** The documented default window, in days, inclusive of both endpoints (§2.1). */
-    public static final int DEFAULT_WINDOW_DAYS = 90;
-
     /**
-     * The oldest date any report window may touch. The epoch: {@code created_at} is written
-     * by this application and no row can predate it, so a request reaching further back is a
-     * typo or a fuzzer, never a question about data.
+     * The window constants and arithmetic moved to {@link ReportWindow} when R3 (cycle time)
+     * became the second report to need them; these are aliases so this record still reads as
+     * a self-contained description of the flow request. There is exactly one definition, and
+     * it is over there — see that class for why a second copy is the bug being prevented.
      */
-    public static final LocalDate MIN_DATE = LocalDate.of(1970, 1, 1);
+    public static final int DEFAULT_WINDOW_DAYS = ReportWindow.DEFAULT_WINDOW_DAYS;
 
-    /**
-     * The newest date any report window may touch — and the reason the constant exists at
-     * all (HD-28 R1 round 2, item 3).
-     *
-     * <p>{@code ISO_DATE}'s year field is {@code EXCEEDS_PAD}, so {@code +999999999-12-31}
-     * <em>binds</em>: it arrives as a perfectly ordinary {@link LocalDate}, passes a
-     * 90-day-window check, and then throws {@link java.time.DateTimeException} on
-     * {@link #endExclusive()}'s {@code plusDays(1)} — a 500 on an endpoint whose contract
-     * promises 400 for a bad date. The sibling case needs no overflow at all: a year inside
-     * Java's range but outside PostgreSQL's {@code timestamptz} fails in the driver instead.
-     * Both are refused here, before any arithmetic runs.
-     *
-     * <p>2200 rather than something tighter because a window may legitimately end in the
-     * future (a burn-up runs to a sprint's end date), and far below the {@code timestamptz}
-     * ceiling because the point is a sane band, not the last representable instant.
-     */
-    public static final LocalDate MAX_DATE = LocalDate.of(2200, 12, 31);
+    /** @see ReportWindow#MIN_DATE */
+    public static final LocalDate MIN_DATE = ReportWindow.MIN_DATE;
+
+    /** @see ReportWindow#MAX_DATE */
+    public static final LocalDate MAX_DATE = ReportWindow.MAX_DATE;
 
     public FlowQuery {
         interval = interval == null ? ReportInterval.WEEK : interval;
@@ -105,7 +90,7 @@ public record FlowQuery(
 
     /** The default window length actually used, in days, given the configured cap. */
     public static int defaultWindowDays(int maxWindowDays) {
-        return Math.min(DEFAULT_WINDOW_DAYS, maxWindowDays);
+        return ReportWindow.defaultWindowDays(maxWindowDays);
     }
 
     /**
@@ -126,12 +111,12 @@ public record FlowQuery(
 
     /** Window length in days, counting both endpoints. Negative when {@code from > to}. */
     public long windowDays() {
-        return ChronoUnit.DAYS.between(from, to) + 1;
+        return ReportWindow.windowDays(from, to);
     }
 
     /** Window start as an instant — {@code from} at 00:00 UTC, inclusive. */
     public OffsetDateTime startInclusive() {
-        return from.atStartOfDay().atOffset(ZoneOffset.UTC);
+        return ReportWindow.startInclusive(from);
     }
 
     /**
@@ -143,6 +128,6 @@ public record FlowQuery(
      * service validates the band before calling this.
      */
     public OffsetDateTime endExclusive() {
-        return to.plusDays(1).atStartOfDay().atOffset(ZoneOffset.UTC);
+        return ReportWindow.endExclusive(to);
     }
 }

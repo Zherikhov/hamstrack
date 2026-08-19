@@ -7,13 +7,12 @@ import com.hamstrack.report.dto.FlowQuery;
 import com.hamstrack.report.dto.FlowReportResponse;
 import com.hamstrack.report.dto.FlowTotals;
 import com.hamstrack.report.dto.ReportMeta;
+import com.hamstrack.report.dto.ReportWindow;
 import com.hamstrack.report.repository.FlowReportRepository;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.web.server.ResponseStatusException;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -87,12 +86,12 @@ public class FlowReportService {
         // 2. Then the dates, BEFORE any arithmetic touches them: `to.plusDays(1)` on a
         //    parseable-but-absurd year is a DateTimeException, i.e. a 500 where the contract
         //    promises a 400.
-        validateDateBand(raw);
+        ReportWindow.validateBand(raw.from(), raw.to());
 
         // 3. Only now default the window — the default depends on the configured cap, so it
         //    is applied here and not in the controller.
         var query = raw.withDefaultWindow(reportProperties.maxWindowDays());
-        validateWindow(query);
+        ReportWindow.validate(query.from(), query.to(), reportProperties.maxWindowDays());
 
         var scopedProjectId = ctx.project().getId();
         var unit = query.interval().sqlUnit();
@@ -152,61 +151,6 @@ public class FlowReportService {
                 List.copyOf(buckets),
                 new FlowTotals(totalCreated, totalResolved, totalCreated - totalResolved),
                 meta(basedOnIssues, firstIssueAt, unmatchedFilters(query, counts)));
-    }
-
-    // ------------------------------------------------------------------ window
-
-    /**
-     * The date band of {@link FlowQuery#MIN_DATE}..{@link FlowQuery#MAX_DATE}, refused in the
-     * same refuse-and-name-it wording as the cap (round 2, item 3).
-     *
-     * <p>This runs <strong>before</strong> {@link #validateWindow} and before the default
-     * window is derived, because both do date arithmetic: at
-     * {@code to=+999999999-12-31} — which {@code ISO_DATE} parses happily — the half-open
-     * window's own {@code plusDays(1)} overflows and throws, and a year merely outside
-     * PostgreSQL's {@code timestamptz} fails later in the driver. Both used to be 500s.
-     * {@code GlobalExceptionHandler} now maps {@code DateTimeException} to a 400 as a
-     * backstop, but a backstop is not a message: the refusal a caller can act on is this one.
-     */
-    private void validateDateBand(FlowQuery query) {
-        requireInBand(query.from(), "from");
-        requireInBand(query.to(), "to");
-    }
-
-    private void requireInBand(LocalDate date, String name) {
-        if (date == null || (!date.isBefore(FlowQuery.MIN_DATE) && !date.isAfter(FlowQuery.MAX_DATE))) {
-            return;
-        }
-        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "Invalid window: " + name + " (" + date + ") is outside the supported range "
-                        + FlowQuery.MIN_DATE + " to " + FlowQuery.MAX_DATE + ". Reports cover "
-                        + "issue history, which cannot predate the epoch, and a date past 2200 "
-                        + "is a typo rather than a question.");
-    }
-
-    /**
-     * The two 400s of §6, and the single most important behavioural rule in the spec: a
-     * window this server will not serve is <strong>refused with the cap named</strong>, not
-     * silently reduced to one it likes better.
-     *
-     * <p>Both messages state the numbers they measured, because the caller of a report API
-     * is usually a chart that did the date arithmetic itself and needs to know which of the
-     * two ends it got wrong.
-     */
-    private void validateWindow(FlowQuery query) {
-        if (query.from().isAfter(query.to())) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Invalid window: from (" + query.from() + ") is after to (" + query.to() + ")");
-        }
-        long days = query.windowDays();
-        int max = reportProperties.maxWindowDays();
-        if (days > max) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Window is " + days + " days (" + query.from() + " to " + query.to()
-                            + "); the maximum is " + max + " days (app.reports.max-window-days). "
-                            + "Narrow the range — it is not clamped for you, because a report of a "
-                            + "different window than the one you asked for is worse than no report.");
-        }
     }
 
     // ------------------------------------------------------------------ disclosure

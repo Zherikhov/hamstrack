@@ -48,8 +48,52 @@ public record ReportProperties(
          * reports (cycle time, aging WIP) in R3, where it is load-bearing.
          *
          * @Max for the same reason as above: this number is an allocation budget.
+         *
+         * The number an operator reads here is ROWS; what actually constrains it is
+         * BYTES, and nothing on the configuration page relates the two — so the
+         * arithmetic is written down, the way issue_key VARCHAR(40) carries its sum.
+         * Per shipped row, at the peak of one request, roughly:
+         *
+         *   ~980 B  the JDBC Object[] and the values hanging off it — worst-case
+         *           title (issues.title is VARCHAR(500), one byte per char under
+         *           compact strings) dominates, plus the key, two UUIDs, two
+         *           OffsetDateTimes and the numbers;
+         *   ~140 B  the DTO built beside it (AgingItem / CycleTimeItem) — strings and
+         *           UUIDs are shared with the array, its own boxed doubles are not;
+         *   ~750 B  the serialized JSON, because a @ResponseBody is buffered whole
+         *           rather than streamed.
+         *   ------
+         *   ~1.9 KB per row worst case (~0.6 KB with realistic 60-character titles),
+         *           and all three copies ARE alive together: the full result list is
+         *           materialised, then mapped, then serialized.
+         *
+         * So maxRows is really "megabytes of transient heap ÷ ~1.9". At the old
+         * ceiling of 200 000 that is ~380 MB for ONE authenticated GET, so an operator
+         * who stayed inside the documented range could OOM the instance with a single
+         * request. At 50 000 it is ~95 MB.
+         *
+         * The reference heap that ceiling is sized against is 512 MB, and that is an
+         * ASSUMPTION, not a property of this deployment. Nothing in the repository
+         * bounds the heap: the Dockerfile ends in a bare `java -jar` with no -Xmx and
+         * no -XX:MaxRAMPercentage, and docker-compose.prod.yml sets no memory limit —
+         * so the JVM takes ~25% of whatever HOST RAM it detects and the real budget
+         * floats with the machine. At the ~1 GB host docs/self-hosting.md tells
+         * operators to budget, that is a ~256 MB heap and 50 000 rows is a large
+         * fraction of it; on an 8 GB host the same ceiling is conservative by roughly
+         * 4x. HD-152 configures a heap bound and is what turns this assumption into a
+         * fact — treat it as a prerequisite of this rationale rather than as
+         * independent hardening, and until it lands, size maxRows against the heap you
+         * actually get rather than against the number written here.
+         *
+         * No claim is made about how many of these fit at once, because nothing bounds
+         * concurrency: the throttle bounds request RATE per principal and imposes no
+         * concurrency bound at all — N principals asking together is N of these live
+         * together, on whatever heap the host happens to give.
+         *
+         * The default of 20 000 (~38 MB worst case, ~12 MB typical) is unchanged and
+         * is not the footgun; the ceiling was.
          */
-        @DefaultValue("20000") @Min(1) @Max(200_000) int maxRows,
+        @DefaultValue("20000") @Min(1) @Max(50_000) int maxRows,
         /*
          * How many report requests ONE PRINCIPAL may make per minute across the whole
          * reports surface (HD-28 R1 round 2, item 1). Not in §5.3 either, and it is the
