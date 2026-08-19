@@ -1,5 +1,6 @@
 package com.hamstrack.search.filter;
 
+import com.hamstrack.common.security.RoleScope;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
@@ -7,7 +8,6 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.junit.jupiter.api.Test;
@@ -47,6 +47,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class SavedFilterApiTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -283,7 +285,7 @@ class SavedFilterApiTest {
     private Ws newWorkspace() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         return new Ws(ws.getId(), owner, login(owner));
     }
 
@@ -291,7 +293,7 @@ class SavedFilterApiTest {
     private Member addMember(Ws ws) throws Exception {
         var u = user();
         var workspace = workspaceRepository.findById(ws.wsId).orElseThrow();
-        member(workspace, u, WorkspaceRole.MEMBER);
+        member(workspace, u, "MEMBER");
         return new Member(u, login(u));
     }
 
@@ -356,11 +358,11 @@ class SavedFilterApiTest {
         return workspaceRepository.save(w);
     }
 
-    private void member(Workspace ws, User user, WorkspaceRole role) {
+    private void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 

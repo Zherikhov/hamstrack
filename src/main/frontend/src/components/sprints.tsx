@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Flag } from 'lucide-react'
 import {
-  ApiResponseError, apiGetBacklogView, apiGetProject, apiGetWorkspace,
+  ApiResponseError, apiGetBacklogView, apiGetProject,
   apiListIssuesPaged, sprintsApi,
 } from '../api'
 import type { BacklogViewOptions, CreateSprintPayload, StartSprintPayload, UpdateSprintPayload } from '../api'
@@ -215,38 +215,24 @@ export function useActiveSprint(
 }
 
 /**
- * Mirrors the server's `ScopeResolver.requireProjectCurator`: project MANAGER
- * *or* workspace OWNER/ADMIN. A UX guard only — every endpoint enforces it
- * independently. Both lookups are cache hits on any project page (`NavRail` and
- * the settings areas already fetch them).
+ * The cached project entry (`NavRail` and both settings areas already fetch it),
+ * which is where the declared delivery capabilities ride.
+ *
+ * HD-123 S5 removed this helper's other half. It used to also answer "is this
+ * actor a project curator?" by re-deriving `ScopeResolver.requireProjectCurator`
+ * client-side — project `myRole === 'MANAGER'` OR workspace `myRole` OWNER/ADMIN
+ * — which cost a second request for the workspace role and, being a hand-written
+ * copy of a server predicate, drifted from it (HD-98). Authorization now comes
+ * from `hooks/usePermissions`, which reads the server's own answer off this same
+ * cache entry and needs no workspace lookup at all.
  */
-export function useIsProjectCurator(
-  wsId: string | undefined,
-  projectId: string | undefined,
-  /**
-   * The PROJECT is always fetched (`NavRail` already caches that entry, and
-   * `boardMode` rides along on it). The WORKSPACE lookup is what proves the
-   * OWNER/ADMIN half of the predicate — a caller that only needs `boardMode`
-   * passes `false` so a Kanban board makes no extra request at all.
-   */
-  needsRole = true,
-) {
+export function useProjectEntry(wsId: string | undefined, projectId: string | undefined) {
   const { data: project } = useQuery({
     queryKey: ['project', wsId, projectId],
     queryFn: () => apiGetProject(wsId!, projectId!),
     enabled: !!wsId && !!projectId,
   })
-  const { data: workspace } = useQuery({
-    queryKey: ['workspace', wsId],
-    queryFn: () => apiGetWorkspace(wsId!),
-    enabled: !!wsId && needsRole,
-  })
-  return {
-    project,
-    workspace,
-    isCurator: project?.myRole === 'MANAGER'
-      || workspace?.myRole === 'OWNER' || workspace?.myRole === 'ADMIN',
-  }
+  return { project }
 }
 
 /**

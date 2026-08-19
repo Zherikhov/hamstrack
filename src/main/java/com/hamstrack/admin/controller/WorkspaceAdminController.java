@@ -2,7 +2,6 @@ package com.hamstrack.admin.controller;
 
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.admin.service.AdminCatalogService;
 import com.hamstrack.admin.service.AdminFieldService;
 import com.hamstrack.admin.service.AdminIssueTypeSetService;
@@ -10,6 +9,8 @@ import com.hamstrack.admin.service.AdminPrioritySetService;
 import com.hamstrack.admin.service.AdminWorkflowService;
 import com.hamstrack.admin.service.ScopedProjectAdminService;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -23,9 +24,15 @@ import java.util.UUID;
  * Workspace-admin console: workspace-scoped catalog (statuses, priorities, issue
  * types) plus the binding matrix for every project in a workspace the actor
  * owns/administers. Unlike {@code /api/admin/**} (system admin, guarded in
- * SecurityConfig), authorization is membership-based — every handler resolves
- * the workspace-OWNER/ADMIN scope via {@link ScopeResolver} before delegating to
- * the shared services with {@code ScopeContext.workspace(..)}.
+ * SecurityConfig), authorization is membership-based — every handler resolves the
+ * workspace through {@link WorkspaceAccessService#requireMember} (404 for a missing
+ * workspace or a non-member) and then requires
+ * {@link Permission#WORKSPACE_TAXONOMY_MANAGE} (403) before delegating to the shared
+ * services with {@code ScopeContext.workspace(..)}.
+ *
+ * <p>HD-126 (S3) replaced {@code ScopeResolver.requireWorkspaceAdmin} here. Δ-free: the
+ * built-in Owner and Admin hold that permission and Member does not, which is exactly the
+ * {@code isAtLeast(ADMIN)} it ran.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/admin")
@@ -38,11 +45,12 @@ public class WorkspaceAdminController {
     private final AdminPrioritySetService prioritySetService;
     private final AdminIssueTypeSetService issueTypeSetService;
     private final AdminFieldService fieldService;
-    private final ScopeResolver scopeResolver;
+    private final WorkspaceAccessService workspaceAccess;
 
-    /** Authorize the actor as a workspace admin and return the workspace scope. */
+    /** Authorize the actor for workspace taxonomy administration and return the scope. */
     private ScopeContext scope(User actor, UUID workspaceId) {
-        scopeResolver.requireWorkspaceAdmin(actor, workspaceId);
+        workspaceAccess.requireMember(actor, workspaceId)
+                .permissions().require(Permission.WORKSPACE_TAXONOMY_MANAGE);
         return ScopeContext.workspace(workspaceId);
     }
 

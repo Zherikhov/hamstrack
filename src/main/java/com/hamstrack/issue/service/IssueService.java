@@ -10,6 +10,7 @@ import com.hamstrack.common.event.IssueCreated;
 import com.hamstrack.common.event.IssueDeleted;
 import com.hamstrack.common.event.IssueUpdated;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.util.Points;
 import com.hamstrack.issue.dto.BoardIssuesResponse;
 import com.hamstrack.issue.dto.CreateIssueRequest;
@@ -22,12 +23,8 @@ import com.hamstrack.issue.entity.*;
 import com.hamstrack.issue.exception.IssueNotFoundException;
 import com.hamstrack.issue.repository.*;
 import com.hamstrack.project.entity.Project;
-import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
-import com.hamstrack.workspace.entity.Workspace;
-import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
+import com.hamstrack.workspace.service.ProjectContext;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.ApplicationEventPublisher;
@@ -54,9 +51,7 @@ import java.util.stream.Collectors;
 public class IssueService {
 
     private final WorkspaceAccessService workspaceAccess;
-    private final WorkspaceMemberRepository workspaceMemberRepository;
     private final ProjectRepository projectRepository;
-    private final ProjectMemberRepository projectMemberRepository;
     private final IssueRepository issueRepository;
     private final IssueTypeRepository issueTypeRepository;
     private final StatusRepository statusRepository;
@@ -144,9 +139,36 @@ public class IssueService {
         return jsonMapper.writeValueAsBytes(response);
     }
 
+    /**
+     * <strong>Multi-permission, like {@link #update} and for the same reason (§6.5).</strong>
+     * Filing an issue is {@code issue.create}; filing one that <em>names an assignee</em>
+     * additionally needs {@code issue.assign}, and one that <em>lands in a sprint</em>
+     * needs {@code sprint.assign}. {@code POST /issues} carrying {@code assigneeId} is
+     * the same act as {@code POST} followed by {@code PATCH assigneeId} — gating only the
+     * second would make {@code issue.assign} decorative, with the bypass shorter than the
+     * guarded path.
+     *
+     * <p>Only what the payload actually carries is gated: a create with no assignee
+     * requires no {@code issue.assign}, exactly as an unchanged field on {@link #update}
+     * requires nothing. On a create there is no "unchanged" case to consider — a new
+     * issue has no prior assignee or sprint, so presence <em>is</em> change. Order is the
+     * same catalog order the PATCH path uses, so the first missing permission a caller is
+     * told about does not depend on field iteration.
+     *
+     * <p>Behaviour-neutral today: the built-in Contributor holds all three, so this
+     * bites only a custom role — which cannot exist before S4. Closing it now costs
+     * nothing; closing it later would take away something people had come to rely on.
+     */
     @Transactional
     public IssueResponse create(User actor, UUID workspaceId, UUID projectId, CreateIssueRequest req) {
-        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        // Permission first, project state second (§10.3.6): a 403 must never depend on
+        // whether this project happens to be archived. All three checks read the request
+        // shape only, so they run before anything is read from the database.
+        var permissions = ctx.permissions();
+        permissions.require(Permission.ISSUE_CREATE);
+        if (req.assigneeId() != null) permissions.require(Permission.ISSUE_ASSIGN);
+        if (req.sprintId() != null) permissions.require(Permission.SPRINT_ASSIGN);
         var workspace = ctx.workspace();
         var project = ctx.project();
         requireNotArchived(project);
@@ -176,9 +198,18 @@ public class IssueService {
         // with auto-assign + a lead who is still a workspace member supplies one. A
         // stale lead is skipped silently — it must never fail issue creation. Resolved
         // here, with the other reads, for the same @Version ordering reason.
+        // Every create-time value is a NEW assignment, so BOTH halves of §6.3 apply and
+        // both must hold: the actor's (`issue.assign`, checked above from the request
+        // shape) and the target's (`issue.assignable`, checked here). They are different
+        // questions — may you hand out work, and may this person be given it.
         var assignee = req.assigneeId() != null
-                ? resolveAssignee(workspace, req.assigneeId())
-                : componentService.autoAssignee(workspace, component);
+                ? resolveAssignableAssignee(ctx, req.assigneeId())
+                // The component lead is not a value the caller supplied, and a stale lead
+                // is already skipped silently rather than failing the create (§5.1). A
+                // lead who may not be given work in this project is skipped the same way:
+                // 422ing an issue create over somebody else's role would be a worse
+                // answer than filing it unassigned.
+                : assignableOrNull(ctx, componentService.autoAssignee(workspace, component));
         // HD-22: same ordering rule again. A sprint of another project is a 422 "Unknown
         // sprint"; filing straight into a COMPLETED sprint is a 422 too (every
         // create-time value is a new assignment).
@@ -259,7 +290,7 @@ public class IssueService {
                                           UUID statusId, UUID assigneeId, UUID priorityId,
                                           UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
                                           UUID fixVersionId, UUID sprintId, boolean noSprint) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
         requireCoherentSprintFilter(sprintId, noSprint);
@@ -293,7 +324,7 @@ public class IssueService {
                                                  UUID componentId, List<UUID> labelIds, LabelMatch labelMatch,
                                                  UUID fixVersionId, UUID sprintId, boolean noSprint,
                                                  boolean excludeDone, Pageable pageable) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var labelFilter = LabelFilter.of(labelIds, labelMatch,
                 classificationProperties.maxLabelsPerIssue());
         requireCoherentSprintFilter(sprintId, noSprint);
@@ -326,12 +357,39 @@ public class IssueService {
         return PageResponse.of(historyRepository.findByIssue(issue, pageable).map(IssueHistoryResponse::of));
     }
 
+    /**
+     * <strong>Multi-permission by construction (§10.3.3).</strong> One PATCH can require
+     * {@code issue.edit}, {@code issue.transition}, {@code issue.assign} and
+     * {@code sprint.assign} at once, so this method does not have "a" permission. Three
+     * rules, and all three matter:
+     * <ol>
+     *   <li><strong>Present <em>and actually changing</em></strong> — the SPA sends whole-
+     *       form patches, so a field that arrives carrying its current value must not
+     *       403. Sending an unchanged {@code statusId} alongside a new title needs
+     *       {@code issue.edit} and nothing else.</li>
+     *   <li><strong>Every permission is checked before any mutation.</strong> Half-applied
+     *       authorization is not authorization — and the {@code @Version} rule demands the
+     *       same ordering anyway (all reads, then all mutations).</li>
+     *   <li>On failure, the 403 names the <strong>first</strong> missing permission in
+     *       catalog order ({@code issue.edit} → {@code issue.transition} →
+     *       {@code issue.assign} → {@code sprint.assign}), so the answer to a given
+     *       payload is deterministic rather than dependent on field iteration order.</li>
+     * </ol>
+     *
+     * <p>One shape the spec did not anticipate: <strong>custom fields are gated on
+     * presence, not on change.</strong> Deciding whether {@code fields} actually changes
+     * anything needs a per-field {@code issue_field_values} read, which is precisely what
+     * {@code FieldValueService.applyValues} does <em>as it applies</em> — a dry run would
+     * double the queries on every issue PATCH to refine an answer that only differs for a
+     * role holding {@code issue.transition} without {@code issue.edit}. A non-empty
+     * {@code fields} map therefore requires {@code issue.edit}; an empty or absent one
+     * requires nothing.
+     */
     @Transactional
     public IssueResponse update(User actor, UUID workspaceId, UUID projectId, long number, UpdateIssueRequest req) {
-        var ctx = workspaceAccess.requireProjectMember(actor, workspaceId, projectId);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
         var workspace = ctx.workspace();
         var project = ctx.project();
-        requireNotArchived(project);
 
         // Request shape, before anything is read: "put it in sprint X" and "take it out
         // of every sprint" cannot both hold. Letting sprintId silently win would make a
@@ -352,9 +410,13 @@ public class IssueService {
         var newPriority = req.priorityId() != null
                 ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
                 : null;
-        var newAssignee = req.assigneeId() != null
-                ? resolveAssignee(workspace, req.assigneeId())
-                : null;
+        // The assignee is deliberately NOT resolved here (HD-125 review, L4). Resolving it
+        // with the other reads put its 422 ("Unknown assignee" = not a member of this
+        // workspace) BEFORE the actor's own 403, which let someone without `issue.assign`
+        // probe arbitrary user ids for workspace membership. It is resolved after the
+        // permission block instead, and only when the assignee actually changes — which
+        // also collapses four queries into two, since resolution and the assignable check
+        // now share one lookup of the target's permissions.
         var newCategory = req.statusId() != null
                 ? newStatus.getCategory()
                 : null;
@@ -432,6 +494,87 @@ public class IssueService {
             }
         }
 
+        // ---- what this PATCH actually changes -------------------------------------
+        // Pure comparisons over the reads above; no query, no mutation. The label and
+        // version diffs are computed HERE rather than inline further down (they are pure
+        // too) because "does this PATCH edit anything" cannot be answered without them,
+        // and the answer has to exist before the first mutation.
+        LabelService.LabelChange labelChange =
+                newLabels == null ? null : labelService.diffLabels(currentLabelRows, newLabels);
+        VersionService.VersionChange fixChange = newFixVersions == null ? null
+                : versionService.diffVersions(currentVersionRows, newFixVersions, VersionLinkType.FIX);
+        VersionService.VersionChange affectsChange = newAffectsVersions == null ? null
+                : versionService.diffVersions(currentVersionRows, newAffectsVersions, VersionLinkType.AFFECTS);
+
+        boolean statusChanges = newStatus != null && !newStatus.getId().equals(issue.getStatus().getId());
+        // Computed from the RAW id, so the actor's 403 can precede the value's 422 (L4):
+        // an exact id comparison needs no entity, and resolving one first is what let a
+        // caller without `issue.assign` learn whether an arbitrary user id belongs to this
+        // workspace. Same shape as the mutation below, which compares the same two ids.
+        UUID currentAssigneeId = idOf(issue.getAssignee());
+        boolean assigneeChanges = req.assigneeId() != null
+                ? !req.assigneeId().equals(currentAssigneeId)
+                : req.clearAssignee() && currentAssigneeId != null;
+        boolean sprintChanges = (newSprint != null || req.clearSprint())
+                && !Objects.equals(idOf(issue.getSprint()), idOf(newSprint));
+        boolean componentChanges = (newComponent != null || req.clearComponent())
+                && !Objects.equals(idOf(issue.getComponent()), idOf(newComponent));
+        boolean parentChanges = (newParent != null || req.clearParent())
+                && !Objects.equals(idOf(issue.getParent()), idOf(newParent));
+        // DO NOT SIMPLIFY THIS TO ONE BOOLEAN. Two flags, the second guarded by the
+        // first, because that is exactly the if/else-if the mutation below runs: the
+        // `else if` fires whenever the first condition is false, which includes "dueDate
+        // present but unchanged". So a payload carrying an unchanged `dueDate` AND
+        // `clearDueDate: true` really does clear the date — and a single "is dueDate
+        // changing" boolean would answer false for it, letting that mutation through
+        // with no `issue.edit` check at all. The gate has to mirror the mutation's own
+        // branching, not a tidier restatement of it.
+        boolean dueDateSet = req.dueDate() != null && !req.dueDate().equals(issue.getDueDate());
+        boolean dueDateCleared = !dueDateSet && req.clearDueDate() && issue.getDueDate() != null;
+        boolean dueDateChanges = dueDateSet || dueDateCleared;
+        boolean storyPointsChange = (newStoryPoints != null || req.clearStoryPoints())
+                && (newStoryPoints == null
+                        ? issue.getStoryPoints() != null
+                        : issue.getStoryPoints() == null
+                          || issue.getStoryPoints().compareTo(newStoryPoints) != 0);
+        boolean edits = (req.title() != null && !req.title().equals(issue.getTitle()))
+                || (req.description() != null && !req.description().equals(issue.getDescription()))
+                || (newType != null && !newType.getId().equals(issue.getType().getId()))
+                || (newPriority != null && !newPriority.getId().equals(issue.getPriority().getId()))
+                || dueDateChanges
+                || componentChanges
+                || parentChanges
+                || storyPointsChange
+                || (labelChange != null && labelChange.changed())
+                || (fixChange != null && fixChange.changed())
+                || (affectsChange != null && affectsChange.changed())
+                // Presence, not change — see the method javadoc.
+                || (req.fields() != null && !req.fields().isEmpty());
+
+        // ---- every permission, before the first mutation (§10.3.3) -----------------
+        var permissions = ctx.permissions();
+        if (edits) permissions.require(Permission.ISSUE_EDIT, isReporter(issue, actor));
+        if (statusChanges) permissions.require(Permission.ISSUE_TRANSITION);
+        if (assigneeChanges) permissions.require(Permission.ISSUE_ASSIGN);
+        // The second door (§6.5): the sprint endpoints are not the only way to move an
+        // issue in or out of a sprint, and a permission that guards one door and not the
+        // other is not a permission.
+        if (sprintChanges) permissions.require(Permission.SPRINT_ASSIGN);
+
+        // ---- the last read: the assignee, now that the actor is known to be entitled ---
+        // The actor's 403 has already been answered, so what remains is the VALUE: an id
+        // that is not a member of this workspace is "Unknown assignee" and one who may not
+        // be given work here is "cannot be assigned" (§10.3.4), both 422. Resolved only on
+        // an actual CHANGE, so an issue whose assignee has since lost `issue.assignable`
+        // — or even left the workspace — stays editable (§11.5).
+        User newAssignee = assigneeChanges && req.assigneeId() != null
+                ? resolveAssignableAssignee(ctx, req.assigneeId())
+                : null;
+
+        // Project state comes after authorization, uniformly (§10.3.6), so a 403 never
+        // depends on whether the project happens to be archived.
+        requireNotArchived(project);
+
         var historyEntries = new ArrayList<IssueHistory>();
 
         if (req.title() != null && !req.title().equals(issue.getTitle())) {
@@ -447,7 +590,7 @@ public class IssueService {
             historyEntries.add(makeHistory(issue, actor, "type", issue.getType().getName(), newType.getName()));
             issue.setType(newType);
         }
-        if (newStatus != null && !newStatus.getId().equals(issue.getStatus().getId())) {
+        if (statusChanges) {
             projectConfigService.validateTransition(project, issue.getStatus(), newStatus);
             historyEntries.add(makeHistory(issue, actor, "status", issue.getStatus().getName(), newStatus.getName()));
             issue.setStatus(newStatus);
@@ -463,22 +606,18 @@ public class IssueService {
             issue.setPriority(newPriority);
         }
         // Assignee: a non-null id sets it; clearAssignee (when no id) unsets it
-        if (newAssignee != null || req.clearAssignee()) {
-            var oldId = issue.getAssignee() != null ? issue.getAssignee().getId() : null;
-            var newId = newAssignee != null ? newAssignee.getId() : null;
-            if (!Objects.equals(oldId, newId)) {
-                String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
-                String newName = newAssignee != null ? newAssignee.getDisplayName() : null;
-                historyEntries.add(makeHistory(issue, actor, "assignee", oldName, newName));
-                issue.setAssignee(newAssignee);
-            }
+        if (assigneeChanges) {
+            String oldName = issue.getAssignee() != null ? issue.getAssignee().getDisplayName() : null;
+            String newName = newAssignee != null ? newAssignee.getDisplayName() : null;
+            historyEntries.add(makeHistory(issue, actor, "assignee", oldName, newName));
+            issue.setAssignee(newAssignee);
         }
-        if (req.dueDate() != null && !req.dueDate().equals(issue.getDueDate())) {
+        if (dueDateSet) {
             historyEntries.add(makeHistory(issue, actor, "dueDate",
                     issue.getDueDate() != null ? issue.getDueDate().toString() : null,
                     req.dueDate().toString()));
             issue.setDueDate(req.dueDate());
-        } else if (req.clearDueDate() && issue.getDueDate() != null) {
+        } else if (dueDateCleared) {
             historyEntries.add(makeHistory(issue, actor, "dueDate", issue.getDueDate().toString(), null));
             issue.setDueDate(null);
         }
@@ -488,16 +627,12 @@ public class IssueService {
         // fire here: changing a component later must never silently reassign someone's
         // work (§5.1). An ARCHIVED component is only rejected when it is an actual
         // change — an issue already carrying one stays editable (§5.4).
-        if (newComponent != null || req.clearComponent()) {
-            var oldId = issue.getComponent() != null ? issue.getComponent().getId() : null;
-            var newId = newComponent != null ? newComponent.getId() : null;
-            if (!Objects.equals(oldId, newId)) {
-                componentService.requireAssignable(newComponent);
-                String oldName = issue.getComponent() != null ? issue.getComponent().getName() : null;
-                String newName = newComponent != null ? newComponent.getName() : null;
-                historyEntries.add(makeHistory(issue, actor, "component", oldName, newName));
-                issue.setComponent(newComponent);
-            }
+        if (componentChanges) {
+            componentService.requireAssignable(newComponent);
+            String oldName = issue.getComponent() != null ? issue.getComponent().getName() : null;
+            String newName = newComponent != null ? newComponent.getName() : null;
+            historyEntries.add(makeHistory(issue, actor, "component", oldName, newName));
+            issue.setComponent(newComponent);
         }
 
         // Sprint (HD-22): a non-null sprintId sets/changes it; clearSprint (no id)
@@ -509,88 +644,63 @@ public class IssueService {
         // The freeze cuts BOTH ways: a completed sprint's membership is the delivery
         // record `complete` already reported, so an issue may no more be pulled OUT of
         // one than pushed INTO one.
-        if (newSprint != null || req.clearSprint()) {
-            var oldId = issue.getSprint() != null ? issue.getSprint().getId() : null;
-            var newId = newSprint != null ? newSprint.getId() : null;
-            if (!Objects.equals(oldId, newId)) {
-                sprintService.requireDetachable(issue.getSprint());
-                sprintService.requireAssignable(newSprint);
-                String oldName = issue.getSprint() != null ? issue.getSprint().getName() : null;
-                String newName = newSprint != null ? newSprint.getName() : null;
-                historyEntries.add(makeHistory(issue, actor, "sprint", oldName, newName));
-                issue.setSprint(newSprint);
-            }
+        if (sprintChanges) {
+            sprintService.requireDetachable(issue.getSprint());
+            sprintService.requireAssignable(newSprint);
+            String oldName = issue.getSprint() != null ? issue.getSprint().getName() : null;
+            String newName = newSprint != null ? newSprint.getName() : null;
+            historyEntries.add(makeHistory(issue, actor, "sprint", oldName, newName));
+            issue.setSprint(newSprint);
         }
 
         // Story points (HD-22): same nullable-scalar convention. A no-op writes no
         // history row (compareTo, not equals: 5 and 5.00 are the same estimate).
-        if (newStoryPoints != null || req.clearStoryPoints()) {
+        if (storyPointsChange) {
             var old = issue.getStoryPoints();
-            boolean changed = newStoryPoints == null
-                    ? old != null
-                    : old == null || old.compareTo(newStoryPoints) != 0;
-            if (changed) {
-                historyEntries.add(makeHistory(issue, actor, "storyPoints",
-                        old == null ? null : old.toPlainString(),
-                        newStoryPoints == null ? null : newStoryPoints.toPlainString()));
-                issue.setStoryPoints(newStoryPoints);
-            }
+            historyEntries.add(makeHistory(issue, actor, "storyPoints",
+                    old == null ? null : old.toPlainString(),
+                    newStoryPoints == null ? null : newStoryPoints.toPlainString()));
+            issue.setStoryPoints(newStoryPoints);
         }
 
         // Parent: a non-null parentId sets/changes it; clearParent (no id) detaches.
         // History records the old → new parent key.
-        if (newParent != null || req.clearParent()) {
-            var oldId = issue.getParent() != null ? issue.getParent().getId() : null;
-            var newId = newParent != null ? newParent.getId() : null;
-            if (!Objects.equals(oldId, newId)) {
-                String oldKey = issue.getParent() != null ? issueKey(issue.getParent()) : null;
-                String newKey = newParent != null ? issueKey(newParent) : null;
-                historyEntries.add(makeHistory(issue, actor, "parent", oldKey, newKey));
-                issue.setParent(newParent);
-            }
+        if (parentChanges) {
+            String oldKey = issue.getParent() != null ? issueKey(issue.getParent()) : null;
+            String newKey = newParent != null ? issueKey(newParent) : null;
+            historyEntries.add(makeHistory(issue, actor, "parent", oldKey, newKey));
+            issue.setParent(newParent);
         }
 
-        // Labels (HD-30): full replacement when present. The diff is PURE (no query),
-        // so it runs here with the other mutations; a set equal to the current one is
-        // a no-op — no history row (the PATCH still bumps @Version, as documented).
-        LabelService.LabelChange labelChange = null;
-        if (newLabels != null) {
-            labelChange = labelService.diffLabels(currentLabelRows, newLabels);
-            if (labelChange.changed()) {
-                historyEntries.add(makeHistory(issue, actor, "labels",
-                        labelChange.oldNames(), labelChange.newNames()));
-                // Labels live in a side table, so the Issue row would otherwise stay
-                // clean and Hibernate would emit no UPDATE — leaving @Version and
-                // updatedAt stale on a label-only PATCH. Touching updatedAt makes the
-                // entity dirty, so the row is written exactly once: version +1 (§4.4)
-                // and @LastModifiedDate re-stamps the audit time at pre-update.
-                issue.setUpdatedAt(java.time.Instant.now());
-            }
+        // Labels (HD-30): full replacement when present. The diff itself was computed
+        // with the other reads (it is pure, and the permission block needs its verdict);
+        // only the history row and the version touch belong here. A set equal to the
+        // current one is a no-op — no history row (the PATCH still bumps @Version).
+        if (labelChange != null && labelChange.changed()) {
+            historyEntries.add(makeHistory(issue, actor, "labels",
+                    labelChange.oldNames(), labelChange.newNames()));
+            // Labels live in a side table, so the Issue row would otherwise stay
+            // clean and Hibernate would emit no UPDATE — leaving @Version and
+            // updatedAt stale on a label-only PATCH. Touching updatedAt makes the
+            // entity dirty, so the row is written exactly once: version +1 (§4.4)
+            // and @LastModifiedDate re-stamps the audit time at pre-update.
+            issue.setUpdatedAt(java.time.Instant.now());
         }
 
         // Fix / affects versions (HD-32): full replacement PER ROLE, independently —
         // sending only `fixVersionIds` never touches the affects set. Same shape as
-        // labels: the diff is PURE (no query), a set equal to the current one is a
-        // no-op with no history row, and a real change touches updatedAt so the
+        // labels: the diff is pure and was computed above, a set equal to the current one
+        // is a no-op with no history row, and a real change touches updatedAt so the
         // side-table-only edit still bumps @Version exactly once.
-        VersionService.VersionChange fixChange = null;
-        VersionService.VersionChange affectsChange = null;
-        if (newFixVersions != null) {
-            fixChange = versionService.diffVersions(currentVersionRows, newFixVersions, VersionLinkType.FIX);
-            if (fixChange.changed()) {
-                historyEntries.add(makeHistory(issue, actor, "fixVersions",
-                        fixChange.oldNames(), fixChange.newNames()));
-                issue.setUpdatedAt(java.time.Instant.now());
-            }
+        if (fixChange != null && fixChange.changed()) {
+            historyEntries.add(makeHistory(issue, actor, "fixVersions",
+                    fixChange.oldNames(), fixChange.newNames()));
+            issue.setUpdatedAt(java.time.Instant.now());
         }
-        if (newAffectsVersions != null) {
-            affectsChange = versionService.diffVersions(
-                    currentVersionRows, newAffectsVersions, VersionLinkType.AFFECTS);
-            if (affectsChange.changed()) {
-                historyEntries.add(makeHistory(issue, actor, "affectsVersions",
-                        affectsChange.oldNames(), affectsChange.newNames()));
-                issue.setUpdatedAt(java.time.Instant.now());
-            }
+        if (affectsChange != null && affectsChange.changed()) {
+            historyEntries.add(makeHistory(issue, actor, "affectsVersions",
+                    affectsChange.oldNames(), affectsChange.newNames()));
+            issue.setUpdatedAt(java.time.Instant.now());
         }
 
         // Custom fields: partial map, JSON null clears; changes land in history
@@ -608,7 +718,15 @@ public class IssueService {
         var changeSet = historyEntries.stream()
                 .map(h -> new FieldChange(h.getField(), h.getOldValue(), h.getNewValue()))
                 .toList();
-        eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
+        // A PATCH that changed nothing must not announce an update (HD-125 review, L6).
+        // Every real mutation writes at least one history row, so an empty changeSet IS
+        // "nothing happened" — and announcing it anyway was a free amplifier: an
+        // all-unchanged whole-form patch needs no permission at all (that is the point of
+        // the per-field rules), so any member could turn one request into one push per
+        // subscribed client, each of which refetches.
+        if (!changeSet.isEmpty()) {
+            eventPublisher.publishEvent(new IssueUpdated(workspaceId, projectId, number, changeSet));
+        }
         return toResponse(issue);
     }
 
@@ -616,9 +734,19 @@ public class IssueService {
      * Move one issue in the shared backlog/board rank, optionally into or out of a
      * sprint in the same request (HD-22 §3.3, §4.4) — {@code POST …/issues/{n}/rank}.
      *
-     * <p><strong>Permission is the ISSUE-EDIT tier, not curator</strong> (§3.2):
-     * dragging items around at a planning meeting is ordinary work the whole team does,
-     * and requiring MANAGER would make the backlog read-only for most of it.
+     * <p><strong>Permission: {@link Permission#ISSUE_RANK}</strong> (HD-123 §10.2), not
+     * curation: dragging items around at a planning meeting is ordinary work the whole
+     * team does, and requiring MANAGER would make the backlog read-only for most of it.
+     * Ranking is nonetheless its own permission because "developers must not reprioritise
+     * the backlog" is a real policy.
+     *
+     * <p><strong>This endpoint is a sprint door too</strong> (§6.5). {@code sprintId} /
+     * {@code clearSprint} in a rank request move an issue in or out of a sprint exactly as
+     * {@code PATCH /issues/{n}} and {@code POST /sprints/{id}/issues} do, so a sprint
+     * change here additionally requires {@link Permission#SPRINT_ASSIGN}. §6.5 names only
+     * the other two doors; leaving this one open would have made the permission
+     * bypassable with a one-line curl, which is the exact failure the rule exists to
+     * prevent.
      *
      * <p>The client sends only ANCHORS — the server computes the position
      * ({@link IssueRankService}), so a rank can never be invented or corrupted from a
@@ -633,8 +761,17 @@ public class IssueService {
     @Transactional
     public IssueResponse rank(User actor, UUID workspaceId, UUID projectId, long number,
                               RankIssueRequest req) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
-        requireNotArchived(project);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        // Permission first, project state second (§10.3.6) — for BOTH permissions this
+        // endpoint can require. The sprint door cannot be evaluated here because it
+        // depends on the issue's current sprint, so `requireNotArchived` waits until after
+        // it (below) rather than running between the two: an archived project answering
+        // 409 where every other converted site answers 403 would make the state of the
+        // project observable through the authorization answer, which is precisely what
+        // §10.3.6 forbids. Both checks still precede every mutation, including the rank
+        // service's rebalance.
+        ctx.permissions().require(Permission.ISSUE_RANK);
+        var project = ctx.project();
 
         // ---- request shape: these are malformed requests, not business rejections ----
         if (req.sprintId() != null && req.clearSprint()) {
@@ -665,6 +802,13 @@ public class IssueService {
         UUID targetSprintId = req.sprintId() != null ? req.sprintId()
                 : req.clearSprint() ? null : currentSprintId;
         boolean sprintChanges = !Objects.equals(currentSprintId, targetSprintId);
+        if (sprintChanges) {
+            // The third door (§6.5): moving between sections IS sprint assignment.
+            ctx.permissions().require(Permission.SPRINT_ASSIGN);
+        }
+
+        // ---- every permission this request needs has now been checked; state next ----
+        requireNotArchived(project);
         if (sprintChanges) {
             // A COMPLETED sprint's membership is a delivered fact: it can neither take a
             // new issue nor give one up (§4.5). Checked before any write happens.
@@ -705,13 +849,26 @@ public class IssueService {
         return toResponse(moved);
     }
 
+    /**
+     * <strong>{@link Permission#ISSUE_DELETE}, with the ownership modifier</strong>
+     * (§6.4): {@code own} = the actor <em>reported</em> the issue (§19 OQ 2 — the
+     * reporter, not the assignee). No built-in role holds it own-only today, so this is
+     * behaviour-identical to the project-MANAGER gate it replaces; it exists because
+     * "let people clean up their own mis-filed issues" is one of the asks the catalog was
+     * built for.
+     *
+     * <p>The issue is loaded before the check because {@code isOwn} is a property of the
+     * object; the archived-project 409 runs after it, because a 403 must not depend on
+     * project state (§10.3.6). That is a deliberate flip of the old order.
+     */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long number) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
-        requireNotArchived(project);
-        requireProjectRole(actor, project, ProjectRole.MANAGER);
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        var project = ctx.project();
         var issue = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
+        ctx.permissions().require(Permission.ISSUE_DELETE, isReporter(issue, actor));
+        requireNotArchived(project);
 
         // Orphan direct children to root (parent = null) before deleting (proposal
         // Revision 2 §4.7-superseded). Re-homing to the grandparent would break the
@@ -948,20 +1105,70 @@ public class IssueService {
         }
     }
 
-    // Assignee must be a member of the workspace — a bare findById would let callers
-    // reference (and enumerate) users from other tenants
-    private User resolveAssignee(Workspace workspace, UUID assigneeId) {
-        return userRepository.findById(assigneeId)
-                .filter(u -> workspaceMemberRepository.existsByWorkspaceAndUser(workspace, u))
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee"));
+    /**
+     * The assignee named by a request: a member of <em>this workspace</em> who holds
+     * {@link Permission#ISSUE_ASSIGNABLE} in <em>this project</em>. Two failures, both
+     * <strong>422</strong> because both are about the value rather than the caller's
+     * entitlement, and deliberately worded apart (§10.3.4):
+     * <ul>
+     *   <li><em>"Unknown assignee"</em> — no such user, or not a member here. A bare
+     *       {@code findById} would let callers reference and enumerate users from other
+     *       tenants, so membership is the filter.</li>
+     *   <li><em>"That user cannot be assigned in this project"</em> — a real colleague who
+     *       may not be given work. §6.3's asymmetry: {@code issue.assign} is checked
+     *       against the actor, {@code issue.assignable} against the target. A member must
+     *       never be told a colleague does not exist, so the two messages must stay
+     *       distinct.</li>
+     * </ul>
+     *
+     * <p>One lookup of the target's permissions serves both questions — presence answers
+     * membership, content answers assignability. Splitting them (as the first cut did) ran
+     * the same resolution twice per assigned PATCH.
+     */
+    private User resolveAssignableAssignee(ProjectContext ctx, UUID assigneeId) {
+        var target = userRepository.findById(assigneeId)
+                .orElseThrow(() -> unknownAssignee());
+        var permissions = workspaceAccess.projectPermissionsOf(target, ctx)
+                .orElseThrow(() -> unknownAssignee());
+        if (!permissions.has(Permission.ISSUE_ASSIGNABLE)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "That user cannot be assigned in this project");
+        }
+        return target;
     }
 
-    private void requireProjectRole(User actor, Project project, ProjectRole required) {
-        var role = projectMemberRepository.findByProjectAndUser(project, actor)
-                .map(ProjectMember::getRole)
-                .orElse(ProjectRole.VIEWER);
-        if (!role.isAtLeast(required)) {
-            throw new com.hamstrack.project.exception.InsufficientProjectRoleException();
-        }
+    private static ResponseStatusException unknownAssignee() {
+        return new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown assignee");
+    }
+
+    /** {@code target} if they may be given work in this project, else {@code null}. */
+    private User assignableOrNull(ProjectContext ctx, User target) {
+        if (target == null) return null;
+        return workspaceAccess.projectPermissionsOf(target, ctx)
+                .filter(p -> p.has(Permission.ISSUE_ASSIGNABLE))
+                .map(p -> target)
+                .orElse(null);
+    }
+
+    /** The ownership qualifier for {@code issue.edit} / {@code issue.delete} (§6.4). */
+    private static boolean isReporter(Issue issue, User actor) {
+        return issue.getReporter() != null && issue.getReporter().getId().equals(actor.getId());
+    }
+
+    /** Null-safe id of an entity that may be absent, for the "did it change" diffs. */
+    private static UUID idOf(Issue issue) {
+        return issue == null ? null : issue.getId();
+    }
+
+    private static UUID idOf(User user) {
+        return user == null ? null : user.getId();
+    }
+
+    private static UUID idOf(Sprint sprint) {
+        return sprint == null ? null : sprint.getId();
+    }
+
+    private static UUID idOf(Component component) {
+        return component == null ? null : component.getId();
     }
 }

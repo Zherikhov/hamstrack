@@ -2,7 +2,8 @@ import { useEffect } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArchiveRestore, FolderOpen, Plus, Settings, Users } from 'lucide-react'
-import { apiGetWorkspace, apiListProjects, apiUnarchiveProject } from '../api'
+import { apiListProjects, apiUnarchiveProject } from '../api'
+import { canOpenWorkspaceSettings, permissionsFrom, usePermissions } from '../hooks/usePermissions'
 import { Button } from '../components/ui'
 import { useState } from 'react'
 import CreateProjectModal from '../components/CreateProjectModal'
@@ -26,12 +27,13 @@ export default function WorkspaceHomePage() {
     enabled: !!wsId,
   })
 
-  const { data: workspace } = useQuery({
-    queryKey: ['workspace', wsId],
-    queryFn: () => apiGetWorkspace(wsId!),
-    enabled: !!wsId,
-  })
-  const canAdminWorkspace = workspace?.myRole === 'OWNER' || workspace?.myRole === 'ADMIN'
+  // One workspace-role check used to gate two unrelated things (the settings
+  // door and the invite control). They are separate grants, so they are now
+  // separate questions — a custom role may hold either without the other.
+  const permissions = usePermissions(wsId)
+  const canOpenSettings = canOpenWorkspaceSettings(permissions)
+  const canInvite = permissions.can('workspace.member.manage')
+  const canCreateProject = permissions.can('project.create')
 
   const active = projects.filter(p => !p.archived)
   const archived = projects.filter(p => p.archived)
@@ -75,13 +77,24 @@ export default function WorkspaceHomePage() {
               <Users size={14} />
               Members
             </Button>
-            {canAdminWorkspace && (
+            {canOpenSettings && (
               <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}/settings`)}>
                 <Settings size={14} />
                 Workspace settings
               </Button>
             )}
-            <Button variant="primary" size="sm" onClick={() => setShowCreate(true)}>
+            {/* A permanent slot, so the loading rule is "disabled, not gone":
+                the button never disappears out from under a pointer, it only
+                goes from disabled to live once the answer lands. */}
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canCreateProject}
+              title={!canCreateProject && !permissions.isLoading
+                ? 'You do not have permission to create projects in this workspace'
+                : undefined}
+              onClick={() => setShowCreate(true)}
+            >
               <Plus size={14} />
               New project
             </Button>
@@ -102,7 +115,14 @@ export default function WorkspaceHomePage() {
                 Create a project to start tracking issues
               </p>
             </div>
-            <Button variant="primary" onClick={() => setShowCreate(true)}>
+            <Button
+              variant="primary"
+              disabled={!canCreateProject}
+              title={!canCreateProject && !permissions.isLoading
+                ? 'You do not have permission to create projects in this workspace'
+                : undefined}
+              onClick={() => setShowCreate(true)}
+            >
               <Plus size={14} />
               Create first project
             </Button>
@@ -168,7 +188,10 @@ export default function WorkspaceHomePage() {
                       {project.key}
                     </div>
                   </div>
-                  {project.myRole === 'MANAGER' && (
+                  {/* Per-row gate: each project row carries its OWN permission
+                      set, so the answer is built from the row rather than from
+                      a hook (one hook per row is neither possible nor right). */}
+                  {permissionsFrom([project]).can('project.archive') && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -193,7 +216,7 @@ export default function WorkspaceHomePage() {
       {showMembers && wsId && (
         <WorkspaceMembersModal
           wsId={wsId}
-          canInvite={canAdminWorkspace}
+          canManage={canInvite}
           onClose={() => setShowMembers(false)}
         />
       )}

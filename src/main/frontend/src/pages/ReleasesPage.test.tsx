@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS, PROJECT_CURATOR_BYPASS_PERMISSIONS,
+} from '../test/permissions'
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
@@ -54,8 +57,9 @@ const ARCHIVED: Version = {
 
 const mockState = vi.hoisted(() => ({
   versions: [] as unknown[],
-  projectRole: 'MANAGER' as 'MANAGER' | 'MEMBER',
-  workspaceRole: 'MEMBER' as 'OWNER' | 'ADMIN' | 'MEMBER',
+  /** The project's `myPermissions` — the only input to a UI gate since HD-123 S5. */
+  projectPermissions: [] as string[],
+
   // HD-102: `undefined` = a response with no `delivery` at all, which `deliveryOf`
   // upgrades per §7 (releases stay ON for every pre-existing project) — the state
   // every test outside the off-state block below describes.
@@ -66,11 +70,13 @@ vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0; detail = '' },
   apiGetProject: vi.fn(async () => ({
     id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY',
-    archived: false, myRole: mockState.projectRole, createdAt: '2026-01-01T00:00:00Z',
+    archived: false, myRole: 'MEMBER', myPermissions: mockState.projectPermissions,
+    createdAt: '2026-01-01T00:00:00Z',
     ...(mockState.delivery ? { delivery: mockState.delivery } : {}),
   })),
   apiGetWorkspace: vi.fn(async () => ({
-    id: 'w1', name: 'WS', slug: 'ws', myRole: mockState.workspaceRole, createdAt: '2026-01-01T00:00:00Z',
+    id: 'w1', name: 'WS', slug: 'ws', myRole: 'MEMBER', myPermissions: [],
+    createdAt: '2026-01-01T00:00:00Z',
   })),
   // HD-104: the only write the off-state affordance performs — a PARTIAL delivery
   // PATCH that never carries the derived `preset`.
@@ -79,7 +85,8 @@ vi.mock('../api', () => ({
       ...(mockState.delivery ?? {}), ...(payload.delivery as Record<string, unknown>) }
     return {
       id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY',
-      archived: false, myRole: mockState.projectRole, createdAt: '2026-01-01T00:00:00Z',
+      archived: false, myRole: 'MEMBER', myPermissions: mockState.projectPermissions,
+    createdAt: '2026-01-01T00:00:00Z',
       delivery: mockState.delivery,
     }
   }),
@@ -98,8 +105,7 @@ vi.mock('../api', () => ({
 
 beforeEach(() => {
   mockState.versions = [UNRELEASED, NEXT, RELEASED]
-  mockState.projectRole = 'MANAGER'
-  mockState.workspaceRole = 'MEMBER'
+  mockState.projectPermissions = PROJECT_ADMIN_PERMISSIONS
   mockState.delivery = undefined
   vi.mocked(apiUpdateProject).mockClear()
   vi.mocked(versionsApi.create).mockClear()
@@ -244,8 +250,7 @@ describe('ReleasesPage — issue count links into HQL search', () => {
 
 describe('ReleasesPage — curation guard', () => {
   it('hides every write affordance from a plain member', async () => {
-    mockState.projectRole = 'MEMBER'
-    mockState.workspaceRole = 'MEMBER'
+    mockState.projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
     renderPage()
 
     // The page still reads…
@@ -257,8 +262,9 @@ describe('ReleasesPage — curation guard', () => {
   })
 
   it('lets a workspace ADMIN who is not a project MANAGER curate', async () => {
-    mockState.projectRole = 'MEMBER'
-    mockState.workspaceRole = 'ADMIN'
+    // A workspace admin who is not a project member: the server folds the
+    // `project.curate.all` bypass into the project's own permission set.
+    mockState.projectPermissions = PROJECT_CURATOR_BYPASS_PERMISSIONS
     renderPage()
 
     expect(await screen.findByLabelText('Actions for 2.4.0')).toBeInTheDocument()
@@ -327,8 +333,7 @@ describe('ReleasesPage — the off-state (HD-104, Rule C)', () => {
 
   it('offers a plain member no enabling action at all', async () => {
     mockState.delivery = RELEASES_OFF
-    mockState.projectRole = 'MEMBER'
-    mockState.workspaceRole = 'MEMBER'
+    mockState.projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
     renderPage()
 
     expect(await screen.findByText('18 / 24')).toBeInTheDocument()

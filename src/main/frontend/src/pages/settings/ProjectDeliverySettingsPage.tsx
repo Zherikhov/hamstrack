@@ -8,6 +8,7 @@ import type { DeliveryCapability } from '../../components/delivery'
 import { useOpenSprints } from '../../components/sprints'
 import { useProjectVersions } from '../../components/versions'
 import { useProjectDelivery } from '../../hooks/useProjectDelivery'
+import { useProjectPermissions } from '../../hooks/usePermissions'
 import type { BoardMode, DeliveryPreset, Sprint, Version } from '../../types'
 
 /**
@@ -83,11 +84,13 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 export default function ProjectDeliverySettingsPage() {
   const { wsId, projectId } = useParams<{ wsId: string; projectId: string }>()
-  // ONE reader for "how does this project deliver?" (§12). `needsRole` resolves
-  // the workspace half of the curator predicate; both queries are already cached
-  // by the settings area itself, so this page costs no extra project request.
-  const { board, releases, estimation, preset, isCurator, project } =
-    useProjectDelivery(wsId, projectId, { needsRole: true })
+  // ONE reader for "how does this project deliver?" (§12) — a capability is not
+  // a permission, so the two questions are asked separately (HD-123 S5). Every
+  // switch on this page is a change to the PROJECT, hence `project.edit`; the
+  // settings area has already cached the entry both read, so neither costs a
+  // request here.
+  const { board, releases, estimation, preset, project } = useProjectDelivery(wsId, projectId)
+  const canEditProject = useProjectPermissions(wsId, projectId).can('project.edit')
 
   const loaded = !!project
   const archived = !!project?.archived
@@ -195,7 +198,7 @@ export default function ProjectDeliverySettingsPage() {
           whether issues are estimated.{' '}
           {/* A member has no switch to be told is reversible; they are told who
               does have one, and that the guarantee holds either way. */}
-          {isCurator
+          {canEditProject
             ? 'Every switch here is reversible and changes nothing about the issues themselves: '
               + 'sprints, versions and estimates are kept whichever way you set it.'
             : 'A project admin sets this. Whichever way it is set, nothing about the issues '
@@ -221,14 +224,14 @@ export default function ProjectDeliverySettingsPage() {
               title="How the board works"
               // A JSX string attribute keeps its newlines and indentation verbatim
               // — long copy goes through an expression, not a wrapped literal.
-              hint={isCurator
+              hint={canEditProject
                 ? 'Kanban and Scrum are two ways to run the same board over the same issues. '
                   + 'This is one choice with two answers, not a feature and its absence.'
                 : 'How this project’s board is set up. A project admin chooses it.'}
             />
             <BoardChoice
               value={board}
-              isCurator={isCurator}
+              canEdit={canEditProject}
               disabled={archived || switcher.isPending}
               onChange={next => startSwitch('iterations', next === 'SCRUM')}
             />
@@ -237,7 +240,7 @@ export default function ProjectDeliverySettingsPage() {
                 still open are the data a user would most expect to have lost.
                 Curator-only, like the control above it: on a Kanban project this
                 is sprint vocabulary, and §5.3 withholds that from a member. */}
-            {isCurator && board === 'KANBAN' && openSprints.length > 0 && (
+            {canEditProject && board === 'KANBAN' && openSprints.length > 0 && (
               <KeptNotice to={backlogHref} linkLabel="Open Backlog">
                 <b>{openSprints.length}</b> open {plural(openSprints.length, 'sprint')} kept
                 {activeSprint ? <> — <b>{activeSprint.name}</b> is still running</> : null}.
@@ -246,7 +249,7 @@ export default function ProjectDeliverySettingsPage() {
               </KeptNotice>
             )}
             {/* Addressed to whoever could do the switching — a member cannot. */}
-            {isCurator && board === 'SCRUM' && (
+            {canEditProject && board === 'SCRUM' && (
               <p className="text-xs" style={{ color: 'var(--color-text-muted)', maxWidth: 620 }}>
                 Switching to Kanban later keeps every sprint and every issue in it — open sprints
                 stay on the Backlog, read-only, until you complete them.
@@ -260,7 +263,7 @@ export default function ProjectDeliverySettingsPage() {
           <section className="flex flex-col gap-2.5">
             <SectionHeading
               title="What else this project does"
-              hint={isCurator
+              hint={canEditProject
                 ? 'Independent of the board choice — Scrum that also ships tagged versions is '
                   + 'ordinary here, and estimating without sprints is legal too.'
                 : 'What this project does besides the board. A project admin chooses it.'}
@@ -273,7 +276,7 @@ export default function ProjectDeliverySettingsPage() {
                   {on ? (
                     <CapabilityOnRow
                       capability={capability}
-                      isCurator={isCurator}
+                      canEdit={canEditProject}
                       disabled={archived}
                       pending={switcher.isPending}
                       onTurnOff={() => startSwitch(capability, false)}
@@ -281,10 +284,10 @@ export default function ProjectDeliverySettingsPage() {
                   ) : (
                     // The SAME off-state component the Backlog and the Releases
                     // page render (Rule C) — one implementation, one wording, and
-                    // `isCurator` is the real role rather than a literal `true`.
+                    // the real permission rather than a literal `true`.
                     <CapabilityOffState
                       capability={capability}
-                      isCurator={isCurator}
+                      canEnable={canEditProject}
                       pending={switcher.isPending}
                       disabled={archived}
                       error={failed === capability ? switcher.error : ''}
@@ -325,7 +328,7 @@ export default function ProjectDeliverySettingsPage() {
       {/* Curator-only: planning and starting a sprint is itself curator-only on
           the Backlog, so this sentence would send a member somewhere to do
           something they will not be offered. */}
-      {isCurator && board === 'SCRUM' && wsId && projectId && (
+      {canEditProject && board === 'SCRUM' && wsId && projectId && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
             Plan and start sprints from the project’s Backlog.
@@ -529,9 +532,9 @@ function PresetPill({ preset }: { preset: DeliveryPreset }) {
  * nothing else, while choosing it at creation also turns estimation on — one
  * blurb cannot honestly describe both.
  */
-function BoardChoice({ value, isCurator, disabled, onChange }: {
+function BoardChoice({ value, canEdit, disabled, onChange }: {
   value: BoardMode
-  isCurator: boolean
+  canEdit: boolean
   disabled: boolean
   onChange: (next: BoardMode) => void
 }) {
@@ -541,7 +544,7 @@ function BoardChoice({ value, isCurator, disabled, onChange }: {
   // 403 on, Rule A), and on a Kanban project its label is exactly the sprint
   // vocabulary §5.3 withholds from a member. The settings area redirects
   // non-curators, but this editor may not depend on that guard.
-  if (!isCurator) {
+  if (!canEdit) {
     const copy = CAPABILITY.iterations
     return (
       <p className="text-xs" style={{ color: 'var(--color-text-muted)', maxWidth: 620 }}>
@@ -602,22 +605,22 @@ function BoardChoice({ value, isCurator, disabled, onChange }: {
 /**
  * An add-on capability while it is ON — its name, what it does, and the way out.
  *
- * The mirror of `CapabilityOffState`, `isCurator` included: a member is told what
+ * The mirror of `CapabilityOffState`, `canEdit` included: a member is told what
  * the project does and offered nothing, because "Turn off releases" is a control
  * whose only possible outcome for them is a 403 (Rule A — the endpoint was never
  * open to them). Showing a member a live off switch beside "…is off for this
  * project. A project admin can turn it back on" is the same page saying two
  * different things about the same role.
  */
-function CapabilityOnRow({ capability, isCurator, disabled, pending, onTurnOff }: {
+function CapabilityOnRow({ capability, canEdit, disabled, pending, onTurnOff }: {
   capability: DeliveryCapability
-  isCurator: boolean
+  canEdit: boolean
   disabled: boolean
   pending: boolean
   onTurnOff: () => void
 }) {
   const copy = CAPABILITY[capability]
-  if (!isCurator) {
+  if (!canEdit) {
     return (
       <p className="text-xs" style={{ color: 'var(--color-text-muted)', maxWidth: 620 }}>
         {copy.memberNoteOn}

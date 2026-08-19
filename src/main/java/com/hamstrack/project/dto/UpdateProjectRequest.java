@@ -1,11 +1,16 @@
 package com.hamstrack.project.dto;
 
+import com.hamstrack.common.util.DisplayText;
 import com.hamstrack.project.entity.BoardMode;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
  * Partial project update — an absent field is left alone.
+ *
+ * <p>{@code name} carries {@link DisplayText#SINGLE_LINE} for the reasons spelled out on
+ * {@code CreateProjectRequest}: it is a display string that leaves this application.
  *
  * <p>{@code delivery} (HD-102 §11.3) carries the three delivery capabilities, each of
  * them independently nullable: {@code {"delivery":{"releases":true}}} turns releases on
@@ -30,7 +35,8 @@ import jakarta.validation.constraints.Size;
  * <em>curator</em> (§3.2) — see {@code ProjectService.update}.
  */
 public record UpdateProjectRequest(
-        @Size(min = 2, max = 255) String name,
+        @Size(min = 2, max = 255) @Pattern(regexp = DisplayText.SINGLE_LINE,
+                message = "Name must not contain control characters") String name,
         String description,
         @Deprecated BoardMode boardMode,
         @Valid DeliveryRequest delivery

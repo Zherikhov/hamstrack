@@ -1,5 +1,6 @@
 package com.hamstrack.admin;
 
+import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
@@ -14,12 +15,10 @@ import com.hamstrack.issue.repository.PrioritySetRepository;
 import com.hamstrack.issue.repository.StatusRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.hamcrest.Matchers;
@@ -49,6 +48,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class DelegatedAdminBindingTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -65,7 +66,7 @@ class DelegatedAdminBindingTest {
     void workspaceOwnerSeesMatrixAndCanBindGlobalSet() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
         var token = login(owner);
 
@@ -87,9 +88,9 @@ class DelegatedAdminBindingTest {
     void workspaceMemberWithoutAdminRoleGets403() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var plain = user();
-        member(ws, plain, WorkspaceRole.MEMBER);
+        member(ws, plain, "MEMBER");
         var token = login(plain);
 
         mockMvc.perform(get("/api/workspaces/" + ws.getId() + "/admin/projects")
@@ -101,7 +102,7 @@ class DelegatedAdminBindingTest {
     void nonMemberGets404OnWorkspaceAdmin() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var outsider = user();
         var token = login(outsider);
 
@@ -114,7 +115,7 @@ class DelegatedAdminBindingTest {
     void bindingASetFromAnotherWorkspaceIsRejected() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
         var token = login(owner);
 
@@ -138,11 +139,11 @@ class DelegatedAdminBindingTest {
     void projectManagerCanReadAndBind() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var manager = user();
-        member(ws, manager, WorkspaceRole.MEMBER);
+        member(ws, manager, "MEMBER");
         var project = project(ws, owner);
-        projectMember(project, manager, ProjectRole.MANAGER);
+        projectMember(project, manager, "MANAGER");
         var token = login(manager);
 
         mockMvc.perform(get("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/bindings")
@@ -168,11 +169,11 @@ class DelegatedAdminBindingTest {
     void projectMemberWithoutManagerRoleGets403() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var viewer = user();
-        member(ws, viewer, WorkspaceRole.MEMBER);
+        member(ws, viewer, "MEMBER");
         var project = project(ws, owner);
-        projectMember(project, viewer, ProjectRole.MEMBER);
+        projectMember(project, viewer, "MEMBER");
         var token = login(viewer);
 
         mockMvc.perform(get("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/bindings")
@@ -184,10 +185,10 @@ class DelegatedAdminBindingTest {
     void projectManagerCannotBindAnotherProjectsPrivateSet() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
         var other = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
         // priority set private to the *other* project in the same workspace
@@ -209,9 +210,9 @@ class DelegatedAdminBindingTest {
     void projectPrivateStatusIsScopedAndInvisibleGlobally() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -239,9 +240,9 @@ class DelegatedAdminBindingTest {
     void projectAdminCannotEditAGlobalStatus() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
         // a seeded global status id
@@ -264,9 +265,9 @@ class DelegatedAdminBindingTest {
     void statusNameUniquenessIsPerScope() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -290,11 +291,11 @@ class DelegatedAdminBindingTest {
     void projectMemberCannotCreateAStatus() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var viewer = user();
-        member(ws, viewer, WorkspaceRole.MEMBER);
+        member(ws, viewer, "MEMBER");
         var project = project(ws, owner);
-        projectMember(project, viewer, ProjectRole.MEMBER);
+        projectMember(project, viewer, "MEMBER");
         var token = login(viewer);
 
         mockMvc.perform(post("/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin/statuses")
@@ -310,9 +311,9 @@ class DelegatedAdminBindingTest {
     void projectAdminBuildsPrivateWorkflowFromOwnStatus() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -343,10 +344,10 @@ class DelegatedAdminBindingTest {
     void workflowCannotIncludeAnotherProjectsPrivateStatus() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
         var other = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
         // a status private to the *other* project
@@ -367,9 +368,9 @@ class DelegatedAdminBindingTest {
     void scopedWorkflowIsInvisibleInTheGlobalConsole() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var admin = adminToken();
 
@@ -398,9 +399,9 @@ class DelegatedAdminBindingTest {
     void projectAdminCreatesPrivateFieldAndSet() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -427,10 +428,10 @@ class DelegatedAdminBindingTest {
     void fieldSetCannotIncludeAnotherProjectsPrivateField() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
         var other = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
         var foreign = new FieldDef();
@@ -452,9 +453,9 @@ class DelegatedAdminBindingTest {
     void projectPrivateFieldIsInvisibleInTheGlobalConsole() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
 
         var name = "PF-" + System.nanoTime();
@@ -474,9 +475,9 @@ class DelegatedAdminBindingTest {
     void projectCatalogListIncludesInheritedGlobalRows() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -494,9 +495,9 @@ class DelegatedAdminBindingTest {
     void projectAdminCanReadCatalogUsage() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var base = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/admin";
 
@@ -517,7 +518,7 @@ class DelegatedAdminBindingTest {
     void workspaceAdminCannotDuplicateAnInheritedStatusName() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var token = login(owner);
 
         // "To Do" is a seeded GLOBAL status, inherited (visible) by every workspace.
@@ -546,13 +547,13 @@ class DelegatedAdminBindingTest {
         // caller's own workspace's projects, never a global figure spanning tenants.
         var ownerA = user();
         var wsA = workspace(ownerA);
-        member(wsA, ownerA, WorkspaceRole.OWNER);
+        member(wsA, ownerA, "OWNER");
         project(wsA, ownerA);
         var tokenA = login(ownerA);
 
         var ownerB = user();
         var wsB = workspace(ownerB);
-        member(wsB, ownerB, WorkspaceRole.OWNER);
+        member(wsB, ownerB, "OWNER");
         project(wsB, ownerB);
         project(wsB, ownerB);
         var tokenB = login(ownerB);
@@ -607,11 +608,11 @@ class DelegatedAdminBindingTest {
         return workspaceRepository.save(w);
     }
 
-    private void member(Workspace ws, User user, WorkspaceRole role) {
+    private void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 
@@ -624,11 +625,11 @@ class DelegatedAdminBindingTest {
         return projectRepository.save(p);
     }
 
-    private void projectMember(Project project, User user, ProjectRole role) {
+    private void projectMember(Project project, User user, String role) {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, role));
         projectMemberRepository.save(m);
     }
 

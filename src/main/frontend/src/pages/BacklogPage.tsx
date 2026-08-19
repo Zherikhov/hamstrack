@@ -24,6 +24,7 @@ import {
 } from '../components/sprints'
 import { CAPABILITY, CapabilityOffState, DELIVERY_SETTINGS_TAB } from '../components/delivery'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
+import { useProjectPermissions } from '../hooks/usePermissions'
 import { useUiStore } from '../uiStore'
 import IssueSidePanel from './IssueSidePanel'
 import type {
@@ -38,6 +39,11 @@ import type {
 const PLANNING_OFF_HINT =
   'Sprint planning is off for this project — this sprint and its issues are kept, '
   + 'but issues can’t be moved in or out until a curator turns it back on.'
+
+/** HD-123 S5 — a UI courtesy; the API answers the same refusal with a 403. */
+const RANK_DENIED_HINT = 'You don’t have permission to reorder this project’s backlog.'
+const SPRINT_ASSIGN_DENIED_HINT =
+  'You don’t have permission to move issues into or out of a sprint in this project.'
 
 /**
  * Backlog & sprint planning (HD-23) — `/w/:wsId/p/:projectId/backlog`, wrapped in
@@ -115,15 +121,22 @@ export default function BacklogPage() {
   const fields = config?.fields ?? []
   const openStatuses = statuses.filter(s => s.category !== 'DONE')
 
-  // HD-102: what this project declares, not what its data implies. `needsRole`
-  // because this page renders curator-only sprint controls.
-  const { iterations, releases, estimation, isCurator, project } =
-    useProjectDelivery(wsId, projectId, { needsRole: true })
-  // The curator predicate can go true from the WORKSPACE role alone, before the
-  // project itself has loaded — and an unloaded project answers "off" for every
-  // capability by design. Without this guard a Scrum project would flash the
-  // "Plan in sprints" affordance at its own curator for one round trip.
-  const canBootstrap = isCurator && !!project
+  // HD-102: what this project declares, not what its data implies.
+  const { iterations, releases, estimation, project } = useProjectDelivery(wsId, projectId)
+  // HD-123 S5: the planning page touches three distinct grants, and they are
+  // asked separately because a role may hold any one without the others —
+  // "developers must not reprioritise the backlog" is the motivating example.
+  //   • sprint.manage — the sprint LIFECYCLE (create / edit / start / complete / delete)
+  //   • sprint.assign — putting issues into and taking them out of a sprint
+  //   • issue.rank    — reordering the ranked list itself
+  const permissions = useProjectPermissions(wsId, projectId)
+  const canManageSprints = permissions.can('sprint.manage')
+  const canAssignSprints = permissions.can('sprint.assign')
+  const canRank = permissions.can('issue.rank')
+  // Both halves of the bootstrap gesture: creating the first sprint AND turning
+  // the iterations capability on in the same submit (a project edit).
+  const canBootstrap = canManageSprints && !!project
+    && (iterations || permissions.can('project.edit'))
   const { addIssues, removeIssues } = useSprintMutations(wsId, projectId)
 
   const filters = useMemo(() => ({
@@ -204,19 +217,28 @@ export default function BacklogPage() {
   }
 
   /**
-   * Why a section-to-section move is not on offer, or null when it is.
+   * Why a move is not on offer, or null when it is.
    *
-   * Two different reasons, deliberately worded differently: a COMPLETED sprint is
-   * a delivered fact the server itself refuses to change (422), while "planning
-   * off" is a reversible project preference this UI enforces alone — the API
-   * would happily take the move (Rule A, §5.1).
+   * Three different reasons, deliberately worded differently: a COMPLETED sprint
+   * is a delivered fact the server itself refuses to change (422); "planning off"
+   * is a reversible project preference this UI enforces alone — the API would
+   * happily take the move (Rule A, §5.1); a missing permission is the one the
+   * API answers with a 403, so saying so here is a courtesy, not the control.
+   *
+   * This is the single backstop every entry point funnels through (drag, kebab,
+   * "move all"), which is why the permission check belongs here rather than
+   * being re-stated at each of them.
    */
   function moveRefusal(from: string, to: string): string | null {
-    if (from === to) return null
+    // Same section = a pure re-rank; a different one also changes sprint
+    // membership, which is a separate grant (§6.5's double-door rule applies to
+    // the server side of the same split).
+    if (from === to) return canRank ? null : RANK_DENIED_HINT
     if (isClosedSection(from) || isClosedSection(to)) return CLOSED_SPRINT_HINT
     // Every section other than the backlog IS a sprint, so any cross-section move
     // touches one while sprint planning is off.
     if (sprintsReadOnly) return PLANNING_OFF_HINT
+    if (!canAssignSprints) return SPRINT_ASSIGN_DENIED_HINT
     return null
   }
 
@@ -535,7 +557,7 @@ export default function BacklogPage() {
                     <SprintSectionHeader
                       sprint={section.sprint}
                       stats={section.stats}
-                      canCurate={isCurator}
+                      canCurate={canManageSprints}
                       // Rule B: still visible, but inert except for the one
                       // action a running sprint must never lose.
                       planningOff={sprintsReadOnly}
@@ -550,7 +572,7 @@ export default function BacklogPage() {
                       // membership is what it delivered (the server refuses both
                       // directions with a 422). Neither does any sprint while
                       // planning is off — the section is read-only.
-                      moveTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly ? [] : [
+                      moveTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly || !canAssignSprints ? [] : [
                         ...openSprints.filter(s => s.id !== section.sprint.id)
                           .map(s => ({ id: s.id, name: s.name })),
                         { id: BACKLOG_SECTION, name: 'Backlog' },
@@ -563,7 +585,7 @@ export default function BacklogPage() {
                   refreshing={view.refreshingSection === section.sprint.id}
                   onRefresh={() => view.refreshSection(section.sprint.id)}
                   emptyText={
-                    isCurator && !sprintsReadOnly
+                    canAssignSprints && !sprintsReadOnly
                       ? 'Drag issues here from the backlog to plan this sprint.'
                       : 'No issues planned for this sprint yet.'
                   }
@@ -581,7 +603,8 @@ export default function BacklogPage() {
                   // Same rule for a single row's kebab: nothing leaves a
                   // completed sprint — or any sprint while planning is off — so
                   // it offers no "Move to →" at all.
-                  menuTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly ? [] : [
+                  canRank={canRank}
+                  menuTargets={isSprintClosed(section.sprint.state) || sprintsReadOnly || !canAssignSprints ? [] : [
                     ...openSprints.filter(s => s.id !== section.sprint.id)
                       .map(s => ({ id: s.id, name: s.name })),
                     { id: BACKLOG_SECTION, name: 'Backlog' },
@@ -610,7 +633,9 @@ export default function BacklogPage() {
               ) : (
                 <CapabilityOffState
                   capability="iterations"
-                  isCurator
+                  // `canBootstrap` above already proved both grants, so the
+                  // whole block is only rendered for someone who holds them.
+                  canEnable
                   // The switch itself happens inside the create dialog, in the
                   // same gesture that creates the first sprint — turning sprint
                   // planning on and then landing on an empty sprint area would be
@@ -625,6 +650,7 @@ export default function BacklogPage() {
                   <BacklogSectionHeader
                     stats={data.backlog.stats}
                     showPoints={estimation}
+                    canCreateIssue={permissions.can('issue.create')}
                     onCreateIssue={() => openCreateIssue({ projectId })}
                   />
                 }
@@ -647,7 +673,8 @@ export default function BacklogPage() {
                 onSectionDrop={onSectionDrop}
                 // "Move to a sprint" is a planning control, so it follows the
                 // capability — with iterations off the ranked list is all there is.
-                menuTargets={sprintsReadOnly ? [] : openSprints.map(s => ({ id: s.id, name: s.name }))}
+                canRank={canRank}
+                menuTargets={sprintsReadOnly || !canAssignSprints ? [] : openSprints.map(s => ({ id: s.id, name: s.name }))}
                 onMoveWithin={moveWithin}
                 onMoveToSection={moveToSection}
               />
@@ -826,7 +853,7 @@ function SectionCard({
   sectionId, header, section, collapsed, onToggle, refreshing, onRefresh, emptyText,
   wsId, issueTypes, openIssueNumber, onOpenIssue,
   dragging, dropAt, onDragStartIssue, onDragEnd, onRowDragOver, onSectionDragOver, onSectionDrop,
-  menuTargets, onMoveWithin, onMoveToSection,
+  canRank, menuTargets, onMoveWithin, onMoveToSection,
 }: {
   sectionId: string
   header: React.ReactNode
@@ -847,6 +874,8 @@ function SectionCard({
   onRowDragOver: (e: React.DragEvent, section: string, index: number) => void
   onSectionDragOver: (e: React.DragEvent, section: string) => void
   onSectionDrop: (e: React.DragEvent, section: string) => void
+  /** `issue.rank` — the reorder half of the kebab, and half of "may I drag". */
+  canRank: boolean
   /** Sections this section's rows may be moved into from the kebab menu. */
   menuTargets: { id: string; name: string }[]
   onMoveWithin: (issue: Issue, section: string, where: 'top' | 'up' | 'down' | 'bottom') => void
@@ -917,6 +946,7 @@ function SectionCard({
                   index={idx}
                   lastIndex={section.issues.length - 1}
                   sectionId={sectionId}
+                  canRank={canRank}
                   menuTargets={menuTargets}
                   onClick={() => onOpenIssue(openIssueNumber === issue.number ? undefined : issue.number)}
                   onOpenNumber={onOpenIssue}
@@ -1095,10 +1125,12 @@ function SprintSectionHeader({
   )
 }
 
-function BacklogSectionHeader({ stats, showPoints, onCreateIssue }: {
+function BacklogSectionHeader({ stats, showPoints, canCreateIssue, onCreateIssue }: {
   stats: SectionStats
   /** `estimation` — the point sum is an aggregate and follows the capability. */
   showPoints: boolean
+  /** `issue.create`. A permanent slot, so it is disabled rather than removed. */
+  canCreateIssue: boolean
   onCreateIssue: () => void
 }) {
   return (
@@ -1109,7 +1141,13 @@ function BacklogSectionHeader({ stats, showPoints, onCreateIssue }: {
           {stats.issueCount} issue{stats.issueCount === 1 ? '' : 's'}
         </span>
         {showPoints && <SprintPointsBadge stats={stats} compact />}
-        <Button variant="ghost" size="sm" onClick={onCreateIssue}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={!canCreateIssue}
+          title={canCreateIssue ? undefined : 'You don’t have permission to create issues in this project'}
+          onClick={onCreateIssue}
+        >
           <Plus size={13} /> Create issue
         </Button>
       </div>
@@ -1120,7 +1158,7 @@ function BacklogSectionHeader({ stats, showPoints, onCreateIssue }: {
 // ── Row ───────────────────────────────────────────────────────────────────────
 
 function IssueRow({
-  issue, issueTypes, active, isDragging, index, lastIndex, sectionId, menuTargets,
+  issue, issueTypes, active, isDragging, index, lastIndex, sectionId, canRank, menuTargets,
   onClick, onOpenNumber, onDragStart, onDragEnd, onMoveWithin, onMoveToSection,
 }: {
   issue: Issue
@@ -1130,6 +1168,8 @@ function IssueRow({
   index: number
   lastIndex: number
   sectionId: string
+  /** `issue.rank`. With neither this nor a move target the row is not draggable. */
+  canRank: boolean
   menuTargets: { id: string; name: string }[]
   onClick: () => void
   onOpenNumber: (n: number) => void
@@ -1144,10 +1184,15 @@ function IssueRow({
   const parentNumber = issue.parentKey
     ? Number(issue.parentKey.slice(issue.parentKey.lastIndexOf('-') + 1))
     : undefined
+  // Two grants can make a drag meaningful: reordering within the section
+  // (`issue.rank`) and dropping into another one (`sprint.assign`, which is what
+  // a non-empty `menuTargets` already proves). Neither ⇒ the row is inert, and
+  // the grip goes with it rather than promising a gesture that does nothing.
+  const canDrag = canRank || menuTargets.length > 0
 
   return (
     <div
-      draggable
+      draggable={canDrag}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={onClick}
@@ -1162,7 +1207,13 @@ function IssueRow({
       onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'var(--color-surface)' }}
       onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent' }}
     >
-      <GripVertical size={13} style={{ color: 'var(--color-text-muted)', flexShrink: 0, cursor: 'grab' }} />
+      <GripVertical
+        size={13}
+        style={{
+          color: 'var(--color-text-muted)', flexShrink: 0,
+          cursor: canDrag ? 'grab' : 'default', opacity: canDrag ? 1 : 0.35,
+        }}
+      />
       <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)', minWidth: 62 }}>
         {issue.key}
       </span>
@@ -1205,23 +1256,30 @@ function IssueRow({
       </span>
 
       {/* Keyboard/menu equivalent of EVERY drag gesture (§5.1) — native HTML5 DnD
-          is pointer-only, so this is not optional. */}
+          is pointer-only, so this is not optional. It therefore carries the SAME
+          two permission gates the drag does: offering a menu item the drag no
+          longer offers would just move the 403 one click further away. */}
+      {canDrag && (
       <span onClick={e => e.stopPropagation()} className="flex-shrink-0">
         <KebabMenu label={`Move ${issue.key}`}>
           {close => (
             <>
-              <MenuCaption>Rank</MenuCaption>
-              <MenuItem label="Move to top" disabled={index === 0}
-                        onClick={() => { close(); onMoveWithin('top') }} />
-              <MenuItem label="Move up" disabled={index === 0}
-                        onClick={() => { close(); onMoveWithin('up') }} />
-              <MenuItem label="Move down" disabled={index === lastIndex}
-                        onClick={() => { close(); onMoveWithin('down') }} />
-              <MenuItem label="Move to bottom" disabled={index === lastIndex}
-                        onClick={() => { close(); onMoveWithin('bottom') }} />
+              {canRank && (
+                <>
+                  <MenuCaption>Rank</MenuCaption>
+                  <MenuItem label="Move to top" disabled={index === 0}
+                            onClick={() => { close(); onMoveWithin('top') }} />
+                  <MenuItem label="Move up" disabled={index === 0}
+                            onClick={() => { close(); onMoveWithin('up') }} />
+                  <MenuItem label="Move down" disabled={index === lastIndex}
+                            onClick={() => { close(); onMoveWithin('down') }} />
+                  <MenuItem label="Move to bottom" disabled={index === lastIndex}
+                            onClick={() => { close(); onMoveWithin('bottom') }} />
+                </>
+              )}
               {menuTargets.length > 0 && (
                 <>
-                  <MenuSeparator />
+                  {canRank && <MenuSeparator />}
                   <MenuCaption>Move to</MenuCaption>
                   {menuTargets.map(t => (
                     <MenuItem
@@ -1237,6 +1295,7 @@ function IssueRow({
           )}
         </KebabMenu>
       </span>
+      )}
     </div>
   )
 }

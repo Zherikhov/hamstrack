@@ -1,6 +1,5 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -97,7 +96,7 @@ class ComponentFilterTest extends ComponentTestBase {
     @Test
     void theComponentFilterComposesWithTheOtherFilters() throws Exception {
         var ctx = newProject();
-        var assignee = addMember(ctx, WorkspaceRole.MEMBER);
+        var assignee = addMember(ctx, "MEMBER");
         var billing = createComponent(ctx, "billing");
         var label = createLabel(ctx, "urgent");
         var done = ctx.statusId(doneStatusName(ctx));

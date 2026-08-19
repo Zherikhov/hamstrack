@@ -7,6 +7,10 @@ import CommandPalette from './CommandPalette'
 import ShortcutsHelp from './ShortcutsHelp'
 import { useUiStore } from '../uiStore'
 import { useAuthStore } from '../auth'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS,
+  WORKSPACE_ADMIN_PERMISSIONS, WORKSPACE_MEMBER_PERMISSIONS,
+} from '../test/permissions'
 import type { Issue, Project, SavedFilter, SearchResultRow, User, Workspace, WorkspaceMember } from '../types'
 
 // HD-39 §17.1 (25–42). The palette is a jumper: what matters is that the right
@@ -16,12 +20,18 @@ import type { Issue, Project, SavedFilter, SearchResultRow, User, Workspace, Wor
 const ME: User = { id: 'u-me', email: 'me@example.com', displayName: 'Me', systemRole: 'USER' }
 const ADMIN: User = { ...ME, systemRole: 'ADMIN' }
 
-const WS: Workspace = { id: 'w1', name: 'Acme', slug: 'acme', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z' }
-const WS_MEMBER_ONLY: Workspace = { ...WS, myRole: 'MEMBER' }
+const WS: Workspace = {
+  id: 'w1', name: 'Acme', slug: 'acme', myRole: 'OWNER',
+  myPermissions: WORKSPACE_ADMIN_PERMISSIONS, createdAt: '2026-01-01T00:00:00Z',
+}
+const WS_MEMBER_ONLY: Workspace = {
+  ...WS, myRole: 'MEMBER', myPermissions: WORKSPACE_MEMBER_PERMISSIONS,
+}
 
 const PROJ_BOATS: Project = {
   id: 'p1', workspaceId: 'w1', name: 'Boats', key: 'BOA',
-  archived: false, myRole: 'MEMBER', createdAt: '2026-01-01T00:00:00Z',
+  archived: false, myRole: 'MEMBER', myPermissions: PROJECT_CONTRIBUTOR_PERMISSIONS,
+  createdAt: '2026-01-01T00:00:00Z',
 }
 const PROJ_PAYMENTS: Project = { ...PROJ_BOATS, id: 'p2', name: 'Payments', key: 'PAY' }
 const PROJ_ARCHIVED: Project = { ...PROJ_BOATS, id: 'p3', name: 'Boatyard (old)', key: 'OLD', archived: true }
@@ -32,7 +42,10 @@ const FILTER: SavedFilter = {
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 }
 
-const MEMBER: WorkspaceMember = { userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee', role: 'MEMBER' }
+const MEMBER: WorkspaceMember = {
+  userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee',
+  roleId: 'r-ws-member', role: 'MEMBER',
+}
 
 const ISSUE: Issue = {
   id: 'i1', number: 42, key: 'BOA-42', title: 'Hull leaks under load',
@@ -545,7 +558,9 @@ describe('CommandPalette — permissions & persistence', () => {
     expect(screen.queryByText(/^Project settings/)).not.toBeInTheDocument()
     asMember.unmount()
 
-    mocks.projects.mockResolvedValue([{ ...PROJ_BOATS, myRole: 'MANAGER' }, PROJ_PAYMENTS])
+    mocks.projects.mockResolvedValue([
+      { ...PROJ_BOATS, myPermissions: PROJECT_ADMIN_PERMISSIONS }, PROJ_PAYMENTS,
+    ])
     renderPalette()
     openPalette()
     await waitFor(() => expect(screen.getByText('Project settings — Boats')).toBeInTheDocument())

@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.common.security.RoleScope;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
@@ -8,12 +9,10 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.junit.jupiter.api.Test;
@@ -52,6 +51,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class SearchApiTest {
 
     @Autowired MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -370,9 +371,9 @@ class SearchApiTest {
     private Ctx newProject() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var configBase = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/config";
         var body = mockMvc.perform(get(configBase).header("Authorization", "Bearer " + token))
@@ -451,11 +452,11 @@ class SearchApiTest {
         return workspaceRepository.save(w);
     }
 
-    private void member(Workspace ws, User user, WorkspaceRole role) {
+    private void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 
@@ -468,11 +469,11 @@ class SearchApiTest {
         return projectRepository.save(p);
     }
 
-    private void projectMember(Project project, User user, ProjectRole role) {
+    private void projectMember(Project project, User user, String role) {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, role));
         projectMemberRepository.save(m);
     }
 

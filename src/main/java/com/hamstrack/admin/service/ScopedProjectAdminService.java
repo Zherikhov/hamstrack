@@ -4,8 +4,8 @@ import com.hamstrack.admin.dto.BindingOptionsResponse;
 import com.hamstrack.admin.dto.BindingOptionsResponse.SetOption;
 import com.hamstrack.admin.dto.ProjectBindingResponse;
 import com.hamstrack.admin.dto.UpdateProjectBindingsRequest;
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.entity.Scoped;
 import com.hamstrack.issue.repository.FieldSetRepository;
 import com.hamstrack.issue.repository.IssueTypeSetRepository;
@@ -15,6 +15,7 @@ import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.exception.ProjectNotFoundException;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -29,14 +30,16 @@ import java.util.UUID;
  * project may be bound only to sets <em>visible</em> to it — global, its own
  * workspace's, or its own project-private — enforced by {@link #requireBindable}.
  * This structurally prevents binding a set that belongs to another tenant or
- * another project. Authorization is delegated to {@link ScopeResolver}; the
+ * another project. Authorization is {@code workspace.taxonomy.manage} on the workspace
+ * paths and {@code project.taxonomy.manage} on the project ones, resolved through the
+ * single tenancy chokepoint (HD-126 S3, §10.4 — {@code ScopeResolver} is gone); the
  * system-admin matrix stays in {@link AdminProjectService}.
  */
 @Service
 @RequiredArgsConstructor
 public class ScopedProjectAdminService {
 
-    private final ScopeResolver scopeResolver;
+    private final WorkspaceAccessService workspaceAccess;
     private final ProjectRepository projectRepository;
     private final WorkflowRepository workflowRepository;
     private final PrioritySetRepository prioritySetRepository;
@@ -48,7 +51,7 @@ public class ScopedProjectAdminService {
 
     @Transactional(readOnly = true)
     public List<ProjectBindingResponse> workspaceMatrix(User actor, UUID workspaceId) {
-        var workspace = scopeResolver.requireWorkspaceAdmin(actor, workspaceId);
+        var workspace = requireWorkspaceTaxonomyAdmin(actor, workspaceId);
         return projectRepository.findAllByWorkspace(workspace).stream()
                 .map(this::toResponse)
                 .toList();
@@ -56,7 +59,7 @@ public class ScopedProjectAdminService {
 
     @Transactional(readOnly = true)
     public BindingOptionsResponse workspaceBindingOptions(User actor, UUID workspaceId) {
-        scopeResolver.requireWorkspaceAdmin(actor, workspaceId);
+        requireWorkspaceTaxonomyAdmin(actor, workspaceId);
         // proj = null → global ∪ workspace only (a null project id matches no rows)
         return options(workspaceId, null);
     }
@@ -64,7 +67,7 @@ public class ScopedProjectAdminService {
     @Transactional
     public ProjectBindingResponse updateWorkspaceProjectBindings(
             User actor, UUID workspaceId, UUID projectId, UpdateProjectBindingsRequest req) {
-        var workspace = scopeResolver.requireWorkspaceAdmin(actor, workspaceId);
+        var workspace = requireWorkspaceTaxonomyAdmin(actor, workspaceId);
         var project = projectRepository.findByIdAndWorkspace(projectId, workspace)
                 .orElseThrow(ProjectNotFoundException::new);
         return applyBindings(project, req);
@@ -74,21 +77,51 @@ public class ScopedProjectAdminService {
 
     @Transactional(readOnly = true)
     public ProjectBindingResponse projectBindings(User actor, UUID workspaceId, UUID projectId) {
-        var project = scopeResolver.requireProjectAdmin(actor, workspaceId, projectId);
-        return toResponse(project);
+        return toResponse(requireProjectTaxonomyAdmin(actor, workspaceId, projectId));
     }
 
     @Transactional(readOnly = true)
     public BindingOptionsResponse projectBindingOptions(User actor, UUID workspaceId, UUID projectId) {
-        scopeResolver.requireProjectAdmin(actor, workspaceId, projectId);
+        requireProjectTaxonomyAdmin(actor, workspaceId, projectId);
         return options(workspaceId, projectId);
     }
 
     @Transactional
     public ProjectBindingResponse updateProjectBindings(
             User actor, UUID workspaceId, UUID projectId, UpdateProjectBindingsRequest req) {
-        var project = scopeResolver.requireProjectAdmin(actor, workspaceId, projectId);
-        return applyBindings(project, req);
+        return applyBindings(requireProjectTaxonomyAdmin(actor, workspaceId, projectId), req);
+    }
+
+    // ---------- authorization ----------
+
+    /**
+     * 404 for a missing workspace or a non-member; 403 for a member without
+     * {@code workspace.taxonomy.manage}. Δ-free against the deleted
+     * {@code ScopeResolver.requireWorkspaceAdmin}: the built-in Owner and Admin hold that
+     * permission and Member does not.
+     */
+    private Workspace requireWorkspaceTaxonomyAdmin(User actor, UUID workspaceId) {
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        ctx.permissions().require(Permission.WORKSPACE_TAXONOMY_MANAGE);
+        return ctx.workspace();
+    }
+
+    /**
+     * 404 for a missing workspace, a missing project or a non-member of the
+     * <em>workspace</em>; <strong>403</strong> for a workspace member without
+     * {@code project.taxonomy.manage} in this project.
+     *
+     * <p>That 403 is the one deliberate 404→403 change of HD-126 (§10.3.2) — see
+     * {@code ProjectAdminController} for why it is safe here and must not be copied
+     * elsewhere. The permission itself is Δ-free: only the built-in Project admin holds
+     * it, and a workspace Owner/Admin with no {@code project_members} row is still refused
+     * (it is not in the {@code project.curate.all} bypass), which is exactly what
+     * {@code requireProjectAdmin} did.
+     */
+    private Project requireProjectTaxonomyAdmin(User actor, UUID workspaceId, UUID projectId) {
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.PROJECT_TAXONOMY_MANAGE);
+        return ctx.project();
     }
 
     // ---------- shared ----------

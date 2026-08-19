@@ -2,7 +2,6 @@ package com.hamstrack.admin.controller;
 
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.admin.service.AdminCatalogService;
 import com.hamstrack.admin.service.AdminFieldService;
 import com.hamstrack.admin.service.AdminIssueTypeSetService;
@@ -10,6 +9,8 @@ import com.hamstrack.admin.service.AdminPrioritySetService;
 import com.hamstrack.admin.service.AdminWorkflowService;
 import com.hamstrack.admin.service.ScopedProjectAdminService;
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.workspace.service.WorkspaceAccessService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -20,12 +21,23 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Project-admin console: a project MANAGER manages their own project's
- * project-private catalog (statuses, priorities, issue types) and taxonomy
- * bindings. Authorization (MANAGER of a project in a workspace the actor belongs
- * to) runs via {@link ScopeResolver} before delegating with
+ * Project-admin console: a project administrator manages their own project's
+ * project-private catalog (statuses, priorities, issue types) and taxonomy bindings.
+ * Authorization resolves the project through
+ * {@link WorkspaceAccessService#resolveProject} (404 for a missing workspace, a missing
+ * project, or a non-member of the <em>workspace</em>) and then requires
+ * {@link Permission#PROJECT_TAXONOMY_MANAGE} (403), before delegating with
  * {@code ScopeContext.project(..)}. Project-private rows are visible only in this
  * project; inherited (workspace/global) rows are selected, not edited here.
+ *
+ * <p><strong>HD-126 (S3) changed one status code here on purpose</strong> (§10.3.2,
+ * §12.2): {@code ScopeResolver.requireProjectAdmin} answered <strong>404</strong> to a
+ * workspace member who was not a <em>project</em> member, while every neighbouring
+ * predicate answered 403 for the same shape of failure. It is now 403 everywhere. That is
+ * safe precisely because the project is already listed to the caller — they can see it in
+ * {@code GET /projects} — so nothing is disclosed; it must not be copied to any surface
+ * where the resource is not already listed. A non-member of the <em>workspace</em> still
+ * gets 404, from {@code resolveProject}, and always must.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/admin")
@@ -38,11 +50,12 @@ public class ProjectAdminController {
     private final AdminPrioritySetService prioritySetService;
     private final AdminIssueTypeSetService issueTypeSetService;
     private final AdminFieldService fieldService;
-    private final ScopeResolver scopeResolver;
+    private final WorkspaceAccessService workspaceAccess;
 
-    /** Authorize the actor as a project admin and return the project scope. */
+    /** Authorize the actor for project taxonomy administration and return the scope. */
     private ScopeContext scope(User actor, UUID workspaceId, UUID projectId) {
-        scopeResolver.requireProjectAdmin(actor, workspaceId, projectId);
+        workspaceAccess.resolveProject(actor, workspaceId, projectId)
+                .permissions().require(Permission.PROJECT_TAXONOMY_MANAGE);
         return ScopeContext.project(workspaceId, projectId);
     }
 

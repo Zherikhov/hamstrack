@@ -2,10 +2,19 @@ package com.hamstrack.common.exception;
 
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
+import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
+import com.hamstrack.workspace.exception.RoleInUseException;
+import com.hamstrack.workspace.exception.RoleLimitReachedException;
+import com.hamstrack.workspace.exception.SelfHeldRoleException;
 import com.hamstrack.search.HqlSemanticException;
 import com.hamstrack.search.parser.HqlParseException;
+import jakarta.servlet.http.HttpServletRequest;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -50,6 +59,7 @@ import java.util.stream.Collectors;
  */
 @Order(Ordered.HIGHEST_PRECEDENCE + 100)
 @RestControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(AppException.class)
@@ -79,6 +89,96 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(ex.getStatus()).body(problem);
     }
 
+    /**
+     * More specific than the {@code AppException} handler — publishes the full list of
+     * projects the refused removal would have stranded as the {@code projects} extension
+     * (HD-136).
+     *
+     * <p>The list is deliberately not folded into {@code detail} alone: {@code detail} is
+     * a sentence for a human and is capped at three names, while a client that wants to
+     * render "fix these" as links needs ids. Naming them discloses nothing — every project
+     * here belongs to the workspace the caller is already administering and is already
+     * listable via {@code GET /api/workspaces/{ws}/projects}.
+     *
+     * <p>{@code errorType} is the other half (review round 4): the exception has <em>two</em>
+     * variants that share this status and this extension and demand opposite client
+     * behaviour — one is fixed by retrying with {@code adoptStrandedProjects=true}, the
+     * other fails identically on that retry. Same extension name and stable-string shape as
+     * {@link #handleHqlParse}, so there is one convention for "which failure is this",
+     * not two.
+     */
+    @ExceptionHandler(StrandedProjectsException.class)
+    public ResponseEntity<ProblemDetail> handleStrandedProjects(StrandedProjectsException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("projects", ex.getProjects());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * More specific than the {@code AppException} handler — a 403 whose obstacle lives on
+     * <em>another</em> screen, so the body has to say which one (HD-130 S7, review round 3).
+     *
+     * <p>{@code projects} names every project whose declared default carries the offending
+     * role; {@code role} and {@code missing} are the same pair the picker greys a role out
+     * with, so a client can render the refusal in its own copy without parsing {@code detail}.
+     * Discloses nothing — the caller holds {@code workspace.edit} and can already list every
+     * project of this workspace.
+     */
+    @ExceptionHandler(ReactivatedProjectDefaultsException.class)
+    public ResponseEntity<ProblemDetail> handleReactivatedProjectDefaults(
+            ReactivatedProjectDefaultsException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("projects", ex.getProjects());
+        problem.setProperty("role", ex.getRoleName());
+        problem.setProperty("missing", ex.getMissing());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+
+    /**
+     * More specific than the {@code AppException} handler — publishes the workspace-scoped
+     * usage counts as the {@code usage} extension so the client can render the remap dialog
+     * straight from the refusal, without a second round trip (HD-127 §7.1 R5).
+     *
+     * <p>Discloses nothing: every count is scoped to the workspace the caller is already
+     * administering, and they hold {@code workspace.role.manage} or they would not have
+     * reached this at all.
+     */
+    @ExceptionHandler(RoleInUseException.class)
+    public ResponseEntity<ProblemDetail> handleRoleInUse(RoleInUseException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("usage", ex.getUsage());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * More specific than the {@code AppException} handler — carries the {@code errorType}
+     * discriminator only. There is no payload: the refusal is about the caller's own
+     * membership, which they can already see.
+     */
+    @ExceptionHandler(SelfHeldRoleException.class)
+    public ResponseEntity<ProblemDetail> handleSelfHeldRole(SelfHeldRoleException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason: {@code POST /roles/{id}/duplicate} answers 409 for the sprawl
+     * cap, for a display-name conflict and for a lock-wait timeout, and a client that cannot
+     * tell them apart cannot offer the right remedy. The name {@code ROLE_LIMIT_REACHED}
+     * existed in the spec and in the exception's own javadoc but never on the wire (round-2
+     * docs review) — which is the same defect HD-136's two stranded refusals had.
+     */
+    @ExceptionHandler(RoleLimitReachedException.class)
+    public ResponseEntity<ProblemDetail> handleRoleLimitReached(RoleLimitReachedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
     // HQL parse error (Advanced Search §7.1): 422 with a highlight span. The custom
     // ProblemDetail properties (position/length/token/errorType) drive the SPA's
     // inline underline. errorType is always "PARSE_ERROR".
@@ -113,6 +213,105 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ProblemDetail> handleMaxUploadSize(MaxUploadSizeExceededException ex) {
         var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONTENT_TOO_LARGE, "File is too large");
         return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE).body(problem);
+    }
+
+    /**
+     * What a client sees when it loses an optimistic-lock race. Deliberately the same
+     * sentence {@code IssueService.update}'s pre-check uses, minus the subject noun: this
+     * handler cannot know <em>what</em> was modified (and naming the entity class here would
+     * leak internals onto the wire), but the caller's move is identical either way.
+     */
+    static final String OPTIMISTIC_LOCK_DETAIL =
+            "This item was modified by someone else — refresh and retry";
+
+    /**
+     * <strong>Losing an optimistic-lock race is a 409, not a crash.</strong>
+     *
+     * <p>Until this existed, only the <em>pre-check</em> in {@code IssueService.update} —
+     * "does the client's {@code version} match the row I just loaded?" — produced a 409.
+     * That check cannot cover the case it is named for. It compares against the entity
+     * loaded in <em>this</em> transaction, so a competing commit that lands <em>after</em>
+     * the read still slips past it, and a client that omits {@code version} skips it
+     * entirely. In both cases the conflict surfaces later, at flush, as Hibernate's
+     * {@code ObjectOptimisticLockingFailureException} — which no handler here declared, so
+     * it fell through to a bare <strong>500</strong>. The write was correctly rejected, so
+     * this was never a data or authorization problem; it just told the SPA to render a crash
+     * instead of "refresh and retry", for the one failure mode whose entire user-facing
+     * contract is "retry".
+     *
+     * <p>HD-132 made that window materially wider — removing a member bumps {@code @Version}
+     * on every issue it unassigns (see {@code IssueRepository.unassignAllInWorkspace}) — but
+     * the gap is <strong>app-wide and predates it</strong>: {@code Issue} and {@code Role}
+     * both carry {@code @Version}, and every loser on either 500'd.
+     *
+     * <p>Catches {@link OptimisticLockingFailureException}, the Spring DAO superclass, so
+     * both the ORM subclass and the plain-JDBC variant land here rather than only whichever
+     * one today's persistence path happens to raise.
+     *
+     * <p><strong>Not on Boot's list.</strong> Per the class note above, adding a handler for
+     * anything {@code ResponseEntityExceptionHandler} declares changes that exception's body
+     * app-wide. This one is a {@code org.springframework.dao} exception, which that class
+     * knows nothing about — so the only behaviour that changes is 500 → 409.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ResponseEntity<ProblemDetail> handleOptimisticLock(OptimisticLockingFailureException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, OPTIMISTIC_LOCK_DETAIL);
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(problem);
+    }
+
+    /**
+     * What a client sees when it loses a <em>row-lock</em> race. Deliberately does not say
+     * "deadlock": the caller's move is the same whether they lost a deadlock, a lock
+     * timeout or a serialisation failure, and naming the mechanism would leak an internal
+     * detail into a message a human reads.
+     */
+    static final String LOCK_CONTENTION_DETAIL =
+            "Someone else is changing this right now — try again in a moment";
+
+    /** Long enough for the winning transaction to commit, short enough to feel instant. */
+    private static final int LOCK_RETRY_AFTER_SECONDS = 1;
+
+    /**
+     * The <em>pessimistic</em> twin, and the other half of a promise HD-136 made in a
+     * javadoc: the membership paths' locking reads {@code ORDER BY} their rows, so two
+     * overlapping removals <strong>queue instead of interleaving</strong>. The case this
+     * handler will therefore actually see is the end of that queue — a
+     * {@code lock_timeout}, the bound {@code LockTimeout} puts on a wait PostgreSQL would
+     * otherwise hold for ever. A deadlock is the rare branch and is equally safe, since
+     * Postgres rolls one side back and nothing is half done. Either way the argument only
+     * holds if the victim is told to retry: until this handler existed the loser of a lock
+     * timeout (or of a deadlock) surfaced as an unhandled <strong>500</strong> — the
+     * database did exactly the right thing and the API reported a crash.
+     *
+     * <p>Catches {@link PessimisticLockingFailureException}, the Spring DAO superclass, so
+     * {@code CannotAcquireLockException} (deadlock / lock timeout) and
+     * {@code PessimisticLockingFailureException} proper both land here rather than only
+     * whichever one today's driver happens to raise. 409 with {@code Retry-After}, in the
+     * shape {@link #handleRateLimited} already uses: the request was valid and will very
+     * likely succeed on its own the second time — this is the one failure whose entire
+     * user-facing contract is "try again".
+     *
+     * <p><strong>It logs, because turning a 500 into a clean 409 also removed the only
+     * signal an operator had.</strong> A stack trace is a poor error response and a good
+     * alarm; a deadlock storm on the membership path — the one place in the product that
+     * takes row locks across two tables — would otherwise be completely silent server-side,
+     * visible only as clients retrying. WARN rather than ERROR: one lost race is normal
+     * contention, not a fault, and the exception class plus the request URI are what tell an
+     * operator which lock and which endpoint. The client's message stays mechanism-free.
+     *
+     * <p>Not on Boot's list, per the class note: a {@code org.springframework.dao}
+     * exception, so the only behaviour that changes is 500 → 409.
+     */
+    @ExceptionHandler(PessimisticLockingFailureException.class)
+    public ResponseEntity<ProblemDetail> handlePessimisticLock(PessimisticLockingFailureException ex,
+                                                               HttpServletRequest request) {
+        log.warn("Lock contention on {} {}: {} — answering 409 with Retry-After {}s",
+                request.getMethod(), request.getRequestURI(), ex.getClass().getSimpleName(),
+                LOCK_RETRY_AFTER_SECONDS, ex);
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, LOCK_CONTENTION_DETAIL);
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(LOCK_RETRY_AFTER_SECONDS))
+                .body(problem);
     }
 
     /**

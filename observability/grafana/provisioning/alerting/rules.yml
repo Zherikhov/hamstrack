@@ -232,3 +232,41 @@ groups:
                   query: { params: [] }
                   reducer: { type: last, params: [] }
                   type: query
+
+      # A stored role_id failed the scope/ownership assertion (HD-127). No request can
+      # create such a row — every write door resolves role ids through
+      # RoleRepository.findAssignable(id, workspaceId, scope) — so any non-zero value is a
+      # data-integrity bug (bad migration, hand-written UPDATE, or an authorization defect),
+      # never load. Hence > 0 and for: 0m. The `source` label names the table; the matching
+      # ERROR log names the role id.
+      - uid: hamstrack-role-scope-violation
+        title: RoleScopeViolation
+        condition: B
+        for: 0m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "A stored role_id failed the scope/ownership assertion in the last 15m"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_role_scope_violation_total[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query

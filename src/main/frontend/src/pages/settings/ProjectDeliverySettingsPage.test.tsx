@@ -5,6 +5,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import ProjectDeliverySettingsPage from './ProjectDeliverySettingsPage'
 import { ApiResponseError, apiSearch, apiUpdateProject } from '../../api'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS, PROJECT_CURATOR_BYPASS_PERMISSIONS,
+} from '../../test/permissions'
 import type { Project, ProjectDelivery, Sprint, Version } from '../../types'
 
 /**
@@ -29,7 +32,8 @@ const PROJECT_ID = 'p1'
 
 const BASE: Project = {
   id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-  archived: false, myRole: 'MANAGER', createdAt: '2026-01-01T00:00:00Z',
+  archived: false, myRole: 'MANAGER', myPermissions: PROJECT_ADMIN_PERMISSIONS,
+  createdAt: '2026-01-01T00:00:00Z',
 }
 
 function withDelivery(delivery: Partial<ProjectDelivery>): Project {
@@ -59,7 +63,8 @@ function version(name: string, released: boolean): Version {
 let project: Project = withDelivery({})
 let sprints: Sprint[] = []
 let versions: Version[] = []
-/** The caller's WORKSPACE role — the other half of the curator predicate. */
+/** The caller's WORKSPACE role. Display only since HD-123 S5 — every gate on
+ *  this page reads the PROJECT's `myPermissions` instead. */
 let workspaceRole: 'OWNER' | 'ADMIN' | 'MEMBER' = 'OWNER'
 
 /**
@@ -700,7 +705,9 @@ describe('Delivery tab — the preset is display-only', () => {
 describe('Delivery tab — a plain member (§6)', () => {
   beforeEach(() => {
     workspaceRole = 'MEMBER'
-    project = { ...withDelivery({}), myRole: 'MEMBER' }
+    project = {
+      ...withDelivery({}), myRole: 'MEMBER', myPermissions: PROJECT_CONTRIBUTOR_PERMISSIONS,
+    }
   })
 
   it('is told the project’s way of working, with no vocabulary and no verb', async () => {
@@ -736,7 +743,10 @@ describe('Delivery tab — a plain member (§6)', () => {
    * only behind that guard".
    */
   it('is offered no board switch and no turn-off control either', async () => {
-    project = { ...withDelivery({ releases: true, preset: 'RELEASES' }), myRole: 'MEMBER' }
+    project = {
+      ...withDelivery({ releases: true, preset: 'RELEASES' }),
+      myRole: 'MEMBER', myPermissions: PROJECT_CONTRIBUTOR_PERMISSIONS,
+    }
     renderPage()
 
     await screen.findByText(/Story-point estimation is off/i)
@@ -748,9 +758,13 @@ describe('Delivery tab — a plain member (§6)', () => {
     expect(screen.getByText(/This project groups issues into versions/i)).toBeInTheDocument()
   })
 
-  it('still sees a curator’s controls once the role qualifies', async () => {
-    // The mirror image, so the test above cannot pass by rendering nothing at all.
-    workspaceRole = 'ADMIN'
+  it('still sees a curator’s controls once `project.edit` is granted', async () => {
+    // The mirror image, so the tests above cannot pass by rendering nothing at
+    // all — and expressed the way the server expresses a workspace admin who is
+    // not a project member: `myRole` still reads MEMBER, the grants say curator.
+    project = {
+      ...withDelivery({}), myRole: 'MEMBER', myPermissions: PROJECT_CURATOR_BYPASS_PERMISSIONS,
+    }
     renderPage()
 
     expect(await screen.findByRole('button', { name: /turn on releases/i })).toBeInTheDocument()

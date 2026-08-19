@@ -1,7 +1,5 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -48,7 +46,7 @@ class SprintAuthzTest extends SprintTestBase {
     @Test
     void theSprintLifecycleIsCuratorOnly() throws Exception {
         var ctx = newProject();
-        var plainMember = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var plainMember = actorWith(ctx, "MEMBER", "MEMBER");
         var sprintId = createSprint(ctx, "Sprint 1");
 
         // ---- a plain member may READ everything ----
@@ -81,7 +79,7 @@ class SprintAuthzTest extends SprintTestBase {
     @Test
     void aWorkspaceAdminWhoIsNotAProjectMemberIsStillACurator() throws Exception {
         var ctx = newProject();
-        var admin = actorWith(ctx, WorkspaceRole.ADMIN, null);
+        var admin = actorWith(ctx, "ADMIN", null);
 
         var sprintId = createSprint(ctx, admin.token(), "{\"name\":\"Admin's sprint\"}");
         patchSprint(ctx, admin.token(), sprintId, "{\"goal\":\"ship it\"}").andExpect(status().isOk());
@@ -119,7 +117,7 @@ class SprintAuthzTest extends SprintTestBase {
     @Test
     void assigningAndRankingIsTheIssueEditTierNotCurator() throws Exception {
         var ctx = newProject();
-        var member = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var member = actorWith(ctx, "MEMBER", "MEMBER");
         var sprintId = createSprint(ctx, "Sprint 1");
         var a = createIssue(ctx, "a");
         var b = createIssue(ctx, "b");
@@ -193,7 +191,7 @@ class SprintAuthzTest extends SprintTestBase {
     @Test
     void aWorkspaceAdminMayNowPatchAProjectAndTheEchoedRoleIsTheirOwn() throws Exception {
         var ctx = newProject();
-        var admin = actorWith(ctx, WorkspaceRole.ADMIN, null);
+        var admin = actorWith(ctx, "ADMIN", null);
 
         patchProject(ctx, admin.token(), "{\"name\":\"Renamed by the workspace admin\"}")
                 .andExpect(status().isOk())
@@ -208,7 +206,7 @@ class SprintAuthzTest extends SprintTestBase {
                 .andExpect(jsonPath("$.boardMode").value("SCRUM"));
 
         // …and a plain member still cannot: the widening stopped at curator.
-        var plain = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var plain = actorWith(ctx, "MEMBER", "MEMBER");
         patchProject(ctx, plain.token(), "{\"name\":\"nope\"}").andExpect(status().isForbidden());
 
         // A non-member of the workspace still gets 404, not 403.

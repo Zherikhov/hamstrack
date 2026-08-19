@@ -1,9 +1,9 @@
 package com.hamstrack.issue.service;
 
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.config.ClassificationProperties;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.dto.ComponentResponse;
 import com.hamstrack.issue.dto.ComponentUsageResponse;
 import com.hamstrack.issue.dto.CreateComponentRequest;
@@ -41,17 +41,21 @@ import java.util.UUID;
  * archive, delete — plus the issue-side resolution and the create-time auto-assign.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#requireProjectMember} (reads) or
- * {@link ScopeResolver#requireProjectCurator} (writes) — a missing workspace, a
- * missing project and a non-member all yield <strong>404</strong>, never 403. 403 is
- * reserved for a <em>member without the curation role</em>. Component lookups always
- * go through {@code findByIdAndProject}: a foreign id is a 404 on a direct read and a
- * <strong>422</strong> "Unknown component" inside an issue payload (an invalid field
- * value, leaking nothing about the other tenant).
+ * {@link WorkspaceAccessService#resolveProject} — a missing workspace, a missing
+ * project and a non-member all yield <strong>404</strong>, never 403. 403 is reserved
+ * for a <em>member without the permission</em> ({@link Permission#COMPONENT_MANAGE}),
+ * and by construction it can only reach someone whose membership is already proved.
+ * Component lookups always go through {@code findByIdAndProject}: a foreign id is a 404
+ * on a direct read and a <strong>422</strong> "Unknown component" inside an issue payload
+ * (an invalid field value, leaking nothing about the other tenant).
  *
- * <p><strong>Permissions (§3.3):</strong> read = any project member (i.e. a workspace
- * member for whom the project resolves); create/edit/archive/delete = project
- * MANAGER <em>or</em> workspace OWNER/ADMIN.
+ * <p><strong>Permissions (§3.3, HD-123 §10.2):</strong> read = any project member (i.e. a
+ * workspace member for whom the project resolves); create/edit/archive/delete =
+ * {@link Permission#COMPONENT_MANAGE}, held by the built-in project MANAGER and — via
+ * {@link Permission#PROJECT_CURATE_ALL} — by a workspace OWNER/ADMIN in every project of
+ * their workspace. Assigning a component <em>to an issue</em> is deliberately
+ * {@code issue.edit}, not this: this permission governs the catalog object's lifecycle
+ * (§6.5).
  *
  * <p>Components are <em>content</em>, not bound taxonomy: nothing here touches
  * {@code ProjectConfigService} or {@code ProjectConfigResponse} (§3.2).
@@ -62,7 +66,6 @@ import java.util.UUID;
 public class ComponentService {
 
     private final WorkspaceAccessService workspaceAccess;
-    private final ScopeResolver scopeResolver;
     private final ComponentRepository componentRepository;
     private final IssueRepository issueRepository;
     private final UserRepository userRepository;
@@ -84,7 +87,7 @@ public class ComponentService {
     @Transactional(readOnly = true)
     public List<ComponentResponse> list(User actor, UUID workspaceId, UUID projectId,
                                         boolean includeArchived, boolean withUsage) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var components = componentRepository.findAllByProject(project, includeArchived);
         if (!withUsage || components.isEmpty()) {
             return components.stream().map(c -> ComponentResponse.of(c, null)).toList();
@@ -98,7 +101,7 @@ public class ComponentService {
     /** One component — any project member (reads are unrestricted within the project). */
     @Transactional(readOnly = true)
     public ComponentResponse get(User actor, UUID workspaceId, UUID projectId, UUID componentId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         return ComponentResponse.of(requireComponent(project, componentId), null);
     }
 
@@ -119,7 +122,10 @@ public class ComponentService {
     @Transactional
     public ComponentResponse create(User actor, UUID workspaceId, UUID projectId,
                                     CreateComponentRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.COMPONENT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var workspace = project.getWorkspace();
 
@@ -165,7 +171,10 @@ public class ComponentService {
     @Transactional
     public ComponentResponse update(User actor, UUID workspaceId, UUID projectId, UUID componentId,
                                     UpdateComponentRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.COMPONENT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var workspace = project.getWorkspace();
         var component = requireComponent(project, componentId);
@@ -237,7 +246,10 @@ public class ComponentService {
 
     private ComponentResponse setArchived(User actor, UUID workspaceId, UUID projectId,
                                           UUID componentId, boolean archived) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.COMPONENT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var component = requireComponent(project, componentId);
         component.setArchivedAt(archived ? Instant.now() : null);
@@ -263,7 +275,10 @@ public class ComponentService {
      */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, UUID componentId, boolean force) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.COMPONENT_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var component = requireComponent(project, componentId);
 
@@ -282,7 +297,7 @@ public class ComponentService {
     /** Usage count for one component — any project member (reads are unrestricted). */
     @Transactional(readOnly = true)
     public ComponentUsageResponse usage(User actor, UUID workspaceId, UUID projectId, UUID componentId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var component = requireComponent(project, componentId);
         return new ComponentUsageResponse((int) issueRepository.countByComponent(component));
     }

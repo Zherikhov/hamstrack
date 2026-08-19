@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS } from '../test/permissions'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -91,8 +92,9 @@ const SCRUM: ProjectDelivery = {
 
 const state = vi.hoisted(() => ({
   delivery: { board: 'KANBAN', releases: false, estimation: false, preset: 'KANBAN' } as ProjectDelivery,
-  projectRole: 'MANAGER' as 'MANAGER' | 'MEMBER',
-  workspaceRole: 'OWNER' as 'OWNER' | 'ADMIN' | 'MEMBER',
+  /** The project's `myPermissions` — every gate reads these since HD-123 S5. */
+  projectPermissions: [] as string[],
+
   sprints: [] as Sprint[],
   /**
    * The enabling PATCH fails (403 after a role change, 409 on an archived
@@ -112,11 +114,12 @@ vi.mock('../api', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-    archived: false, myRole: state.projectRole, delivery: state.delivery,
+    archived: false, myRole: 'MEMBER', myPermissions: state.projectPermissions,
+    delivery: state.delivery,
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
-    id: WS_ID, name: 'WS', slug: 'ws', myRole: state.workspaceRole,
+    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'MEMBER', myPermissions: [],
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiUpdateProject: vi.fn(async (_ws: string, _p: string, payload: Record<string, unknown>) => {
@@ -126,7 +129,8 @@ vi.mock('../api', async importOriginal => ({
     state.delivery = { ...state.delivery, ...patch }
     return {
       id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-      archived: false, myRole: state.projectRole, delivery: state.delivery,
+      archived: false, myRole: 'MEMBER', myPermissions: state.projectPermissions,
+    delivery: state.delivery,
       createdAt: '2026-01-01T00:00:00Z',
     }
   }),
@@ -201,8 +205,7 @@ beforeAll(() => {
 beforeEach(() => {
   localStorage.clear()
   state.delivery = KANBAN
-  state.projectRole = 'MANAGER'
-  state.workspaceRole = 'OWNER'
+  state.projectPermissions = PROJECT_ADMIN_PERMISSIONS
   state.sprints = []
   state.patchFails = false
   state.calls = []
@@ -358,8 +361,7 @@ describe('Backlog — a Kanban project’s route to its first sprint (HD-104 Rul
   })
 
   it('shows a plain member no affordance and no sprint vocabulary at all', async () => {
-    state.projectRole = 'MEMBER'
-    state.workspaceRole = 'MEMBER'
+    state.projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
     renderBacklog()
     await screen.findByText(B1.title)
 
@@ -389,8 +391,7 @@ describe('Board — the "no active sprint" empty state is actionable (HD-102 §6
   })
 
   it('lets ANY member drop the sprint scoping locally, without changing the project', async () => {
-    state.projectRole = 'MEMBER'
-    state.workspaceRole = 'MEMBER'
+    state.projectPermissions = PROJECT_CONTRIBUTOR_PERMISSIONS
     renderBoard()
 
     // No curator affordance…

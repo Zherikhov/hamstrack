@@ -18,8 +18,9 @@ import { ComponentFilter, ComponentName } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
 import {
   CompleteSprintDialog, SprintFormDialog, SprintHeader, StartSprintDialog, StoryPointsChip,
-  formatPoints, useActiveSprint, useIsProjectCurator, useOpenSprints,
+  formatPoints, useActiveSprint, useOpenSprints,
 } from '../components/sprints'
+import { useProjectPermissions } from '../hooks/usePermissions'
 import IssueSidePanel from './IssueSidePanel'
 import type { LabelMatch } from '../api'
 import type { BoardIssues, Issue, IssueType, Sprint } from '../types'
@@ -177,16 +178,21 @@ export default function BoardPage() {
   // project have sprints?"). They ride the ProjectResponse the rail and the
   // settings areas already fetch, so this costs no request on the hot path.
   // KANBAN is byte-identical to the pre-0.13.0 board: no sprint fetch, no header,
-  // no extra filter param. The workspace-role half of the curator predicate is
-  // only fetched once the board is actually scoped to sprints, so a Kanban board
-  // issues no new request.
+  // no extra filter param.
   const { iterations: scrum, estimation, releases } = useProjectDelivery(wsId, projectId)
-  const { isCurator } = useIsProjectCurator(wsId, projectId, scrum)
+  // HD-123 S5: the board's three gates, each its own grant. Dragging a card
+  // between columns IS a status transition, which is the split teams ask for
+  // most often ("developers close their own work, nobody else's"). All three
+  // read the project entry the rail already cached — no request.
+  const permissions = useProjectPermissions(wsId, projectId)
+  const canTransition = permissions.can('issue.transition')
+  const canCreateIssue = permissions.can('issue.create')
+  const canManageSprints = permissions.can('sprint.manage')
   const { sprint: activeSprint, isLoading: sprintLoading } = useActiveSprint(wsId, projectId, scrum)
   // Only consulted by the "no active sprint" empty state, so it stays unfetched
   // on a healthy Scrum board.
   const { data: openSprints = [] } = useOpenSprints(
-    wsId, projectId, scrum && !sprintLoading && !activeSprint && isCurator)
+    wsId, projectId, scrum && !sprintLoading && !activeSprint && canManageSprints)
   const futureSprints = openSprints.filter(s => s.state === 'FUTURE')
 
   // "Show all issues" (§6, open question 3) — a LOCAL view toggle any member may
@@ -316,6 +322,10 @@ export default function BoardPage() {
 
   function handleDrop(statusId: string) {
     setDragOverStatusId(null)
+    // Backstop for the one gesture that can reach here without a card of ours
+    // having started it (an OS-level drag, a stale state). Cheap, and it keeps
+    // the permission check on the path that performs the write.
+    if (!canTransition) return
     if (!dragging) return
     const issue = dragging
     setDragging(null)
@@ -361,7 +371,7 @@ export default function BoardPage() {
         {sprintScoped && activeSprint && (
           <SprintHeader
             sprint={activeSprint}
-            canCurate={isCurator}
+            canCurate={canManageSprints}
             showPoints={estimation}
             onComplete={() => setCompleting(true)}
           />
@@ -556,7 +566,7 @@ export default function BoardPage() {
                       without visiting the Backlog or settings (Rule C); everyone
                       gets a local escape hatch to the whole project. */}
                   <div className="flex items-center gap-2 flex-wrap justify-center">
-                    {isCurator && (
+                    {canManageSprints && (
                       futureSprints.length > 0 ? (
                         <Button variant="primary" size="sm" onClick={() => setStartingSprint(futureSprints[0])}>
                           Start “{futureSprints[0].name}”
@@ -574,7 +584,7 @@ export default function BoardPage() {
                       <Button variant="ghost" size="sm">Go to Backlog</Button>
                     </Link>
                   </div>
-                  {isCurator && futureSprints.length > 0 && (
+                  {canManageSprints && futureSprints.length > 0 && (
                     <button
                       type="button"
                       onClick={() => setCreatingSprint(true)}
@@ -679,9 +689,14 @@ export default function BoardPage() {
                     <button
                       type="button"
                       aria-label={`Create issue in ${status.name}`}
-                      title={`Create issue in ${status.name}`}
+                      // A permanent slot, so it stays put and goes inert rather
+                      // than disappearing once the answer arrives (§14.1).
+                      disabled={!canCreateIssue}
+                      title={canCreateIssue
+                        ? `Create issue in ${status.name}`
+                        : 'You don’t have permission to create issues in this project'}
                       onClick={() => openCreateIssue({ projectId, statusId: status.id })}
-                      className="ml-auto flex items-center justify-center flex-shrink-0 rounded-md cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-offset-1"
+                      className="ml-auto flex items-center justify-center flex-shrink-0 rounded-md transition-colors focus-visible:outline-2 focus-visible:outline-offset-1 disabled:opacity-40 disabled:cursor-default enabled:cursor-pointer"
                       style={{
                         width: 22, height: 22,
                         color: 'var(--color-text-muted)',
@@ -716,6 +731,7 @@ export default function BoardPage() {
                         showComponent={!filterComponentId}
                         active={openIssueNumber === issue.number}
                         isDragging={dragging?.id === issue.id}
+                        canDrag={canTransition}
                         onClick={() => setOpenIssueNumber(
                           openIssueNumber === issue.number ? undefined : issue.number
                         )}
@@ -925,7 +941,7 @@ function BoardIssueDrawer({
 }
 
 function IssueCard({
-  issue, issueTypes, showComponent, active, isDragging, onClick, onOpenNumber, onDragStart, onDragEnd,
+  issue, issueTypes, showComponent, active, isDragging, canDrag, onClick, onOpenNumber, onDragStart, onDragEnd,
 }: {
   issue: Issue
   issueTypes: IssueType[]
@@ -933,6 +949,12 @@ function IssueCard({
   showComponent: boolean
   active: boolean
   isDragging: boolean
+  /**
+   * `issue.transition` — a board drag IS a status change, so without the grant
+   * the card is inert and says so with the cursor rather than starting a gesture
+   * that ends in a 403 (HD-123 §14.3). The card still opens on click.
+   */
+  canDrag: boolean
   onClick: () => void
   onOpenNumber: (number: number) => void
   onDragStart: (e: React.DragEvent) => void
@@ -946,7 +968,7 @@ function IssueCard({
     : undefined
   return (
     <div
-      draggable
+      draggable={canDrag}
       onClick={onClick}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
@@ -954,7 +976,7 @@ function IssueCard({
       style={{
         background: 'white',
         borderColor: active ? 'var(--color-brand)' : 'var(--color-border)',
-        cursor: 'grab',
+        cursor: canDrag ? 'grab' : 'pointer',
         opacity: isDragging ? 0.4 : 1,
         boxShadow: '0 1px 2px rgba(28,27,25,0.05)',
       }}

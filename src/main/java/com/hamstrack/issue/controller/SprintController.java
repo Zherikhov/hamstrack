@@ -33,8 +33,9 @@ import java.util.UUID;
  * <p>Every endpoint resolves through workspace→project membership: a missing
  * workspace, a missing project or a non-member all yield <strong>404</strong> (never
  * 403 — no existence leak, the project's #1 bug class). <strong>403</strong> is
- * reserved for a member who lacks the curation role (project MANAGER, or workspace
- * OWNER/ADMIN — {@code ScopeResolver.requireProjectCurator}).
+ * reserved for a member who lacks the permission — {@code sprint.manage}, held by the
+ * built-in project MANAGER and, in every project of their workspace, by a workspace
+ * OWNER/ADMIN through {@code project.curate.all} (HD-123 §10.2).
  *
  * <ul>
  *   <li>{@code GET    …/sprints?state=&page=&size=} — any project member. ALWAYS paged:

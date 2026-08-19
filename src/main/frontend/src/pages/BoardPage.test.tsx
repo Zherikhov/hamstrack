@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { PROJECT_ADMIN_PERMISSIONS, WORKSPACE_ADMIN_PERMISSIONS } from '../test/permissions'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -87,6 +88,8 @@ const apiListIssuesMock = vi.fn(async () => ({
 let delivery: ProjectDelivery | undefined
 let projectVersions: Version[] = []
 let activeSprints: Sprint[] = []
+/** The project's `myPermissions` — every board gate reads these (HD-123 S5). */
+let projectPermissions: string[] = PROJECT_ADMIN_PERMISSIONS
 
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
@@ -128,12 +131,13 @@ vi.mock('../api', () => ({
   // HD-102 block below describes the unchanged, pre-migration board.
   apiGetProject: vi.fn(async () => ({
     id: PROJECT_ID, workspaceId: WS_ID, name: 'Proj', key: 'PR',
-    archived: false, myRole: 'MANAGER', boardMode: 'KANBAN',
+    archived: false, myRole: 'MANAGER', myPermissions: projectPermissions, boardMode: 'KANBAN',
     ...(delivery ? { delivery } : {}),
     createdAt: '2026-01-01T00:00:00Z',
   })),
   apiGetWorkspace: vi.fn(async () => ({
-    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z',
+    id: WS_ID, name: 'WS', slug: 'ws', myRole: 'OWNER', myPermissions: WORKSPACE_ADMIN_PERMISSIONS,
+    createdAt: '2026-01-01T00:00:00Z',
   })),
   // …and the sprint sections/header from this group (unused in KANBAN, but a
   // mocked module must expose every imported binding).
@@ -175,6 +179,7 @@ beforeEach(() => {
   delivery = undefined
   projectVersions = []
   activeSprints = []
+  projectPermissions = PROJECT_ADMIN_PERMISSIONS
   apiListIssuesMock.mockClear()
   vi.mocked(versionsApi.list).mockClear()
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
@@ -557,6 +562,74 @@ describe('BoardPage issue creation entry points (HD-70)', () => {
     expect(useUiStore.getState().createIssueOpen).toBe(true)
     expect(useUiStore.getState().createIssuePreset)
       .toEqual({ projectId: PROJECT_ID, statusId: DOING.id })
+  })
+})
+
+/**
+ * HD-123 S5 §14.3 — the board's two write gestures, each on its own grant.
+ *
+ * A board drag IS a status transition, so `issue.transition` governs it. That
+ * split ("developers close their own work, nobody else's") is the single
+ * most-requested one in the epic's brief, and the board is where it is felt.
+ *
+ * Note what is NOT asserted: that a denied drag is refused. A hidden control is
+ * never a permission (§5.3) — the API is the enforcement boundary and answers
+ * 403 regardless. What the UI owes the user is not offering a gesture whose only
+ * possible outcome is an error.
+ */
+describe('BoardPage permission gates (HD-123 S5)', () => {
+  /** The card element itself — the drag source, found via its title text. */
+  function cardFor(title: string): HTMLElement {
+    return screen.getByText(title).closest('[draggable]') as HTMLElement
+      ?? screen.getByText(title).parentElement!.parentElement!
+  }
+
+  it('makes cards draggable and the quick-add live for a full contributor', async () => {
+    renderBoard()
+    await boardReady()
+
+    expect(cardFor(ALL_ISSUES[0].title)).toHaveAttribute('draggable', 'true')
+    expect(screen.getByRole('button', { name: `Create issue in ${TODO.name}` })).toBeEnabled()
+  })
+
+  it('withdraws card dragging without `issue.transition` — and nothing else', async () => {
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS.filter(p => p !== 'issue.transition')
+    renderBoard()
+    await boardReady()
+
+    expect(cardFor(ALL_ISSUES[0].title)).toHaveAttribute('draggable', 'false')
+    // Rule B: every VALUE the board shows is untouched, and the other gestures
+    // are governed by their own grants, so they stay.
+    expect(screen.getByText(ALL_ISSUES[0].title)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: `Create issue in ${TODO.name}` })).toBeEnabled()
+  })
+
+  it('disables the quick-add without `issue.create`, rather than removing it', async () => {
+    projectPermissions = PROJECT_ADMIN_PERMISSIONS.filter(p => p !== 'issue.create')
+    renderBoard()
+    await boardReady()
+
+    // A permanent slot goes inert; it does not vanish from under a pointer
+    // (§14.1's loading/disabled rule), and it says why.
+    const btn = screen.getByRole('button', { name: `Create issue in ${TODO.name}` })
+    expect(btn).toBeDisabled()
+    expect(btn).toHaveAttribute(
+      'title', 'You don’t have permission to create issues in this project',
+    )
+    // …and the cards are still draggable: one gate, one grant.
+    expect(cardFor(ALL_ISSUES[0].title)).toHaveAttribute('draggable', 'true')
+  })
+
+  it('offers a viewer neither gesture, and still shows every issue', async () => {
+    projectPermissions = []
+    renderBoard()
+    await boardReady()
+
+    expect(cardFor(ALL_ISSUES[0].title)).toHaveAttribute('draggable', 'false')
+    expect(screen.getByRole('button', { name: `Create issue in ${TODO.name}` })).toBeDisabled()
+    for (const issue of ALL_ISSUES) {
+      expect(screen.getByText(issue.title)).toBeInTheDocument()
+    }
   })
 })
 

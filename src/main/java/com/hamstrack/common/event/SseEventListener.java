@@ -82,6 +82,21 @@ public class SseEventListener {
         sseRegistry.sendToUser(e.workspaceId(), e.recipientUserId(), "NOTIFICATION", e.payload());
     }
 
+    /**
+     * The one handler that does not send anything: a removed member's open streams are
+     * <em>closed</em> (HD-132). {@code SseController} checks membership only at subscribe, so
+     * without this a removal leaves them receiving live workspace activity until their
+     * emitter times out ~30 minutes later.
+     *
+     * <p>AFTER_COMMIT is the whole point of routing this through a domain event rather than
+     * calling the registry from the service: a removal that rolls back must not disconnect
+     * somebody who is still a member.
+     */
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
+    void onWorkspaceMemberRemoved(WorkspaceMemberRemoved e) {
+        sseRegistry.disconnectUser(e.workspaceId(), e.userId());
+    }
+
     // Identical wire payload to the old inline calls: {projectId: string, issueNumber: long}.
     private void broadcastIssueEvent(java.util.UUID workspaceId, String event,
                                      java.util.UUID projectId, long issueNumber) {

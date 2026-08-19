@@ -10,6 +10,7 @@ import { ISSUES_KEY_ROOT } from '../lib/queryKeys'
 import { Button, Checkbox, Input, Select, Textarea } from '../components/ui'
 import { CapabilityOffState, ReversibleNotice, useEnableCapability } from '../components/delivery'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
+import { useProjectPermissions } from '../hooks/usePermissions'
 import { Modal } from './admin/common'
 import {
   ReleasedPill, VersionProgress, moveTargets, remapTargets, versionsKey,
@@ -53,10 +54,14 @@ export default function ReleasesPage() {
 
   // HD-102: the route still resolves with releases OFF (Rule C, §5.3) — the rail
   // item is gone, but a link, a bookmark or "turn this back on" must all land
-  // somewhere. `isCurator` mirrors ScopeResolver.requireProjectCurator: a
-  // workspace OWNER/ADMIN curates a project's releases without being a member.
-  const { releases, isCurator, project } =
-    useProjectDelivery(wsId, projectId, { needsRole: true })
+  // somewhere.
+  const { releases, project } = useProjectDelivery(wsId, projectId)
+  // HD-123 S5: two different grants, not one "curator" role. Managing versions
+  // is `version.manage`; turning the releases capability on is a change to the
+  // PROJECT, so it is `project.edit` — a role may hold either alone.
+  const permissions = useProjectPermissions(wsId, projectId)
+  const canManageVersions = permissions.can('version.manage')
+  const canEnableReleases = permissions.can('project.edit')
   const enabling = useEnableCapability(wsId, projectId)
 
   // Its OWN key (archived rows included) so the pickers' lean
@@ -137,7 +142,7 @@ export default function ReleasesPage() {
           {/* Rule C: "New version" is the capability's own entry point, so it is
               NOT gated by the capability — with releases off it turns them on in
               the same gesture that creates the first version. */}
-          {isCurator && (
+          {canManageVersions && (
             <Button variant="primary" onClick={() => { setError(''); setEditing('new') }}>
               <Plus size={14} /> New version
             </Button>
@@ -154,7 +159,7 @@ export default function ReleasesPage() {
           <div className="mb-4">
             <CapabilityOffState
               capability="releases"
-              isCurator={isCurator}
+              canEnable={canEnableReleases}
               pending={enabling.isPending}
               error={enabling.error}
               onEnable={() => { setError(''); enabling.enable('releases').catch(() => {}) }}
@@ -187,7 +192,7 @@ export default function ReleasesPage() {
             <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
               No versions yet — add one to start tracking what ships when.
             </p>
-            {isCurator && (
+            {canManageVersions && (
               <Button variant="secondary" size="sm" onClick={() => { setError(''); setEditing('new') }}>
                 <Plus size={13} /> New version
               </Button>
@@ -202,7 +207,7 @@ export default function ReleasesPage() {
                 // Rule B (§5.2): the card, its progress and its issue links stay
                 // exactly as they are; only the lifecycle CONTROLS follow the
                 // capability. Nothing here was deleted by turning releases off.
-                canCurate={isCurator && releases}
+                canCurate={canManageVersions && releases}
                 onOpenIssues={() => openIssues(v)}
                 onEdit={() => { setError(''); setEditing(v) }}
                 onRelease={() => { setError(''); setReleasing(v) }}

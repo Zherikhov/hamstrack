@@ -1,7 +1,7 @@
 package com.hamstrack.issue;
 
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.workspace.entity.WorkspaceRole;
+import com.hamstrack.common.security.Permission;
+import com.hamstrack.common.security.RoleScope;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -15,15 +15,19 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * The authorization matrix of {@code ScopeResolver.requireProjectCurator} — the authz
- * primitive HD-31 introduced and HD-32 will reuse (proposal §3.3, §5.6).
+ * The authorization matrix of what <em>used</em> to be
+ * {@code ScopeResolver.requireProjectCurator} — the authz primitive HD-31 introduced and
+ * HD-32 reused (proposal §3.3, §5.6). Since HD-125/HD-126 the predicate is
+ * {@code component.manage}, held by the built-in Project admin directly and by the
+ * built-in workspace Owner/Admin through {@code project.curate.all} (§17.2); the gate
+ * changed, the matrix did not.
  *
- * <p>Why this class exists at all: the whole gate rests on the project's
- * <strong>inverted-ordinal</strong> {@code isAtLeast} convention (the privileged value
- * sits at ordinal 0, so {@code isAtLeast} compares {@code <=}). A refactor that
- * reorders {@link WorkspaceRole} or {@link ProjectRole}, or that "fixes" the comparison
- * to {@code >=}, silently inverts every check here — a plain MEMBER would curate and an
- * OWNER would be refused, with nothing failing to compile.
+ * <p>Why this class exists at all: the whole gate used to rest on the project's
+ * <strong>inverted-ordinal</strong> {@code isAtLeast} convention, which a reorder could
+ * invert silently. That convention is gone with the enums, and the equivalent silent
+ * failure now lives in the built-in role seed — see
+ * {@link #theBuiltInSeedTheMatrixAboveRestsOnHolds}, which is this class's version of the
+ * same guard.
  *
  * <p>The matrix, asserted against real mutating component endpoints:
  * <table>
@@ -78,7 +82,7 @@ class ComponentAuthzTest extends ComponentTestBase {
         var a = newProject();
         var b = newProject();
         // The actor is a full ADMIN — of A. Nothing about that may reach into B.
-        var adminOfA = actorWith(a, WorkspaceRole.ADMIN, null);
+        var adminOfA = actorWith(a, "ADMIN", null);
         var bComponent = createComponent(b, "b-only");
 
         // (i) B's own path: not a member of B → 404 at requireMember.
@@ -104,7 +108,7 @@ class ComponentAuthzTest extends ComponentTestBase {
         var componentId = createComponent(ctx, "billing");
         // Member of the workspace, member of NOTHING in the project: the caller already
         // knows the project exists (they can list it), so a role failure is honest 403.
-        var plain = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var plain = actorWith(ctx, "MEMBER", null);
 
         postComponent(ctx, plain.token(), "{\"name\":\"nope\"}").andExpect(status().isForbidden());
         patchComponent(ctx, plain.token(), componentId, "{\"name\":\"nope\"}")
@@ -118,8 +122,8 @@ class ComponentAuthzTest extends ComponentTestBase {
     void projectMemberAndProjectViewerAreForbidden() throws Exception {
         var ctx = newProject();
         var componentId = createComponent(ctx, "billing");
-        var member = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
-        var viewer = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
+        var member = actorWith(ctx, "MEMBER", "MEMBER");
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
 
         for (var actor : java.util.List.of(member, viewer)) {
             postComponent(ctx, actor.token(), "{\"name\":\"nope\"}").andExpect(status().isForbidden());
@@ -137,8 +141,8 @@ class ComponentAuthzTest extends ComponentTestBase {
     void aPlainProjectMemberCanStillReadTheCatalog() throws Exception {
         var ctx = newProject();
         var componentId = createComponent(ctx, "billing");
-        var viewer = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.VIEWER);
-        var noProjectRole = actorWith(ctx, WorkspaceRole.MEMBER, null);
+        var viewer = actorWith(ctx, "MEMBER", "VIEWER");
+        var noProjectRole = actorWith(ctx, "MEMBER", null);
 
         for (var actor : java.util.List.of(viewer, noProjectRole)) {
             assert names(listComponents(ctx, actor.token(), null)).equals(java.util.List.of("billing"));
@@ -152,7 +156,7 @@ class ComponentAuthzTest extends ComponentTestBase {
     @Test
     void aProjectManagerMayCurate() throws Exception {
         var ctx = newProject();
-        var manager = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MANAGER);
+        var manager = actorWith(ctx, "MEMBER", "MANAGER");
 
         var id = createComponent(ctx, manager.token(), "{\"name\":\"ingest\"}");
         patchComponent(ctx, manager.token(), id, "{\"name\":\"ingest pipeline\"}")
@@ -170,8 +174,8 @@ class ComponentAuthzTest extends ComponentTestBase {
     @Test
     void workspaceOwnerAndWorkspaceAdminCurateWithoutBeingProjectMembers() throws Exception {
         var ctx = newProject();
-        var owner = actorWith(ctx, WorkspaceRole.OWNER, null);
-        var admin = actorWith(ctx, WorkspaceRole.ADMIN, null);
+        var owner = actorWith(ctx, "OWNER", null);
+        var admin = actorWith(ctx, "ADMIN", null);
 
         for (var actor : java.util.List.of(owner, admin)) {
             var id = createComponent(ctx, actor.token(),
@@ -185,19 +189,42 @@ class ComponentAuthzTest extends ComponentTestBase {
     }
 
     /**
-     * The ordinal guard, stated as an assertion rather than a comment: OWNER/ADMIN are
-     * "at least ADMIN" and MEMBER is not; MANAGER is "at least MANAGER" and
-     * MEMBER/VIEWER are not. If the enums are reordered or the comparison flipped, this
-     * fails immediately and points at the cause of the HTTP failures above.
+     * <strong>The seed guard that replaced the ordinal guard</strong> (HD-126, S3).
+     *
+     * <p>This test used to assert the inverted-ordinal convention directly
+     * ({@code OWNER.isAtLeast(ADMIN)}, {@code !MEMBER.isAtLeast(MANAGER)}, …) because the
+     * whole matrix above rested on it. Both role enums are deleted; the matrix now rests
+     * on <em>which permissions the built-in roles are seeded with</em>, so that is what is
+     * asserted, and for the same reason: a change here inverts every HTTP expectation
+     * above with nothing failing to compile.
+     *
+     * <p>Note it asserts the <strong>whole</strong> curator set rather than
+     * {@code component.manage} alone. The four permissions moved together as one
+     * predicate ({@code requireProjectCurator}), and a seed that gave the workspace
+     * Owner three of them would pass a narrower assertion while silently changing what an
+     * Owner may do in projects they are not a member of.
      */
     @Test
-    void theInvertedOrdinalConventionTheGateDependsOnHolds() {
-        assert WorkspaceRole.OWNER.isAtLeast(WorkspaceRole.ADMIN);
-        assert WorkspaceRole.ADMIN.isAtLeast(WorkspaceRole.ADMIN);
-        assert !WorkspaceRole.MEMBER.isAtLeast(WorkspaceRole.ADMIN);
-        assert ProjectRole.MANAGER.isAtLeast(ProjectRole.MANAGER);
-        assert !ProjectRole.MEMBER.isAtLeast(ProjectRole.MANAGER);
-        assert !ProjectRole.VIEWER.isAtLeast(ProjectRole.MANAGER);
+    void theBuiltInSeedTheMatrixAboveRestsOnHolds() {
+        var wsMember = roleCatalog.builtIn(RoleScope.WORKSPACE, "MEMBER").permissions();
+        var projectAdmin = roleCatalog.builtIn(RoleScope.PROJECT, "MANAGER").permissions();
+        var contributor = roleCatalog.builtIn(RoleScope.PROJECT, "MEMBER").permissions();
+        var viewer = roleCatalog.builtIn(RoleScope.PROJECT, "VIEWER").permissions();
+
+        for (var role : java.util.List.of("OWNER", "ADMIN")) {
+            var permissions = roleCatalog.builtIn(RoleScope.WORKSPACE, role).permissions();
+            assert permissions.has(Permission.PROJECT_CURATE_ALL)
+                    : "the built-in workspace " + role + " lost project.curate.all — that IS the "
+                      + "workspace-admin bypass the 2xx rows above assert.";
+        }
+        assert !wsMember.has(Permission.PROJECT_CURATE_ALL)
+                : "the built-in workspace Member gained the curator bypass, so the 403 rows above "
+                  + "are now testing nothing.";
+        for (var p : Permission.projectCuration()) {
+            assert projectAdmin.has(p) : "the built-in Project admin lost " + p.key();
+            assert !contributor.has(p) : "the built-in Contributor gained " + p.key();
+            assert !viewer.has(p) : "the built-in Viewer gained " + p.key();
+        }
     }
 
     // ==================================================== helpers

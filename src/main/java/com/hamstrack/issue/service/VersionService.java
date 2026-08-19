@@ -1,8 +1,8 @@
 package com.hamstrack.issue.service;
 
-import com.hamstrack.admin.scope.ScopeResolver;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.ClassificationProperties;
+import com.hamstrack.common.security.Permission;
 import com.hamstrack.issue.dto.CreateVersionRequest;
 import com.hamstrack.issue.dto.IssueVersionRefs;
 import com.hamstrack.issue.dto.ReleaseVersionRequest;
@@ -53,17 +53,22 @@ import java.util.UUID;
  * the batched page loading the board/backlog/search rely on.
  *
  * <p><strong>Tenancy (§3.1):</strong> every entry point resolves through
- * {@link WorkspaceAccessService#requireProjectMember} (reads) or
- * {@link ScopeResolver#requireProjectCurator} (writes) — a missing workspace, a
- * missing project and a non-member all yield <strong>404</strong>, never 403. 403 is
- * reserved for a <em>member without the curation role</em>. Version lookups always
- * go through {@code findByIdAndProject}: a foreign id is a 404 on a direct read and a
- * <strong>422</strong> "Unknown version" inside an issue payload (an invalid field
- * value, leaking nothing about the other tenant).
+ * {@link WorkspaceAccessService#resolveProject} — a missing workspace, a missing
+ * project and a non-member all yield <strong>404</strong>, never 403. 403 is reserved
+ * for a <em>member without the permission</em> ({@link Permission#VERSION_MANAGE}), and
+ * by construction it can only reach someone whose membership is already proved. Version
+ * lookups always go through {@code findByIdAndProject}: a foreign id is a 404 on a direct
+ * read and a <strong>422</strong> "Unknown version" inside an issue payload (an invalid
+ * field value, leaking nothing about the other tenant).
  *
- * <p><strong>Permissions (§3.3):</strong> read = any project member (i.e. a workspace
- * member for whom the project resolves); create/edit/release/un-release/archive/
- * delete = project MANAGER <em>or</em> workspace OWNER/ADMIN.
+ * <p><strong>Permissions (§3.3, HD-123 §10.2):</strong> read = any project member (i.e. a
+ * workspace member for whom the project resolves); create/edit/release/un-release/
+ * archive/delete = {@link Permission#VERSION_MANAGE}, held by the built-in project
+ * MANAGER and — via {@link Permission#PROJECT_CURATE_ALL} — by a workspace OWNER/ADMIN in
+ * every project of their workspace. Setting {@code fixVersionIds} on an issue is
+ * {@code issue.edit}, not this (§6.5). The {@code releases} delivery capability is a
+ * <em>rendering</em> switch and never a check: a project with releases off still accepts
+ * every call here (delivery Rule A).
  *
  * <p>Versions are <em>content</em>, not bound taxonomy: nothing here touches
  * {@code ProjectConfigService} or {@code ProjectConfigResponse} (§3.2).
@@ -74,7 +79,6 @@ import java.util.UUID;
 public class VersionService {
 
     private final WorkspaceAccessService workspaceAccess;
-    private final ScopeResolver scopeResolver;
     private final VersionRepository versionRepository;
     private final IssueVersionLinkRepository linkRepository;
     private final ClassificationProperties classificationProperties;
@@ -109,7 +113,7 @@ public class VersionService {
     @Transactional(readOnly = true)
     public List<VersionResponse> list(User actor, UUID workspaceId, UUID projectId,
                                       boolean includeArchived, boolean includeReleased) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var versions = versionRepository.findAllByProject(project, includeArchived, includeReleased);
         return respondAll(versions);
     }
@@ -117,7 +121,7 @@ public class VersionService {
     /** One version — any project member (reads are unrestricted within the project). */
     @Transactional(readOnly = true)
     public VersionResponse get(User actor, UUID workspaceId, UUID projectId, UUID versionId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         return respond(requireVersion(project, versionId));
     }
 
@@ -129,7 +133,10 @@ public class VersionService {
     @Transactional
     public VersionResponse create(User actor, UUID workspaceId, UUID projectId,
                                   CreateVersionRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
 
         String name = requireValidName(req.name());
@@ -181,7 +188,10 @@ public class VersionService {
     @Transactional
     public VersionResponse update(User actor, UUID workspaceId, UUID projectId, UUID versionId,
                                   UpdateVersionRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var version = requireVersion(project, versionId);
 
@@ -248,7 +258,10 @@ public class VersionService {
     @Transactional
     public VersionResponse release(User actor, UUID workspaceId, UUID projectId, UUID versionId,
                                    ReleaseVersionRequest req) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var version = requireVersion(project, versionId);
 
@@ -302,7 +315,10 @@ public class VersionService {
      */
     @Transactional
     public VersionResponse unrelease(User actor, UUID workspaceId, UUID projectId, UUID versionId) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         requireVersion(project, versionId);   // scope it to the project before mutating
 
@@ -331,7 +347,10 @@ public class VersionService {
 
     private VersionResponse setArchived(User actor, UUID workspaceId, UUID projectId,
                                         UUID versionId, boolean archived) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var version = requireVersion(project, versionId);
         version.setArchivedAt(archived ? Instant.now() : null);
@@ -361,7 +380,10 @@ public class VersionService {
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, UUID versionId,
                        boolean force, UUID remapToId) {
-        var project = scopeResolver.requireProjectCurator(actor, workspaceId, projectId);
+        // HD-123 S2: permission first, project state second (§10.3.6).
+        var ctx = workspaceAccess.resolveProject(actor, workspaceId, projectId);
+        ctx.permissions().require(Permission.VERSION_MANAGE);
+        var project = ctx.project();
         requireNotArchived(project);
         var version = requireVersion(project, versionId);
 
@@ -399,7 +421,7 @@ public class VersionService {
      */
     @Transactional(readOnly = true)
     public VersionUsageResponse usage(User actor, UUID workspaceId, UUID projectId, UUID versionId) {
-        var project = workspaceAccess.requireProjectMember(actor, workspaceId, projectId).project();
+        var project = workspaceAccess.resolveProject(actor, workspaceId, projectId).project();
         var version = requireVersion(project, versionId);
         var p = progressOf(version);
         return new VersionUsageResponse(p.fixCount(), p.affectsCount(), p.fixCount() - p.fixDoneCount());

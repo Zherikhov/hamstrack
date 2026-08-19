@@ -4,6 +4,11 @@ import {
   SECTION_ORDER, SECTION_CAPS, DYNAMIC_SECTIONS,
   type CommandInput, type RunContext,
 } from './commands'
+import { permissionsFrom } from '../../hooks/usePermissions'
+import {
+  PROJECT_ADMIN_PERMISSIONS, PROJECT_CONTRIBUTOR_PERMISSIONS, PROJECT_CURATOR_BYPASS_PERMISSIONS,
+  PROJECT_VIEWER_PERMISSIONS, WORKSPACE_ADMIN_PERMISSIONS, WORKSPACE_MEMBER_PERMISSIONS,
+} from '../../test/permissions'
 import type { Project, SavedFilter, User, Workspace, WorkspaceMember } from '../../types'
 
 // HD-39 §17.1 (36–37, 40) + §6.7 / §5.1 / §5.2 at the pure-registry level. The
@@ -14,11 +19,15 @@ import type { Project, SavedFilter, User, Workspace, WorkspaceMember } from '../
 const ME: User = { id: 'u-me', email: 'me@example.com', displayName: 'Me', systemRole: 'USER' }
 const ADMIN: User = { ...ME, systemRole: 'ADMIN' }
 
-const WS: Workspace = { id: 'w1', name: 'Acme', slug: 'acme', myRole: 'OWNER', createdAt: '2026-01-01T00:00:00Z' }
+const WS: Workspace = {
+  id: 'w1', name: 'Acme', slug: 'acme', myRole: 'OWNER',
+  myPermissions: WORKSPACE_ADMIN_PERMISSIONS, createdAt: '2026-01-01T00:00:00Z',
+}
 
 const PROJ: Project = {
   id: 'p1', workspaceId: 'w1', name: 'Boats', key: 'BOA',
-  archived: false, myRole: 'MEMBER', createdAt: '2026-01-01T00:00:00Z',
+  archived: false, myRole: 'MEMBER', myPermissions: PROJECT_CONTRIBUTOR_PERMISSIONS,
+  createdAt: '2026-01-01T00:00:00Z',
 }
 const PROJ_ARCHIVED: Project = { ...PROJ, id: 'p9', name: 'Old boats', key: 'OLD', archived: true }
 
@@ -28,23 +37,38 @@ const FILTER: SavedFilter = {
   createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z',
 }
 
-const MEMBER: WorkspaceMember = { userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee', role: 'MEMBER' }
+const MEMBER: WorkspaceMember = {
+  userId: 'u-ann', email: 'ann@example.com', displayName: 'Ann Lee',
+  roleId: 'r-ws-member', role: 'MEMBER',
+}
 
 function input(over: Partial<CommandInput> = {}): CommandInput {
-  return {
+  const base = {
     user: ME,
-    wsId: 'w1',
+    wsId: 'w1' as string | null,
     wsName: 'Acme',
-    currentProject: null,
-    projects: [],
+    currentProject: null as CommandInput['currentProject'],
+    projects: [] as Project[],
     workspaces: [WS],
-    filters: [],
-    members: [],
+    filters: [] as SavedFilter[],
+    members: [] as WorkspaceMember[],
     issues: [],
     query: '',
     fastPath: null,
-    issuesState: 'idle',
+    issuesState: 'idle' as const,
     ...over,
+  }
+  return {
+    ...base,
+    // Composed exactly the way `CommandPalette` composes it, so a test that
+    // varies `projects`/`workspaces` varies the gate the same way the app does
+    // — including the "not fetched yet ⇒ denied" case (HD-116).
+    permissions: over.permissions ?? permissionsFrom([
+      base.workspaces.find(w => w.id === base.wsId),
+      base.currentProject
+        ? base.projects.find(p => p.id === base.currentProject!.projectId)
+        : undefined,
+    ]),
   }
 }
 
@@ -121,36 +145,58 @@ describe('buildStaticCommands — availability gates (§5.1/§5.2)', () => {
     expect(withProject).toContain('nav.backlog')
   })
 
-  it('offers Project settings only to a project MANAGER (§17.1 item 40)', () => {
+  it('offers Project settings on the settings PERMISSIONS, not on a role name (§17.1 item 40)', () => {
     const cur = { wsId: 'w1', projectId: 'p1', name: 'Boats' }
-    const asMember = buildStaticCommands(input({ currentProject: cur, projects: [PROJ] }))
-    expect(ids(asMember)).not.toContain('nav.projectSettings')
+    const asContributor = buildStaticCommands(input({ currentProject: cur, projects: [PROJ] }))
+    expect(ids(asContributor)).not.toContain('nav.projectSettings')
 
-    const asViewer = buildStaticCommands(input({ currentProject: cur, projects: [{ ...PROJ, myRole: 'VIEWER' }] }))
-    expect(ids(asViewer)).not.toContain('nav.projectSettings')
+    const viewer = { ...PROJ, myPermissions: PROJECT_VIEWER_PERMISSIONS }
+    expect(ids(buildStaticCommands(input({ currentProject: cur, projects: [viewer] }))))
+      .not.toContain('nav.projectSettings')
 
-    // …and not while ['projects', wsId] is still loading (no role known yet).
+    // …and not while ['projects', wsId] is still loading (nothing known yet).
     const loading = buildStaticCommands(input({ currentProject: cur, projects: [] }))
     expect(ids(loading)).not.toContain('nav.projectSettings')
 
-    const asManager = buildStaticCommands(input({ currentProject: cur, projects: [{ ...PROJ, myRole: 'MANAGER' }] }))
-    expect(ids(asManager)).toContain('nav.projectSettings')
-    const row = asManager.find(c => c.id === 'nav.projectSettings')!
+    const admin = { ...PROJ, myPermissions: PROJECT_ADMIN_PERMISSIONS }
+    const asAdmin = buildStaticCommands(input({ currentProject: cur, projects: [admin] }))
+    expect(ids(asAdmin)).toContain('nav.projectSettings')
+    const row = asAdmin.find(c => c.id === 'nav.projectSettings')!
     expect(row.label).toBe('Project settings — Boats')
     expect(navTarget(row)).toBe('/w/w1/p/p1/settings')
   })
 
-  it('offers Workspace settings to OWNER/ADMIN but not to a MEMBER (nor while the role is unknown)', () => {
+  /**
+   * **HD-116, closed.** The palette gated this row on `myRole === 'MANAGER'`
+   * while the rail's Settings link and `ProjectSettingsArea` both admitted the
+   * wider curator predicate — so a workspace admin curating a project they are
+   * not a member of was offered the door by neither the rail nor the palette,
+   * and could only reach their own settings page by typing the URL. The row now
+   * calls the same `canOpenProjectSettings` those two call, over the permission
+   * set the server sends, so the three cannot disagree.
+   */
+  it('offers Project settings to a workspace admin who is not a project member (HD-116)', () => {
+    const cur = { wsId: 'w1', projectId: 'p1', name: 'Boats' }
+    // Exactly what the server sends such a caller: no project role of their own,
+    // plus the `project.curate.all` bypass — and `myRole` still reads VIEWER.
+    const bypass: Project = {
+      ...PROJ, myRole: 'VIEWER', myPermissions: PROJECT_CURATOR_BYPASS_PERMISSIONS,
+    }
+    expect(ids(buildStaticCommands(input({ currentProject: cur, projects: [bypass] }))))
+      .toContain('nav.projectSettings')
+  })
+
+  it('offers Workspace settings on the settings permissions (and not while they are unknown)', () => {
     expect(ids(buildStaticCommands(input()))).toContain('nav.wsSettings')
-    expect(ids(buildStaticCommands(input({ workspaces: [{ ...WS, myRole: 'ADMIN' }] })))).toContain('nav.wsSettings')
-    expect(ids(buildStaticCommands(input({ workspaces: [{ ...WS, myRole: 'MEMBER' }] })))).not.toContain('nav.wsSettings')
+    const member = { ...WS, myPermissions: WORKSPACE_MEMBER_PERMISSIONS }
+    expect(ids(buildStaticCommands(input({ workspaces: [member] })))).not.toContain('nav.wsSettings')
     expect(ids(buildStaticCommands(input({ workspaces: [] })))).not.toContain('nav.wsSettings')
   })
 
   it('gates System administration on systemRole alone — independent of the workspace role (§14 case 30)', () => {
     expect(ids(buildStaticCommands(input()))).not.toContain('nav.admin')
     const adminButMember = buildStaticCommands(input({
-      user: ADMIN, workspaces: [{ ...WS, myRole: 'MEMBER' }],
+      user: ADMIN, workspaces: [{ ...WS, myPermissions: WORKSPACE_MEMBER_PERMISSIONS }],
     }))
     expect(ids(adminButMember)).toContain('nav.admin')
     expect(ids(adminButMember)).not.toContain('nav.wsSettings')
@@ -160,7 +206,7 @@ describe('buildStaticCommands — availability gates (§5.1/§5.2)', () => {
     const all = ids(buildStaticCommands(input({
       user: ADMIN,
       currentProject: { wsId: 'w1', projectId: 'p1' },
-      projects: [{ ...PROJ, myRole: 'MANAGER' }],
+      projects: [{ ...PROJ, myPermissions: PROJECT_ADMIN_PERMISSIONS }],
     })))
     for (const id of all) {
       expect(id, id).toMatch(/^(action|nav)\.[A-Za-z]+$/)

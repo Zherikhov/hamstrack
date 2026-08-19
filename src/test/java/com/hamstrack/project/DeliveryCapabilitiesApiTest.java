@@ -2,8 +2,6 @@ package com.hamstrack.project;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.hamstrack.issue.SprintTestBase;
-import com.hamstrack.project.entity.ProjectRole;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -420,7 +418,7 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
         patchDelivery(ctx, "\"releases\":true").andExpect(status().isOk());
 
         // workspace ADMIN who is NOT a project member → 200, with their REAL role echoed
-        var admin = actorWith(ctx, WorkspaceRole.ADMIN, null);
+        var admin = actorWith(ctx, "ADMIN", null);
         patchProject(ctx, admin.token(), "{\"delivery\":{\"estimation\":true}}")
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.delivery.estimation").value(true))
@@ -428,7 +426,7 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
 
         // a plain project MEMBER → 403: they know the project exists, they just may not
         // change how the whole team's board reads.
-        var plain = actorWith(ctx, WorkspaceRole.MEMBER, ProjectRole.MEMBER);
+        var plain = actorWith(ctx, "MEMBER", "MEMBER");
         patchProject(ctx, plain.token(), "{\"delivery\":{\"releases\":false}}")
                 .andExpect(status().isForbidden());
         // …and a plain member may still READ the capabilities (§4: any project member).

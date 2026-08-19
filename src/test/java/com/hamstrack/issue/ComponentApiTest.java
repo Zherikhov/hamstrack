@@ -2,7 +2,6 @@ package com.hamstrack.issue;
 
 import com.hamstrack.issue.entity.Component;
 import com.hamstrack.issue.repository.ComponentRepository;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -49,7 +48,7 @@ class ComponentApiTest extends ComponentTestBase {
     @Test
     void createReturnsTheFullRepresentationAndTheListIsOrderedByLowercasedName() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
 
         var body = json.readTree(postComponent(ctx, ctx.token(),
                         "{\"name\":\"Billing\",\"description\":\"invoices\",\"leadId\":\""
@@ -244,7 +243,7 @@ class ComponentApiTest extends ComponentTestBase {
                 .andExpect(jsonPath("$.detail", containsString("Auto-assign needs a lead")));
         assert listComponents(ctx, ctx.token(), null).isEmpty() : "nothing may have been created";
 
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         postComponent(ctx, ctx.token(),
                         "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}")
                 .andExpect(status().isCreated());
@@ -253,7 +252,7 @@ class ComponentApiTest extends ComponentTestBase {
     @Test
     void clearingTheLeadWhileAutoAssignStaysOnIs422() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         var id = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
 
@@ -280,7 +279,7 @@ class ComponentApiTest extends ComponentTestBase {
     @Test
     void assertingAutoAssignOverADepartedLeadIs422WhileAPlainRenameStillSucceeds() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         var id = createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"autoAssign\":false,\"leadId\":\"" + lead.user().getId() + "\"}");
         removeFromWorkspace(ctx, lead.user());
@@ -301,7 +300,7 @@ class ComponentApiTest extends ComponentTestBase {
                 .andExpect(status().isOk());
 
         // (c) supplying a lead who IS a member alongside the switch is accepted.
-        var current = addMember(ctx, WorkspaceRole.MEMBER);
+        var current = addMember(ctx, "MEMBER");
         patchComponent(ctx, ctx.token(), id,
                         "{\"autoAssign\":true,\"leadId\":\"" + current.user().getId() + "\"}")
                 .andExpect(status().isOk())
@@ -312,7 +311,7 @@ class ComponentApiTest extends ComponentTestBase {
     @Test
     void aDepartedLeadIsStillReportedOnTheComponentSoTheUiCanFlagThem() throws Exception {
         var ctx = newProject();
-        var lead = addMember(ctx, WorkspaceRole.MEMBER);
+        var lead = addMember(ctx, "MEMBER");
         createComponent(ctx, ctx.token(),
                 "{\"name\":\"billing\",\"leadId\":\"" + lead.user().getId() + "\"}");
         removeFromWorkspace(ctx, lead.user());

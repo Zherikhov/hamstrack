@@ -175,6 +175,7 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_issues_created_total` | counter | `type`(issue-type name, from the admin catalog) | issues created |
 | `hamstrack_invites_sent_total` / `_accepted_total` / `_declined_total` | counter | — | workspace invites |
 | `hamstrack_email_sent_total` | counter | `type`(verification/password_reset/invite), `outcome`(success/failure) | outbound email |
+| `hamstrack_role_scope_violation_total` | counter | `source`(workspace_members/project_members/workspace_invites/default_project_role) | a stored `role_id` failed the scope/ownership assertion — see the alert below |
 | `hamstrack_attachments_uploaded_total` | counter | — | attachment uploads |
 | `hamstrack_attachments_bytes_count` / `_sum` | summary | — | upload count / cumulative bytes stored |
 | `hamstrack_users_total` / `hamstrack_users_active` | gauge | — | total users / ACTIVE users |
@@ -232,8 +233,21 @@ are visible in Grafana → Alerting.
 | DiskFilling | host filesystem < 15% free | 10m | critical |
 | EmailFailures | `increase(hamstrack_email_sent_total{outcome="failure"}[15m]) > 0` | 0m | warning |
 | JVMHeapPressure | heap used/max > 90% | 10m | warning |
+| RoleScopeViolation | `increase(hamstrack_role_scope_violation_total[15m]) > 0` | 0m | warning |
 
 Grafana's SMTP reuses your `MAIL_*` settings (see below).
+
+**RoleScopeViolation is a data-integrity alert, not a load one.** It fires when a stored
+`role_id` — on `workspace_members`, `project_members`, `workspace_invites` or a
+`default_project_role_id` column — names a role of the wrong scope or of another
+workspace. No request can create such a row (every write door resolves role ids through
+`RoleRepository.findAssignable(id, workspaceId, scope)`), so a non-zero value means a bad
+migration, a hand-written `UPDATE`, or a genuine authorization bug — never traffic. **Any
+increase at all is worth looking at**, hence the `> 0` threshold and the `for: 0m`. The
+`source` label names the table so the offending rows are one query away; the matching
+`ERROR` log line names the role id. On the list endpoints the condition is survivable
+(the entry renders with no role rather than 404ing the whole page), which is exactly why
+it needs an alert: without one it is invisible except as a permanent ERROR trickle.
 
 ---
 

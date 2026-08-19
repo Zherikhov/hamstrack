@@ -70,6 +70,30 @@ public class ProductMetrics {
         PasswordResetPhase(String tag) { this.tag = tag; }
     }
 
+    /**
+     * Where a {@code role_id} that failed the scope/ownership assertion was read from —
+     * the table, not the tenant. Bounded and enum-like, per the cardinality rule above:
+     * a free-form {@code String} label here would let a future call site put an id into
+     * Prometheus.
+     */
+    public enum RoleScopeViolationSource {
+        WORKSPACE_MEMBERS("workspace_members"),
+        PROJECT_MEMBERS("project_members"),
+        /**
+         * A pending invitation's {@code role_id} (HD-127 round-3 review). Its own constant
+         * because the invite path used to write the id straight onto the membership: the
+         * ERROR line then named {@code workspace_members}, sending an operator to the table
+         * whose row is <em>correct</em> while the wrong one sat in {@code workspace_invites}.
+         */
+        WORKSPACE_INVITES("workspace_invites"),
+        DEFAULT_PROJECT_ROLE("default_project_role");
+        final String tag;
+        RoleScopeViolationSource(String tag) { this.tag = tag; }
+
+        /** The table the id came from — also what the ERROR log names. */
+        public String tag() { return tag; }
+    }
+
     public enum EmailType {
         VERIFICATION("verification"), PASSWORD_RESET("password_reset"), INVITE("invite");
         final String tag;
@@ -207,6 +231,21 @@ public class ProductMetrics {
     public void emailSent(EmailType type, EmailOutcome outcome) {
         registry.counter("hamstrack.email.sent",
                 "type", type.tag, "outcome", outcome.tag).increment();
+    }
+
+    // --- authorization ---
+
+    /**
+     * {@code hamstrack.role.scope_violation{source}} — a membership or default-role column
+     * points at a role of the wrong scope, or of another workspace (HD-127 §3c).
+     *
+     * <p>Exists because the read-side degrade makes that condition <em>survivable</em>: the
+     * list endpoints render the row with a null role instead of 404ing the whole page, so
+     * without a meter a permanently corrupt row is only an ERROR line on every list request
+     * — a Loki bill rather than a signal. This makes it alertable without being read.
+     */
+    public void roleScopeViolation(RoleScopeViolationSource source) {
+        registry.counter("hamstrack.role.scope_violation", "source", source.tag).increment();
     }
 
     // --- attachments ---

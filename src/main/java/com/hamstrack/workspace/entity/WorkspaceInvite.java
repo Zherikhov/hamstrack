@@ -21,9 +21,10 @@ public class WorkspaceInvite extends CreatedOnlyEntity {
     @Column(nullable = false, length = 255)
     private String email;
 
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false, length = 20)
-    private WorkspaceRole role;
+    /** The workspace role the invitee gets on acceptance (HD-123 §8.2). */
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "role_id", nullable = false)
+    private Role role;
 
     @Column(name = "token_hash", nullable = false, unique = true, length = 64)
     private String tokenHash;

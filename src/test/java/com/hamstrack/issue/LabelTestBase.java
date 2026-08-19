@@ -1,5 +1,6 @@
 package com.hamstrack.issue;
 
+import com.hamstrack.common.security.RoleScope;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hamstrack.auth.entity.SystemRole;
@@ -8,12 +9,10 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
-import com.hamstrack.project.entity.ProjectRole;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
-import com.hamstrack.workspace.entity.WorkspaceRole;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,6 +40,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 public abstract class LabelTestBase {
 
     @Autowired protected MockMvc mockMvc;
+    // HD-123: memberships carry a roles row now; reference() resolves a built-in with no query.
+    @Autowired protected com.hamstrack.workspace.service.RoleCatalog roleCatalog;
     @Autowired protected UserRepository userRepository;
     @Autowired protected WorkspaceRepository workspaceRepository;
     @Autowired protected WorkspaceMemberRepository workspaceMemberRepository;
@@ -91,9 +92,9 @@ public abstract class LabelTestBase {
     protected Ctx newProject() throws Exception {
         var owner = user();
         var ws = workspace(owner);
-        member(ws, owner, WorkspaceRole.OWNER);
+        member(ws, owner, "OWNER");
         var project = project(ws, owner);
-        projectMember(project, owner, ProjectRole.MANAGER);
+        projectMember(project, owner, "MANAGER");
         var token = login(owner);
         var configUrl = "/api/workspaces/" + ws.getId() + "/projects/" + project.getId() + "/config";
         var body = mockMvc.perform(get(configUrl).header("Authorization", "Bearer " + token))
@@ -102,12 +103,12 @@ public abstract class LabelTestBase {
     }
 
     /** Add a further user to the ctx's workspace (and its project) and log them in. */
-    protected Actor addMember(Ctx ctx, WorkspaceRole role) throws Exception {
+    protected Actor addMember(Ctx ctx, String role) throws Exception {
         var u = user();
         var ws = workspaceRepository.findById(ctx.wsId()).orElseThrow();
         member(ws, u, role);
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
-        projectMember(project, u, ProjectRole.MEMBER);
+        projectMember(project, u, "MEMBER");
         return new Actor(u, login(u));
     }
 
@@ -273,11 +274,11 @@ public abstract class LabelTestBase {
         return workspaceRepository.save(w);
     }
 
-    protected void member(Workspace ws, User user, WorkspaceRole role) {
+    protected void member(Workspace ws, User user, String role) {
         var m = new WorkspaceMember();
         m.setWorkspace(ws);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.WORKSPACE, role));
         workspaceMemberRepository.save(m);
     }
 
@@ -290,11 +291,11 @@ public abstract class LabelTestBase {
         return projectRepository.save(p);
     }
 
-    protected void projectMember(Project project, User user, ProjectRole role) {
+    protected void projectMember(Project project, User user, String role) {
         var m = new ProjectMember();
         m.setProject(project);
         m.setUser(user);
-        m.setRole(role);
+        m.setRole(roleCatalog.reference(RoleScope.PROJECT, role));
         projectMemberRepository.save(m);
     }
 

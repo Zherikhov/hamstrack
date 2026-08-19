@@ -2,10 +2,13 @@ package com.hamstrack.workspace.controller;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.workspace.dto.*;
+import com.hamstrack.workspace.service.ProjectAccessService;
+import com.hamstrack.workspace.service.WorkspaceMemberService;
 import com.hamstrack.workspace.service.WorkspaceService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -15,11 +18,49 @@ import java.util.UUID;
 
 /**
  * Workspace management: create/list/get workspaces, list members, invite by
- * email and accept invites. The workspace is the tenant boundary — every
- * nested resource is resolved through the caller's membership, and a
- * non-member gets 404 (never 403) so workspace existence is not revealed.
+ * email and accept invites, and — since HD-132 — administer an existing
+ * membership (change a role, remove a member). The workspace is the tenant
+ * boundary — every nested resource is resolved through the caller's membership,
+ * and a non-member gets 404 (never 403) so workspace existence is not revealed.
  * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
  * (since M1), so workspace creation no longer seeds any issue types or statuses.
+ *
+ * <p><strong>Member administration</strong> ({@code PATCH}/{@code DELETE
+ * /{id}/members/{userId}}) requires {@code workspace.member.manage} — the same
+ * permission the invite path checks (HD-126, S3). Two further rules apply to both verbs:
+ * the <em>grant ceiling</em> (§11.2 — nobody may hand out, or act on a member holding, a
+ * role that grants something they do not hold themselves, plus the built-in Owner
+ * guardrail) and the <em>last-Owner</em> guard (409 — a workspace must never lose its last
+ * owner, including when an owner acts on themselves).
+ *
+ * <p>{@code DELETE} carries one guard the {@code PATCH} cannot need: it deletes the
+ * member's {@code project_members} rows, so it is refused with a <strong>409 naming every
+ * affected project</strong> ({@code projects} extension, HD-136) when it would leave a
+ * project with no holder of {@code project.member.manage}. Checked after the last-Owner
+ * and self-removal guards, so at most one refusal is reported.
+ *
+ * <p>That 409 is <strong>satisfiable by the caller who received it</strong>, which is what
+ * {@code ?adoptStrandedProjects=true} is for: repeating the DELETE with it makes the
+ * <em>caller</em> an administrator of each named project inside the same transaction and
+ * then removes the member. It has to exist, because the refusal’s own remedy — give those
+ * projects another administrator — needs {@code project.member.manage} <em>in</em> them,
+ * which no workspace-scoped role grants; without it an insider could make themselves
+ * unremovable. The flag names no projects on purpose: the set adopted is the one the server
+ * recomputes under lock in that transaction, so a client cannot widen it, and the response is
+ * <strong>200 with the list of what it granted</strong> rather than a silent 204. What it
+ * grants is deliberately narrow — the built-in <em>Team lead</em> (Contributor plus
+ * {@code project.member.manage}), never Project admin: enough to appoint a real
+ * administrator and to keep working in the project, with no authority over its settings, its
+ * archive state, its taxonomy, or anything irreversible ({@code issue.delete}, unrestricted
+ * {@code attachment.delete}).
+ *
+ * <p>Two narrowings decide what "without an administrator" means here, and both can change
+ * the answer a caller sees: only <strong>ACTIVE</strong> accounts count (a deactivated sole
+ * administrator does not hold the project, so removing them is not refused — and a
+ * deactivated co-administrator does not save one), and <strong>archived</strong> projects
+ * are excluded entirely, since a frozen project must never block an offboarding. The
+ * project-scoped {@code DELETE /projects/{p}/members/{u}} deliberately does NOT share that
+ * archived exclusion — see {@code ProjectAdminGuard}.
  */
 @RestController
 @RequestMapping("/api/workspaces")
@@ -27,6 +68,10 @@ import java.util.UUID;
 public class WorkspaceController {
 
     private final WorkspaceService workspaceService;
+    /** HD-132: administering an EXISTING membership (role change / removal). */
+    private final WorkspaceMemberService workspaceMemberService;
+    /** HD-130 (S7): the project-access mode and the workspace default-role picker. */
+    private final ProjectAccessService projectAccessService;
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
@@ -49,6 +94,137 @@ public class WorkspaceController {
     public List<WorkspaceMemberResponse> members(@AuthenticationPrincipal User user,
                                                  @PathVariable UUID id) {
         return workspaceService.listMembers(user, id);
+    }
+
+    /**
+     * <strong>Workspace settings → General</strong> (HD-130, S7 §7.1 W3): rename the
+     * workspace, switch its project-access mode, and choose the default project role every
+     * member inherits where they have no explicit {@code project_members} row.
+     *
+     * <p>Gate: {@code workspace.edit}. Every field is optional and independent — a body naming
+     * only {@code name} does not disturb the mode, and vice versa.
+     *
+     * <p><strong>200</strong>, including for a request whose values already hold (the row is
+     * then not written at all, so {@code updated_at} does not move) · <strong>400</strong> an
+     * empty body, or an unknown {@code projectAccessMode} · <strong>403</strong> missing
+     * {@code workspace.edit}, or the grant ceiling on the default role — naming the permission
+     * the actor lacks; the built-in workspace Owner is exempt in their own workspace ·
+     * <strong>404</strong> unknown workspace or non-member, indistinguishably ·
+     * <strong>409 {@code STRANDED_BY_INHERITANCE}</strong> when the change would leave projects
+     * whose administrators exist only through the default with nobody able to manage their
+     * membership (doors 7 and 8; the {@code projects} extension names them, and there is
+     * deliberately no adoption retry) · <strong>422</strong> a {@code defaultProjectRoleId}
+     * that is unknown, foreign or WORKSPACE-scoped, or a body sending both
+     * {@code defaultProjectRoleId} and {@code clearDefaultProjectRole}.
+     */
+    @PatchMapping("/{id}")
+    public WorkspaceResponse update(@AuthenticationPrincipal User user,
+                                    @PathVariable UUID id,
+                                    @Valid @RequestBody UpdateWorkspaceRequest req) {
+        return projectAccessService.update(user, id, req);
+    }
+
+    /**
+     * The General page's single read (S7 §7.1 W1): mode, declared default project role, which
+     * roles this actor may set it to (with the first missing permission for each one they may
+     * not), and the impact of the workspace as it stands.
+     *
+     * <p>Gate: {@code workspace.edit} — it is the control's own preview, and it aggregates
+     * write access workspace-wide, which is a different object from the project member lists
+     * that are open to every member. <strong>200</strong> · <strong>403</strong> ·
+     * <strong>404</strong>.
+     */
+    @GetMapping("/{id}/project-access")
+    public ProjectAccessResponse projectAccess(@AuthenticationPrincipal User user,
+                                               @PathVariable UUID id) {
+        return projectAccessService.get(user, id);
+    }
+
+    /**
+     * <strong>What would this change do?</strong> (S7 §7.1 W2) — the same body as the
+     * {@code PATCH}, running the same guards and <strong>persisting nothing</strong>. POST
+     * because it carries a body, exactly as {@code POST /roles/preview} does.
+     *
+     * <p>The counts are advisory — they describe a population
+     * ({@code workspace_members} × {@code project_members}) that is not the row being written,
+     * so they carry {@code computedAt} and no token, echo or {@code expectedCount}. The one
+     * number that must be exact, {@code strandedProjects}, is re-derived under the write and
+     * enforced there whether or not the caller ever previewed.
+     *
+     * <p>A ceiling failure surfaces here as the ordinary <strong>403</strong> and never as a
+     * "would fail" field in a 200 body: a preview that succeeds while describing a refusal
+     * teaches a client to ignore it. Same 400/403/404/422 as the {@code PATCH}; no 409 — the
+     * stranding it would produce is a field, because that is the question being asked.
+     */
+    @PostMapping("/{id}/project-access/preview")
+    public ProjectAccessImpactResponse previewProjectAccess(
+            @AuthenticationPrincipal User user,
+            @PathVariable UUID id,
+            @Valid @RequestBody UpdateWorkspaceRequest req) {
+        return projectAccessService.preview(user, id, req);
+    }
+
+    /**
+     * Change an existing member's workspace role (HD-132).
+     *
+     * <p>200 · <strong>403</strong> caller is a member but below ADMIN, or the edit breaks
+     * the grant ceiling (nobody may act on — or hand out — a role stronger than their own)
+     * · <strong>404</strong> unknown workspace, caller not a member, or the target holds no
+     * membership <em>here</em> (which says nothing about whether the account exists) ·
+     * <strong>409</strong> it would demote the workspace's last owner.
+     */
+    @PatchMapping("/{id}/members/{userId}")
+    public WorkspaceMemberResponse updateMember(@AuthenticationPrincipal User user,
+                                                @PathVariable UUID id,
+                                                @PathVariable UUID userId,
+                                                @Valid @RequestBody UpdateWorkspaceMemberRequest req) {
+        return workspaceMemberService.updateRole(user, id, userId, req);
+    }
+
+    /**
+     * Remove a member from the workspace (HD-132) — their {@code workspace_members} row and
+     * their {@code project_members} rows in this workspace, plus the one reference that must
+     * not outlive access: the issue <em>assignee</em>, which is a statement about who is
+     * responsible now. The account itself is global and is untouched, as is every piece of
+     * historical attribution, their saved filters, and any component they lead (HD-31 §5.4
+     * keeps a departed lead and skips them at auto-assign time).
+     *
+     * <p>Removal also revokes the ways back in: every unaccepted invite for that address in
+     * this workspace is deleted (a leftover one would otherwise re-appear as a live join
+     * button the moment the membership row is gone), and their open SSE streams are closed
+     * once the transaction commits.
+     *
+     * <p><strong>{@code 204}</strong> for an ordinary removal; <strong>{@code 200}</strong>
+     * with {@code {"adoptedProjects":[…]}} when {@code adoptStrandedProjects=true} actually
+     * granted the caller a role somewhere. The asymmetry is deliberate: an adoption is the
+     * one thing this endpoint <em>grants</em>, and a 204 would leave the actor to discover
+     * it from a log line they cannot read (HD-136).
+     *
+     * <p>403/404 exactly as {@code PATCH} above. <strong>409</strong> covers four
+     * different states, and only two of them carry an {@code errorType}:
+     * {@code STRANDED_PROJECTS} — the removal would leave the listed projects with no
+     * administrator, so retry with {@code adoptStrandedProjects=true} to take them over —
+     * and {@code ADOPTION_BLOCKED}, where that retry has already been tried and cannot
+     * work. The other two carry no extension at all and are told apart by
+     * {@code Retry-After}: a lost row-lock race has it, and means retry the identical
+     * request; the workspace's last owner does not, and means change something first
+     * (promote another owner).
+     * <strong>422</strong> when the target is the caller: self-removal ("leave workspace")
+     * is a different feature with its own UX and is not built yet, so this endpoint refuses
+     * rather than quietly doing it. A sole owner deleting themselves gets the 409 instead —
+     * "promote another owner first" is the answer that will still be true once leaving
+     * exists. A second DELETE for an already-removed member is a clean 404, not a 500.
+     */
+    @DeleteMapping("/{id}/members/{userId}")
+    public ResponseEntity<MemberRemovalResponse> removeMember(
+            @AuthenticationPrincipal User user,
+            @PathVariable UUID id,
+            @PathVariable UUID userId,
+            @RequestParam(defaultValue = "false") boolean adoptStrandedProjects) {
+        var adopted = workspaceMemberService.remove(user, id, userId, adoptStrandedProjects);
+        return adopted.isEmpty()
+                ? ResponseEntity.noContent().build()
+                : ResponseEntity.ok(new MemberRemovalResponse(adopted));
     }
 
     @PostMapping("/{id}/invites")
