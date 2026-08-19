@@ -4479,6 +4479,21 @@ paths:
         `assigneeId`/`clearAssignee` convention). The **lifecycle deliberately
         does not move through here** — there is no `state` field, so a PATCH can
         neither start, complete nor re-open a sprint.
+
+
+        `startAt` is editable **only while the sprint is still `FUTURE`**. Once
+        it has started, its start date is the origin its reports are measured
+        from: the scope it committed to is recorded against the original start,
+        so moving the start afterwards would leave the two records disagreeing —
+        pull it earlier and every recorded commitment sits *after* the new start,
+        so "committed scope at start" reads `0`. Changing `startAt` on an
+        `ACTIVE` or `COMPLETED` sprint is therefore a `422`; the recovery path
+        for a wrong start is a new sprint, not an edit to a running one. An
+        `ACTIVE` sprint must also keep a start date at all (`clearStartAt` on a
+        running sprint is a `422`). Equality is by **instant, not by
+        representation** — re-sending the same moment in another UTC offset
+        (`09:00+02:00` vs `07:00Z`) is not an edit and is accepted, so a client
+        may round-trip a sprint and PATCH it back unchanged.
       operationId: updateSprint
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -4506,7 +4521,15 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/SprintConflict' }
         '422':
-          description: 'The resulting dates are inconsistent (`endAt <= startAt`).'
+          description: >-
+            The resulting dates are inconsistent (`endAt <= startAt`); an
+            **ACTIVE** sprint would be left without a start date ("An active
+            sprint must keep a start date"); or the request changes `startAt` on
+            a sprint that is no longer `FUTURE` ("A sprint's start date can only
+            be changed while it is still in the future") — a started sprint's
+            start is the origin its reports are measured from, so it is frozen.
+            Re-sending the same instant in a different UTC offset is not a change
+            and is accepted.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4562,7 +4585,33 @@ paths:
         **optional** — a bare `POST` means "start it now and run it for
         `app.agile.default-sprint-length-days` (default 14) days". A `startAt`
         in the past is allowed on purpose (backfilling a sprint that actually
-        began on Monday is normal).
+        began on Monday is normal); a `startAt` in the **future** is a `422` —
+        starting is the act that turns a plan into history, and it cannot be
+        dated ahead of now.
+
+        Read that refusal together with the `startAt` freeze on
+        `PATCH …/sprints/{sprintId}`: the two are one rule, and either one
+        alone gives a wrong model of the endpoint. A forward-dated start writes
+        a `startAt` that the sprint's own commitment record — stamped when the
+        start actually happens — legitimately disagrees with, so a burn-up
+        measured over the sprint's window reads a committed scope of `0`; the
+        freeze then makes that wrong date **permanent**, recoverable only by
+        completing the sprint and creating a new one. It also let a sprint be
+        completed *before* it started, which the velocity report reads as a
+        negative-length iteration.
+
+        **The remedy is the one the message names**: leave the sprint planned
+        until it actually begins. Planning a future start stays entirely legal
+        — `POST …/sprints` and `PATCH …/sprints/{sprintId}` accept any date,
+        and a `FUTURE` sprint's dates stay editable — and starting it stamps
+        the start for you, so the date never has to be typed. A `startAt` up to
+        five minutes ahead of the server's clock is not refused but **recorded
+        as `now`** — the response echoes the clamped instant, not the one sent,
+        so the sprint and the commitment records it is measured against always
+        carry the same moment. The tolerance means "a slightly fast clock is
+        now", never "a slightly future start is stored", and it is there for
+        **unsynchronised client clocks, not policy** — not configurable, and
+        far too small to express an intention.
 
         **At most one sprint per project may be active**, and that invariant is
         enforced by the database, not only in Java: starting a second one is a
@@ -4600,7 +4649,10 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422':
-          description: '`endAt <= startAt`.'
+          description: >-
+            `endAt <= startAt`, or a `startAt` in the **future** (more than the
+            five-minute clock-skew tolerance ahead of the server) — leave the
+            sprint planned and start it when it actually begins.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -9476,9 +9528,9 @@ components:
       properties:
         name: { type: string, maxLength: 60, description: 'Same normalization, 60-char limit and per-project case-insensitive uniqueness as create (`409`; a pure casing change is allowed).' }
         goal: { type: string, maxLength: 500, description: 'New goal if present; a blank string clears it.' }
-        startAt: { type: string, format: date-time }
+        startAt: { type: string, format: date-time, description: 'Editable only while the sprint is FUTURE; changing it on an ACTIVE or COMPLETED sprint is a 422. Compared by instant, so the same moment re-sent in another UTC offset is not a change.' }
         endAt: { type: string, format: date-time }
-        clearStartAt: { type: boolean, default: false, description: 'Unset the start date (a null startAt cannot be distinguished from "not sent"); ignored when startAt is also given.' }
+        clearStartAt: { type: boolean, default: false, description: 'Unset the start date (a null startAt cannot be distinguished from "not sent"); ignored when startAt is also given. A 422 on an ACTIVE sprint (which must keep a start date) and on a COMPLETED one (whose start is frozen).' }
         clearEndAt: { type: boolean, default: false, description: 'Unset the end date; ignored when endAt is also given.' }
 
     StartSprintRequest:
@@ -9493,7 +9545,14 @@ components:
           nullable: true
           description: >-
             Defaults to **now** (UTC). A date in the past is allowed on purpose:
-            backfilling a sprint that actually began on Monday is normal.
+            backfilling a sprint that actually began on Monday is normal. A date
+            in the **future** is a `422` — plan the sprint instead, leave it
+            `FUTURE` (its dates stay editable) and start it when it begins,
+            which stamps the start for you. Up to five minutes ahead of the
+            server's clock is accepted but **recorded as `now`** — a fast client
+            clock is treated as now, so the stored and returned `startAt` is the
+            clamped instant rather than the one sent. Tolerance for
+            unsynchronised client clocks, not a configurable policy.
         endAt:
           type: string
           format: date-time

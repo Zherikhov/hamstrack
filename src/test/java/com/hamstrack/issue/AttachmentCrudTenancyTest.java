@@ -169,6 +169,49 @@ class AttachmentCrudTenancyTest {
         assert issueRepository.findById(issueId).isPresent();
     }
 
+    /**
+     * <strong>Deleting an issue that HAS an attachment must still be a 204</strong> — the
+     * one step of the delete path nothing in the suite covered (HD-137 R4 item 2). Every
+     * other issue-delete test uses an attachment-free issue, and this class deleted
+     * attachments but never their issue, so the whole neighbourhood of
+     * {@code IssueService.delete}'s {@code removeStoredFilesForIssue} call was untested.
+     *
+     * <p><strong>It found a live bug, and it settled a disagreement about why.</strong>
+     * {@code removeStoredFilesForIssue} loaded managed {@code IssueAttachment} entities
+     * whose {@code issue} points at the entity about to be removed and did NOT detach them
+     * — while {@code SprintScopeLedger.recordDepartureBeforeDelete}, running immediately
+     * before it, carefully does. Two readings of the mechanism disagreed about whether the
+     * detach is what saves it or merely belt-and-braces (the DELETE has not executed yet,
+     * so "does the parent row exist" would say yes). This test answered: written first, it
+     * failed at {@code checkForTransientReferences} with
+     * {@code TransientPropertyValueException} — Hibernate treats an entity whose entry is
+     * deleted-or-gone as transient without asking the database — which means <em>deleting
+     * any issue that had at least one attachment was a 500 and a rollback</em>, on a path
+     * nothing in the suite covered. The detach is load-bearing; the attachment path now
+     * reads storage keys as SCALARS so it has nothing to detach at all.
+     */
+    @Test
+    void deletingAnIssueThatHasAnAttachmentSucceeds() throws Exception {
+        var ctx = newProject();
+        var issueId = createIssue(ctx);
+        var uploaded = upload(ctx, "goes-with-it.txt", "attached bytes".getBytes());
+        var attachmentId = UUID.fromString(uploaded.get("id").asText());
+        var storageKey = attachmentRepository.findById(attachmentId).orElseThrow().getStorageKey();
+        assert blobExists(storageKey) : "precondition: the blob is on disk before the delete";
+
+        mockMvc.perform(delete("/api/workspaces/" + ctx.wsId + "/projects/" + ctx.projectId
+                                + "/issues/1")
+                        .header("Authorization", "Bearer " + ctx.token))
+                .andExpect(status().isNoContent());
+
+        assert issueRepository.findById(issueId).isEmpty() : "the issue must be gone";
+        assert attachmentRepository.findById(attachmentId).isEmpty()
+                : "its attachment row must go with it";
+        assert !blobExists(storageKey)
+                : "and so must the blob — removeStoredFilesForIssue is what the issue "
+                  + "delete path calls instead of the per-attachment delete";
+    }
+
     // ============================================================ tenancy (top bug class)
 
     @Test
@@ -202,6 +245,48 @@ class AttachmentCrudTenancyTest {
                 .andExpect(status().isNotFound());
         assert attachmentRepository.findById(UUID.fromString(attachmentId)).isPresent()
                 : "a non-member's delete must not remove another tenant's attachment row";
+    }
+
+    /**
+     * The other half of {@link #deletingAnIssueThatHasAnAttachmentSucceeds()} (HD-137 R5
+     * item 3). That test proves the deleted issue's own blob <em>goes</em>; nothing proved
+     * that everyone else's <em>stays</em> — and the two failures are not symmetric here.
+     *
+     * <p>{@code AttachmentService.removeStoredFilesForIssue} takes a bare {@code Issue} and
+     * authorizes nothing, so its scoping lives entirely in
+     * {@code IssueAttachmentRepository.findStorageKeysByIssue}'s predicate. Widen that
+     * predicate — an accidental cross join, a {@code findAll}, a "cleanup" query keyed on
+     * something coarser than the issue — and the ordinary consequence of a tenancy bug does
+     * not apply: this path does not leak another tenant's data, it <strong>destroys</strong>
+     * it, after commit, inside a handler that swallows storage failures with a warn. There
+     * is no recovery and no error, which is why the guard is a blob assertion on disk rather
+     * than a row count.
+     */
+    @Test
+    void deletingOneTenantsIssueLeavesAnotherTenantsBlobOnDisk() throws Exception {
+        var a = newProject();
+        createIssue(a);
+        var aKey = attachmentRepository
+                .findById(UUID.fromString(upload(a, "a.txt", "tenant A bytes".getBytes()).get("id").asText()))
+                .orElseThrow().getStorageKey();
+
+        var b = newProject();
+        var bIssueId = createIssue(b);
+        var bAttachmentId = UUID.fromString(upload(b, "b.txt", "tenant B bytes".getBytes()).get("id").asText());
+        var bKey = attachmentRepository.findById(bAttachmentId).orElseThrow().getStorageKey();
+        assert blobExists(aKey) && blobExists(bKey) : "precondition: both tenants' blobs are on disk";
+
+        mockMvc.perform(delete("/api/workspaces/" + a.wsId + "/projects/" + a.projectId + "/issues/1")
+                        .header("Authorization", "Bearer " + a.token))
+                .andExpect(status().isNoContent());
+
+        assert !blobExists(aKey) : "precondition on the delete itself: A's own blob is gone";
+        assert blobExists(bKey)
+                : "workspace B's blob must survive workspace A's issue delete — a widened "
+                  + "findStorageKeysByIssue predicate destroys files rather than leaking them";
+        assert attachmentRepository.findById(bAttachmentId).isPresent()
+                : "and B's attachment row must survive too";
+        assert issueRepository.findById(bIssueId).isPresent() : "as must B's issue";
     }
 
     // ============================================================ helpers

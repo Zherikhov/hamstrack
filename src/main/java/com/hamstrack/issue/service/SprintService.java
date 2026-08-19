@@ -102,6 +102,12 @@ public class SprintService {
     private final SprintRepository sprintRepository;
     private final IssueRepository issueRepository;
     private final IssueHistoryRepository historyRepository;
+    /**
+     * HD-137: the ONE writer of {@code sprint_scope_events}. Four of this class's
+     * statements are doors onto sprint membership, and each of them writes the ledger in
+     * the same breath as its {@code sprint} history row — see {@link SprintScopeLedger}.
+     */
+    private final SprintScopeLedger scopeLedger;
     private final AgileProperties agileProperties;
     private final ApplicationEventPublisher eventPublisher;
 
@@ -125,6 +131,18 @@ public class SprintService {
      * boards update over SSE.
      */
     private static final int COMPLETE_EVENT_FANOUT_THRESHOLD = 50;
+
+    /**
+     * How far ahead of the server's clock a {@code startAt} may sit and still count as
+     * "now" (HD-137 review R3-2, see {@link #start}).
+     *
+     * <p>Not zero, and not a policy: the timestamp on a start request is usually the
+     * CLIENT's idea of now, and an unsynchronised laptop a couple of minutes fast would
+     * otherwise get a 422 on the most ordinary action in the whole feature. Five minutes
+     * is generous for clock skew and far too small to express an intention — nobody plans
+     * a sprint to begin in four minutes.
+     */
+    private static final Duration START_CLOCK_SKEW = Duration.ofMinutes(5);
 
     // ================================================================= reads
 
@@ -283,10 +301,24 @@ public class SprintService {
                 : req.clearEndAt() ? null : sprint.getEndAt();
         requireValidDates(effectiveStart, effectiveEnd);
         // sprints_active_ck: an ACTIVE sprint must keep a start date. Catching it here
-        // turns what would be a driver-level 500 into an honest 422.
+        // turns what would be a driver-level 500 into an honest 422. Checked before the
+        // rule below because its message is the more specific one.
         if (sprint.getState() == SprintState.ACTIVE && effectiveStart == null) {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                     "An active sprint must keep a start date");
+        }
+        // HD-137 review R2-2: once a sprint has LEFT the future, its start is history.
+        // `start_at` is an ordinary entity-writable column, so a PATCH could move an
+        // ACTIVE sprint's start while its commitment rows keep the original stamp — pull
+        // the start earlier and "committed scope at start" reads 0, because every ADDED
+        // row sits after the new start. Same failure for a COMPLETED sprint's review.
+        // The plan is editable exactly as long as it is a plan; after that the recovery
+        // path for a mistake is a new sprint, not an edit to a running one (the
+        // requireDetachable rule, applied to the dates instead of the membership).
+        if (sprint.getState() != SprintState.FUTURE
+            && !sameInstant(effectiveStart, sprint.getStartAt())) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "A sprint's start date can only be changed while it is still in the future");
         }
 
         // ---- then mutate ----
@@ -338,6 +370,20 @@ public class SprintService {
         OffsetDateTime endAt = req != null && req.endAt() != null
                 ? req.endAt() : startAt.plusDays(agileProperties.defaultSprintLengthDays());
         requireValidDates(startAt, endAt);
+        requireStartHasArrived(startAt);
+        // ---- the tolerance is for a CLOCK, not for a start date ----
+        // requireStartHasArrived admits up to now + START_CLOCK_SKEW so an unsynced
+        // laptop does not 422 the most ordinary action in the feature. Persisting that
+        // reading verbatim would be a different thing entirely: start_at would sit ahead
+        // of the commitment rows that describe it (the ledger stamps "now"), and a
+        // burn-up windowed on `occurred_at >= start_at` would read committed scope = 0 —
+        // not a little wrong, ALL of it, for the exact clients the tolerance exists for.
+        // So the admitted skew is normalised here: a couple of minutes fast means "now".
+        // Everything downstream (markActive's start_at, the commitment stamp) then gets
+        // the SAME instant, `update`'s freeze cannot make a forward date permanent, and
+        // completed_at >= start_at holds by construction.
+        var startedNow = OffsetDateTime.now(ZoneOffset.UTC);
+        if (startAt.isAfter(startedNow)) startAt = startedNow;
 
         // ---- an ordinary field is written through the ENTITY, not through the
         // lifecycle UPDATE (migration review M-Low1) ----
@@ -366,6 +412,32 @@ public class SprintService {
         // UPDATE leaves the managed copy stale). `project`/`sprint` are detached from
         // here on — they are only ever used as query parameters below, which bind their
         // identifiers, so that is safe.
+
+        // ---- the commitment, as EVENTS (HD-137, reports-proposal §5.2) ----
+        // "Committed" is not a snapshot column: it is one ADDED row per current member,
+        // dated startAt, so "scope at time T" (ADDED <= T minus REMOVED <= T) answers the
+        // committed scope, the current scope and every step in between with one mechanism.
+        //
+        // Ordering is load-bearing twice over:
+        //   * AFTER the arbitration above, so the loser of a double-click — which got 0
+        //     affected rows and a 409 — writes nothing at all;
+        //   * after the clear, because markActive carries clearAutomatically and rows
+        //     queued before it would be evicted as pending inserts (the documented
+        //     "workspace vanishes" trap).
+        // The membership is re-read as a SCALAR projection for the same reason the
+        // completion path uses one: nothing may re-enter the persistence context here.
+        // startAt is <= now here — requireStartHasArrived refuses a real forward date and
+        // the clamp above normalises the clock skew it tolerates — so start_at and the
+        // stamp on these rows are the SAME instant, which is what lets a burn-up be
+        // computed over the sprint's own window rather than only cumulatively. The ledger
+        // still clamps its stamp to "now" independently (belt-and-braces: it is the single
+        // writer and must not depend on which door called it — for THIS door the clamp is
+        // now a no-op, which is what belt-and-braces should mean), and `update` above
+        // refuses to move start_at once the sprint has left FUTURE, so the two cannot
+        // drift afterwards either.
+        scopeLedger.recordCommitment(workspaceId, project.getKey(), sprint,
+                issueRepository.findRefsBySprint(sprint), actor, startAt);
+
         return respond(requireSprint(project, sprintId));
     }
 
@@ -404,11 +476,6 @@ public class SprintService {
         // The completion report is computed BEFORE the move — done vs carried-over as of
         // the moment the sprint closed.
         var before = statsOf(sprint);
-        // IDS + NUMBERS, not entities: materializing the issues here and then running the
-        // bulk UPDATE below would leave those managed copies stale, and flushing them
-        // later would write the pre-move sprint_id back (the documented "bulk JPQL UPDATE
-        // desyncs already-loaded entities" trap).
-        var movedRefs = issueRepository.findUnfinishedRefsBySprint(sprint, StatusCategory.DONE);
 
         // ---- the conditional UPDATE is the arbiter ----
         if (sprintRepository.markCompleted(sprintId, project.getId(),
@@ -418,13 +485,32 @@ public class SprintService {
         }
         // markCompleted cleared the persistence context; `sprint`/`target`/`project` are
         // detached and are used only as query parameters (which bind identifiers).
-        int moved = issueRepository.moveUnfinishedOutOfSprint(sprint, target, StatusCategory.DONE);
+        //
+        // THE WRITE-LIST IS THE UPDATE'S OWN OUTPUT (HD-137 review R2-5), not a SELECT run
+        // before it. Two statements are two snapshots under READ COMMITTED, and a
+        // concurrent POST /sprints/{id}/issues landing between them would either hide a
+        // real membership change from both records — an ADDED with no matching REMOVED,
+        // so the issue stays in this sprint's scope forever while its sprint_id points
+        // elsewhere — or invent a REMOVED that double-decrements the scope line. The
+        // audit log and the ledger would agree with each other and both be wrong.
+        // Scalars, still: nothing enters the persistence context for a later flush to
+        // write the pre-move sprint_id back with.
+        var movedRefs = issueRepository.moveUnfinishedOutOfSprint(
+                sprintId, target == null ? null : target.getId(), StatusCategory.DONE.name());
+        int moved = movedRefs.size();
         // The move is a real membership change on every issue it touches, so it writes
         // the same `sprint` history row the single-issue paths do (security review L2) —
         // otherwise the highest-volume destructive move in the feature would be the one
         // with no audit trail at all.
         writeSprintHistory(movedRefs, actor, sprint.getName(),
                 target == null ? null : target.getName());
+        // …and the same move is a SCOPE change on both sprints (HD-137, door 6): every
+        // carried-over issue leaves this sprint's burn-up here, and joins the target's
+        // only if the target is already running (a FUTURE target commits its scope when
+        // it starts — see SprintScopeLedger). Same refs, same proxies, same batch shape
+        // as the history rows above, deliberately: two writers reading one list is how
+        // the two records stay in step.
+        scopeLedger.recordBulkMove(workspaceId, project.getKey(), movedRefs, sprint, target, actor);
 
         var completed = requireSprint(project, sprintId);
         var carriedOverPoints = normalize(before.points().subtract(before.donePoints()));
@@ -480,22 +566,33 @@ public class SprintService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "This sprint is active — complete it before deleting it");
         }
-        // Read the membership BEFORE the detach: after clearSprint there is no record
-        // anywhere that these issues ever belonged to this sprint (security review L2).
-        var held = force ? issueRepository.findRefsBySprint(sprint) : List.<Object[]>of();
-        long inUse = force ? held.size() : issueRepository.countBySprint(sprint);
-        if (inUse > 0 && !force) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "This sprint still holds " + inUse
-                            + " issue(s) — move them out, or delete with force");
+        if (!force) {
+            long inUse = issueRepository.countBySprint(sprint);
+            if (inUse > 0) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "This sprint still holds " + inUse
+                                + " issue(s) — move them out, or delete with force");
+            }
         }
         String sprintName = sprint.getName();
-        if (inUse > 0) {
-            issueRepository.clearSprint(sprint);
-            // The history rows are written AFTER clearSprint on purpose: it carries
-            // clearAutomatically, which would evict them as pending inserts (the
-            // documented "workspace vanishes" trap).
+        // The detach IS the read (HD-137 review R2-5): `held` is what the UPDATE actually
+        // moved, so an issue dropped into this sprint a microsecond earlier cannot end up
+        // detached-but-unrecorded (nothing would ever say it had been here — security
+        // review L2) and one dropped in a microsecond later cannot be recorded as
+        // detached when it was not. See IssueRepository.clearSprint.
+        var held = force ? issueRepository.clearSprint(sprintId) : List.<Object[]>of();
+        if (!held.isEmpty()) {
+            // The history rows are written AFTER the detach on purpose: the statement is
+            // native, so Hibernate flushes everything pending before it, and rows queued
+            // ahead of it would be written against a membership that no longer holds.
             writeSprintHistory(held, actor, sprintName, null);
+            // Door 7 (HD-137). These ledger rows are removed again moments later by the
+            // sprint's own ON DELETE CASCADE — deliberately not special-cased: the ledger
+            // records what happened, and a deleted sprint has no report left to be wrong.
+            // deleteByIdAndProject carries flushAutomatically, so they are written before
+            // the DELETE and the cascade takes them, rather than an insert arriving after
+            // its parent is gone.
+            scopeLedger.recordBulkMove(workspaceId, project.getKey(), held, sprint, null, actor);
         }
         if (sprintRepository.deleteByIdAndProject(sprintId, project.getId()) == 0) {
             throw new SprintNotFoundException();
@@ -600,10 +697,14 @@ public class SprintService {
 
         // ---- then mutate ----
         var history = new ArrayList<IssueHistory>(changing.size());
+        // The sprint each issue is LEAVING, captured before the field is overwritten —
+        // the ledger needs it to close the previous sprint's scope (HD-137, door 4).
+        var leaving = new ArrayList<Sprint>(changing.size());
         for (int k = 0; k < changing.size(); k++) {
             var issue = changing.get(k);
             history.add(makeHistory(issue, actor, "sprint",
                     issue.getSprint() == null ? null : issue.getSprint().getName(), sprint.getName()));
+            leaving.add(issue.getSprint());
             issue.setSprint(sprint);
             if (mayRank) {
                 issue.setPosition(req.position() == SprintInsertPosition.TOP
@@ -613,6 +714,14 @@ public class SprintService {
         }
         issueRepository.saveAll(changing);
         historyRepository.saveAll(history);
+        // Door 4 (HD-137), written from the SAME loop's data as the history rows above:
+        // one REMOVED for whatever running sprint the issue left, one ADDED here. The
+        // issues are managed entities carrying their final story points, so the estimate
+        // recorded is the one this sprint actually received.
+        for (int k = 0; k < changing.size(); k++) {
+            scopeLedger.recordMove(workspaceId, project.getKey(), changing.get(k),
+                    leaving.get(k), sprint, actor);
+        }
 
         for (var issue : changing) {
             eventPublisher.publishEvent(
@@ -654,6 +763,9 @@ public class SprintService {
         issue.setSprint(null);
         issueRepository.save(issue);
         historyRepository.save(history);
+        // Door 5 (HD-137): the issue leaves this sprint's scope. `sprint` (not
+        // issue.getSprint(), already nulled) is the one it left.
+        scopeLedger.recordMove(workspaceId, project.getKey(), issue, sprint, null, actor);
         eventPublisher.publishEvent(
                 new IssueUpdated(workspaceId, projectId, issue.getNumber(), List.of()));
     }
@@ -871,6 +983,72 @@ public class SprintService {
     }
 
     /**
+     * A sprint cannot be STARTED into the future (HD-137 review R3-2), 422. Backdating is
+     * untouched — {@code StartSprintRequest} documents it as normal, and it is: a team
+     * that began on Monday and clicks Start on Tuesday is telling the truth.
+     *
+     * <p>PLANNING a future start stays legal (create/PATCH accept any date). This guards
+     * only the one door that turns a plan into history, because a forward-dated START
+     * breaks three things at once:
+     *
+     * <ol>
+     *   <li><strong>The plan and the ledger legitimately disagree.</strong>
+     *       {@code SprintScopeLedger.recordCommitment} clamps the commitment stamp to now,
+     *       and must: N {@code ADDED} rows dated a month out plus one ordinary
+     *       {@code REMOVED} dated today drive {@code count(ADDED <= T) - count(REMOVED <= T)}
+     *       negative for a month. So {@code sprints.start_at} and the sprint's own
+     *       commitment rows would describe different instants, and a burn-up computed over
+     *       the sprint's WINDOW would read 0 committed. With this guard
+     *       {@code start_at == the commitment's occurred_at} always, and R4 may use either
+     *       the cumulative or the windowed form.</li>
+     *   <li><strong>The mistake becomes unrecoverable.</strong> {@link #update} refuses to
+     *       move {@code startAt} once the sprint has left FUTURE, so a mistyped year would
+     *       be fixable only by completing the sprint and recreating it — a freeze is only
+     *       defensible if the wrong value cannot get behind it in the first place.</li>
+     *   <li><strong>A sprint could complete before it started.</strong> V11 relates
+     *       {@code start_at} to {@code end_at} ({@code sprints_dates_ck}) and constrains
+     *       ACTIVE/COMPLETED rows ({@code active_ck}/{@code completed_ck}), but nothing
+     *       relates {@code completed_at} to {@code start_at}. Velocity reads that as a
+     *       negative-length iteration.</li>
+     * </ol>
+     *
+     * <p><strong>What this guard admits, {@link #start} normalises.</strong> The
+     * {@code START_CLOCK_SKEW} tolerance lets a request through with
+     * {@code startAt} up to a few minutes ahead of now — that is a fast clock, not an
+     * intention, and 422ing it would break the feature's most ordinary action on an
+     * unsynced laptop. But the tolerated value must not be PERSISTED: a start a couple of
+     * minutes ahead of its own commitment rows is exactly failure (1) above, in miniature
+     * in time and in full in effect (a windowed burn-up reads 0 committed either way). So
+     * {@link #start} clamps {@code startAt} to now right after this call and hands the
+     * clamped instant to both {@code markActive} and the ledger. Read the two together:
+     * this method decides whether the request is legitimate, the clamp decides what a
+     * legitimate request means.
+     *
+     * <p>The message names an action its reader can actually perform. "Fix the date" is
+     * not one — by the time they read this the sprint is still FUTURE, so the thing they
+     * can do is leave it planned and start it when it starts.
+     */
+    private static void requireStartHasArrived(OffsetDateTime startAt) {
+        if (startAt.isAfter(OffsetDateTime.now(ZoneOffset.UTC).plus(START_CLOCK_SKEW))) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "A sprint can't be started with a start date in the future — start it "
+                            + "when it actually begins. Until then leave it planned: a future "
+                            + "sprint's dates stay editable, and starting it stamps the start "
+                            + "for you.");
+        }
+    }
+
+    /**
+     * Instant equality that survives a client re-sending the same moment in a different
+     * offset — {@code equals} on {@link OffsetDateTime} compares the offset too, so
+     * {@code 09:00+02:00} and {@code 07:00Z} would look like an edit and 422 a PATCH that
+     * changed nothing.
+     */
+    private static boolean sameInstant(OffsetDateTime a, OffsetDateTime b) {
+        return a == null ? b == null : b != null && a.isEqual(b);
+    }
+
+    /**
      * Name normalization (§4.5, shared with the whole HD-6 epic): NFC, non-whitespace
      * control AND format characters dropped, whitespace/separator runs collapsed to one
      * space, then stripped — see {@link ClassificationNames}. Casing is preserved for
@@ -909,8 +1087,12 @@ public class SprintService {
      * desyncs already-loaded entities" trap). An uninitialized proxy is only ever
      * dereferenced for its id, which the FK insert needs and which we already have.
      *
-     * <p>Written in one {@code saveAll}, so this is one batched insert set rather than
-     * N round-trips.
+     * <p>Written in one {@code saveAll} — one persistence-context operation, but NOT one
+     * round-trip: {@code hibernate.jdbc.batch_size} is unset in this project, so JDBC
+     * batching is off and Hibernate issues N INSERTs. (Turning it on changes flush
+     * behaviour for every entity in the application, so it is its own change with its own
+     * review; the same correction is on {@code SprintScopeLedger.recordBulkMove}, which
+     * used to make the same claim.)
      */
     private void writeSprintHistory(List<Object[]> refs, User actor, String oldName, String newName) {
         if (refs.isEmpty()) return;

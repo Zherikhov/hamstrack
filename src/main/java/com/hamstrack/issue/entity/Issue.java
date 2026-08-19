@@ -130,4 +130,33 @@ public class Issue extends BaseEntity {
 
     @Column(name = "closed_at", columnDefinition = "TIMESTAMP WITH TIME ZONE")
     private OffsetDateTime closedAt;
+
+    /**
+     * When work actually STARTED on this issue (HD-137, reports-proposal §5.1) — the
+     * first moment it entered a status whose category is {@code IN_PROGRESS} <em>or</em>
+     * {@code DONE}. An issue dragged straight to Done was started and finished in one
+     * move; refusing to admit that would drop exactly the fastest work out of every
+     * cycle-time percentile.
+     *
+     * <p><strong>Never cleared, never re-stamped</strong> — and that asymmetry with
+     * {@link #closedAt} is deliberate. {@code closedAt} is cleared when an issue leaves
+     * a DONE status because "is it closed" is a question about the issue's <em>current
+     * state</em>. "When did work start" is not a current-state question, so a re-open
+     * must not move it: clearing (or re-stamping) it would make the cycle time of
+     * reopened work shrink retroactively, and a number that quietly gets better when
+     * work goes worse is how a report loses its readers.
+     *
+     * <p>Written ONLY by {@code IssueService} (create + the status branch of update),
+     * alongside the {@code closedAt} logic and inside the same "all reads first, then
+     * mutate" ordering. No {@code updatable = false}: unlike {@code projects.issue_seq}
+     * there is no native writer to protect it from.
+     *
+     * <p>{@code null} means "we do not know when this started" — a fact the cycle-time
+     * report prints as {@code missingStartCount} rather than papering over. V18's
+     * best-effort backfill leaves it null for anything it cannot resolve from
+     * {@code issue_history}, and <strong>nothing may substitute {@code createdAt}</strong>
+     * (that is a lead time, not a cycle time — §2.2).
+     */
+    @Column(name = "started_at", columnDefinition = "TIMESTAMP WITH TIME ZONE")
+    private OffsetDateTime startedAt;
 }

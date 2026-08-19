@@ -39,6 +39,59 @@
 - **Explicitly avoided:** indigo/violet as the *primary* brand accent (category default; Plane uses it). Violet is fine as a *type* color only.
 - **Dark mode:** Not yet themed app-wide (the rail is the only permanently-dark surface). When added: dedicated surface/border/text overrides, not inverted lightness; state tints darken while preserving hue so safety-state meaning stays legible.
 
+## Data Visualisation (charts — added 2026-08-19, reports epic HD-5)
+
+Charts are read, not decorated. The palette below is the **only** source of series colour
+for a chart whose series are *measures* (created, resolved, open, cycle time, scope,
+completed). It is deliberately disjoint from the colours that already mean something.
+
+- **The categorical ramp (5 hues + context).** Derived from the Okabe–Ito colour-blind-safe
+  set (deuteranopia / protanopia / tritanopia distinguishable), darkened where needed for
+  contrast on the white card surface:
+  | Token | Hex | Role |
+  |---|---|---|
+  | `--color-chart-1` | `#0072B2` | first series (blue) |
+  | `--color-chart-2` | `#D55E00` | second series (vermillion) |
+  | `--color-chart-3` | `#009E73` | third series (green) |
+  | `--color-chart-4` | `#CC79A7` | fourth series (rose-purple) |
+  | `--color-chart-5` | `#56B4E9` | fifth series (sky) |
+  | `--color-chart-context` | `#8B97A8` | context / derived / reference series, always secondary — dashed lines, percentile rules, "open at end" |
+  | `--color-chart-grid` | `#E8EBF1` | grid lines (= `--color-border`) |
+  | `--color-chart-axis` | `#98A2B3` | axis lines, ticks and labels (= `--color-text-muted`) |
+- **No red, amber, yellow, teal or slate in the ramp — on purpose.** Those five hues are
+  already spoken for: priority (Urgent red / High amber / Medium yellow / Low slate),
+  status category (To do slate / In progress amber / Done teal) and the safety-state
+  machine (sandbox slate → pending amber → production teal). A series colour that reuses
+  one of them lets a bar be misread as a state. `--color-chart-3`'s green is a different,
+  darker green from `--color-success` and never means "good".
+- **Series colour carries no meaning.** It is an index, not a verdict; the legend and the
+  table under the chart are the source of truth. The one exception is the rule below.
+- **When the series IS a taxonomy entity, use the entity's own colour.** A chart sliced by
+  status / priority / issue type reads `color` from the project `config` endpoint, exactly
+  as badges do — never the ramp, never a hardcoded hex. Config-driven rendering does not
+  stop at the chart boundary.
+- **Five is the limit.** A slice with more than five categories groups the tail into
+  **"Other"** rather than inventing a sixth hue: colours 6–10 of any ramp are not reliably
+  distinguishable for colour-blind readers, and a 12-slice legend is unreadable for
+  everyone.
+- **Colour is never the only encoding.** Every series is also identified in the legend, in
+  the tooltip, and in the table underneath — and dashed vs solid separates a derived
+  series from a measured one.
+- **Every chart ships a table equivalent directly underneath it**, with the same numbers in
+  the same order. It is the accessibility answer (a chart is `aria-hidden` decoration over
+  a real `<table>`), and it is what CSV export serialises.
+- **Axes are zero-based with fixed ticks**, never auto-scaled to the data range, so two
+  screenshots of the same report taken a week apart are comparable. Dates are UTC and the
+  chart says so.
+- **Provenance is part of the chart, not a tooltip.** Anything drawn from a bounded query
+  prints when it was computed and how many issues it saw, and says out loud when a cap
+  truncated it or when a first/last bucket is partial.
+- **Chart type:** line for a time series, bar for a categorical breakdown, scatter for
+  per-issue distributions. Stroke 2px, dots hidden at rest and shown on hover, `--radius-sm`
+  on bar corners. Chart surface = a normal white card (`--radius-lg`, `--shadow-card`).
+- **Library:** Recharts (MIT), imported **only** inside the lazy `/reports` chunk so the
+  main bundle never carries it (precedent: the Swagger UI chunk).
+
 ## Spacing
 - **Base unit:** 8px (4px half-step for 2xs/xs). Scale: 2xs(2) xs(4) sm(8) md(16) lg(24) xl(32) 2xl(48) 3xl(64).
 - **Density:** Comfortable on Home/dashboard and cards (16–24px padding); compact in tables and the board. Widgets and cards breathe — this is a dashboard, not a spreadsheet.
@@ -69,3 +122,6 @@
 | 2026-08-09 | **Adopted the "Beacon" visual language** — slate + teal, dark left navigation rail, work-centric dashboard Home as the default screen; retired warm-neutral palette and the navy top bar | Chosen from a 10-variant design study (`mockups/`, 5 style + 5 UX-layout concepts); friends' feedback overwhelmingly picked Beacon (`09-beacon.html`). The dashboard-first IA surfaces "my work" across projects; the dark rail frees the top bar and gives global actions a permanent home |
 | 2026-08-09 | **Typography → Inter everywhere** (dropped Cabinet Grotesk + Instrument Sans) | Beacon is drawn on Inter; user chose exact fidelity to the mockup. Mono roles (IBM Plex Mono for data, JetBrains Mono for code) are kept, preserving the "inspectable, not magic" rule |
 | 2026-08-09 | Token strategy: keep CSS variable **names** stable in `index.css`, remap only **values** | Lets the whole app re-skin from one file; the shell + core project screens (Board, drawer, Backlog, create, Home, My work) then get bespoke Beacon layouts on top |
+| 2026-08-19 | **Added a data-visualisation palette** — a 5-hue colour-blind-safe categorical ramp (Okabe–Ito derived) plus context/grid/axis tokens, disjoint from every semantic hue | Charts arrived with the reports epic (HD-5) and the system had no series colours at all. Reusing priority/status/safety-state hues would let a bar be misread as a state, so the ramp deliberately contains no red, amber, yellow, teal or slate; a chart sliced BY a taxonomy entity still reads that entity's configured colour (config-driven rendering does not stop at the chart) |
+| 2026-08-19 | **Recharts (MIT), lazy-loaded inside the `/reports` chunk only** | Owner decision (reports-proposal §9 OQ 1). Hand-rolled SVG is fine for lines and bars but not for the scatter-with-reference-lines that carries the most value in R3. Lazy import keeps the main bundle unchanged — same pattern as the Swagger UI chunk |
+| 2026-08-19 | **Every chart ships a table equivalent underneath it** | It is the accessibility answer (the chart is decoration over a real table) and it is the series CSV export R7 needs — one artefact, two requirements |
