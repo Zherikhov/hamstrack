@@ -53,7 +53,11 @@ public class ProductMetrics {
         IP_WINDOW("ip_window"),
         LOGIN_BACKOFF("login_backoff"),
         // Per-project cooldown on whole-project rank rebalances (IssueRankService).
-        RANK_REBALANCE("rank_rebalance");
+        RANK_REBALANCE("rank_rebalance"),
+        // Per-principal budget across the whole reports surface (ReportRateLimiter). The
+        // one alert worth building on it: a report is O(project history), so a sustained
+        // rate here is either an abusive client or a UI that lost its query cache.
+        REPORT_REQUESTS("report_requests");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }

@@ -35,6 +35,7 @@ https://hamstrack.com/api
 - [Components](#components)
 - [Versions](#versions)
 - [Sprints & backlog](#sprints--backlog)
+- [Reports](#reports)
 - [Search (HQL)](#search-hql)
 - [Saved filters](#saved-filters)
 - [Notifications](#notifications)
@@ -220,7 +221,7 @@ Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no re
 
 The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget of 15 requests per minute**. Additionally, repeated failed logins for one account trigger an **exponential backoff** (starting at 30 s after 5 consecutive failures, doubling per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds).
 
-One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank`](#sprints--backlog) allows at most one whole-project rank *rebalance* per project per 60 s and answers `429` + `Retry-After` for a second one inside that window. It is a retryable throttle, not a fault — nothing was moved. The rest of the API is not rate-limited.
+Two non-auth surfaces have throttles of their own. [`POST …/issues/{number}/rank`](#sprints--backlog) allows at most one whole-project rank *rebalance* per project per 60 s and answers `429` + `Retry-After` for a second one inside that window; it is a retryable throttle, not a fault — nothing was moved. And every [report](#reports) under `…/reports/**` shares a **per-principal budget of 60 requests per minute**, which is checked **before** the workspace and project are resolved — the one place in this API where a `429` precedes a `404`. Being keyed on the principal, that budget bounds **one user, not one workspace**: aggregate report load still scales with member count (see [Reports](#reports)). Beyond those two surfaces and the auth endpoints above, nothing in this API is rate-limited.
 
 ## Roles
 
@@ -1917,6 +1918,106 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/rank \
 - **Both permissions are checked before the project's state.** `issue.rank` is checked first, and `sprint.assign` as soon as the request is known to move the issue between sections — and only then does the endpoint refuse an **archived** project with `409`. So a caller who lacks either permission gets the `403`, never the archive conflict, which is the same ordering [deleting an issue](#issues) and [deleting an attachment](#attachments) already follow.
 
 **Using sprints elsewhere** — set `sprintId` / `storyPoints` when creating or updating an [issue](#issues) (`clearSprint` / `clearStoryPoints` unset them), filter the board and backlog with `?sprintId=` or `?noSprint=true`, and query them in [HQL](#search-hql) as `sprint` (alias `sprints`) and `storyPoints` (alias `points`). An issue's own sprint comes back in `IssueResponse.sprint` as `{id, name, state}`, or `null`.
+
+## Reports
+
+Read-only analytics over one project, all under `/workspaces/{wsId}/projects/{pId}/reports`. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/flow?from=&to=&interval=&typeId=&componentId=&labelId=` | member | Created vs resolved over a window, plus the open-count line and the window totals |
+
+### How every report behaves
+
+**Project membership, and nothing else.** There is no `report.view` [permission](#permissions) and there is not meant to be one: this product has no read permissions, and every number a report prints is derivable by the same member from the [search API](#search-hql) they already hold, so a gate here would protect nothing. Any workspace member who can reach the project may open its reports, including one with no explicit project membership. Anonymous is `401`; an unknown workspace, an unknown project, a project that belongs to a **different** workspace and a non-member are all `404`, indistinguishably — `403` is never returned by a report.
+
+**A project's [delivery capabilities](#delivery-capabilities) change nothing.** No status code on any report depends on a capability: `board: KANBAN` does not close a report and `estimation: false` does not change one's shape. A capability hides vocabulary in the UI; it is never a permission and never a `404`.
+
+**Caching** — every report answers `Cache-Control: private, max-age=60` **and `Vary: Authorization`**. `private` is the load-bearing half: a report is one tenant's data and must never be held by a shared cache. The `Vary` is not decoration — a browser's HTTP cache keys on (method, URL) and **ignores request headers unless `Vary` names them**, so without it a shared-profile browser could replay a cached `200` to a different bearer token inside the 60 s, one the server would have answered `404`.
+
+**The shared `meta` block.** Every report response carries the same provenance object:
+
+```json
+"meta": {
+  "computedAt": "2026-08-19T09:14:22Z",
+  "basedOnIssues": 1842,
+  "truncated": false,
+  "cap": 20000,
+  "firstIssueAt": "2024-11-04T08:31:00Z",
+  "unmatchedFilters": []
+}
+```
+
+It exists because the classic complaint about a reporting feature is *"these numbers don't match what I expected"*, and what produces it is a report that quietly left data out. A response that states **when** it was computed, **how many issues** it was computed from, **whether a cap bit**, **how far back its data goes** and **whether a filter it was given matched nothing** cannot fail that way silently.
+
+- `computedAt` — reports are live reads, so two tabs opened minutes apart legitimately disagree. This is how a reader tells which is which.
+- `basedOnIssues` — how many **distinct issues** the numbers came from: the issues *touching* the window, i.e. created in it **or** closed in it. It is deliberately **not** `created + resolved`. An issue created and closed inside the same window appears on both lines but is one issue of evidence, not two, and adding the lines together would overstate the report's own evidence — the exact species of quiet wrongness `meta` exists to prevent.
+- `truncated` — whether `cap` actually bit. When `true` the report is a partial view and a client must say so above the chart. **On `/flow` it is always `false`, and that is a fact rather than a stub:** the flow report aggregates inside PostgreSQL and returns at most one row per bucket, so the row cap physically cannot bite there. It will bite on the row-level reports that follow.
+- `cap` — the row budget that *would* bite. Reported by every report **including the ones that cannot hit it**, so a client never has to guess which budget a number was measured against.
+- `firstIssueAt` — when the **earliest issue this report could ever have shown** was created, or `null` when there is none. This is what "we only have N days of history" has to be measured from: the project's own `createdAt` is a different date, often years off, and getting it used to cost a second request for a number that was never the right one. **It is filtered exactly like the rest of the response** — with `typeId` set it is the first issue *of that type*, and with a `componentId` or `labelId` the first issue carrying that component or label. It is not the project's age, and reading it that way is the mistake this bullet exists to prevent.
+- `unmatchedFilters` — which of the filter parameters you sent match **no issue in this project at all**; never `null`, and empty when every filter matched something or none was sent. Entries are the query-parameter names themselves (`typeId`, `componentId`, `labelId`), so you can map one straight back to the control the user touched. It exists because a typo'd or stale filter id otherwise renders a complete, plausible, **all-zero** chart: *"no bugs were created in Q1"* and *"your filter matched nothing"* are the same picture without it. Note the deliberately weak and exact claim — **"no issue in this project carries this id"**, *not* "this id does not exist". A perfectly valid issue type nobody here has ever used is reported too, and saying nothing about whether the id exists elsewhere in the taxonomy is what keeps the disclosure limited to data you can already see.
+
+**A window over the cap is a `400` that names the cap. Nothing is ever silently clamped.** Windows are bounded (`app.reports.max-window-days`, 365 days by default, counting both endpoints), and a request wider than that is refused with a problem document whose `detail` names three things — the cap, the property key, and the length it actually measured:
+
+```json
+{ "status": 400,
+  "detail": "Window is 400 days (2025-08-01 to 2026-09-03); the maximum is 365 days (app.reports.max-window-days). Narrow the range — it is not clamped for you, because a report of a different window than the one you asked for is worse than no report." }
+```
+
+The cap is a **maximum, not a strict inequality** — a window exactly that long is served. `from` after `to` is a second `400`, and it echoes both dates back, because the caller of a report API is usually a chart that did the date arithmetic itself and needs to know which end it got wrong. Since nothing is clamped, the `from`/`to` in a `200` are always exactly the ones you sent.
+
+**A date outside the supported band is a third `400`, refused before any arithmetic.** Report dates must fall in `1970-01-01`…`2200-12-31`, and one that does not is refused in the same refuse-and-name-it wording as the cap — naming the parameter, the value and the band. The floor is the epoch (issue history is written by this application and cannot predate it); the ceiling is deliberately loose, because a window may legitimately end in the future, and deliberately far below the largest representable date, because the point is a sane band rather than the last instant a database can store. The check runs **before** the window is measured and before any date is incremented: an extreme-but-perfectly-parseable year such as `+999999999-12-31` binds happily and used to overflow into a `500` on an endpoint whose contract promises `400`.
+
+**Tenancy is resolved before the window is validated.** A caller who cannot see the project gets `404` even when the window is also malformed. A `400` there would tell an outsider that the project exists — cheaply, repeatably, and without ever authenticating as anyone entitled to know.
+
+**Reports are throttled per principal, and that `429` comes *before* the `404`.** The whole `…/reports/**` path shares one budget per caller — 60 requests per minute by default — and a request past it is refused with `429` and a `Retry-After` header (seconds). It is a **retryable throttle, not a fault**: nothing was computed, and the identical request succeeds after the wait; a report is never narrowed or approximated to fit a budget. A report needs this when no other read does because its cost is not bounded by what it returns: the flow report's opening balance counts history from before the window, so asking for a narrower window does not make it cheaper, and `private` caching means no shared cache ever absorbs a repeat.
+
+The budget is spent **before** the workspace and project are resolved, so this is the one place in this API where `429` precedes `404` — an over-budget caller is refused even for a project they cannot see. That ordering is deliberate, and so is keying the budget on the **caller** rather than the project: a per-project key would answer differently depending on whether a project exists, turning a throttle into an existence oracle, and would let one colleague's open dashboard tab throttle everyone else on the project. Keyed on you, the `429` is identical for a real project, a nonexistent one and somebody else's.
+
+One consequence worth stating for anyone sizing a deployment: because the key is the **principal**, this budget bounds **one user, not one workspace**. Ten members each get 60 report requests a minute, so aggregate report load still scales with member count — that is what a per-user limit does and does not promise, and it is not a defect. Size on members × budget, not on the budget alone.
+
+### Flow — created vs resolved
+
+`GET …/reports/flow` answers "are we keeping up?": one series of issues **created** per bucket, one of issues **resolved** per bucket, the count still **open** at each bucket's end, and the three totals under the chart.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/flow?from=2026-05-21&to=2026-08-19&interval=WEEK" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "from": "2026-05-21", "to": "2026-08-19", "interval": "WEEK",
+  "buckets": [
+    { "date": "2026-05-18", "created": 14, "resolved": 9, "openAtEnd": 121, "partial": true },
+    { "date": "2026-05-25", "created": 11, "resolved": 13, "openAtEnd": 119, "partial": false }
+  ],
+  "totals": { "created": 142, "resolved": 137, "net": 5 },
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 1842,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**Every parameter is optional**, and no parameters at all means *the last 90 days, weekly, unfiltered*: `to` defaults to today in UTC, `interval` defaults to `WEEK`, and `from` defaults to `min(90, app.reports.max-window-days) - 1` days before `to` (the window counts **both** endpoints, so that is a 90-day window at the default cap). `from` and `to` are ISO dates interpreted in UTC, and `from=X&to=X` is one whole UTC day, not an empty range. An unparseable date, a date outside `1970-01-01`…`2200-12-31`, or an `interval` other than `DAY`/`WEEK`, is a `400`.
+
+**The default window is derived from the cap, and that is *defaulting*, not clamping.** If an operator lowers the maximum window below 90 days, a parameterless call asks for the lower number rather than being refused by the endpoint's own cap — the default request this endpoint makes must be one it will actually serve. Nothing about the never-clamp rule changes: a caller who *sends* a window wider than the cap still gets the `400` naming it, because there the caller asked for something specific and answering a different question would be worse than answering none.
+
+**Buckets are not snapped to bucket boundaries, so the first and last one can be partial.** A bucket's `date` is its **start**, on a UTC boundary — for `interval=WEEK` a **Monday** (ISO-8601; not configurable). A window that does not begin on one therefore opens with a bucket dated *before* `from`: the example above asks for `2026-05-21` (a Thursday) and the first bucket reads `2026-05-18`. That bucket counts **only what happened inside the requested window**, so its bar is legitimately shorter than a full week's — a reader who assumes whole weeks will misread it as a drop. The alternative, snapping your window outwards to whole weeks, would quietly answer a different question than the one you asked.
+
+**Each bucket states this itself: `partial` is `true` when the bucket covers less calendar than a full interval.** The server's flag is **authoritative — do not compute it in the client.** Deriving it browser-side means re-implementing Monday truncation in a second language, and the first time the two disagree the chart footnotes the wrong bar; the server computes it from the same interval definition that produced the boundaries, so it cannot drift from them. Use it to annotate or de-emphasise the bar. At `interval=DAY` no bucket is ever partial.
+
+**Buckets are zero-filled.** A bucket in which nothing happened is present with zeros rather than absent, so the series never has invisible gaps and an export never has missing rows.
+
+`openAtEnd` is the count open at the **end** of that bucket: how many were open when the window started, plus every `created` minus every `resolved` up to and including it. The opening balance is real history — on a project with years behind it the line does not start at zero.
+
+`totals` covers the whole window: `net` is `created - resolved`, signed on purpose, and positive means the backlog grew.
+
+**`resolved` means "issues closed *now*, dated by their latest closure" — so past numbers can move.** This is an honest limitation of the data model rather than a bug, and it is worth stating plainly. The series are built from an issue's `createdAt` and `closedAt` and from nothing else; there is no resolution-event ledger. `closedAt` is **cleared** when an issue leaves a DONE status, so reopening an issue removes it from the bucket it used to sit in, and closing it again puts it in a new one. `openAtEnd` inherits the same caveat, one integral further on. The same window queried a week apart can therefore report different history, and a client rendering this report is expected to footnote it: *"Resolved counts issues that are closed now, dated by their latest closure. Reopened issues move."*
+
+**The filter ids narrow the series; they never `404` or `422`.** `typeId`, `componentId` and `labelId` are ordinary equality filters over the project's own data (an issue carrying several labels is still counted once). An id that does **not** exist — or that exists but belongs to another project or another workspace — simply matches nothing and yields an **empty series with a `200`**. This is deliberate, and it is the opposite of what the rest of this API does with a request-supplied id: the report queries are project-scoped first, so an unknown filter can only ever narrow, and answering `404`/`422` instead would turn the endpoint into an existence oracle for another tenant's types and labels. You are not left guessing, though: **`meta.unmatchedFilters` names every filter that matched nothing in this project**, so an all-zero chart is never ambiguous — read that array before concluding it was a quiet quarter.
 
 ## Search (HQL)
 

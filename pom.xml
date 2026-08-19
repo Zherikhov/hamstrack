@@ -193,7 +193,18 @@
                         <id>npm-install</id>
                         <goals><goal>npm</goal></goals>
                         <phase>generate-resources</phase>
-                        <configuration><arguments>install</arguments></configuration>
+                        <!-- `ci`, not `install` (HD-28 R1 round 2). `npm install` is free to
+                             RESOLVE a dependency to something the lockfile does not name — it
+                             updates package-lock.json to match package.json rather than the
+                             other way round — so a build could ship a transitive version
+                             nobody reviewed. `npm ci` installs the lockfile exactly and fails
+                             if package.json and the lock disagree. Every one of those packages
+                             runs code at build time; the reports work alone brought in 36 more
+                             (recharts pulls the Redux stack via victory-vendor). It is also
+                             the faster of the two for a clean CI checkout. NOTE: `ci` deletes
+                             node_modules first, so it needs the lockfile committed and in
+                             sync — that is the point. -->
+                        <configuration><arguments>ci</arguments></configuration>
                     </execution>
                     <execution>
                         <id>npm-build</id>

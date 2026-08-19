@@ -1050,3 +1050,99 @@ export interface SavedFilter {
   createdAt: string;
   updatedAt: string;
 }
+
+// ── Reports (epic HD-5, slice R1) ────────────────────────────────────────────
+// Mirrors `com.hamstrack.report.dto`. Reads need project membership and nothing
+// else — reports are deliberately NOT permission-gated (reports-proposal §4.2),
+// so nothing here has a `myPermissions` twin.
+
+/** Bucket width. Boundaries are UTC; WEEK starts on Monday (PostgreSQL `date_trunc`). */
+export type ReportInterval = 'DAY' | 'WEEK';
+
+/**
+ * The provenance block every report response carries (§4.3). It exists to be
+ * PRINTED, not swallowed: the recurring complaint about competitors' reports is
+ * "these numbers don't match what I expected", and its mechanism is a report
+ * that quietly left data out.
+ */
+export interface ReportMeta {
+  /** When the server computed the numbers — the reader's anchor across two tabs. */
+  computedAt: string;
+  /** Distinct issues the numbers were computed from (not the sum of the series). */
+  basedOnIssues: number;
+  /**
+   * Whether `cap` actually bit. Always false on the flow report (it aggregates in
+   * SQL, so the row cap physically cannot bite) — but the UI still handles it,
+   * because the row-level reports of R3 return the same block and DO truncate.
+   */
+  truncated: boolean;
+  /** The row cap that would bite (`app.reports.max-rows`). */
+  cap: number;
+  /**
+   * When the earliest issue this report could ever have shown was created, or
+   * `null` when there is none.
+   *
+   * This — not `project.createdAt` — is what "we only have N days of history"
+   * must be measured from. **It is filtered exactly like the rest of the
+   * response**, so with a filter set it is the first issue *of that type /
+   * component / label* and the UI must not call it the project's age.
+   */
+  firstIssueAt: string | null;
+  /**
+   * Which of the supplied filter parameters (`typeId` / `componentId` /
+   * `labelId`) match **no issue in this project at all** — never null, empty
+   * when every filter matched something or none was sent.
+   *
+   * This is the difference between "nothing happened in this window" and "your
+   * filter matched nothing", which are the same all-zero picture without it.
+   * Note the deliberately weak claim: *no issue in this project carries this
+   * id*, NOT "this id does not exist" — a perfectly valid type nobody here has
+   * ever used is named too, so the copy may not say the thing was deleted.
+   */
+  unmatchedFilters: string[];
+}
+
+/**
+ * One point of the flow series.
+ *
+ * `resolved` reads as "issues that are closed NOW, dated by their most recent
+ * closure": `closed_at` is cleared when an issue leaves a DONE status, so a
+ * reopened issue leaves the bucket it used to sit in and joins a new one on
+ * reclosure. Past buckets are mutable and the UI is required to say so.
+ * `openAtEnd` inherits the same caveat, one integral further on.
+ */
+export interface FlowBucket {
+  /** Bucket START date (a Monday for WEEK). May precede `from` — that bucket is partial. */
+  date: string;
+  created: number;
+  resolved: number;
+  openAtEnd: number;
+  /**
+   * Whether this bucket covers less calendar than a full interval, because the
+   * window opens or closes inside it — so its bar is legitimately short.
+   *
+   * **Authoritative; never re-derived here.** Computing it client-side means
+   * re-implementing Monday truncation in a second language, and the first time
+   * the two disagree the chart footnotes the wrong bar. Always false at
+   * `interval=DAY`, where a day is the unit.
+   */
+  partial: boolean;
+}
+
+export interface FlowTotals {
+  created: number;
+  resolved: number;
+  /** `created - resolved`. Positive = the backlog grew. Computed server-side. */
+  net: number;
+}
+
+export interface FlowReport {
+  /** Echoed back EXACTLY as requested — a too-wide window is a 400, never a clamp. */
+  from: string;
+  to: string;
+  interval: ReportInterval;
+  /** Zero-filled and ascending: an empty bucket is present with zeros, never absent. */
+  buckets: FlowBucket[];
+  totals: FlowTotals;
+  meta: ReportMeta;
+}

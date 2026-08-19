@@ -10,6 +10,7 @@ import type {
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
+  FlowReport, ReportInterval,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1611,4 +1612,60 @@ export const savedFilters = {
     request<{ usages: { type: string; id: string; name: string }[] }>(
       `/workspaces/${wsId}/filters/${id}/usage`
     ),
+}
+
+// ── Reports — HD-5 / HD-28 ────────────────────────────────────────────────────
+// Project-scoped, read-only, `Cache-Control: private, max-age=60` (match it with
+// a 60s `staleTime`; see `flowReportKey`). Reading needs project membership and
+// NOTHING else — there is no `report.view` permission and there is not meant to
+// be one (reports-proposal §4.2), so no caller of these gates on a permission.
+//
+// Error shapes the UI has to render as real sentences, not a generic banner:
+//   • 400 — `from > to`, a window wider than `app.reports.max-window-days`, or
+//     a date outside 1970-01-01…2200-12-31. Every one of them NAMES the bound it
+//     measured against, because a window is never silently clamped; surface
+//     `detail` verbatim (see `FlowReportPage`). All three share one shape, so
+//     they share one rendering path.
+//   • 404 — workspace/project not visible (non-member and non-existent alike).
+//   • 429 — past this caller's report budget (`app.reports.requests-per-minute`).
+//     A retryable throttle, not a fault: nothing was computed and a retry after
+//     `Retry-After` succeeds (`ApiResponseError.retryAfter` carries it). It is
+//     spent per principal BEFORE the project is resolved, which makes it the one
+//     place on this API where 429 precedes 404 — so a 429 says nothing about
+//     whether the caller can see the project, and no UI may imply otherwise.
+//
+// Unknown/foreign filter ids are NOT an error: the queries are project-scoped
+// first, so an id that does not exist here simply matches nothing and yields an
+// empty series. Answering otherwise would make this an existence oracle. The
+// caller is not left guessing, though — `meta.unmatchedFilters` names any filter
+// that matched no issue in the project, so an all-zero chart is never ambiguous.
+
+/**
+ * Every parameter is optional, and **sending none is the intended first call**:
+ * the server then reports the last `min(90, app.reports.max-window-days)` days,
+ * weekly and unfiltered. Deriving the default from the cap is what makes a
+ * parameterless request always succeed, including on an instance whose operator
+ * capped windows below 90 — so do not "help" by filling a window in here. There
+ * is exactly one definition of the default and it is the server's.
+ *
+ * Dates are ISO `YYYY-MM-DD` and the window INCLUDES both endpoints. Empty
+ * strings are dropped rather than sent, so an unset window really is absent.
+ */
+export interface FlowReportParams {
+  from?: string
+  to?: string
+  interval?: ReportInterval
+  typeId?: string
+  componentId?: string
+  labelId?: string
+}
+
+export const reportsApi = {
+  flow: (wsId: string, projectId: string, params: FlowReportParams = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<FlowReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/flow${q ? `?${q}` : ''}`)
+  },
 }

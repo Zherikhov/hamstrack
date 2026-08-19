@@ -41,6 +41,25 @@
   --color-error: #F04438;
   --color-info: #667085;
 
+  /* Data visualisation (DESIGN.md → Data Visualisation, HD-28).
+     A colour-blind-safe categorical ramp derived from Okabe–Ito, used ONLY for
+     chart series that are MEASURES. It contains no red, amber, yellow, teal or
+     slate on purpose: those hues already mean priority, status category and the
+     sandbox→pending→production safety state, and a series that borrowed one
+     could be misread as a state. A chart sliced BY a taxonomy entity (status,
+     priority, type) uses that entity's configured colour instead — config-driven
+     rendering does not stop at the chart boundary. Five is the limit; a sixth
+     category groups into "Other" rather than inventing a hue nobody can tell
+     apart. */
+  --color-chart-1: #0072B2;        /* blue      — first series */
+  --color-chart-2: #D55E00;        /* vermillion — second series */
+  --color-chart-3: #009E73;        /* green     — third series (NOT --color-success; never means "good") */
+  --color-chart-4: #CC79A7;        /* rose      — fourth series */
+  --color-chart-5: #56B4E9;        /* sky       — fifth series */
+  --color-chart-context: #8B97A8;  /* derived/reference series, always secondary (dashed) */
+  --color-chart-grid: #E8EBF1;     /* grid lines (= --color-border) */
+  --color-chart-axis: #98A2B3;     /* axis lines, ticks, labels (= --color-text-muted) */
+
   /* Typography — Inter everywhere; IBM Plex Mono kept for keys/tables/audit
      ("inspectable, not magic"), JetBrains Mono for script/validator source. */
   --font-display: "Inter", system-ui, sans-serif;

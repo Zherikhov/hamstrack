@@ -103,10 +103,14 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds). One non-auth endpoint has a throttle of its own:
+    header (seconds). Two non-auth surfaces have throttles of their own:
     `POST …/issues/{number}/rank` allows at most one whole-project rank
     rebalance per project per 60 s and answers `429` + `Retry-After` for a
-    second one inside that window — a retryable throttle, not a fault.
+    second one inside that window — a retryable throttle, not a fault — and
+    every `…/reports/**` endpoint shares a **per-principal** budget
+    (`app.reports.requests-per-minute`, 60/min by default), which is checked
+    **before** the workspace/project is resolved, so an over-budget caller sees
+    `429` even for a project they could not otherwise see.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/easyTask
@@ -203,6 +207,38 @@ tags:
       a workspace OWNER/ADMIN across their whole workspace), while putting
       issues into a sprint is `sprint.assign` and ranking them is `issue.rank`
       — everyday contributor permissions.
+  - name: Reports
+    description: >-
+      Read-only, project-scoped analytics under
+      `/workspaces/{wsId}/projects/{pId}/reports`. Every report needs **project
+      membership and nothing else** — there is deliberately no `report.view`
+      permission, because every number a report prints is derivable by the same
+      member from the search API they already hold. **No status code depends on
+      a delivery capability**, so a project with `board: KANBAN` or
+      `estimation: false` gets the identical answers.
+
+
+      Four conventions are fixed here by the first report and inherited
+      unchanged by the rest: every response carries the shared `ReportMeta`
+      provenance block (`computedAt`, `basedOnIssues`, `truncated`, `cap`,
+      `firstIssueAt`, `unmatchedFilters`); every response is
+      `Cache-Control: private, max-age=60` **plus `Vary: Authorization`** (one
+      tenant's data, so cacheable by the browser that asked and by nothing
+      else); a window wider than `app.reports.max-window-days` is **refused with
+      a `400` naming the cap** — never silently clamped, because a chart of a
+      window nobody asked for is exactly how a report earns "these numbers don't
+      match what I expected"; and the whole base path shares one **per-principal
+      throttle** (`app.reports.requests-per-minute`, 60/min by default, master
+      switch `app.rate-limit.enabled`), so a report added later inherits the
+      budget instead of having to ask for one.
+
+
+      The throttle is the one place in this API where `429` **precedes** `404`:
+      it runs in an interceptor, before the workspace and project are resolved,
+      so a caller over budget is refused even for a project they cannot see. The
+      budget is keyed on the caller and never on the project, which is what keeps
+      that refusal free of tenancy information — the `429` is identical for a
+      real project, a nonexistent one and somebody else's.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -4863,6 +4899,192 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/flow:
+    get:
+      tags: [Reports]
+      summary: Flow — created vs resolved over a window
+      description: >-
+        Two series over a window — issues **created** per bucket and issues
+        **resolved** per bucket — plus the open-count line at each bucket's end
+        and the three window totals (`created`, `resolved`, `net`). Any project
+        member may read it; a missing workspace, a missing project, a project in
+        another workspace and a non-member all give `404`, never `403`.
+
+
+        **Every parameter is optional.** No parameters at all means *the last 90
+        days, weekly, unfiltered*: `to` defaults to today in UTC, `interval` to
+        `WEEK`, and `from` to **`min(90, app.reports.max-window-days)` days**
+        before `to` inclusive of both endpoints — the default window is derived
+        from the cap so that the endpoint's own default request can never be
+        refused by the endpoint's own cap (an operator running
+        `REPORTS_MAX_WINDOW_DAYS=30` still gets a served parameterless call).
+        That is **defaulting, not clamping**: a caller who *sends* an over-cap
+        window still gets the `400`, because nothing you asked for is ever
+        narrowed for you. The window is echoed back exactly as requested, so
+        `from`/`to` in the response are always the caller's own numbers.
+
+
+        **Buckets are not snapped to bucket boundaries.** Bucket starts are UTC
+        `date_trunc` boundaries (ISO weeks, so a `WEEK` bucket starts on a
+        Monday), and a window that does not begin on one opens with a bucket
+        dated *before* `from`. That first bucket — and symmetrically the last —
+        is **partial**: it counts only what happened inside the requested
+        window, so its bar is legitimately shorter than a full week's and must
+        not be read as a drop. The alternative, snapping the window outwards,
+        would answer a different question than the one asked. Each bucket says so
+        itself via `partial`, which is **authoritative — do not re-derive it in
+        the client**: computing it browser-side means a second implementation of
+        Monday truncation, and the moment the two disagree the chart annotates
+        the wrong bar.
+
+
+        Buckets are **zero-filled**: a bucket in which nothing happened is
+        present with zeros rather than absent, so the series never has invisible
+        gaps.
+
+
+        **What `resolved` means, and why past numbers can move.** The series come
+        from `issues.created_at` and `issues.closed_at` and from nothing else —
+        there is no resolution-event history. `closed_at` is *cleared* when an
+        issue leaves a DONE status, so `resolved` reads "issues that are closed
+        **now**, dated by their most recent closure": reopening an issue removes
+        it from the bucket it used to occupy, and reclosing it puts it in a new
+        one. `openAtEnd` inherits the same caveat. This is a disclosed
+        limitation, not a defect, and clients are expected to footnote it.
+
+
+        **`truncated` is always `false` here.** The report aggregates inside
+        PostgreSQL and materialises at most one row per bucket, so
+        `app.reports.max-rows` physically cannot bite on this endpoint. `cap` is
+        still reported, because a client must never have to guess which budget a
+        report was measured against — and the row-level reports that follow
+        return the same block and *do* truncate.
+
+
+        **An empty chart is never ambiguous.** `meta.unmatchedFilters` names any
+        of `typeId` / `componentId` / `labelId` that matched **no issue in this
+        project at all**, so a typo'd or stale filter id cannot render a
+        complete, plausible, all-zero chart indistinguishable from a genuinely
+        quiet quarter. `meta.firstIssueAt` states how far this chart's own
+        history reaches — and it is filtered like everything else in the
+        response, so with `typeId` set it is the first issue *of that type*, not
+        the project's age.
+      operationId: getFlowReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: from
+          in: query
+          description: >-
+            First day of the window, **inclusive**, as an ISO date interpreted
+            in UTC. Defaults to `min(90, app.reports.max-window-days)` days
+            before `to`, counting both endpoints. An unparseable value, or one
+            outside the supported band `1970-01-01`…`2200-12-31`, is a `400`.
+          schema: { type: string, format: date, example: 2026-05-21 }
+        - name: to
+          in: query
+          description: >-
+            Last day of the window, **inclusive**. Defaults to today in UTC.
+            `from=X&to=X` is one whole UTC day, not an empty range. Same
+            `1970-01-01`…`2200-12-31` band as `from`.
+          schema: { type: string, format: date, example: 2026-08-19 }
+        - name: interval
+          in: query
+          description: >-
+            Bucket width. Weeks start on **Monday** (ISO-8601) and are not
+            configurable. An unknown value is a `400`.
+          schema: { $ref: '#/components/schemas/ReportInterval' }
+        - name: typeId
+          in: query
+          description: >-
+            Narrow to one issue type. An id that does not exist — or belongs to
+            another project or tenant — **matches nothing and yields an empty
+            series**; it is never a `404` or a `422`. The queries are
+            project-scoped first, so an unknown filter can only ever narrow, and
+            answering differently would make this endpoint an existence oracle
+            for another tenant's taxonomy. This is deliberately the opposite of
+            how a request-supplied id behaves elsewhere on this API. What you get
+            instead is a disclosure: a filter that matched nothing is named in
+            `meta.unmatchedFilters`.
+          schema: { type: string, format: uuid }
+        - name: componentId
+          in: query
+          description: Narrow to one component. Same "unknown id narrows to empty" rule as `typeId`.
+          schema: { type: string, format: uuid }
+        - name: labelId
+          in: query
+          description: >-
+            Narrow to issues carrying this label. Same "unknown id narrows to
+            empty" rule as `typeId`. A multi-label issue is still counted once.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK — the zero-filled series, the window totals and the shared `meta` block
+          headers:
+            Cache-Control:
+              description: >-
+                Always `private, max-age=60`. `private` is the load-bearing
+                half: a report is one tenant's data and must never be held by a
+                shared cache.
+              schema: { type: string, example: 'private, max-age=60' }
+            Vary:
+              description: >-
+                Always `Authorization`. A browser's HTTP cache keys on (method,
+                URL) and **ignores request headers unless `Vary` names them**, so
+                without this a shared-profile browser could replay a cached `200`
+                to a different bearer token inside the 60 s — one the server
+                would have answered `404`. `private` is a promise the cache has
+                to be told how to keep.
+              schema: { type: string, example: Authorization }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FlowReportResponse' }
+        '400':
+          description: >-
+            `from` is after `to`; the window is wider than
+            `app.reports.max-window-days` (the `detail` names the cap, the
+            property key and the measured length — the window is **never**
+            silently clamped); `from` or `to` falls outside the supported band
+            `1970-01-01`…`2200-12-31` (refused in the same name-the-bound
+            wording, **before** any date arithmetic runs — an extreme but
+            perfectly parseable year used to overflow into a `500`); or `from`,
+            `to` or `interval` cannot be parsed.
+
+
+            Tenancy is resolved **before** the window is validated, so a caller
+            who cannot see the project gets `404` for a malformed window too — a
+            `400` would confirm the project exists.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: >-
+            Past this caller's report budget
+            (`app.reports.requests-per-minute`, 60/min by default, in-memory per
+            app node and disabled wholesale by `app.rate-limit.enabled=false`).
+            A **retryable throttle, not a fault**: nothing was computed, and
+            retrying after the number of seconds in `Retry-After` succeeds — a
+            report is never narrowed or approximated to fit a budget.
+
+
+            The budget covers the whole `…/reports/**` path per principal, and it
+            is spent **before** the workspace and project are resolved. This is
+            therefore the one place in this API where `429` **precedes** `404`:
+            an over-budget caller is refused even for a project they cannot see.
+            Keying on the caller rather than the project is what keeps that
+            refusal free of tenancy information — and it means the budget bounds
+            one **user**, not one workspace: aggregate report load still scales
+            with the number of members asking.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
   /notifications:
     get:
       tags: [Notifications]
@@ -9356,6 +9578,182 @@ components:
             the move simply applies. Ranking is a positional, last-drag-wins
             operation, so a mandatory version round trip would produce a `409`
             storm during a planning meeting.
+
+    ReportInterval:
+      type: string
+      enum: [DAY, WEEK]
+      default: WEEK
+      description: >-
+        Bucket width of a time-series report. Every boundary is a **UTC**
+        boundary, and `WEEK` buckets start on **Monday** (ISO-8601) — not
+        configurable.
+
+    ReportMeta:
+      type: object
+      description: >-
+        The provenance block carried by **every** report response. It exists for
+        one reason: the recurring complaint about reporting features is "these
+        numbers don't match what I expected", and the mechanism behind it is a
+        report that quietly left data out. A response that states when it was
+        computed, how many issues it saw, whether a cap bit, how far back its
+        data goes and whether a filter it was given matched nothing cannot fail
+        that way silently.
+      properties:
+        computedAt:
+          type: string
+          format: date-time
+          description: >-
+            When the server computed these numbers. Reports are live reads, so
+            two tabs opened at different times legitimately disagree — this is
+            how a reader tells which is which.
+        basedOnIssues:
+          type: integer
+          format: int64
+          example: 1842
+          description: >-
+            How many **distinct issues** the numbers were computed from — the
+            issues touching the window, i.e. created in it **or** closed in it.
+            Deliberately **not** `created + resolved`: an issue created and
+            closed inside the same window appears on both lines but is one issue
+            of evidence, not two.
+        truncated:
+          type: boolean
+          description: >-
+            Whether `cap` actually bit; when `true` the report is a partial view
+            and the client must say so. **Always `false` on `/flow`**, which
+            aggregates in SQL and returns at most one row per bucket, so the row
+            cap physically cannot bite there.
+        cap:
+          type: integer
+          example: 20000
+          description: >-
+            The row cap that *would* bite (`app.reports.max-rows`). Reported by
+            every report **including those that cannot hit it**, so a client
+            never has to guess which budget a number was measured against.
+        firstIssueAt:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2024-11-04T08:31:00Z'
+          description: >-
+            When the earliest issue this report could ever have shown was
+            created, or `null` when there is none. This is what "we only have N
+            days of history" must be measured from — the project's own
+            `createdAt` is a different date, often years off, and fetching it
+            took a second request for a number that was never the right one.
+
+
+            **It is filtered exactly like the rest of the response.** With
+            `typeId` set it is the first issue *of that type*; with a
+            `componentId` or `labelId` it is the first issue carrying that
+            component or label. Do not read it as the project's age.
+        unmatchedFilters:
+          type: array
+          items: { type: string }
+          example: [typeId]
+          description: >-
+            Which of the supplied filter parameters match **no issue in this
+            project at all** — never `null`, empty when every filter matched
+            something or none was sent. Entries are the query-parameter names
+            themselves (`typeId`, `componentId`, `labelId`), so a client can map
+            one straight back to the control the user touched.
+
+
+            It exists because a typo'd or stale filter id otherwise renders a
+            complete, plausible, all-zero chart: "no bugs were created in Q1" and
+            "your filter matched nothing" are the same picture without it.
+
+
+            **Note the deliberately weak and exact claim**: *no issue in this
+            project carries this id* — **not** "this id does not exist". A
+            perfectly valid issue type that nobody in this project has ever used
+            is reported here too, and saying nothing about whether the id exists
+            elsewhere in the taxonomy is what keeps the disclosure free of
+            anything the caller cannot already see.
+
+    FlowBucket:
+      type: object
+      description: One point on the flow chart.
+      properties:
+        date:
+          type: string
+          format: date
+          example: 2026-05-21
+          description: >-
+            The bucket's **start** date, on a UTC boundary (a Monday when
+            `interval=WEEK`). For an unaligned window the first bucket's date
+            may lie **before** `from` — that bucket is partial and counts only
+            what happened inside the window.
+        created:
+          type: integer
+          format: int64
+          description: Issues whose `created_at` falls in this bucket.
+        resolved:
+          type: integer
+          format: int64
+          description: >-
+            Issues whose `closed_at` falls in this bucket — read as "issues
+            **closed now**, dated by their most recent closure". Reopening an
+            issue clears `closed_at` and removes it from this bucket, so past
+            buckets are mutable.
+        openAtEnd:
+          type: integer
+          format: int64
+          description: >-
+            How many issues were open at the **end** of this bucket: the count
+            open when the window started, plus every `created` minus every
+            `resolved` up to and including this bucket. Inherits the same
+            "as of now" caveat as `resolved`.
+        partial:
+          type: boolean
+          description: >-
+            Whether this bucket covers **less calendar than a full interval**,
+            because the requested window opens or closes inside it. Its bar is
+            legitimately shorter than its neighbours' and a reader comparing them
+            is being misled unless the UI says so.
+
+
+            **The server's flag is authoritative — do not compute it in the
+            client.** Deriving it browser-side means re-implementing Monday
+            truncation in a second language, and the first time the two disagree
+            the chart footnotes the wrong bar. It is computed from the same
+            interval definition that produced the boundaries, so it cannot drift
+            from them. At `interval=DAY` nothing is ever partial.
+
+    FlowTotals:
+      type: object
+      description: The three window-wide numbers under the chart — the whole window, not a bucket.
+      properties:
+        created: { type: integer, format: int64, description: Issues created inside the window. }
+        resolved: { type: integer, format: int64, description: Issues closed inside the window. }
+        net:
+          type: integer
+          format: int64
+          description: >-
+            `created - resolved`. Signed on purpose: positive means the backlog
+            grew over the window.
+
+    FlowReportResponse:
+      type: object
+      description: >-
+        `GET …/reports/flow`. The window is echoed back **exactly as
+        requested** — an over-long one is refused with a `400` naming the cap
+        rather than narrowed, so these are always the caller's own numbers.
+      properties:
+        from: { type: string, format: date, example: 2026-05-21 }
+        to: { type: string, format: date, example: 2026-08-19 }
+        interval: { $ref: '#/components/schemas/ReportInterval' }
+        buckets:
+          type: array
+          description: >-
+            One entry per bucket in the window, ascending and **zero-filled** —
+            a bucket in which nothing happened is present with zeros rather than
+            absent. The first and last bucket may be **partial** when the window
+            does not start/end on a bucket boundary; each bucket carries its own
+            `partial` flag, which is the authoritative answer.
+          items: { $ref: '#/components/schemas/FlowBucket' }
+        totals: { $ref: '#/components/schemas/FlowTotals' }
+        meta: { $ref: '#/components/schemas/ReportMeta' }
 
     NotificationResponse:
       type: object
