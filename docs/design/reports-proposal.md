@@ -197,11 +197,15 @@ The UI footnotes it: *"Points reflect current estimates."*
 
 The ledger's snapshot is **not** made redundant by this. It answers a different question, and the one the sprint review (§2.4) actually asks: *what did this issue weigh when it entered this sprint* — which is exactly what a retrospective needs and what current points destroy.
 
-**Cost:** two queries. The ledger for one sprint is O(sprint size + changes) — hundreds of rows. Cheapest report in the set.
+**Cost:** **7 statements — 4 resolution + 3** (the sprint, the ledger, and one statement carrying both `meta` scalars — `firstIssueAt` and the ledger's distinct-issue count), and the same 7 for the sprint review (§2.4): one joined ledger query serves both, so the two reports cannot disagree about what was in the sprint. The ledger for one sprint is O(sprint size + changes) — hundreds of rows — and the join is O(ledger rows), not O(project issues): measured at **2.7 ms** on a 25-issue project and **~4 ms** on a 102 000-issue one, against a seeded 249 000-row ledger. Cheapest report in the set.
+
+`meta.firstIssueAt` **cannot** be spliced into the ledger query the way §2.1 and §2.2 splice it, because that query legitimately returns zero rows for an empty sprint and a scalar in a no-row result never arrives. Hence the third statement — which also carries `meta.basedOnIssues`, counted **above** `app.reports.max-rows` rather than from the grouped rows that survived it: the field's family contract (§4.3) is that it states how many issues the report was *about*, so when a cap bites it is deliberately larger than what came back, and a field whose job is to disclose truncation must not shrink with the data it discloses.
 
 **Capability — `board`:** the API answers for any sprint that exists, in any project, regardless of `board` (Rule A). The **UI** shows this report only when `board = SCRUM`; when KANBAN it is listed but disabled with the Rule C affordance *"This project doesn't run sprints — turn on Scrum in project settings"*, linking there. **Never decided by whether sprints exist in the data** (the documented shipped bug).
 
-**Capability — `estimation`:** with estimation OFF the UI omits the points toggle and shows count; the API still returns both series (Rule A). Existing points still render read-only in the scope-change log (Rule B). Rule C: *"Turn on estimation to chart story points"* next to the disabled toggle.
+**Capability — `estimation`:** with estimation OFF the UI omits the points toggle and shows count; the API still returns both series (Rule A). Existing points still render read-only in the scope-change log (Rule B) — which is why every `ScopeChange` carries the ledger's `storyPoints` snapshot **beside** its measure-dependent `delta`: under `COUNT` the delta is ±1, so without it no point value reaches the log at all and the Rule B affordance has nothing to show. Rule C: *"Turn on estimation to chart story points"* next to the disabled toggle.
+
+**The series has a day bound, and it is not `meta.truncated`.** A sprint longer than `app.reports.max-window-days` is drawn from its **first** day (the commitment is what later numbers are read against) and the response says where it stopped: `seriesTruncatedAt` names that day, null when the whole sprint is drawn. `meta.truncated` keeps its one meaning — the `max-rows` ledger cap bit, the number printed beside it in `meta.cap` — because folding the two together made a twelve-issue sprint answer `truncated: true, cap: 20000` and put "20 000" in a banner about a report that dropped no rows. The scope-change log and `unestimatedCount` are clipped to the same day; the sprint review is a list report and is not clipped, so on a clipped sprint the two legitimately describe different spans, which is exactly what the field announces.
 
 **Empty state:** no sprint has ever existed → the whole report is replaced by the Rule C card, not by an empty chart.
 
@@ -209,11 +213,15 @@ The ledger's snapshot is **not** made redundant by this. It answers a different 
 
 **Question (the one teams actually ask at retro):** what did we commit to, what arrived late, what did we finish, what carried over?
 
-**Shape:** not a chart. Five labelled lists with counts and point sums: **Committed** (in the sprint when it started) · **Added after start** · **Removed before end** · **Completed** · **Carried over**. Each list is issue rows (key, title, type, assignee, points, status), clickable. One header line: *"Sprint 12 · 14 Aug – 28 Aug · completed 18 of 23 issues (41 of 55 points) · 5 added after start."*
+**Shape:** not a chart. Five labelled lists with counts and point sums: **Committed** (in the sprint when it started) · **Added after start** · **Removed before end** · **Completed** · **Carried over**. Each list is issue rows (key, title, type, assignee, points, status), clickable. One header line: *"Sprint 12 · 14 Aug – 28 Aug · completed 18 of 25 issues (41 of 60 points) · 5 added after start."*
+
+**The denominator is what the sprint held at its end** — completed plus carried over — not what it committed to. An earlier draft compared completions against the *commitment*, which counts two different populations: work added after the start can be completed, so the numerator was not a subset of its own denominator and the ratio could exceed one. The commitment is not lost by this: it is a labelled list of its own, and the *"5 added after start"* clause is precisely the disclosure of how far the sprint drifted from it.
+
+**Points per list are nullable, and null is not zero.** A list in which nothing was estimated reports `points: null` (with `unestimatedCount` saying how many), not `0` — "we didn't estimate this" and "this is worth nothing" are different statements that a bare zero renders identically, and the alternative made every client re-derive emptiness from `count > unestimatedCount` in five places. Empty lists are null for the same reason.
 
 **Data:** `sprint_scope_events` + current issue state + `closed_at`. For a COMPLETED sprint this is a permanent, exact record because the ledger is append-only and id-keyed.
 
-**Cost:** one query over the ledger + one batched issue fetch. Bounded by sprint size.
+**Cost:** none of its own — it shares §2.3's ledger query and its 7 statements. Bounded by sprint size.
 
 **Capability:** same as §2.3.
 
@@ -348,9 +356,20 @@ Representative shapes (records; Jackson 3 rules — boxed types for optional fie
 // GET /sprint-burnup
 { "sprint":{"id":"…","name":"Sprint 12","state":"ACTIVE"},
   "startAt":"…","endAt":"…","measure":"COUNT","committedAtStart":23,
+  "unestimatedCount":2,
   "series":[{"date":"2026-08-14","scope":23,"completed":0}, …],
   "scopeChanges":[{"at":"…","issueId":"…","key":"DEMO-77","event":"ADDED",
-                   "delta":1,"actorId":"…"}, …], "meta":{…} }
+                   "delta":1,"actorId":"…","storyPoints":5}, …],
+  "seriesTruncatedAt":null, "meta":{…} }
+
+// GET /sprint-review — five lists, each {count, points, unestimatedCount, issues[]}
+{ "sprint":{…},"startAt":"…","endAt":"…","completedAt":"…",
+  "committed":{…},"addedAfterStart":{…},"removedBeforeEnd":{…},
+  "completed":{…},"carriedOver":{…},
+  "totals":{"committedCount":23,"committedPoints":55,
+            "atEndCount":25,"atEndPoints":60,
+            "completedCount":18,"completedPoints":41,"addedAfterStartCount":5},
+  "meta":{…} }
 
 // GET /velocity
 { "measure":"COUNT",
@@ -418,7 +437,8 @@ CREATE TABLE sprint_scope_events (
     id           UUID        PRIMARY KEY,                 -- UUID v7, app-generated
     workspace_id UUID        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     sprint_id    UUID        NOT NULL REFERENCES sprints(id)    ON DELETE CASCADE,
-    issue_id     UUID        NOT NULL REFERENCES issues(id)     ON DELETE CASCADE,
+    issue_id     UUID            NULL,   -- nullable; composite FK below, ON DELETE SET NULL
+    issue_key    VARCHAR(40) NOT NULL,   -- snapshot: survives the issue
     event        VARCHAR(10) NOT NULL,        -- ADDED | REMOVED  (Java enum; never a PG ENUM)
     story_points NUMERIC(5,2),                -- points at the moment of the event, nullable
     actor_id     UUID            REFERENCES users(id),
@@ -435,7 +455,14 @@ Entity extends `CreatedOnlyEntity` (append-only; `@CreatedDate`, no `updated_at`
 
 **Commitment is an event, not a snapshot.** `SprintService.start` writes one `ADDED` row per current member issue with `occurred_at = startAt`, in one `saveAll` batch, in the same transaction as the conditional `markActive` UPDATE (after its affected-row arbitration succeeds, so a losing double-click writes nothing). "Scope at time T" is then `count(ADDED ≤ T) − count(REMOVED ≤ T)`, and "committed" is scope at `startAt`. One mechanism, no second concept.
 
-**`ON DELETE CASCADE` on `issue_id` is deliberate:** a deleted issue leaves the sprint report entirely rather than dangling as an unresolvable id. Documented, not accidental.
+**This draft said `ON DELETE CASCADE` on `issue_id`, and V18 shipped the opposite.** Corrected here because anyone reading the old text would build an inner join and reintroduce the bug it causes.
+
+Cascading loses the arrival **and** the departure *as a pair*, which is worse than losing either: a completed sprint's review would quietly shed issues, and its scope arithmetic would still balance, so nothing would look wrong. What shipped is a **composite** FK `(issue_id, workspace_id) → issues (id, workspace_id) ON DELETE SET NULL (issue_id)` — the column list matters, since a bare `SET NULL` would try to null the `NOT NULL` `workspace_id` and the delete would fail — plus a snapshotted `issue_key` and `story_points` on the row itself, so a departed issue still means something.
+
+Two consequences the read side must honour, both load-bearing:
+
+1. **Never inner-join `issues`.** A completed sprint whose issues were later deleted would silently lose rows from its own record — exactly what the nulling FK exists to prevent.
+2. **Group by `issue_id`, or by `issue_key` when it is null.** Otherwise every departed issue in a sprint collapses into one phantom whose adds and removes interleave.
 
 **The enumerated-doors problem — the highest-risk part of the feature.** Sprint membership changes today in at least five places, all of which already write an `IssueHistory` row with `field = 'sprint'`:
 
@@ -478,7 +505,7 @@ app.reports.max-rows=${REPORTS_MAX_ROWS:20000}
 | Fewer than 3 completed sprints (velocity) | Forecast band suppressed, sample size stated. |
 | Sprint from another project | 404 (`findByIdAndProject`). |
 | Sprint deleted while a report URL is open | 404 on refetch; the UI offers the sprint picker. |
-| Issue deleted | Its ledger rows cascade away; past reports change. Documented (§5.2). |
+| Issue deleted | Its ledger rows **survive**, with `issue_id` nulled and `issue_key`/`story_points` snapshotted, so a past sprint's record does not change. It appears as a real, unlinked row marked deleted (§5.2). A deleted issue out of a **completed** sprint cannot be proven completed — the completion lives on the issue, and removing it from a frozen sprint writes no ledger row — so it lands in *carried over* with a null completion rather than being dropped (which would shrink what the sprint committed to) or claimed (which a report may not do for something it cannot show). **Its `actorId` is nulled in the response** (the DB row keeps it): `issue_history.issue_id` cascades on delete, so preserving attribution here would leave the scope log as the only surviving place in the product naming who touched that issue and exactly when — wider survival than the ledger was designed for. The step, its instant, its direction, its key and its estimate are the record; the person is not. |
 | Issue reopened | It leaves its old "resolved" bucket and joins a new one. Footnoted (§2.1). |
 | Archived project | Reports readable; archived banner shown. |
 | Archived / removed status | Aging WIP renders columns from the project's *effective* workflow via `ProjectConfigService`; an issue stranded in a status outside the workflow appears in a trailing **"Not on this board"** column rather than vanishing. |

@@ -5,6 +5,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * {@code app.reports.max-rows}, which R1 declared and R3 is the first slice to actually hit
@@ -34,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
         "app.reports.max-rows=2"
 })
 @AutoConfigureMockMvc
-class ReportRowCapTest extends CycleTimeTestBase {
+class ReportRowCapTest extends SprintReportTestBase {
 
     @Test
     void aCappedCycleTimeReportShipsTheMostRecentAndSaysSo() throws Exception {
@@ -116,5 +117,49 @@ class ReportRowCapTest extends CycleTimeTestBase {
 
         assertThat(report.get("meta").get("truncated").asBoolean()).isFalse();
         assertThat(itemKeys(column(report, "In Progress"))).hasSize(2);
+    }
+
+    /**
+     * The R4 sprint reports cap <strong>ledger rows</strong>, not issues — but the rule above is
+     * the same one, and it was broken here (HD-29 R4 round 2): {@code basedOnIssues} was sized
+     * from the rows that <em>survived</em> the cap, so the one field whose job is to disclose
+     * truncation would have shrunk along with the data it was disclosing. A reader would have been
+     * told the report covered two issues, which is exactly the number they could already count on
+     * screen, at the moment they most needed the real one.
+     *
+     * <p>Unreachable with real data — a sprint's ledger is hundreds of rows against a cap of
+     * 20 000 — so nothing but a test with the cap turned down to 2 can hold this contract, and
+     * "unreachable" is a property of today's data rather than of the field's meaning.
+     */
+    @Test
+    void aCappedSprintLedgerStillCountsEveryIssueItWasAbout() throws Exception {
+        var ctx = newProject();
+        var a = createIssue(ctx, "one");
+        var b = createIssue(ctx, "two");
+        var c = createIssue(ctx, "three");
+        var sprint = createSprint(ctx, "S");
+        addIssuesToSprint(ctx, ctx.token(), sprint, idOf(a), idOf(b), idOf(c))
+                .andExpect(status().isOk());
+        startSprint(ctx, ctx.token(), sprint).andExpect(status().isOk());
+
+        var report = burnup(ctx, "?sprintId=" + sprint);
+
+        assertThat(report.get("meta").get("truncated").asBoolean())
+                .as("three commitment rows against a cap of two")
+                .isTrue();
+        assertThat(report.get("meta").get("cap").asInt()).isEqualTo(2);
+        assertThat(report.get("meta").get("basedOnIssues").asLong())
+                .as("counted in the database, above the cap — the true total is what makes "
+                    + "'showing 2 of 3' expressible, and it is what the reader can no longer see")
+                .isEqualTo(3);
+        assertThat(report.get("committedAtStart").asInt())
+                .as("the numbers that ARE derived from the shipped rows shrink with them, which is "
+                    + "why the disclosure has to be honest")
+                .isEqualTo(2);
+
+        // The sprint review reads the same ledger through the same record, so it says the same.
+        var review = review(ctx, "?sprintId=" + sprint);
+        assertThat(review.get("meta").get("basedOnIssues").asLong()).isEqualTo(3);
+        assertThat(review.get("meta").get("truncated").asBoolean()).isTrue();
     }
 }

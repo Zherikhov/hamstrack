@@ -1260,3 +1260,250 @@ export interface AgingReport {
   percentiles: Percentiles | null;
   meta: ReportMeta;
 }
+
+// ── Sprint burn-up & sprint review (epic HD-5, slice R4) ─────────────────────
+// Mirrors `com.hamstrack.report.dto` (`SprintBurnupResponse` / `SprintReviewResponse`).
+// Both endpoints are per-sprint, both read the R2 scope ledger
+// (`sprint_scope_events`), and both answer for ANY sprint in ANY project
+// regardless of `delivery.board` — a capability gates the UI and never the API
+// (delivery-paths §5.1, Rule A). Neither is permission-gated (§4.2).
+//
+// **Every point number arrives as a `BigDecimal` server-side** and lands here as
+// a plain number, already stripped of trailing zeros (`common.util.Points`), so
+// `3` and never `3.00`.
+
+/**
+ * Issue count (default) or story points — `ReportMeasure` on the server.
+ *
+ * Unlike {@link CycleMeasure} this one **is on the wire**: the two series are
+ * different sums over different rows, so the server computes the one asked for
+ * and echoes it back. It therefore joins the query key, and flipping the toggle
+ * is a refetch rather than a re-render.
+ */
+export type SprintMeasure = 'COUNT' | 'POINTS';
+
+/** A membership change. A re-estimate is NEVER one of these (§2.3 rule 1). */
+export type ScopeEventType = 'ADDED' | 'REMOVED';
+
+/**
+ * One day of the burn-up, `YYYY-MM-DD` in UTC.
+ *
+ * `scope` is the total work in the sprint that day — it steps up on an add and
+ * down on a remove, and never moves on a re-estimate. `completed` is cumulative
+ * work closed by the end of that day. Both are zero-filled, never absent.
+ *
+ * The series ends at **today** (or at `completedAt` for a finished sprint), not
+ * at the sprint's planned end: the server simply does not compute days that have
+ * not happened. The chart still draws the axis across the whole sprint, with
+ * nothing on it after the last real day — see `burnupRows`.
+ */
+export interface BurnupPoint {
+  date: string;
+  scope: number;
+  completed: number;
+}
+
+/**
+ * One row of the scope-change log — the ledger, rendered.
+ *
+ * `issueId` is **null once that issue has been deleted**: the ledger's FK is
+ * `ON DELETE SET NULL`, so the row outlives the issue and keeps both of its
+ * steps in the scope arithmetic. `key` is the snapshot taken at the event and is
+ * always present, which is what lets a deleted issue's line still say which
+ * issue it was — so a null `issueId` means "no longer linkable", never "hide me".
+ */
+export interface ScopeChange {
+  /** The ledger's `occurred_at` — when scope MOVED, not when the row was written. */
+  at: string;
+  issueId: string | null;
+  key: string;
+  event: ScopeEventType;
+  /** In the requested measure: ±1 under COUNT, ±the issue's points under POINTS. */
+  delta: number;
+  /**
+   * Who moved it — **null in two different cases, and neither is an error.**
+   *
+   * The ordinary one is an account that has since been deleted: the event is a
+   * fact about the sprint and outlives the user who caused it. The second is a
+   * decision rather than a foreign key — attribution is dropped on the rows of a
+   * **deleted issue**, because `issue_history` cascades away with the issue
+   * while the ledger row survives, which would otherwise leave this log as the
+   * only place in the product still naming who touched a since-deleted issue and
+   * when. The design preserves the key and the estimate on purpose; it does not
+   * preserve a person. So render a null actor as ordinary, never as a fault.
+   */
+  actorId: string | null;
+  /**
+   * The points the issue carried at the moment of the event — the ledger's
+   * snapshot, and **independent of `delta`**: `delta` is ±1 under COUNT, while
+   * this is what the issue weighed either way. Null when it entered unestimated.
+   *
+   * This is what closes Rule B (§5.2 — "a value the project already recorded
+   * stays visible when a capability is switched off"): a project with
+   * `estimation` off is charted in COUNT, so without this column the log would
+   * carry no point value at all and estimates the project had already recorded
+   * would vanish with the toggle.
+   */
+  storyPoints: number | null;
+}
+
+export interface SprintBurnupReport {
+  /**
+   * Null only for a parameterless request against a project with no ACTIVE
+   * sprint — `SprintRef.of(null)` is null. The SPA never makes that request (it
+   * resolves a sprint for its picker first and always names one), but the field
+   * is typed honestly so a page cannot dereference it by accident.
+   */
+  sprint: SprintRef | null;
+  /**
+   * The sprint's start — the ledger dates the commitment batch to it, not to the
+   * click. **Null for a sprint that has never been started**, which is a 200
+   * with an empty series: commitment is an event and it has not happened.
+   */
+  startAt: string | null;
+  /** The sprint's planned end; null when it was started without one. */
+  endAt: string | null;
+  measure: SprintMeasure;
+  /** Scope at `startAt` — what the ideal guide is drawn TO (never current scope). */
+  committedAtStart: number;
+  /**
+   * Issues in the sprint with no estimate. They weigh zero in a POINTS series
+   * **and are counted here** — never silently zero, which is documented failure
+   * mode #4 of the burndown (§1.2, §6). Always present; `0` under COUNT.
+   */
+  unestimatedCount: number;
+  /** One point per UTC day from the sprint's start to today, ascending. */
+  series: BurnupPoint[];
+  /**
+   * Every membership change after the start, ascending by instant then key.
+   *
+   * Clipped to {@link seriesTruncatedAt} **only when the chart is clipped**, and
+   * deliberately not otherwise: a completed sprint's carry-over rows are stamped
+   * a moment AFTER `completed_at`, so bounding the log at the last plotted point
+   * would drop the completion's own moves — the ones that explain where the
+   * remaining scope went.
+   */
+  scopeChanges: ScopeChange[];
+  /**
+   * The UTC day the series stops at, or null when the whole sprint is drawn.
+   *
+   * A sprint's start may be **backdated arbitrarily**, so the day count is
+   * caller-influenced and is bounded by `app.reports.max-window-days`, keeping
+   * the FIRST days because they carry the commitment. This is its own signal and
+   * **not** `meta.truncated`: that flag means the `app.reports.max-rows` cap bit
+   * and is printed beside `meta.cap`, so reusing it made a day-clipped
+   * twelve-issue sprint answer `truncated: true, cap: 20000` and quote twenty
+   * thousand at a report that dropped nothing of the kind. Two limits, two
+   * signals; the one that fired names the day it fired on.
+   */
+  seriesTruncatedAt: string | null;
+  meta: ReportMeta;
+}
+
+/**
+ * One issue row of the sprint review.
+ *
+ * The rule that shapes it: **a completed sprint's record may not quietly shed
+ * rows.** An issue deleted since the sprint ran still appears — from the
+ * ledger's snapshot — with `deleted: true`, its key, and the points it carried
+ * on entry; everything that lives on the issue itself (`title`, `typeId`,
+ * `assigneeId`, `statusId`, `closedAt`) is null. It is rendered as a real row
+ * that says the issue is gone, not hidden and not drawn as a broken link.
+ */
+export interface SprintReviewIssue {
+  /** Null once the issue was deleted — the row is a snapshot, not a join. */
+  issueId: string | null;
+  /** Snapshotted at the event; present on every row, including a deleted one. */
+  key: string;
+  title: string | null;
+  /** Resolved against the project `config`, exactly as every other type badge is. */
+  typeId: string | null;
+  assigneeId: string | null;
+  statusId: string | null;
+  /**
+   * **What this issue weighed when it entered this sprint** — the ledger's
+   * snapshot, not today's estimate, and null when it entered unestimated.
+   *
+   * This is the one place the two halves of R4 deliberately disagree: the
+   * burn-up plots CURRENT points (so a re-estimate moves its whole line), while
+   * the review is a retrospective record and a retro asks what was committed.
+   */
+  points: number | null;
+  /**
+   * The issue's CURRENT closure stamp, null when it is open — or when the issue
+   * is gone. `closed_at` is cleared on reopen, so a reopened issue leaves its
+   * old sprint's completed list; the record answers "is it done", and that
+   * answer changed.
+   */
+  closedAt: string | null;
+  /** The issue no longer exists. Authoritative — never re-derived from `issueId`. */
+  deleted: boolean;
+}
+
+/**
+ * One of the review's five lists, with its own count and point sum.
+ *
+ * `points` is **null when nothing in the list was estimated**, empty lists
+ * included — never `0`. The distinction is the whole reason it is nullable: "it
+ * added up to nothing" is a measurement and "nobody estimated any of it" is the
+ * absence of one, and a sum alone renders them identically. A null point sum is
+ * therefore a fact to print as "no estimates here", not a number to default.
+ */
+export interface SprintReviewList {
+  count: number;
+  points: number | null;
+  unestimatedCount: number;
+  issues: SprintReviewIssue[];
+}
+
+/**
+ * The numbers behind the header line, computed server-side so the sentence and
+ * the lists cannot drift: *"completed 18 of 23 issues (41 of 55 points) · 5
+ * added after start."*
+ *
+ * The denominator is **`atEndCount`** — completed plus carried over, i.e. what
+ * the sprint held when it ended. That is the population the completed list is a
+ * subset of, by construction, so the ratio can never exceed one. Committing it
+ * to `committedCount` instead compared two different populations: work added
+ * after the start can be completed, so "completed 25 of 23" was reachable.
+ *
+ * The commitment does not disappear — it stays a labelled list with its own
+ * count and sum, and the "5 added after start" clause is the disclosure of the
+ * drift between the two.
+ */
+export interface SprintReviewTotals {
+  committedCount: number;
+  /** Null when nothing committed was estimated — see {@link SprintReviewList}. */
+  committedPoints: number | null;
+  /** Completed + carried over: what the sprint held at its end. The denominator. */
+  atEndCount: number;
+  atEndPoints: number | null;
+  completedCount: number;
+  completedPoints: number | null;
+  addedAfterStartCount: number;
+}
+
+/**
+ * The artefact a team opens at a retrospective (§2.4) — five lists, not a chart.
+ *
+ * For a COMPLETED sprint this is a permanent, exact record: the ledger is
+ * append-only and id-keyed, so it survives every rename and every re-estimate.
+ * A sprint that never started answers 200 with five empty lists, not a 404.
+ */
+export interface SprintReviewReport {
+  /** Null under the same condition as {@link SprintBurnupReport.sprint}. */
+  sprint: SprintRef | null;
+  /** Null for a sprint that never started — then every list is empty. */
+  startAt: string | null;
+  endAt: string | null;
+  completedAt: string | null;
+  /** In the sprint at the moment it started. */
+  committed: SprintReviewList;
+  addedAfterStart: SprintReviewList;
+  /** Out of the sprint before it ended — disjoint from completed and carried over. */
+  removedBeforeEnd: SprintReviewList;
+  completed: SprintReviewList;
+  carriedOver: SprintReviewList;
+  totals: SprintReviewTotals;
+  meta: ReportMeta;
+}

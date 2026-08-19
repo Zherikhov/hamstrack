@@ -11,6 +11,7 @@ import type {
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
   FlowReport, ReportInterval, CycleTimeReport, AgingReport,
+  SprintBurnupReport, SprintMeasure, SprintReviewReport,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1701,4 +1702,44 @@ export const reportsApi = {
    */
   aging: (wsId: string, projectId: string) =>
     request<AgingReport>(`/workspaces/${wsId}/projects/${projectId}/reports/aging`),
+
+  /**
+   * The sprint burn-up (R4). This client always SENDS `sprintId`, even though
+   * the endpoint defaults to the ACTIVE sprint: the page has to resolve a sprint
+   * to render its picker anyway, and a request that names the sprint is the one
+   * whose URL still means the same report tomorrow, when a different sprint is
+   * the active one.
+   *
+   * **`measure` IS on the wire here**, unlike the cycle-time page's toggle: the
+   * two series are different sums over different rows, so the server computes
+   * the one that was asked for. It therefore joins the cache key, and flipping
+   * the toggle is a refetch.
+   *
+   * 404 when the sprint is not in this project (or the project is not visible).
+   * Never a capability — `board = KANBAN` answers exactly the same, because a
+   * hidden control is not a permission (delivery-paths Rule A).
+   */
+  sprintBurnup: (
+    wsId: string, projectId: string,
+    params: { sprintId?: string; measure?: SprintMeasure } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<SprintBurnupReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/sprint-burnup${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * The sprint review record (R4) — five lists, no chart, and deliberately **no
+   * measure**: it always reports a count AND a point sum, because that is how a
+   * retrospective reads them ("18 of 23 issues, 41 of 55 points").
+   */
+  sprintReview: (wsId: string, projectId: string, params: { sprintId?: string } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<SprintReviewReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/sprint-review${q ? `?${q}` : ''}`)
+  },
 }

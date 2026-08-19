@@ -1,6 +1,5 @@
 package com.hamstrack.issue.repository;
 
-import com.hamstrack.issue.entity.Sprint;
 import com.hamstrack.issue.entity.SprintScopeEvent;
 import org.springframework.data.repository.Repository;
 
@@ -20,13 +19,20 @@ import java.util.List;
  * inherited method comes with an unscoped twin: {@code findAll()} would compile and
  * return every tenant's ledger, {@code findById(id)} would resolve a row belonging to
  * anybody. On a table that exists to feed cross-workspace report sweeps, an unscoped read
- * has no symptom at all — it is a number. So this interface declares exactly the two
- * operations the feature has, and a third one has to be written down before it can be
+ * has no symptom at all — it is a number. So this interface declares exactly the one
+ * operation the feature has, and a second one has to be written down before it can be
  * used.
  *
- * <p>The finder is scoped by {@code Sprint} — an entity the caller has already resolved
- * through {@code findByIdAndProject}, i.e. through workspace membership — for the same
- * reason {@code SprintRepository} takes no bare ids.
+ * <p><strong>Write-only, and now literally so.</strong> This interface carried a
+ * {@code findBySprintOrderByOccurredAtAsc} finder from HD-137 "for the tests today and the
+ * R4 burn-up tomorrow"; R4 arrived, wrote its own joined statement in
+ * {@code SprintReportRepository} (it needs each event's issue beside it, which an entity
+ * finder cannot give), and left the finder with no caller in {@code src/main} or
+ * {@code src/test}. It is deleted rather than kept: a convenient unscoped-looking reader on
+ * the ledger is exactly the thing a later slice reaches for instead of going through
+ * {@code SprintLedgerReader}, which is where the sprint is resolved through membership. The
+ * next reader here is written when it has a caller, and {@code ReportQueryScopeTest} adopts
+ * this type so that it is guarded on the day it is written.
  */
 public interface SprintScopeEventRepository extends Repository<SprintScopeEvent, java.util.UUID> {
 
@@ -38,11 +44,4 @@ public interface SprintScopeEventRepository extends Repository<SprintScopeEvent,
      * the type.
      */
     <S extends SprintScopeEvent> List<S> saveAll(Iterable<S> entities);
-
-    /**
-     * One sprint's whole ledger in chronological order — served by
-     * {@code idx_sprint_scope_events_sprint}. Used by the tests today and by the R4
-     * burn-up tomorrow; a sprint's ledger is O(size + changes), i.e. hundreds of rows.
-     */
-    List<SprintScopeEvent> findBySprintOrderByOccurredAtAsc(Sprint sprint);
 }

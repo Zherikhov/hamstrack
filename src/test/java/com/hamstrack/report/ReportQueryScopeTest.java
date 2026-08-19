@@ -1,5 +1,6 @@
 package com.hamstrack.report;
 
+import com.hamstrack.issue.repository.SprintScopeEventRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.jpa.repository.Query;
 
@@ -27,18 +28,27 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>R1 shipped three statements; the later slices copy them. So the risk this pins is not
  * today's code (which is scoped) but tomorrow's: a new report that splices the shared filter
- * fragment into a statement that forgot {@code project_id}. Two mechanisms, both asserted here:
+ * fragment into a statement that forgot {@code project_id}. Three mechanisms, all asserted here:
  * <ol>
  *   <li>the shared fragment <strong>contains the scope</strong>, so pasting it cannot yield an
  *       unscoped statement in the first place;</li>
  *   <li>every native query in the report package scopes <strong>every {@code issues} alias it
- *       introduces</strong> — the backstop for a statement written without the fragment.</li>
+ *       introduces</strong> — the backstop for a statement written without the fragment;</li>
+ *   <li>every native query scopes <strong>the table it drives from</strong>, whatever that table
+ *       is — the backstop for a statement that does not drive from {@code issues} at all, which
+ *       R4 is the first in this epic to write.</li>
  * </ol>
  *
  * <p>Reflection over the package rather than a list of known classes, deliberately: a test
  * that has to be extended when a report is added is a test the sixth report silently escapes.
  * This suite was <em>not</em> touched when R3 added its statements and it covered them anyway,
  * which is the property working as designed.
+ *
+ * <p><strong>Reach (HD-149).</strong> "The report package" above is the default, not the
+ * boundary: {@link #ADOPTED_TYPES} names the report-shaped types that live elsewhere, and today
+ * that is the sprint scope ledger's repository, which sits with its writer in
+ * {@code issue.repository}. The rule those types are held to is exactly the rule below — see
+ * that constant for what travels and what deliberately does not.
  *
  * <h2>Round 2 (HD-138 R3): the budget was satisfiable by the wrong thing</h2>
  * The original backstop counted {@code project_id = :projectId} <em>anywhere</em> in the SQL and
@@ -63,12 +73,80 @@ import static org.assertj.core.api.Assertions.assertThat;
  * somewhere, so the alias {@code x} is captured and must be scoped inside that body. What a CTE
  * can no longer do is launder an unaliased or unscoped reference past the counter.
  *
+ * <h2>Round 3 (HD-29 R4): the rule only looked at {@code issues}</h2>
+ * Both rules above are about {@code issues} aliases, which covered every statement in the epic
+ * because every one of them drove from {@code issues}. R4's ledger read is the first that does
+ * not — it drives from {@code sprint_scope_events} and joins {@code issues} on the way — and in
+ * that shape the join carries the scope while the driver may carry nothing, which the alias rule
+ * cannot see. {@link #unscopedDrivingTable} is the third mechanism, added a slice before the
+ * statement that would have escaped it (R5's velocity sweep), and its hostile fixtures are the
+ * last block of {@link #theGuardRejectsEveryWayAStatementCanLoseItsScope()}.
+ *
  * <p>A plain unit test — no Spring context. The annotation values are compile-time constants
  * (that is why {@code @Query} can splice them at all), so they can be read without a database.
  */
 class ReportQueryScopeTest {
 
     private static final String REPORT_PACKAGE = "com.hamstrack.report";
+
+    /**
+     * Types that hold report statements but do <strong>not</strong> live in
+     * {@link #REPORT_PACKAGE} — the guard follows the STATEMENT, not the package (HD-149).
+     *
+     * <p>Exactly one today: {@link SprintScopeEventRepository}, the sprint scope ledger. It sits
+     * in {@code issue.repository} because it is first of all the ledger's <em>write</em> side —
+     * {@code SprintScopeLedger} is its only writer and it belongs beside the doors it is written
+     * from — and R4 is the first slice to <em>read</em> the table. Its own javadoc already
+     * promises that the read side lands "in {@code com.hamstrack.report}, where
+     * {@code ReportQueryScopeTest} holds every native statement to its tenant predicate". This
+     * list is the other half of that promise: R4's read statements do live in
+     * {@code report.repository}, and the ledger's own interface is adopted here so that a future
+     * reader added to it — the obvious place somebody will reach for — is guarded on the day it
+     * is written rather than on the day it is noticed.
+     *
+     * <p><strong>Widened BEFORE the read side was written</strong>, deliberately. A guard
+     * retrofitted to shipped code can only confirm what was already written. The ledger's reader
+     * is the statement in this feature most likely to lose its scope: it starts from
+     * {@code sprint_scope_events}, whose tenant predicate is a {@code sprint_id} the caller has
+     * already resolved rather than a {@code project_id} the statement itself states, so joining
+     * {@code issues} onto it "because the sprint is already scoped" is a one-line, entirely
+     * plausible leak. That is not a hypothetical shape — it is hostile fixture #1 in
+     * {@link #theGuardRejectsEveryWayAStatementCanLoseItsScope()}, written a slice before the
+     * statement it describes existed.
+     *
+     * <p>The reach is extended; the <em>rule</em> is not. A native statement here must scope
+     * every {@code issues} alias it binds, exactly as one in the report package must. One thing
+     * deliberately does not travel: a shared fragment named {@code *SCOPE*} is required to carry
+     * {@code project_id}, and this table has no such column, so a scope fragment for
+     * {@code sprint_scope_events} itself would fail
+     * {@link #everySharedSqlFragmentCarriesTheProjectScope()} rather than pass it vacuously.
+     * That is the correct failure — it is a conversation about what this table's tenant predicate
+     * is, not a silent exemption — and it does not arise today, because R4's fragments live in
+     * {@code report.repository}.
+     */
+    private static final List<Class<?>> ADOPTED_TYPES = List.of(SprintScopeEventRepository.class);
+
+    /**
+     * The adopted types that contribute <strong>no checked statement yet</strong> — a tripwire
+     * placed ahead of the code it is waiting for, and required to say so out loud.
+     *
+     * <p>Round 2 of R4 found the reason this list has to exist. {@link #ADOPTED_TYPES} reads like
+     * coverage, and it was cited as coverage — but {@link SprintScopeEventRepository} declares no
+     * native {@code @Query} at all, so adopting it guarded exactly nothing; the proof offered for
+     * the widening ("the join's tenant predicate was deleted and the suite went red") actually came
+     * from the ordinary package scan finding {@code SprintReportRepository}. Both facts are fine.
+     * Confusing them is not: a reader counting adopted types as guarded statements over-credits the
+     * net by however many types sit in this list.
+     *
+     * <p>So every adopted type must be in exactly one state, and
+     * {@link #everyAdoptedTypeIsEitherGuardingAStatementOrSaysItIsWaitingForOne()} pins both
+     * directions — a type here that has since grown a statement fails until it is removed, and a
+     * type adopted with nothing to check fails until it is added. The second failure is the useful
+     * one: it is what makes "adopted ahead of its first statement" a decision somebody wrote down
+     * rather than a claim the list silently implies.
+     */
+    private static final Set<Class<?>> ADOPTED_BEFORE_ITS_FIRST_STATEMENT =
+            Set.of(SprintScopeEventRepository.class);
 
     /**
      * Every reference to the {@code issues} table, <strong>with the alias it introduces</strong>.
@@ -81,6 +159,13 @@ class ReportQueryScopeTest {
      */
     private static final Pattern ISSUES_ALIAS =
             Pattern.compile("(?i)\\b(?:from|join)\\s+issues\\b(?:\\s+as)?(?:\\s+(\\w+))?");
+
+    /**
+     * A table name and the alias it binds, read immediately after a {@code FROM} — the driving
+     * reference. The same shape as {@link #ISSUES_ALIAS} with the table name left open.
+     */
+    private static final Pattern DRIVING_REFERENCE =
+            Pattern.compile("(?i)(\\w+)(?:\\s+as)?(?:\\s+(\\w+))?");
 
     /** SQL keywords that cannot be an alias, so that {@code FROM issues WHERE} is not "alias WHERE". */
     private static final Set<String> NOT_AN_ALIAS =
@@ -107,7 +192,7 @@ class ReportQueryScopeTest {
                 }
                 field.setAccessible(true);
                 var sql = (String) field.get(null);
-                assertThat(unscopedAliases("<fragment>", sql))
+                assertThat(complaints("<fragment>", sql))
                         .as("%s.%s is a shared SQL fragment whose name promises a tenant scope; "
                             + "a report that pastes it must not be able to end up unscoped.%n%s",
                                 type.getSimpleName(), field.getName(), sql)
@@ -147,7 +232,7 @@ class ReportQueryScopeTest {
                     continue;
                 }
                 var where = type.getSimpleName() + "." + method.getName();
-                assertThat(unscopedAliases(where, query.value()))
+                assertThat(complaints(where, query.value()))
                         .as("%s binds an issues alias it never scopes. A report is an aggregate: "
                             + "an unscoped reference here returns a number that is silently "
                             + "another tenant's, with nothing in the response to notice. Note "
@@ -161,6 +246,58 @@ class ReportQueryScopeTest {
                 .as("no native @Query found in %s — this test found nothing to guard, which "
                     + "means it is guarding nothing", REPORT_PACKAGE)
                 .isPositive();
+    }
+
+    /**
+     * <strong>An adopted type is either guarding a statement or admitting it is not.</strong>
+     *
+     * <p>{@link #ADOPTED_TYPES} extends this suite's reach past its package, and it reads like
+     * coverage. For {@link SprintScopeEventRepository} it currently is not: that interface declares
+     * no native {@code @Query}, so the two rules above have nothing of its to check and the
+     * adoption is a tripwire waiting for a statement rather than a statement being watched. Both
+     * are legitimate; conflating them inflates what this file claims to cover, which is how a green
+     * suite comes to stand for more than it tested — twice already in this epic.
+     *
+     * <p>So the two states are named, and each has to stay true: a type that contributes nothing
+     * must appear in {@link #ADOPTED_BEFORE_ITS_FIRST_STATEMENT}, and a type that has since grown
+     * one must be taken out of it — that removal is the moment the adoption stops being a promise
+     * and starts being coverage, and it should be a deliberate edit rather than a silent
+     * reclassification.
+     */
+    @Test
+    void everyAdoptedTypeIsEitherGuardingAStatementOrSaysItIsWaitingForOne() {
+        assertThat(ADOPTED_TYPES)
+                .as("a type is registered as adopted-ahead-of-its-first-statement without being "
+                    + "adopted at all")
+                .containsAll(ADOPTED_BEFORE_ITS_FIRST_STATEMENT);
+        for (var type : ADOPTED_TYPES) {
+            long statements = nativeQueryCount(type);
+            if (statements == 0) {
+                assertThat(ADOPTED_BEFORE_ITS_FIRST_STATEMENT)
+                        .as("%s is adopted but declares no native @Query, so it contributes NO "
+                            + "checked statement — the adoption is a tripwire, not coverage, and "
+                            + "it has to say so here", type.getSimpleName())
+                        .contains(type);
+            } else {
+                assertThat(ADOPTED_BEFORE_ITS_FIRST_STATEMENT)
+                        .as("%s now contributes %d native statement(s) and is guarded like any "
+                            + "other — take it out of the waiting list, which is the edit that "
+                            + "records the adoption paying off", type.getSimpleName(), statements)
+                        .doesNotContain(type);
+            }
+        }
+    }
+
+    /** How many native {@code @Query} methods a type declares — i.e. how many statements it adds. */
+    private static long nativeQueryCount(Class<?> type) {
+        long count = 0;
+        for (var method : type.getDeclaredMethods()) {
+            var query = method.getAnnotation(Query.class);
+            if (query != null && query.nativeQuery()) {
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -231,9 +368,36 @@ class ReportQueryScopeTest {
                 SELECT count(*) FROM open_work o WHERE o.project_id = :projectId
                 """);
 
-        // And the control: the real shape, which must pass — otherwise the assertions above
+        // 6. THE DRIVING TABLE (HD-29 R4 round 2). Everything above inspects `issues` aliases,
+        //    which is every report up to R3 because they all drive FROM issues. R4 drives from the
+        //    scope ledger and reaches issues through a LEFT join, so the scoped side is the JOINED
+        //    one — and a driving side with no tenant predicate at all sails through the alias rule
+        //    while returning its own columns for every tenant. This is R5's velocity sweep, one
+        //    predicate short.
+        assertRejected("a scoped join does not scope the table the statement drives from", """
+                SELECT e.sprint_id, e.issue_key, e.story_points, i.closed_at
+                  FROM sprint_scope_events e
+                  LEFT JOIN issues i ON i.id = e.issue_id AND i.project_id = :projectId
+                 WHERE e.occurred_at >= :since
+                """);
+        assertRejected("...and the same statement driving from issue_history is no better", """
+                SELECT h.issue_id, h.field, h.created_at
+                  FROM issue_history h
+                  JOIN issues i ON i.id = h.issue_id AND i.project_id = :projectId
+                 WHERE h.field = 'status'
+                """);
+        assertRejected("a driving table's tenant predicate behind an OR is not a scope", """
+                SELECT count(*)
+                  FROM sprint_scope_events e
+                 WHERE (e.workspace_id = :workspaceId OR e.event = 'ADDED')
+                """);
+        assertRejected("a driving table with no alias cannot be checked, so it is refused", """
+                SELECT count(*) FROM sprint_scope_events WHERE workspace_id = :workspaceId
+                """);
+
+        // And the controls: the real shapes, which must pass — otherwise the assertions above
         // prove only that the matcher rejects everything.
-        assertThat(unscopedAliases("control", """
+        assertThat(complaints("control", """
                 SELECT count(*)
                   FROM issues i
                   JOIN statuses s ON s.id = i.status_id
@@ -243,9 +407,150 @@ class ReportQueryScopeTest {
                 .as("the matcher rejects a correctly scoped statement, so its rejections above "
                     + "prove nothing")
                 .isEmpty();
+        // R4's ledger read, which drives from sprint_scope_events and is scoped twice over: by the
+        // sprint it is ABOUT and by the workspace it restates. Either alone discharges the rule;
+        // both are there because the statement must be safe to read on its own.
+        assertThat(complaints("control", """
+                SELECT e.issue_id, e.issue_key, e.event, i.closed_at
+                  FROM sprint_scope_events e
+                  LEFT JOIN issues i ON i.id = e.issue_id AND i.project_id = :projectId
+                 WHERE e.sprint_id = :sprintId
+                   AND e.workspace_id = :workspaceId
+                 ORDER BY e.occurred_at ASC, e.id ASC
+                """))
+                .as("the driving-table rule rejects the statement it was written for")
+                .isEmpty();
+        // A velocity sweep can drive from the ledger across many sprints — it just has to say
+        // which tenant. This is the shape R5 is expected to write.
+        assertThat(complaints("control", """
+                SELECT e.sprint_id, count(*)
+                  FROM sprint_scope_events e
+                 WHERE e.workspace_id = :workspaceId
+                   AND e.sprint_id IN (:sprintIds)
+                 GROUP BY 1
+                """))
+                .as("a workspace-scoped sweep over several sprints is legitimate and must pass")
+                .isEmpty();
     }
 
     // ------------------------------------------------------------------ the matcher
+
+    /**
+     * Both rules, run over one statement: <strong>every {@code issues} alias it binds must be
+     * scoped, and the table it DRIVES from must be scoped too.</strong> Empty means clean.
+     */
+    private static Set<String> complaints(String where, String sql) {
+        var complaints = new LinkedHashSet<String>(unscopedAliases(where, sql));
+        complaints.addAll(unscopedDrivingTable(where, sql));
+        return complaints;
+    }
+
+    /**
+     * <strong>The driving-table rule (HD-29 R4 round 2).</strong> The statement's own
+     * {@code FROM} — the first one at its top level, unwrapping a derived table — must carry a
+     * conjunctive tenant predicate on the alias it binds: {@code project_id = :projectId},
+     * {@code workspace_id = :workspaceId} or {@code sprint_id = :sprintId}.
+     *
+     * <p>The rule below it inspects {@code issues} aliases only, which was enough while every
+     * report in the epic drove from {@code issues}. R4 is the first statement that does not: it
+     * drives from {@code sprint_scope_events} and reaches {@code issues} through a LEFT join. That
+     * inverts what the join is for. In
+     * {@code FROM sprint_scope_events e LEFT JOIN issues i ON … AND i.project_id = :projectId} the
+     * scoped side is the <em>joined</em> one, so a driving side with no tenant predicate at all
+     * passes the alias rule cleanly — and returns the driving table's own columns for every tenant,
+     * with the {@code issues} columns nulling out. R4 is safe only because {@code :sprintId} is a
+     * subject the caller resolved through membership; R5's velocity sweep
+     * ({@code FROM sprint_scope_events e WHERE e.sprint_id IN (…)}) and anything driving from
+     * {@code issue_history} would not be, and the suite would stay green.
+     *
+     * <p>So the rule is widened <strong>before</strong> the statement that would slip past it,
+     * which is the same order HD-149 used and the same reason: a guard retrofitted to shipped code
+     * can only confirm what was already written. It is also what makes R4's restated
+     * {@code e.workspace_id = :workspaceId} load-bearing rather than conventional — the composite
+     * foreign key already determines it, so nothing but this test asks for it to stay.
+     *
+     * <p>A statement with no top-level {@code FROM} earns nothing here, and that is correct rather
+     * than a gap: the flow report's whole-window scalars are a {@code SELECT} of independent scalar
+     * subqueries, each of which is a query block with its own driving reference — every one of them
+     * an {@code issues} reference the rule below already checks.
+     */
+    private static Set<String> unscopedDrivingTable(String where, String sql) {
+        return drivingComplaint(where, sql, 0, sql.length());
+    }
+
+    private static Set<String> drivingComplaint(String where, String sql, int from, int to) {
+        int afterFrom = topLevelFrom(sql, from, to);
+        if (afterFrom < 0) {
+            return Set.of();                          // no FROM of its own — nothing drives it
+        }
+        int start = afterFrom;
+        while (start < to && Character.isWhitespace(sql.charAt(start))) {
+            start++;
+        }
+        if (start < to && sql.charAt(start) == '(') {
+            // A derived table: what matters is the reference IT drives from.
+            return drivingComplaint(where, sql, start + 1, closerOf(sql, start + 1));
+        }
+        var matcher = DRIVING_REFERENCE.matcher(sql.substring(start, to));
+        if (!matcher.lookingAt()) {
+            return Set.of(where + " drives from something this guard cannot read at offset "
+                          + start + " — write it as `FROM <table> <alias>`");
+        }
+        var table = matcher.group(1);
+        var alias = matcher.group(2);
+        if (alias == null || NOT_AN_ALIAS.contains(alias.toLowerCase())) {
+            return Set.of(where + " drives from " + table + " with no alias — nothing can tie a "
+                          + "tenant predicate to it");
+        }
+        var span = sql.substring(from, to);
+        return tenantScoped(alias, span)
+                ? Set.of()
+                : Set.of(where + " drives from " + table + " " + alias + ", which it never scopes."
+                         + " A statement that drives from a table other than issues carries the"
+                         + " tenant on THAT table: a scoped join hangs off an unscoped driver and"
+                         + " returns the driver's own rows for every tenant.");
+    }
+
+    /** Whether {@code alias} carries a conjunctive workspace/project/sprint predicate in {@code sql}. */
+    private static boolean tenantScoped(String alias, String sql) {
+        var matcher = Pattern.compile(
+                "(?i)\\b" + Pattern.quote(alias)
+                + "\\.(?:project_id\\s*=\\s*:projectId"
+                + "|workspace_id\\s*=\\s*:workspaceId"
+                + "|sprint_id\\s*=\\s*:sprintId)\\b").matcher(sql);
+        while (matcher.find()) {
+            if (isConjunct(sql, matcher.start(), matcher.end())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The index just after the first {@code FROM} keyword that sits at the top level of
+     * {@code [from, to)} — i.e. inside no bracket group of its own — or {@code -1}.
+     *
+     * <p>Skipping bracketed ones is what keeps {@code EXTRACT(EPOCH FROM …)} and every scalar
+     * subquery in a {@code SELECT} list out of the answer.
+     */
+    private static int topLevelFrom(String sql, int from, int to) {
+        int depth = 0;
+        var matcher = Pattern.compile("(?i)\\bfrom\\b").matcher(sql);
+        matcher.region(from, to);
+        int scanned = from;
+        while (matcher.find()) {
+            for (int i = scanned; i < matcher.start(); i++) {
+                char c = sql.charAt(i);
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+            }
+            scanned = matcher.start();
+            if (depth == 0) {
+                return matcher.end();
+            }
+        }
+        return -1;
+    }
 
     /**
      * The complaints this statement earns — empty means it is clean.
@@ -405,7 +710,7 @@ class ReportQueryScopeTest {
     }
 
     private static void assertRejected(String why, String sql) {
-        assertThat(unscopedAliases("hostile fixture", sql))
+        assertThat(complaints("hostile fixture", sql))
                 .as("this statement reads another tenant's issues and the guard accepted it — %s"
                     + "%n%s", why, sql)
                 .isNotEmpty();
@@ -438,6 +743,10 @@ class ReportQueryScopeTest {
                 .as("the report package scan found no types at all — this test cannot guard "
                     + "what it cannot see")
                 .isNotEmpty();
+        // …plus the report-shaped types that live elsewhere. Named rather than scanned: adopting
+        // one is a decision somebody wrote down, and a compiler-checked class literal survives the
+        // rename or move that a second package string would quietly stop matching.
+        types.addAll(ADOPTED_TYPES);
         return types;
     }
 }

@@ -7,9 +7,14 @@ import com.hamstrack.report.dto.CycleTimeReportResponse;
 import com.hamstrack.report.dto.FlowQuery;
 import com.hamstrack.report.dto.FlowReportResponse;
 import com.hamstrack.report.dto.ReportInterval;
+import com.hamstrack.report.dto.ReportMeasure;
+import com.hamstrack.report.dto.SprintBurnupResponse;
+import com.hamstrack.report.dto.SprintReviewResponse;
 import com.hamstrack.report.service.AgingReportService;
 import com.hamstrack.report.service.CycleTimeReportService;
 import com.hamstrack.report.service.FlowReportService;
+import com.hamstrack.report.service.SprintBurnupService;
+import com.hamstrack.report.service.SprintReviewService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.CacheControl;
@@ -77,11 +82,11 @@ import java.util.UUID;
  * report's <strong>narrowing filter</strong> id is never resolved: it is applied as an
  * equality inside an already project-scoped statement, where it can only subtract.</blockquote>
  * So {@code /flow}'s {@code typeId}/{@code componentId}/{@code labelId} — filters — narrow to
- * an empty series when they name nothing, and R4's {@code sprintId} — the report's subject —
- * resolves through the project and 404s for another project's sprint. The reason a filter is
- * not resolved is <em>not</em> "resolving it would leak another tenant's taxonomy": a lookup
- * scoped to this project answers identically for a foreign id and a nonexistent one, so it
- * would leak nothing. The reasons are better than that. A filter is a predicate, not an
+ * an empty series when they name nothing, while the sprint reports' {@code sprintId} — their
+ * subject — resolves through the project and 404s for another project's sprint. The reason a
+ * filter is not resolved is <em>not</em> "resolving it would leak another tenant's taxonomy": a
+ * lookup scoped to this project answers identically for a foreign id and a nonexistent one, so
+ * it would leak nothing. The reasons are better than that. A filter is a predicate, not an
  * addressed resource, so the 404-on-unknown-id convention is a category error applied to it;
  * and resolving three optional ids would add three statements to a report that spends three
  * in total. What the caller gets instead is a disclosure: {@code meta.unmatchedFilters} names
@@ -93,9 +98,9 @@ import java.util.UUID;
  * the answer is 429 + {@code Retry-After} — a report is never narrowed or approximated to fit
  * a budget.
  *
- * <p>{@code /flow} (R1), {@code /cycle-time} and {@code /aging} (R3) exist so far. The rest of
- * §4.3 — sprint burn-up, sprint review, velocity and the {@code .csv} variants — land in later
- * slices on this same base path and reuse this class's conventions.
+ * <p>{@code /flow} (R1), {@code /cycle-time} and {@code /aging} (R3), {@code /sprint-burnup} and
+ * {@code /sprint-review} (R4) exist so far. The rest of §4.3 — velocity and the {@code .csv}
+ * variants — lands in later slices on this same base path and reuses this class's conventions.
  *
  * <p>R3 adds one distinction to the list above rather than a new rule: <strong>not every report
  * has a window</strong>. {@code /aging} answers a current-state question and therefore takes no
@@ -117,6 +122,8 @@ public class ReportController {
     private final FlowReportService flowReportService;
     private final CycleTimeReportService cycleTimeReportService;
     private final AgingReportService agingReportService;
+    private final SprintBurnupService sprintBurnupService;
+    private final SprintReviewService sprintReviewService;
 
     /**
      * {@code GET …/reports/flow} — created vs resolved, bucketed on UTC day/week
@@ -212,6 +219,72 @@ public class ReportController {
             @PathVariable UUID workspaceId,
             @PathVariable UUID projectId) {
         var report = agingReportService.aging(actor, workspaceId, projectId);
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
+                .varyBy(HttpHeaders.AUTHORIZATION)
+                .body(report);
+    }
+
+    /**
+     * {@code GET …/reports/sprint-burnup} — one sprint's scope and completed lines, day by day,
+     * plus the log of every change to its scope (§2.3).
+     *
+     * <p>Both parameters are optional. {@code sprintId} defaults to the project's <strong>ACTIVE
+     * sprint</strong>; when there is none the answer is a 200 whose {@code sprint} is {@code null}
+     * and whose series is empty — "there is no sprint running" is an answer, not a missing
+     * resource, and a 404 there would be indistinguishable from the one below. {@code measure}
+     * defaults to {@code COUNT}, the measure every project has whether or not it estimates.
+     *
+     * <p><strong>A named {@code sprintId} that is not in this project is a 404</strong>, and that
+     * is the subject-versus-filter rule on this class arriving in code: a sprint is what the report
+     * is ABOUT, so it resolves through its parent, while {@code /flow}'s {@code typeId} is a
+     * predicate that can only subtract and therefore narrows to an empty chart instead. Both halves
+     * are load-bearing; getting either backwards produces a plausible, wrong report.
+     *
+     * <p>A {@code sprintId} that is not a UUID at all is a <strong>400</strong> rather than a 404,
+     * and that is not an inconsistency with the rule above: it fails while Spring is binding the
+     * parameter, before this method runs, and a malformed id names no resource — so there is no
+     * existence for it to confirm. Same as every other id parameter in the product.
+     *
+     * <p>No status code here depends on a delivery capability (Rule A): a KANBAN project's sprint
+     * answers exactly as a SCRUM project's does, and {@code measure=POINTS} answers with points in
+     * a project whose {@code estimation} is off. The UI hides those controls; the API hides
+     * nothing.
+     */
+    @GetMapping("/sprint-burnup")
+    public ResponseEntity<SprintBurnupResponse> sprintBurnup(
+            @AuthenticationPrincipal User actor,
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(required = false) UUID sprintId,
+            @RequestParam(required = false) ReportMeasure measure) {
+        var report = sprintBurnupService.burnup(actor, workspaceId, projectId, sprintId, measure);
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
+                .varyBy(HttpHeaders.AUTHORIZATION)
+                .body(report);
+    }
+
+    /**
+     * {@code GET …/reports/sprint-review} — the retro record (§2.4): committed, added after start,
+     * removed before end, completed and carried over, each a list of issue rows with a count and a
+     * point sum, plus one header line's worth of totals.
+     *
+     * <p>Same subject resolution as the burn-up above, same default (the ACTIVE sprint), same 404,
+     * and no measure parameter — this report reports counts AND points for every list, so there is
+     * nothing to toggle.
+     *
+     * <p>Its points are the ledger's entry snapshots, not today's estimates, which is the opposite
+     * of the burn-up beside it. That is a decision rather than an inconsistency; both services
+     * carry the reasoning.
+     */
+    @GetMapping("/sprint-review")
+    public ResponseEntity<SprintReviewResponse> sprintReview(
+            @AuthenticationPrincipal User actor,
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(required = false) UUID sprintId) {
+        var report = sprintReviewService.review(actor, workspaceId, projectId, sprintId);
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
                 .varyBy(HttpHeaders.AUTHORIZATION)

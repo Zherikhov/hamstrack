@@ -1,12 +1,13 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import ReportsArea from './ReportsArea'
+import type { ProjectDelivery } from '../../types'
 
 /**
- * HD-28 — the reports area's own contract, which is entirely about routing and
- * discoverability:
+ * HD-28 / HD-29 — the reports area's own contract, which is entirely about
+ * routing and discoverability:
  *
  *  1. **Absolute paths inside the splat.** Inside `/reports/*` a relative `to`
  *     resolves AFTER the splat segment, so `to="flow"` from `/reports/flow`
@@ -15,19 +16,36 @@ import ReportsArea from './ReportsArea'
  *  2. **The index and every unknown sub-path resolve to a report**, so a
  *     bookmark of `/reports` and a typo both land somewhere real.
  *  3. **The unbuilt reports are listed, not hidden** — a report nobody can see
- *     is a report nobody asks for, and R4/R5's sprint reports will sit in this
- *     same list disabled-with-reason rather than vanish in a Kanban project.
+ *     is a report nobody asks for.
+ *  4. **A capability a project does not have disables a report, it does not
+ *     delete it** (R4). A Kanban project still sees both sprint reports, marked
+ *     unavailable, and can still open the page that says what turns them on —
+ *     Rule C, whose whole point is that the affordance is visible *while the
+ *     capability is off*. And the decision reads the DECLARED capability: a
+ *     Kanban project with sprints in its data is still Kanban, which is the
+ *     inference that shipped wrong once.
  */
 
 vi.mock('./FlowReportPage', () => ({ default: () => <div data-testid="flow-page">flow</div> }))
 vi.mock('./CycleTimeReportPage', () => ({ default: () => <div data-testid="cycle-page">cycle</div> }))
+vi.mock('./SprintBurnupPage', () => ({ default: () => <div data-testid="burnup-page">burnup</div> }))
+vi.mock('./SprintReviewPage', () => ({ default: () => <div data-testid="review-page">review</div> }))
+
+const state = vi.hoisted(() => ({
+  delivery: { board: 'SCRUM', releases: true, estimation: true, preset: 'SCRUM' } as ProjectDelivery,
+}))
 
 vi.mock('../../api', () => ({
   apiGetProject: vi.fn(async () => ({
     id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY',
-    archived: false, myRole: 'MEMBER', myPermissions: [], createdAt: '2026-01-01T00:00:00Z',
+    archived: false, myRole: 'MEMBER', myPermissions: [], delivery: state.delivery,
+    createdAt: '2026-01-01T00:00:00Z',
   })),
 }))
+
+beforeEach(() => {
+  state.delivery = { board: 'SCRUM', releases: true, estimation: true, preset: 'SCRUM' }
+})
 
 function LocationProbe() {
   const loc = useLocation()
@@ -74,16 +92,61 @@ describe('ReportsArea', () => {
       .toHaveAttribute('href', '/w/w1/p/p1/reports/cycle-time')
   })
 
+  it('routes both sprint reports, absolutely', async () => {
+    renderArea('/w/w1/p/p1/reports/sprint-burnup')
+    expect(await screen.findByTestId('burnup-page')).toBeInTheDocument()
+    // `find*`, not `get*`: until the project response lands the capability is
+    // unknown and both entries render disabled — the deliberate direction, since
+    // a control may go disabled → enabled but must never be yanked away.
+    expect(await screen.findByRole('link', { name: 'Sprint burn-up' }))
+      .toHaveAttribute('href', '/w/w1/p/p1/reports/sprint-burnup')
+    expect(screen.getByRole('link', { name: 'Sprint review' }))
+      .toHaveAttribute('href', '/w/w1/p/p1/reports/sprint-review')
+  })
+
   it('lists the reports that are not built yet, labelled', async () => {
     renderArea('/w/w1/p/p1/reports/flow')
     await screen.findByTestId('flow-page')
-    for (const label of ['Sprint burn-up', 'Sprint review', 'Velocity']) {
-      expect(screen.getByText(label)).toBeInTheDocument()
-    }
-    // R3 took 'Cycle & lead time' out of the SOON list and made it a link — the
+    // R4 took both sprint reports out of the SOON list and made them links — the
     // list shrinks as the epic lands, and an entry that is still SOON must never
     // pretend to be a destination.
-    expect(screen.getAllByText('SOON')).toHaveLength(3)
+    expect(screen.getByText('Velocity')).toBeInTheDocument()
+    expect(screen.getAllByText('SOON')).toHaveLength(1)
     expect(screen.queryByRole('link', { name: 'Velocity' })).toBeNull()
+  })
+})
+
+describe('ReportsArea — a capability disables a report, it never deletes it', () => {
+  it('still lists both sprint reports on a Kanban project, marked unavailable', async () => {
+    state.delivery = { board: 'KANBAN', releases: true, estimation: true, preset: 'KANBAN' }
+    renderArea('/w/w1/p/p1/reports/flow')
+    await screen.findByTestId('flow-page')
+
+    const burnup = await screen.findByRole('link', { name: /Sprint burn-up/ })
+    expect(burnup).toHaveAttribute('aria-disabled', 'true')
+    // Rule C: the reason is reachable while the capability is off, and it names
+    // the switch rather than merely refusing.
+    expect(burnup).toHaveAttribute('title', expect.stringContaining('turn on Scrum in project settings'))
+    // …and it is still a link, because the page behind it carries the affordance.
+    expect(burnup).toHaveAttribute('href', '/w/w1/p/p1/reports/sprint-burnup')
+    expect(await screen.findByRole('link', { name: /Sprint review/ }))
+      .toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('marks nothing unavailable on a Scrum project', async () => {
+    renderArea('/w/w1/p/p1/reports/flow')
+    await screen.findByTestId('flow-page')
+    expect(await screen.findByRole('link', { name: 'Sprint burn-up' }))
+      .not.toHaveAttribute('aria-disabled')
+    expect(screen.queryByText('OFF')).toBeNull()
+  })
+
+  it('routes a shared sprint-report link on a Kanban project to the page, not away from it', async () => {
+    // The page carries the Rule C affordance, so redirecting here would send a
+    // reader somewhere unrelated and lose the only sentence that helps them.
+    state.delivery = { board: 'KANBAN', releases: true, estimation: true, preset: 'KANBAN' }
+    renderArea('/w/w1/p/p1/reports/sprint-review')
+    expect(await screen.findByTestId('review-page')).toBeInTheDocument()
+    expect(screen.getByTestId('loc')).toHaveTextContent('/w/w1/p/p1/reports/sprint-review')
   })
 })

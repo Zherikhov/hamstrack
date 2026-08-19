@@ -243,11 +243,34 @@ tags:
 
       Two things vary between reports rather than across them. **Not every
       report has a window**: `/aging` answers a current-state question and takes
-      no parameters at all, which makes it the only endpoint here that cannot
-      return a `400`. And a report's **filter** ids (`typeId`, `componentId`,
-      `labelId`) are predicates, not addressed resources — an unknown or foreign
-      id narrows the report to an empty result and is named in
-      `meta.unmatchedFilters`; it is never a `404` or a `422`.
+      no parameters at all, so it is the only endpoint here with **no `400` of
+      its own** — a malformed path UUID still `400`s there, as it does
+      everywhere, while binding and before any handler runs. The sprint reports
+      have no window either; their span is the sprint's, and an over-long sprint
+      is **clipped and disclosed** (`seriesTruncatedAt`) rather than refused,
+      because the caller never stated that window.
+
+
+      And a request-supplied id means one of two opposite things depending on
+      whether it is a **subject** or a **filter**, a distinction this path draws
+      explicitly because R1/R3 and R4 sit on opposite sides of it. A report's
+      **filter** ids (`typeId`, `componentId`, `labelId` on `/flow` and
+      `/cycle-time`) are predicates, not addressed resources — applied inside an
+      already project-scoped statement where an unknown id can only subtract, so
+      an unknown or foreign one narrows the report to an empty result, is named
+      in `meta.unmatchedFilters`, and is never a `404` or a `422`. A report's
+      **subject** id (`sprintId` on `/sprint-burnup` and `/sprint-review`) is the
+      resource the report is *about*: it resolves through its parent project and
+      an id that does not resolve there — including one belonging to another
+      project or tenant — is a `404`. Getting either half backwards produces a
+      plausible, wrong report.
+
+
+      The sprint reports add one more shared rule: **omitting `sprintId` means
+      the project's ACTIVE sprint, and having none is a `200` with
+      `sprint: null`** — deliberately not a `404`, which would be
+      indistinguishable from "that sprint is not in this project" and leave a
+      client unable to tell a project between sprints from a bad id.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -5223,8 +5246,12 @@ paths:
         would be meaningless (every open issue is open today) or actively
         misleading (a window on `created_at` hides exactly the oldest items,
         which are the entire point). This is therefore **the one endpoint on
-        this base path that cannot return a `400`**; the only failures available
-        to it are `401`, `404` and `429`.
+        this base path with no `400` of its own**: it validates nothing, because
+        there is nothing here for a caller to state wrongly, and a stray query
+        parameter is ignored rather than refused. Its failures are `401`, `404`
+        and `429` — plus the two that belong to every endpoint rather than to
+        this one: a `400` from binding a malformed path UUID, and a `500` on an
+        install with no system default workflow.
 
 
         **"Open" is `status.category <> DONE`** — the same question the columns
@@ -5308,6 +5335,276 @@ paths:
               schema: { $ref: '#/components/schemas/AgingReportResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-burnup:
+    get:
+      tags: [Reports]
+      summary: Sprint burn-up — will this sprint land, and what happened to the plan
+      description: >-
+        Two lines over one sprint's days — **scope** (how much work was in the
+        sprint at the end of each UTC day) and **completed** (how much of that
+        was closed by then) — plus `scopeChanges`, the log that explains every
+        step in the first of them. Access, caching, the `meta` block and the
+        throttle are the family's; see the `Reports` tag.
+
+
+        The client draws the faint ideal guide itself, from `(startAt, 0)` to
+        `(endAt, committedAtStart)` — **to the COMMITTED scope, not the current
+        one**. That is what makes it a guide rather than a verdict: a sprint that
+        took work on sits above its guide, which is information, not failure.
+        Regenerating the guide against today's scope would make every sprint look
+        on-plan.
+
+
+        **`sprintId` is the report's SUBJECT, not a filter — the opposite of how
+        `/flow` and `/cycle-time` treat `typeId`.** It defaults to the project's
+        **ACTIVE** sprint (a project has at most one, enforced in the database,
+        so the default is unambiguous). A `sprintId` that names a sprint in
+        **another** project or tenant resolves to nothing and is a `404`, exactly
+        as one that never existed — because a subject is an addressed resource,
+        while a filter is a predicate applied inside an already project-scoped
+        statement where an unknown id can only subtract. Opposite rules on one
+        base path, both load-bearing: getting either backwards produces a
+        plausible, wrong report.
+
+
+        **No ACTIVE sprint is a `200` with `sprint: null`, not a `404`.** The
+        caller asked a well-formed question about a project they can see, and
+        "there is no sprint running" is an answer. A `404` there would be
+        indistinguishable from the `404` above — leaving a client unable to tell
+        a project between sprints from a bad id — and it would leave the empty
+        state with no body to render. A sprint that exists but has never started
+        answers the same way with its `sprint` populated: `startAt: null`, an
+        empty `series` and `committedAtStart: 0`, because commitment is an event
+        and it has not happened yet.
+
+
+        **Points here are each issue's CURRENT estimate — and the sprint
+        review's are not. Both are deliberate; do not "fix" either to match the
+        other.** Under `measure=POINTS` this report weighs every issue by
+        `issues.story_points` **as it stands today**, so a re-estimate moves the
+        whole scope line *including its past*: a chart read yesterday can
+        legitimately look different today, and a client should footnote it
+        ("Points reflect current estimates"). The alternative is not buildable —
+        the ledger writes a row only on a membership change, so a per-day
+        estimate history does not exist and cannot be reconstructed.
+        `/sprint-review` reads the ledger's entry **snapshot** instead, because
+        the retrospective question is *what did this weigh when it entered*.
+        Each is wrong for the other's question. The one exception is inherited
+        rather than chosen: a **deleted** issue has no current estimate, so it is
+        weighed by its snapshot — the only number left.
+
+
+        **Scope change is membership change only.** The line steps up on an add
+        and down on a remove, and on nothing else — **a re-estimate is never a
+        scope event and never appears in `scopeChanges`**, because the ledger
+        writes no row for one. That single rule is what makes this a burn-up
+        worth trusting rather than a burndown: every step in the line has a
+        timestamp, an issue and (for a live issue) an author.
+
+
+        **The commitment is not a change.** The `ADDED` rows a sprint's start
+        writes are all stamped exactly `startAt`; they are reported as
+        `committedAtStart` and as the height of the first point, and are
+        deliberately **not** listed in `scopeChanges`, which would otherwise bury
+        four real changes under twenty-three rows saying "the sprint started".
+        Only events strictly after `startAt` are changes.
+
+
+        **The line ends where it ends.** The last point is today for a running
+        sprint and the **completion instant** for a finished one — not the
+        planned `endAt`, and not the end of the completion's calendar day
+        (measuring at the following midnight would put the completion's own
+        carry-out removals inside the last point, so every completed sprint would
+        render as having delivered 100% of its final scope — a chart that cannot
+        show a miss). There is **no projection**: no "at this rate you finish
+        Thursday". Forecasting is a later slice, with a stated sample size. A
+        sprint that overran is drawn to today and its guide simply ends earlier
+        than its lines do.
+
+
+        **A deleted issue still appears**, rendered from the ledger's snapshot —
+        see `ScopeChange`. It keeps its steps, its instant, its direction and its
+        `key`, and reports `issueId: null` **and** `actorId: null`. Render it as
+        a real, unlinked entry; dropping it would silently rewrite what the
+        sprint held.
+
+
+        **No status code here depends on a delivery capability.** A `KANBAN`
+        project's sprint answers exactly as a `SCRUM` project's does, and
+        `measure=POINTS` returns a points series in a project whose `estimation`
+        is `false`. The UI hides those controls; the API hides nothing.
+      operationId: getSprintBurnupReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: sprintId
+          in: query
+          description: >-
+            The sprint to report on. Defaults to the project's **ACTIVE**
+            sprint; when the project has none the answer is a `200` with
+            `sprint: null`. **A subject, not a filter**: an id that does not
+            resolve inside this project — including one from another project or
+            tenant — is a `404`, not an empty chart. An id that is not a UUID at
+            all is a `400` instead: it fails while Spring binds the parameter,
+            before the handler runs, and a malformed id names no resource, so
+            there is no existence for it to confirm.
+          schema: { type: string, format: uuid }
+        - name: measure
+          in: query
+          description: >-
+            What the two lines count. Defaults to `COUNT`, the measure every
+            project has whether or not it estimates. Echoed back in the response
+            so a client can never mislabel a chart it did not explicitly
+            parameterise. An unknown value is a `400`.
+          schema: { $ref: '#/components/schemas/ReportMeasure' }
+      responses:
+        '200':
+          description: >-
+            OK — the day series, the scope-change log, the commitment anchor and
+            the shared `meta` block. Also the answer when the project has no
+            ACTIVE sprint (`sprint: null`, empty series).
+          headers:
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintBurnupResponse' }
+        '400':
+          description: >-
+            An unknown `measure` value, or a `sprintId` (or path id) that is not
+            a UUID — the latter raised while binding, before the handler runs, on
+            every endpoint of this API alike.
+
+
+            This report takes **no window**, so none of the window refusals of
+            `/flow` and `/cycle-time` apply to it: a sprint longer than
+            `app.reports.max-window-days` is clipped and disclosed with
+            `seriesTruncatedAt`, never refused. The caller stated no window here
+            — the sprint did — so there is nothing for them to correct, and
+            refusing would leave a legitimately long sprint with no chart at all.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ReportSprintNotFound' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-review:
+    get:
+      tags: [Reports]
+      summary: Sprint review — committed, added, removed, completed, carried over
+      description: >-
+        The retro record, and **not a chart**: five labelled lists of issue rows,
+        each with a count, a point sum and an unestimated count, plus one header
+        line's worth of `totals`. Access, caching, the `meta` block and the
+        throttle are the family's; see the `Reports` tag.
+
+
+        Subject resolution is the burn-up's exactly: `sprintId` defaults to the
+        project's **ACTIVE** sprint, no ACTIVE sprint is a `200` with
+        `sprint: null` and five empty lists, and a `sprintId` that does not
+        resolve inside this project is a `404` — a subject, never a filter.
+        There is **no `measure` parameter**: this report reports counts *and*
+        points for every list, so there is nothing to toggle.
+
+
+        **Points here are the ledger's entry SNAPSHOT — the opposite of the
+        burn-up beside it, on purpose.** Every point value in this response is
+        what the issue weighed **when it entered this sprint**, never today's
+        estimate. The retrospective question is what the team took on, and an
+        issue re-pointed from 3 to 8 after the sprint ended would otherwise
+        retroactively rewrite the commitment — the one number a retro exists to
+        look at honestly. `/sprint-burnup` reads current points because it asks a
+        live question. State the two together, or one will be reported as a bug
+        against the other. Consequently **every number in this response is stable
+        for a COMPLETED sprint**: the ledger is append-only and id-keyed, so the
+        record survives renames, re-estimates and the deletion of the issues
+        themselves.
+
+
+        **The sprint's end is when it was COMPLETED, not when it was planned to
+        end.** Every "before the end" boundary here is `completedAt` for a
+        finished sprint and the instant of the request for a running one;
+        `endAt` is reported beside them and decides nothing. A sprint completed
+        three days late did not remove anything "after the end" for those three
+        days, and one completed early did not carry over the work it had already
+        stopped doing.
+
+
+        **The five lists are labelled views, not a partition.** An issue is in
+        `committed` and — if it landed — in `completed` too; that overlap is the
+        headline. Only `committed` + `addedAfterStart` are disjoint and together
+        cover everything the sprint ever held, and only `completed` +
+        `carriedOver` partition what it held at its end.
+
+
+        **The headline's denominator is `atEndCount`, not the commitment.**
+        "Completed X of Y" reads `completedCount` of `atEndCount` — completed
+        plus carried over, i.e. what the sprint **held at its end** — so the
+        numerator is a subset of its own denominator. Against the *commitment* it
+        is not: work added after the start can be completed, so a sprint that
+        took late work on and finished it could report "completed 25 of 23". The
+        commitment is not lost by that — it keeps its own list, count and point
+        sum, and `addedAfterStartCount` is precisely the disclosure of how far
+        the sprint drifted from it.
+
+
+        **A deleted issue still gets a row**, with `deleted: true`, its
+        snapshotted `key` and `points`, and `null` for everything only the live
+        issue could answer. Render it as the line it is ("DEMO-77 (deleted)")
+        rather than dropping it — dropping it would silently change what the
+        sprint delivered.
+
+
+        **A deleted issue out of a COMPLETED sprint lands in `carriedOver`, with
+        a null `closedAt`.** `closed_at` lives on the issue, the issue is gone,
+        and removing an issue from a frozen sprint writes no ledger row — so
+        nothing in the record could prove it was finished. It is neither dropped
+        (which would shrink what the sprint committed to) nor claimed as
+        completed (which a report may not do for something it cannot show).
+
+
+        **No status code here depends on a delivery capability**, and there is no
+        per-assignee anything: `assigneeId` is a field on a row so a client can
+        show an avatar, and nothing in this feature groups, counts, sums or
+        filters by it.
+      operationId: getSprintReviewReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: sprintId
+          in: query
+          description: >-
+            The sprint to review. Defaults to the project's **ACTIVE** sprint;
+            when the project has none the answer is a `200` with `sprint: null`
+            and five empty lists. **A subject, not a filter** — the same `404` as
+            on `/sprint-burnup`, and the same `400` for an id that is not a UUID.
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >-
+            OK — the five lists, the header totals and the shared `meta` block.
+            Also the answer when the project has no ACTIVE sprint, and when the
+            named sprint has never started (`sprint` populated, `startAt: null`,
+            five empty lists).
+          headers:
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SprintReviewResponse' }
+        '400':
+          description: >-
+            A `sprintId` (or path id) that is not a UUID, raised while binding
+            before the handler runs. This report takes no window and has no
+            refusal of its own beyond that.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ReportSprintNotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
   /notifications:
@@ -6532,8 +6829,12 @@ components:
 
         Every windowed report shares one implementation of these rules
         (`ReportWindow`) down to the wording of the messages, so `/flow` and
-        `/cycle-time` refuse identically. `/aging` has no window and therefore no
-        `400` at all.
+        `/cycle-time` refuse identically. `/aging` and the two sprint reports
+        have no window and therefore none of these refusals — an over-long sprint
+        is clipped and disclosed (`seriesTruncatedAt`), never refused, because
+        its caller stated no window. Their own `400`s are the ones every endpoint
+        of this API has: a path or query id that is not a UUID, plus an unknown
+        `measure` on `/sprint-burnup`, all raised while binding.
 
 
         Tenancy is resolved **before** the window is validated, so a caller who
@@ -6552,8 +6853,10 @@ components:
         fit a budget.
 
 
-        The budget covers the whole `…/reports/**` path per principal, and it is
-        spent **before** the workspace and project are resolved. This is
+        The budget covers the whole `…/reports/**` path per principal — **all
+        five reports share one budget rather than holding one each**, so a page
+        opening `/sprint-burnup` and `/sprint-review` together spends two of it —
+        and it is spent **before** the workspace and project are resolved. This is
         therefore the one place in this API where `429` **precedes** `404`: an
         over-budget caller is refused even for a project they cannot see. Keying
         on the caller rather than the project is what keeps that refusal free of
@@ -6564,6 +6867,36 @@ components:
         Retry-After:
           description: Seconds to wait before retrying
           schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ReportSprintNotFound:
+      description: >-
+        The family's `404` — an unknown workspace, an unknown project, a project
+        in a **different** workspace and a non-member, all indistinguishable —
+        **plus one of its own**: a `sprintId` that does not resolve inside this
+        project, including one that belongs to another project or another tenant.
+
+
+        That last case is the **subject-versus-filter** rule arriving in a status
+        code. A sprint is what the report is *about*, so it is resolved through
+        its parent and refused when it does not resolve; `typeId` / `componentId`
+        / `labelId` on `/flow` and `/cycle-time` are predicates applied inside an
+        already project-scoped statement, where an unknown id can only subtract —
+        so those narrow to an empty result with a `200` and are disclosed in
+        `meta.unmatchedFilters`. Opposite rules on the same base path, and each
+        is deliberate.
+
+
+        **Not to be confused with "no sprint is running."** Omitting `sprintId`
+        when the project has no ACTIVE sprint is a `200` with `sprint: null`, not
+        this — precisely so that a client can tell a project between sprints from
+        a bad id, which a shared `404` would make impossible.
+
+
+        Tenancy is resolved **before** the sprint is looked up, so a caller who
+        cannot see the project gets this `404` whatever they named; and the
+        report throttle is spent before either, so a `429` can still precede it.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -9915,7 +10248,9 @@ components:
             `created + resolved`, since an issue created and closed inside the
             same window appears on both lines but is one issue of evidence, not
             two; on `/cycle-time` the completed issues in the window after
-            filters (i.e. `sampleSize`); on `/aging` the project's open issues.
+            filters (i.e. `sampleSize`); on `/aging` the project's open issues;
+            on `/sprint-burnup` and `/sprint-review` the distinct issues that
+            have ever been in that sprint.
 
 
             It is never `items.length`: when the cap bites this is deliberately
@@ -9938,6 +10273,19 @@ components:
             On both, the aggregates — percentiles, counts — are computed over the
             *whole* matching set, so truncation shortens the list and never moves
             a line.
+
+
+            **On the two sprint reports it caps ledger EVENT rows, not issues**,
+            and the surviving end is the **oldest**: the ledger is read oldest
+            first, so what a truncated sprint keeps is its commitment and its
+            earliest changes — the head of the chart stays exact and its tail
+            goes missing, which is the recoverable failure. The opposite ordering
+            would lose the commitment batch and make every number wrong. (In
+            practice it cannot bite: one sprint's ledger is hundreds of rows
+            against a cap of 20 000.) **`seriesTruncatedAt` on `/sprint-burnup`
+            is a different limit and does not set this flag** — that one clips the
+            day series against `app.reports.max-window-days` and names the day it
+            stopped on; this one means the row cap printed beside it in `cap`.
         cap:
           type: integer
           example: 20000
@@ -9987,7 +10335,10 @@ components:
             project at all** — never `null`, empty when every filter matched
             something or none was sent. Entries are the query-parameter names
             themselves (`typeId`, `componentId`, `labelId`), so a client can map
-            one straight back to the control the user touched.
+            one straight back to the control the user touched. Always empty on
+            `/aging`, `/sprint-burnup` and `/sprint-review`, which take no
+            filters — `sprintId` is a **subject**, so an id that matches nothing
+            is a `404` there rather than an entry here.
 
 
             It exists because a typo'd or stale filter id otherwise renders a
@@ -10351,7 +10702,8 @@ components:
       description: >-
         `GET …/reports/aging`. No window and no parameters — "what is rotting
         now" is a current-state question — which makes this the one report on
-        this base path that cannot return a `400`.
+        this base path with no `400` of its own (a malformed path UUID still
+        `400`s here, as it does on every endpoint, while binding).
       properties:
         columns:
           type: array
@@ -10392,6 +10744,541 @@ components:
             derivable from this response at all, and it is the provenance this
             report actually needs, since its `percentiles` are computed over
             precisely that history.
+
+    ReportMeasure:
+      type: string
+      enum: [COUNT, POINTS]
+      default: COUNT
+      description: >-
+        What a sprint report counts: whole issues, or story points. The toggle
+        exists on `/sprint-burnup`; `/sprint-review` reports **both** for every
+        list and needs no parameter.
+
+
+        `COUNT` is the default because it is the measure every project has: one
+        issue is one unit, and no estimation is required. Under `POINTS` an
+        **unestimated issue contributes `0`** to the series *and* is counted in
+        `unestimatedCount` beside it — "we didn't estimate it" is not "it's
+        free", and reporting the zero without the count is the documented failure
+        this pair exists to prevent.
+
+
+        **No status code depends on the delivery capabilities.** A project with
+        `estimation: false` still answers `measure=POINTS` with a points series:
+        the UI hides the toggle, the API does not hide the data, and points the
+        project already recorded still render.
+
+
+        **Which points, exactly, differs between the two sprint reports on
+        purpose** — `/sprint-burnup` reads each issue's CURRENT estimate,
+        `/sprint-review` reads the ledger's entry SNAPSHOT. The asymmetry is a
+        decision, not an inconsistency, and "fixing" either to match the other
+        breaks the question that one answers.
+
+    SprintScopeEventType:
+      type: string
+      enum: [ADDED, REMOVED]
+      description: >-
+        The two things that can happen to a sprint's **scope**: an issue joined
+        it, or an issue left it. `REMOVED` covers a manual removal, a move to
+        another sprint or to the backlog, a completion's carry-over and a
+        force-delete's detach.
+
+
+        Deliberately closed at two values — "scope at time T" is the arithmetic
+        `count(ADDED ≤ T) - count(REMOVED ≤ T)`, so a third member would not be a
+        new feature, it would be a wrong number in every burn-up ever drawn.
+
+
+        **What is NOT an event: re-estimating an issue.** A scope change is a
+        membership change only. A re-estimate changes the height of the scope
+        line from that point on and is never drawn as a step, and no
+        `ScopeChange` row is ever written for one.
+
+    BurnupPoint:
+      type: object
+      description: >-
+        One day of the burn-up: how much work was in the sprint at the end of
+        that day, and how much of it was finished.
+
+
+        **Both values are "as at the end of `date`"**, computed at the following
+        UTC midnight — the same UTC day boundaries every report in this family
+        buckets on. The first point is the sprint's start day and carries the
+        committed scope; the last is the day the line stops (today for a running
+        sprint, the completion day for a finished one). There is no point after
+        that.
+      properties:
+        date: { type: string, format: date, example: 2026-08-14 }
+        scope:
+          type: number
+          example: 23
+          description: >-
+            Total work in the sprint at the end of that day, in the requested
+            `measure`. Steps up on adds and down on removes, and on **nothing
+            else** — a re-estimate is not a scope event, which is the whole
+            reason this line can be trusted where a burndown's cannot. (Under
+            `POINTS` a re-estimate does move the line, including its past,
+            because points are read *currently*; it simply is not a step with a
+            date and an author.)
+        completed:
+          type: number
+          example: 18
+          description: >-
+            The part of `scope` that was closed by the end of that day. **Bounded
+            above by `scope` by construction**: an issue that leaves the sprint
+            takes its completion with it, so the two lines can meet but cannot
+            cross. Do not draw a client-side guard for the crossing case; it
+            cannot happen, and a guard would hide a real bug if it ever did.
+
+    ScopeChange:
+      type: object
+      description: >-
+        One entry of the burn-up's **scope-change log**: an issue joined or left
+        a running sprint, when, moved by whom, and by how much the scope line
+        stepped. This is the answer to "what happened to the plan", and it is why
+        a burn-up is worth building where a burndown is not — every step in the
+        line is hoverable and names the issue, so a scope increase is a fact with
+        an author instead of an unexplained jump.
+
+
+        **The commitment is not a change.** The `ADDED` rows a sprint's start
+        writes — one per member, all stamped exactly `startAt` — are the sprint's
+        committed scope and appear as `committedAtStart` and as the height of the
+        first point, never as N log entries. Only events strictly after `startAt`
+        are listed here.
+
+
+        Ordered oldest first, ties broken by `key` so two issues moved in the
+        same batch cannot swap places between requests.
+      properties:
+        at:
+          type: string
+          format: date-time
+          description: When it happened (the ledger's `occurred_at`, UTC).
+        issueId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The issue, or **`null` if it has since been deleted**. The event
+            survives the issue by design, because a sprint's record must not be
+            quietly rewritten by a later delete — so a client must be able to
+            render this row **without a link**. `key` is always present.
+        key:
+          type: string
+          example: DEMO-77
+          description: >-
+            The issue key as the ledger snapshotted it at the moment of the
+            event — a snapshot rather than a join, so the row still reads as a
+            line of a sprint's history after the issue is gone.
+        event: { $ref: '#/components/schemas/SprintScopeEventType' }
+        delta:
+          type: number
+          example: 5
+          description: >-
+            The signed step **in the requested `measure`** — `+1`/`-1` under
+            `COUNT`, the issue's current estimate under `POINTS` (its entry
+            snapshot for an issue that no longer has a current one). Always the
+            same weight the series used for this issue, so the log and the line
+            cannot disagree.
+        actorId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            Who moved it, or `null` in two cases. The ordinary one: the account
+            has since been deleted — the event is a fact about the sprint and
+            must outlive the account that caused it.
+
+
+            The second is a decision rather than a foreign key: **a row belonging
+            to a deleted issue names nobody**, even though the database still
+            holds the actor. An issue's own history is cascade-deleted with it,
+            so keeping the actor here would leave this log as the only surviving
+            place in the product saying who moved a since-deleted issue — a wider
+            survival than was ever argued for. The step, its instant, its
+            direction and the key all survive; only the person does not.
+        storyPoints:
+          type: number
+          nullable: true
+          example: 5
+          description: >-
+            What the issue weighed **when it entered this sprint** — the ledger's
+            own snapshot, `null` when it entered unestimated. Independent of
+            `delta`, and carrying both is the point: `delta` is in the requested
+            measure, so under `COUNT` it is ±1 and no point value would otherwise
+            reach this log at all. A project with `estimation` switched off is
+            shown exactly that measure, and a value the project already recorded
+            stays visible when a capability is switched off — so the estimate
+            travels with the row rather than being inferred client-side from a
+            number that means something else.
+
+    SprintBurnupResponse:
+      type: object
+      description: >-
+        `GET …/reports/sprint-burnup`. Two lines and a log: `series` carries the
+        scope and completed values per UTC day, and `scopeChanges` explains every
+        step in the first of them. The ideal guide is **not** in the response —
+        the client draws it from `(startAt, 0)` to `(endAt, committedAtStart)`,
+        i.e. to the **committed** scope, not the current one.
+      properties:
+        sprint:
+          allOf:
+            - $ref: '#/components/schemas/SprintRef'
+          nullable: true
+          description: >-
+            The subject. **`null` when the project has no ACTIVE sprint and the
+            caller named none** — an empty answer to a well-formed question, not
+            a missing resource, so it is a `200` with an empty series rather than
+            a `404`. A named `sprintId` that does not resolve inside this project
+            is always a `404`; it is the report's *subject*, not a filter.
+        startAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the sprint started, or `null` for one that never has — a
+            `FUTURE` sprint has no burn-up, because commitment is an event and it
+            has not happened yet.
+        endAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            The sprint's **planned** end. May be *before* the last series point:
+            a sprint that overran is drawn to today, and the guide simply ends
+            earlier than the lines do. It bounds nothing.
+        measure:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeasure'
+          description: >-
+            The measure actually applied, echoed so a client can never mislabel a
+            chart it did not explicitly parameterise.
+        committedAtStart:
+          type: number
+          example: 23
+          description: >-
+            The scope at `startAt`: the sum over the commitment batch the
+            sprint's start wrote. `0` for a sprint that never started, and the
+            anchor of the ideal guide.
+        unestimatedCount:
+          type: integer
+          example: 4
+          description: >-
+            Issues in the sprint at the **last plotted point** that carry no
+            estimate. They contribute `0` to a `POINTS` series and are counted
+            here, never silently treated as zero alone. **Always populated,
+            including under `COUNT`**, where it is the honest footnote for the
+            toggle the reader is about to flip. Measured at `seriesTruncatedAt`
+            when the series was clipped, so it describes the same span as the
+            chart.
+        series:
+          type: array
+          description: >-
+            One point per UTC day, start day first. Empty when the sprint never
+            started or when there is no sprint at all.
+          items: { $ref: '#/components/schemas/BurnupPoint' }
+        scopeChanges:
+          type: array
+          description: >-
+            Every membership change **after** the start, oldest first. **Empty is
+            a real and common answer**: it means the plan held.
+          items: { $ref: '#/components/schemas/ScopeChange' }
+        seriesTruncatedAt:
+          type: string
+          format: date
+          nullable: true
+          example: 2026-08-13
+          description: >-
+            **The last day the chart covers when the sprint is longer than
+            `app.reports.max-window-days`**, and `null` — the ordinary case —
+            when the whole sprint is drawn. The **first** days are the ones kept,
+            because they carry the commitment, without which every later number
+            means nothing. It is not a `400`: the caller stated no window, the
+            sprint did, so there is nothing for them to correct. The bound exists
+            because `startAt` may be arbitrarily **backdated** when a sprint is
+            started, which makes the day count caller-influenced.
+
+
+            **Its own field rather than `meta.truncated`, and the asymmetry
+            matters.** `meta.truncated` means one specific thing — the
+            `app.reports.max-rows` ledger-row cap bit, the number printed beside
+            it in `meta.cap`. Folding the day clip into that flag made a
+            twelve-issue sprint answer `basedOnIssues: 12`, `truncated: true`,
+            `cap: 20000` and put "20 000" in a banner about a report that dropped
+            no rows at all. Two limits, two signals; this one names the day it
+            stopped on so the UI can say it.
+
+
+            **`scopeChanges` is clipped to this same boundary — but only when the
+            chart is clipped.** When this is `null` the log runs to the end of the
+            ledger, deliberately: a completed sprint's carry-over rows are stamped
+            a moment *after* `completed_at`, so bounding the log at the last point
+            would silently drop the completion's own moves — the ones that explain
+            where the remaining scope went. `/sprint-review` has no such bound at
+            all (it returns lists, not a day series), so on a clipped sprint the
+            two reports legitimately describe different spans, which is exactly
+            what this field announces.
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance. Here `basedOnIssues` is the distinct issues this response
+            describes — everything that has ever been in this sprint — and
+            `unmatchedFilters` is always empty, because this endpoint takes no
+            filters. `firstIssueAt` is the family's, unchanged: the **project's**
+            earliest issue, not the sprint's, and never scoped to the sprint.
+
+    SprintReviewIssue:
+      type: object
+      description: >-
+        One row of a sprint-review list — the issue, as the retro needs to read
+        it. Ids rather than names for the taxonomy, exactly as `CycleTimeItem`
+        and `AgingItem` do: the client already holds the project's types,
+        statuses and members from the config endpoint, so resolving them here
+        would be three joins per report to re-send what the caller has.
+
+
+        **A departed issue still gets a row.** When an issue is deleted its ledger
+        entries survive with the issue id nulled, which is the whole reason a
+        completed sprint's record cannot be rewritten by a later delete. Such a
+        row arrives with `deleted: true`, its snapshotted `key` and `points`, and
+        `null` for everything only the live issue could answer. **Render it as the
+        line it is — "DEMO-77 (deleted)" — rather than dropping it**, because
+        dropping it would silently change what the sprint delivered.
+      properties:
+        issueId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The issue, or `null` if it no longer exists. Also the only field a
+            client can link from.
+        key:
+          type: string
+          example: DEMO-14
+          description: >-
+            The key the ledger snapshotted when the issue entered the sprint —
+            present for every row, deleted or not.
+        title:
+          type: string
+          nullable: true
+          example: Search returns stale results
+          description: >-
+            `null` for a deleted issue. Never snapshotted: a title is edited far
+            too often for a copy of it to be a fact about the sprint, and the
+            ledger deliberately stores only what identifies the row.
+        typeId: { type: string, format: uuid, nullable: true, description: '`null` for a deleted issue' }
+        assigneeId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The issue's **current** assignee, `null` when unassigned or deleted.
+            Never a per-person breakdown: it is one field on a row, and no list,
+            count, filter or sum in this feature groups by it.
+        statusId: { type: string, format: uuid, nullable: true, description: 'The issue''s current status; `null` for a deleted issue' }
+        points:
+          type: number
+          nullable: true
+          example: 5
+          description: >-
+            What the issue weighed **when it entered this sprint** — the ledger's
+            snapshot, **not** today's estimate, which is the opposite of what
+            `/sprint-burnup` weighs with and is deliberate on both sides.
+            `null` means it was unestimated at that moment, which is a different
+            statement from zero.
+        closedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the issue was closed, or `null` if it is still open (or was
+            reopened, which clears the stamp). Always `null` on a `deleted` row —
+            see `carriedOver` on `SprintReviewResponse` for what that implies.
+        deleted:
+          type: boolean
+          description: Whether the issue is gone and this row is all that is left of it.
+
+    SprintReviewList:
+      type: object
+      description: >-
+        One of the sprint review's five labelled lists, with the count and point
+        sum its heading prints. The label is the **field name** on
+        `SprintReviewResponse` — a `label` string inside the object would be a
+        second name for the same thing, and the two would eventually disagree.
+      properties:
+        count: { type: integer, example: 23 }
+        points:
+          type: number
+          nullable: true
+          example: 55
+          description: >-
+            Sum of the rows' points, unestimated issues contributing nothing.
+            **`null` when NOTHING in the list carried an estimate — including for
+            an empty list.** "This list has no points to show" and "these issues
+            are worth zero points" are different statements, and a sum of nothing
+            rendered as `0` is the same silent zero `unestimatedCount` exists to
+            refuse one row at a time. Structural rather than derived: the
+            alternative left every client inferring emptiness from
+            `count > unestimatedCount`, i.e. re-deriving a fact the server already
+            knew, in each of the five places a list is rendered.
+        unestimatedCount:
+          type: integer
+          example: 6
+          description: >-
+            How many of `count` carried no estimate. Stated **per list**, because
+            "committed 55 points" means something quite different when six of the
+            twenty-three issues were never estimated.
+        issues:
+          type: array
+          description: >-
+            The rows, in the order they first entered the sprint — chronological
+            for `addedAfterStart`, deterministic for the rest, and never
+            dependent on a key's lexicographic accident (`DEMO-10` sorts before
+            `DEMO-9`).
+          items: { $ref: '#/components/schemas/SprintReviewIssue' }
+
+    SprintReviewTotals:
+      type: object
+      description: >-
+        The sprint review's one header line, as data — *"Sprint 12 · 14 Aug –
+        28 Aug · completed 18 of 25 issues (41 of 60 points) · 5 added after
+        start."* Every number here is also derivable from the five lists; it is
+        restated in one place so the sentence has a single source, because
+        composing it from five separate objects is how a header ends up quoting
+        one list and a subtitle another.
+
+
+        **The denominator is what the sprint held at its END, not what it
+        committed to.** `completedCount` of `atEndCount` — completed plus carried
+        over — are two cuts of one population, so the numerator is a subset of
+        its own denominator. Against the commitment it is not: work added after
+        the start can be completed, so a sprint that took late work on and
+        finished it could report "completed 25 of 23". The commitment keeps its
+        own list beside the outcome, and `addedAfterStartCount` is the clause
+        that turns "we missed the plan" into "the plan changed".
+
+
+        The nullable point sums follow `SprintReviewList.points` exactly: `null`
+        means "nothing here was estimated", never zero.
+      properties:
+        committedCount:
+          type: integer
+          example: 23
+          description: >-
+            Issues in the sprint when it started — the plan, shown beside the
+            outcome rather than used as its denominator.
+        committedPoints:
+          type: number
+          nullable: true
+          example: 60
+          description: What they weighed on entry (the ledger's snapshot), or `null` when none of them was estimated.
+        atEndCount:
+          type: integer
+          example: 25
+          description: 'Everything the sprint held when it stopped: completed plus carried over. **The denominator.**'
+        atEndPoints: { type: number, nullable: true, example: 60, description: 'And what that weighed, or `null` when nothing in it was estimated' }
+        completedCount: { type: integer, example: 18, description: How much of `atEndCount` was closed by then }
+        completedPoints: { type: number, nullable: true, example: 41, description: 'And what that weighed, or `null` when none of it was estimated' }
+        addedAfterStartCount:
+          type: integer
+          example: 5
+          description: >-
+            Issues that joined after the commitment — the disclosure of how far
+            the sprint drifted from its plan.
+
+    SprintReviewResponse:
+      type: object
+      description: >-
+        `GET …/reports/sprint-review`. Five labelled lists plus one header line's
+        worth of totals. **Not a chart.**
+
+
+        For a COMPLETED sprint this is a permanent, exact record: the ledger is
+        append-only and id-keyed, so it survives renames and re-estimates, and it
+        survives the deletion of the issues themselves — those arrive as rows with
+        `deleted: true` rather than vanishing.
+      properties:
+        sprint:
+          allOf:
+            - $ref: '#/components/schemas/SprintRef'
+          nullable: true
+          description: >-
+            The subject, or `null` when the project has no ACTIVE sprint and the
+            caller named none (a `200` with five empty lists — same rule as
+            `SprintBurnupResponse.sprint`).
+        startAt: { type: string, format: date-time, nullable: true, description: 'When the sprint started; `null` if it never did' }
+        endAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: The **planned** end. Informational — it bounds nothing in this record.
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When it was actually completed, `null` while it is still running.
+            **This is the boundary every list below is measured against** (the
+            instant of the request for a running sprint).
+        committed:
+          allOf:
+            - $ref: '#/components/schemas/SprintReviewList'
+          description: >-
+            What was in the sprint when it started — the commitment batch the
+            start wrote, one `ADDED` per member dated exactly `startAt`.
+        addedAfterStart:
+          allOf:
+            - $ref: '#/components/schemas/SprintReviewList'
+          description: >-
+            What joined afterwards. The number that makes a missed sprint
+            legible. Together with `committed` it covers everything the sprint
+            ever held, and the two are disjoint.
+        removedBeforeEnd:
+          allOf:
+            - $ref: '#/components/schemas/SprintReviewList'
+          description: >-
+            What was pulled out while the sprint was running. **Distinct from
+            `carriedOver`**: this is work someone took *off* the sprint, not work
+            the sprint ran out of time for. The two are told apart without a
+            timestamp comparison — a completion stamps `completedAt` before it
+            writes the ledger rows for the issues it moves out, so at that instant
+            those issues are still members.
+        completed:
+          allOf:
+            - $ref: '#/components/schemas/SprintReviewList'
+          description: >-
+            What was in the sprint at its end and closed by then. **Identical in
+            membership to the last point of the burn-up's completed line**, on
+            purpose: two reports over one ledger that disagreed about what "done
+            in this sprint" means would discredit both.
+        carriedOver:
+          allOf:
+            - $ref: '#/components/schemas/SprintReviewList'
+          description: >-
+            What was in the sprint at its end and not closed — for a completed
+            sprint, exactly what the completion moved to the backlog or to the
+            next sprint; for a running one, what is still open right now.
+
+
+            **A deleted issue out of a COMPLETED sprint always lands here, with a
+            null `closedAt`.** Completion lives on the issue, the issue is gone,
+            and removing an issue from a frozen sprint writes no ledger row — so
+            the record cannot prove it was finished. It is neither dropped (which
+            would shrink what the sprint committed to) nor claimed as completed
+            (which a report may not do for something it cannot show).
+        totals: { $ref: '#/components/schemas/SprintReviewTotals' }
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance. `basedOnIssues` is the distinct issues this response
+            describes — everything that has ever been in this sprint — and
+            `unmatchedFilters` is always empty, because this endpoint takes no
+            filters. `firstIssueAt` is the family's: the **project's** earliest
+            issue, never scoped to the sprint.
 
     NotificationResponse:
       type: object
