@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
-import { apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError } from './api'
+import {
+  apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError, filenameFromDisposition, reportCsvPath,
+} from './api'
 import type { RankIssuePayload, UpdateIssuePayload } from './api'
 import { useAuthStore } from './auth'
 
@@ -193,5 +195,41 @@ describe('issue writes: sprintId and clearSprint are mutually exclusive', () => 
     const idOnly: UpdateIssuePayload = { sprintId: 'sp1' }
     const clearOnly: UpdateIssuePayload = { clearSprint: true }
     expect([bothOnUpdate, bothOnRank, idOnly, clearOnly]).toHaveLength(4)
+  })
+})
+
+/**
+ * HD-141 (R7) — the report CSV link.
+ *
+ * Two facts worth pinning. The path is the report's own path with `.csv` on the
+ * name and the SAME parameters, so the file and the chart are the same query;
+ * and the filename that comes back off `Content-Disposition` is a **name**, not
+ * a path — the one place a server string becomes something the browser saves.
+ */
+describe('report CSV', () => {
+  it('is the report path plus .csv, with the report’s own parameters', () => {
+    expect(reportCsvPath('w1', 'p1', 'flow', { from: '2026-05-01', interval: 'WEEK' }))
+      .toBe('/workspaces/w1/projects/p1/reports/flow.csv?from=2026-05-01&interval=WEEK')
+  })
+
+  it('drops empty parameters rather than sending them blank', () => {
+    expect(reportCsvPath('w1', 'p1', 'aging', { typeId: '' }))
+      .toBe('/workspaces/w1/projects/p1/reports/aging.csv')
+  })
+
+  it('reads a quoted filename, and an RFC 5987 one', () => {
+    expect(filenameFromDisposition('attachment; filename="flow-PAY.csv"')).toBe('flow-PAY.csv')
+    expect(filenameFromDisposition("attachment; filename*=UTF-8''fl%C3%B8w.csv")).toBe('fløw.csv')
+    expect(filenameFromDisposition('attachment; filename=plain.csv')).toBe('plain.csv')
+  })
+
+  it('never lets a filename be a path', () => {
+    expect(filenameFromDisposition('attachment; filename="../../etc/passwd"')).toBe('passwd')
+    expect(filenameFromDisposition('attachment; filename="C:\\temp\\x.csv"')).toBe('x.csv')
+  })
+
+  it('falls back to the caller’s name when the header says nothing usable', () => {
+    expect(filenameFromDisposition(null)).toBeNull()
+    expect(filenameFromDisposition('attachment')).toBeNull()
   })
 })

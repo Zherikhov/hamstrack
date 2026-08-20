@@ -294,6 +294,26 @@ tags:
       client unable to tell a project between sprints from a bad id.
 
 
+      **Each of the six project reports has a `.csv` sibling** — append `.csv` to
+      the path. It takes the same parameters, answers the same status codes, and
+      exports **the plotted series: one row per data point**, under a `#`-comment
+      header naming the project, the window, the measure, the percentiles (or why
+      they were suppressed), `computedAt`, `basedOnIssues` and whether truncation
+      bit. The `ReportCsvFile` schema documents the file format once for all six.
+
+
+      **They are not issue-list exports, and there is currently no such export in
+      this API.** That is worth stating plainly because it is the natural wrong
+      assumption: a "download matching issues" button is a different feature,
+      wired to a search-side export path that **does not exist yet** — there is no
+      CSV or export endpoint under `/search`, and the handoff cannot be built by a
+      client either, because HQL has no `project` field to scope it with and no
+      `resolved`/`closed` field, so the flow report’s resolved half is not
+      expressible as a query at all. It is tracked as its own ticket. Until it
+      lands, do not read a report CSV as the issues behind the chart: it is the
+      numbers that were drawn.
+
+
       `/velocity` sits on the same rule from the other side: **its subject is the
       PROJECT**, which the path already names, so it takes no `sprintId` at all
       (its sample is resolved from the project) and has no `404` of its own. It
@@ -5148,6 +5168,53 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/flow.csv:
+    get:
+      tags: [Reports]
+      summary: Flow — the plotted series as CSV
+      description: >-
+        The CSV export of `GET …/reports/flow` — **one row per bucket**, exactly
+        the bars that were drawn, zero-filled and `partial`-flagged as on screen.
+
+
+        Every parameter, default, refusal and status code is that endpoint's:
+        this handler delegates to the same service, and being a download changes
+        none of them. The file's structure, its comment header and its cell
+        conventions are the family's — the `ReportCsvFile` schema documents them
+        once for all six exports.
+
+
+        Header lines specific to this report: `# Window`, `# Interval`,
+        `# Totals` (created / resolved / net), a note explaining `partial` when
+        any bucket carries it, and `# Filters that matched nothing` when a filter
+        matched nothing — so a thin file is never mistaken for a quiet quarter.
+      operationId: getFlowReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/reportCsvFrom'
+        - $ref: '#/components/parameters/reportCsvTo'
+        - $ref: '#/components/parameters/reportCsvInterval'
+        - $ref: '#/components/parameters/reportCsvTypeId'
+        - $ref: '#/components/parameters/reportCsvComponentId'
+        - $ref: '#/components/parameters/reportCsvLabelId'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `date`, `created`, `resolved`, `openAtEnd`,
+            `partial`.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '400': { $ref: '#/components/responses/ReportWindowRejected' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /workspaces/{workspaceId}/projects/{projectId}/reports/cycle-time:
     get:
       tags: [Reports]
@@ -5262,6 +5329,55 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/cycle-time.csv:
+    get:
+      tags: [Reports]
+      summary: Cycle time — the plotted series as CSV
+      description: >-
+        The CSV export of `GET …/reports/cycle-time` — **one row per plotted
+        point**, which here is one row per completed issue, because the chart is
+        a scatter plot *of issues*. That is not the flat-issue-list mistake: the
+        plotted value is `cycleDays` / `leadDays`, and `key` and `title` are
+        there to identify the dot a reader is pointing at. No description, no
+        status history, no components — the columns an issue export would carry
+        and a chart does not plot.
+
+
+        Every parameter, default, refusal and status code is the JSON endpoint's;
+        see the `ReportCsvFile` schema for the file's shared structure.
+
+
+        **`cycleDays` is empty for an issue with no recorded start** — never
+        backfilled from `created_at`, exactly as in JSON — and the header counts
+        those rows in `# Completed issues with no start` and explains the gap.
+        The percentile pairs are in the header, or the reason each was
+        suppressed.
+      operationId: getCycleTimeReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/reportCsvFrom'
+        - $ref: '#/components/parameters/reportCsvTo'
+        - $ref: '#/components/parameters/reportCsvTypeId'
+        - $ref: '#/components/parameters/reportCsvComponentId'
+        - $ref: '#/components/parameters/reportCsvLabelId'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `issueId`, `key`, `title`, `typeId`, `startedAt`,
+            `closedAt`, `cycleDays`, `leadDays`.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '400': { $ref: '#/components/responses/ReportWindowRejected' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /workspaces/{workspaceId}/projects/{projectId}/reports/aging:
     get:
       tags: [Reports]
@@ -5370,6 +5486,48 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/aging.csv:
+    get:
+      tags: [Reports]
+      summary: Aging WIP — the plotted series as CSV
+      description: >-
+        The CSV export of `GET …/reports/aging` — **the columns flattened, one
+        row per open issue, each carrying the column it sits in**. Same
+        scatter-plot-of-issues reasoning as `cycle-time.csv`: the plotted value
+        is `ageDays`, and the key and title identify the dot.
+
+
+        Takes **no parameters**, exactly as the JSON does — a current-state
+        report has no window to state, and the header says so in as many words
+        rather than leaving a blank `# Window` line to be read as an omission.
+
+
+        The `# Cycle time percentiles` lines are the project's **completed**
+        work, drawn as reference lines across the columns; the header states
+        explicitly that they are *not* computed from the open issues in the file,
+        because that is the natural wrong reading of a file containing only open
+        issues. An empty trailing column name means the "Not on this board"
+        column, whose `statusId` is empty.
+      operationId: getAgingReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `statusId`, `status`, `category`, `issueId`,
+            `key`, `title`, `ageDays`, `assigneeId`, `startedAt`.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-burnup:
     get:
       tags: [Reports]
@@ -5524,6 +5682,64 @@ paths:
         '404': { $ref: '#/components/responses/ReportSprintNotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-burnup.csv:
+    get:
+      tags: [Reports]
+      summary: Sprint burn-up — the plotted series as CSV
+      description: >-
+        The CSV export of `GET …/reports/sprint-burnup` — **one row per UTC day,
+        `scope` and `completed`**: the two lines, and nothing else.
+
+
+        **The scope-change log is deliberately not folded in.** It is a different
+        shape from a day series, and two tables in one CSV is a file no
+        spreadsheet opens correctly. The header states how many scope changes
+        there were and points at the JSON endpoint for them, so a reader is told
+        what is missing rather than left to notice.
+
+
+        Every parameter, default, refusal and status code is the JSON endpoint's;
+        see the `ReportCsvFile` schema for the file's shared structure.
+
+
+        **No ACTIVE sprint is a `200`, not an error** — the header carries a
+        `# No sprint:` note explaining that this project has none and none was
+        named, and the file has zero data rows. An unexplained empty CSV would
+        recreate exactly the ambiguity the JSON endpoint avoids by answering
+        `sprint: null` instead of `404`. Other report-specific header lines:
+        `# Measure`, `# Committed at start`, `# Issues in scope with no estimate`
+        (with a note on why a POINTS line can sit below a COUNT line), and
+        `# Series truncated at` when the day series was clipped.
+      operationId: getSprintBurnupReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/reportCsvSprintId'
+        - $ref: '#/components/parameters/reportCsvMeasure'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `date`, `scope`, `completed`. Zero data rows when
+            the project has no ACTIVE sprint and none was named.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '400':
+          description: >-
+            Same as the JSON sibling — an unknown `measure`, or a `sprintId` or
+            path id that will not bind. This report takes no window, so none of
+            the window refusals apply.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ReportSprintNotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-review:
     get:
       tags: [Reports]
@@ -5640,6 +5856,63 @@ paths:
         '404': { $ref: '#/components/responses/ReportSprintNotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/sprint-review.csv:
+    get:
+      tags: [Reports]
+      summary: Sprint review — the record as CSV
+      description: >-
+        The CSV export of `GET …/reports/sprint-review`, and **the one export
+        that is not a plotted series** — because the report is not a chart. It is
+        five labelled lists, so the file is **one row per issue per list, with a
+        leading `list` column** naming which line of the record the row belongs
+        to.
+
+
+        **The same key legitimately appears more than once**, exactly as it does
+        on screen: an issue that was committed and then completed is in both
+        lists, and the five lists are labelled views rather than a partition.
+        Deduplicate only if you know which question you are asking; summing a
+        column across the whole file counts those issues twice.
+
+
+        Every parameter, default, refusal and status code is the JSON endpoint's;
+        see the `ReportCsvFile` schema for the file's shared structure.
+
+
+        **`points` are the ledger's entry snapshots, not today's estimates** —
+        the header says so, because a column of numbers in a spreadsheet carries
+        none of the context the API reference does. The header also carries
+        `# Totals (count/points)` and a `# List <name>` summary line per list,
+        and — as on the burn-up — a `# No sprint:` note plus zero data rows when
+        the project has no ACTIVE sprint and none was named.
+      operationId: getSprintReviewReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/reportCsvSprintId'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `list`, `issueId`, `key`, `title`, `typeId`,
+            `assigneeId`, `statusId`, `points`, `closedAt`, `deleted`. A deleted
+            issue still gets its row, with `deleted` true and only `key` and
+            `points` populated.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '400':
+          description: A `sprintId` or path id that will not bind. This report takes no window.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/ReportSprintNotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /workspaces/{workspaceId}/projects/{projectId}/reports/velocity:
     get:
       tags: [Reports]
@@ -5803,6 +6076,65 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/velocity.csv:
+    get:
+      tags: [Reports]
+      summary: Velocity — the bars as CSV
+      description: >-
+        The CSV export of `GET …/reports/velocity` — **one row per completed
+        sprint**, oldest first, carrying exactly the four numbers the bar shows
+        plus its unestimated count.
+
+
+        Every parameter, default, refusal and status code is the JSON endpoint's;
+        see the `ReportCsvFile` schema for the file's shared structure.
+
+
+        **The band is in the header, never a column** — `# Forecast: p50=…,
+        p85=…, sample size=…`, described there as *a range to plan the next
+        sprint with, and deliberately not a single number to compare teams by*.
+        When it is suppressed the header says so and why, and **the bars are
+        exported anyway**, because they are facts and only the band is an
+        inference.
+
+
+        **The report's refusals travel with the file.** Its columns are exactly
+        the JSON record's and may not grow a per-person one: there is no
+        assignee, actor or owner column here and there will not be, and no
+        workspace-level `velocity.csv` exists — comparing two teams still means
+        exporting two files and doing the arithmetic yourself, which is the
+        intended friction rather than an omission.
+      operationId: getVelocityReportCsv
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/reportCsvSprints'
+        - $ref: '#/components/parameters/reportCsvMeasure'
+      responses:
+        '200':
+          description: >-
+            The file. Columns: `sprintId`, `name`, `startAt`, `completedAt`,
+            `committed`, `completed`, `addedAfterStart`, `carriedOver`,
+            `unestimatedCount`. Zero data rows for a project that has never
+            completed a sprint.
+          headers:
+            Content-Disposition: { $ref: '#/components/headers/ReportCsvDisposition' }
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            text/csv:
+              schema: { $ref: '#/components/schemas/ReportCsvFile' }
+        '400':
+          description: >-
+            Same as the JSON sibling — `sprints` outside `1`…`12`, refused and
+            never clamped, or an unknown `measure`, or an id that will not bind.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '406': { $ref: '#/components/responses/ReportCsvNotAcceptable' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
   /notifications:
     get:
       tags: [Notifications]
@@ -6603,6 +6935,65 @@ components:
       description: Page size (default 50, clamped server-side to a maximum of 100)
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
 
+    reportCsvFrom:
+      name: from
+      in: query
+      description: >-
+        Identical to the JSON sibling's `from` — same default, same
+        `1970-01-01`…`2200-12-31` band, same `400` naming the cap. Being a
+        download changes no parameter and no refusal.
+      schema: { type: string, format: date, example: 2026-05-21 }
+    reportCsvTo:
+      name: to
+      in: query
+      description: Identical to the JSON sibling's `to`.
+      schema: { type: string, format: date, example: 2026-08-19 }
+    reportCsvInterval:
+      name: interval
+      in: query
+      description: Identical to `/reports/flow`'s `interval`. An unknown value is a `400`.
+      schema: { $ref: '#/components/schemas/ReportInterval' }
+    reportCsvTypeId:
+      name: typeId
+      in: query
+      description: >-
+        Identical to the JSON sibling's `typeId` — a **filter**, so an unknown or
+        foreign id narrows the export to zero data rows and is named in the
+        `# Filters that matched nothing` header line rather than being a `404`.
+      schema: { type: string, format: uuid }
+    reportCsvComponentId:
+      name: componentId
+      in: query
+      description: Identical to the JSON sibling's `componentId`; same filter rule as `typeId`.
+      schema: { type: string, format: uuid }
+    reportCsvLabelId:
+      name: labelId
+      in: query
+      description: Identical to the JSON sibling's `labelId`; same filter rule as `typeId`.
+      schema: { type: string, format: uuid }
+    reportCsvSprintId:
+      name: sprintId
+      in: query
+      description: >-
+        Identical to the JSON sibling's `sprintId` — the report's **subject**, so
+        it defaults to the project's ACTIVE sprint and an id that does not resolve
+        inside this project is a `404`. Having no ACTIVE sprint is **not** an
+        error: it is a `200` whose header says so, with zero data rows.
+      schema: { type: string, format: uuid }
+    reportCsvMeasure:
+      name: measure
+      in: query
+      description: >-
+        Identical to the JSON sibling's `measure`. Echoed into the `# Measure`
+        header line, so an exported file always states which measure it holds.
+      schema: { $ref: '#/components/schemas/ReportMeasure' }
+    reportCsvSprints:
+      name: sprints
+      in: query
+      description: >-
+        Identical to `/reports/velocity`'s `sprints` — refused at both ends
+        (1…12) rather than clamped.
+      schema: { type: integer, minimum: 1, maximum: 12, default: 6, example: 6 }
   responses:
     AuthOk:
       description: Authenticated — access token in body, refresh cookie set
@@ -7345,7 +7736,29 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+    ReportCsvNotAcceptable:
+      description: >-
+        The request `Accept` header excludes `text/csv`. These operations declare
+        `produces: text/csv`, so a client asking for `application/json` is refused
+        rather than handed a CSV body labelled as JSON.
+
+
+        Error responses are unaffected by that declaration: a `404`, `429` or
+        `400` on one of these paths still comes back as a `application/problem+json`
+        problem detail, not as CSV.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
   headers:
+    ReportCsvDisposition:
+      description: >-
+        Always `attachment`, with a **server-built** filename — never one the
+        client supplied. The shape is `<PROJECT KEY>-<report>-<YYYY-MM-DD>.csv`,
+        e.g. `DEMO-velocity-2026-08-20.csv`. The date comes from the same
+        `computedAt` the file’s header prints, so the name and the contents can
+        never disagree — which is what tells two exports of the same report apart
+        in a downloads folder.
+      schema: { type: string, example: 'attachment; filename="DEMO-velocity-2026-08-20.csv"' }
     ReportCacheControl:
       description: >-
         Always `private, max-age=60`. `private` is the load-bearing half: a
@@ -11610,6 +12023,122 @@ components:
             report actually needs, since its `percentiles` are computed over
             precisely that history.
 
+    ReportCsvFile:
+      type: string
+      description: >-
+        **The plotted series, one row per data point — not a list of issues.**
+        That distinction is the whole feature. Where an export like this exists at
+        all it usually hands back a flat issue list, which is the documented
+        disappointment: people ask for the chart and get a spreadsheet, so they go
+        back to screenshotting. Every row in these files is a point that was
+        drawn, and every point that was drawn is a row.
+
+
+        `cycle-time.csv` and `aging.csv` look like the exception and are not:
+        their charts are scatter plots **of issues**, so one dot is one issue and
+        the key and title identify the dot a reader is pointing at. Neither
+        carries a description, a status history or a component list — the columns
+        an issue export would have and a chart does not plot.
+
+
+        **There is no "matching issues" export.** Do not read these files as one.
+        See the `Reports` tag for the current state of that gap.
+
+
+        ## Structure
+
+        A UTF-8 file with **CRLF** line endings (RFC 4180), opening with a
+        **UTF-8 BOM**, then a `#`-comment header, then exactly one column row,
+        then the data rows. **Every line is CSV cells — the comment header and
+        the column row included**, so the whole file parses with one reader.
+
+        ```
+
+        <BOM>"# Hamstrack report: velocity"
+
+        "# Project: DEMO - Demo Project"
+
+        "# Project id: 0192a0…"
+
+        "# Measure: COUNT"
+
+        "# Window: 6 completed sprints"
+
+        "# Forecast: p50=18, p85=23, sample size=6 - a range to plan the next sprint with, …"
+
+        "# Computed at: 2026-08-20T09:14:22Z"
+
+        "# Based on issues: 142"
+
+        "# Truncated: no (row cap 20000)"
+
+        "sprintId","name","startAt","completedAt","committed","completed","addedAfterStart","carriedOver","unestimatedCount"
+
+        0192cc…,"Sprint 6",2026-05-01T09:00Z,2026-05-15T16:02:41Z,19,14,2,5,0
+
+        ```
+
+
+        **The header is part of the contract, not decoration** — it is what makes
+        a file mailed on, renamed and opened three weeks later still say what it
+        is. It carries the report name, the project key + name + id, the window,
+        the measure or sprint or interval **where the report has one**, the
+        percentiles **or the reason they were suppressed**, `computedAt`,
+        `basedOnIssues`, and whether truncation bit.
+
+
+        **A parser must not require a fixed header block.** Only the lines that
+        apply to a given report are emitted: four of the six reports have no
+        measure at all, `aging` states that it has no window rather than printing
+        one, and the suppression, truncation, unmatched-filter and no-sprint lines
+        appear only when they are true. Match on the `# key: value` shape, not on
+        position or count — and **unquote the line first**: each header line is
+        **one quoted CSV cell**, `#` included.
+
+
+        That quoting is a security control, not tidiness. A comment line emitted
+        raw is still split on commas, so only its *first* cell begins with `#` —
+        a project or sprint name containing a comma ends that cell and opens a
+        new one, which is free to begin with `=`. Neither name restricts commas
+        or equals signs, so wrapping the whole line in quotes is what closes the
+        breakout. The column row is quoted for the same reason.
+
+
+        **Consequence worth knowing if you already parse these files:** because
+        `#` now sits *inside* the quotes, a reader configured to drop comment
+        lines by a leading `#` — `pandas.read_csv(..., comment="#")` and its
+        equivalents — **no longer skips the header**, and sees one-column rows
+        instead. That trade was taken deliberately: there is no format in which a
+        line both starts with a bare `#` and is a single cell. Match the header
+        and read it, or skip lines whose first cell starts with `"#` after
+        unquoting; do not filter on a bare leading `#`.
+
+
+        ## Cell conventions
+
+        * **`null` is an empty, unquoted field** — never `""` and never `null`.
+          Report gaps are real (a cycle time with no recorded start, a suppressed
+          band, a sprint with no completion date), and an empty field is what every
+          spreadsheet and dataframe library reads back as *missing*.
+        * **Text cells are always quoted**, with inner quotes doubled — so a comma,
+          quote or newline in a title can never shift a row's remaining columns. The
+          **comment-header lines and the column-name row take the same path**, so
+          they are quoted too: every line in the file is cells.
+        * **Text cells beginning `=`, `+`, `-`, `@`, tab or CR are prefixed with an
+          apostrophe** (`'`) against spreadsheet formula injection: an issue titled
+          `=HYPERLINK(...)` would otherwise become a live link in the reader's
+          spreadsheet, and quoting does not help because the CSV parser strips
+          quotes before the formula engine sees the value. **Expect that leading
+          apostrophe when parsing text columns.**
+        * **Numeric, date, enum, UUID and boolean cells are NOT prefixed**, and
+          that asymmetry is deliberate: a negative `net` or `delta` legitimately
+          starts with `-`, and guarding it would turn the column into text that
+          will not sum. Those cells are server-generated and cannot carry attacker
+          input.
+        * The **BOM is deliberate**. Without it Excel on Windows decodes the file
+          as the system code page and mangles every non-ASCII title. It costs a
+          strict RFC 4180 parser three bytes on the first line; Excel, LibreOffice,
+          Sheets, `pandas` (`encoding="utf-8-sig"`) and R all strip it.
     ReportMeasure:
       type: string
       enum: [COUNT, POINTS]

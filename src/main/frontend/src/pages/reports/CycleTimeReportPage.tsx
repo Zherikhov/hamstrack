@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type ReactNode } from 'react'
+import { Suspense, lazy, useMemo, useRef, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -21,6 +21,7 @@ import {
   RANGE_PRESETS, THIN_HISTORY_DAYS, historyDays, presetOf, presetWindow, readCycleState,
   todayIso, writeCycleParams, writeCycleUrl, type CycleState,
 } from './window'
+import { ChartExport, ReportExportBar, useReportProject } from './export'
 
 // Both charts split out of the page chunk, and only one of them (the scatter)
 // carries Recharts. The chrome — controls, the numbers, every disclosure and
@@ -31,6 +32,11 @@ const AgingChart = lazy(() => import('./AgingChart'))
 
 /** Beyond this many rows the per-issue table is capped — and says so. */
 const TABLE_LIMIT = 200
+
+/** Why this half has no PNG button while the other four charts do (R7). */
+const AGING_IMAGE_HINT =
+  'Image export serialises a chart’s own SVG. The aging columns are drawn as an HTML layout '
+  + 'rather than SVG, so there is nothing to serialise — the CSV above holds every column and row.'
 
 /**
  * **Cycle & lead time** (`/w/:wsId/p/:projectId/reports/cycle-time`) — R3 of the
@@ -148,9 +154,29 @@ export default function CycleTimeReportPage() {
   )
 
   const filtered = !!(state.typeId || state.componentId || state.labelId)
+
+  // Pinned state for the shareable link and the series CSV — including the
+  // measure, which is client-only on the wire but is half of what this page IS.
+  const pinned = writeCycleUrl({ ...state, from: shownFrom, to: shownTo })
+  const csvParams = writeCycleParams({ ...state, from: shownFrom, to: shownTo })
+  const { projectKey, projectLabel } = useReportProject(wsId, projectId)
+  const scatterRef = useRef<HTMLDivElement>(null)
+
   const history = historyDays(cycle.data?.meta.firstIssueAt, today)
   const cycleError = cycle.error instanceof ApiResponseError ? cycle.error : null
   const agingError = aging.error instanceof ApiResponseError ? aging.error : null
+
+  /**
+   * The active filters in words, for the exported image's subtitle — a picture
+   * of a filtered chart that does not say so misleads with numbers that are all
+   * true. Names where this browser can resolve them, raw ids where it cannot.
+   */
+  const filterParts = [
+    state.typeId && `type ${nameOrId(config?.issueTypes, state.typeId)}`,
+    state.componentId && `component ${nameOrId(components, state.componentId)}`,
+    state.labelId && `label ${nameOrId(labels, state.labelId)}`,
+  ].filter(Boolean) as string[]
+  const filterSummary = filterParts.length ? `Filtered by ${filterParts.join(' · ')}` : ''
 
   /** A filter parameter in the reader's own vocabulary — see `FlowReportPage`. */
   function describeFilter(param: string): ReactNode {
@@ -413,6 +439,22 @@ export default function CycleTimeReportPage() {
         </Select>
       </div>
 
+      {/* Export (R7). TWO series CSVs, because this page is two reports with two
+          endpoints and two different scopes — one windowed, one current-state —
+          and a single "download the data" button would have to pick one and
+          silently drop the other. */}
+      <ReportExportBar
+        wsId={wsId}
+        projectId={projectId}
+        projectKey={projectKey}
+        shareParams={pinned}
+        csv={[
+          { kind: 'cycle-time', label: 'Finished work', params: csvParams, slug: 'cycle-time' },
+          { kind: 'aging', label: 'Aging WIP', params: {}, slug: 'aging' },
+        ]}
+        disabled={!cycle.data && !aging.data}
+      />
+
       {/* ── Finished work ───────────────────────────────────────────────────── */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: '4px 0 0' }}>Finished work</h2>
 
@@ -522,6 +564,28 @@ export default function CycleTimeReportPage() {
                   refreshing…
                 </span>
               )}
+              {/* Only when there is a chart: an empty window draws none, and a
+                  button that answers "not loaded yet" forever is worse than no
+                  button at all. */}
+              {plotted.length > 0 && <ChartExport
+                chartRef={scatterRef}
+                title={`${MEASURE_LABEL[measure]} — finished work`}
+                subtitle={filterSummary}
+                slug={measure === 'CYCLE' ? 'cycle-time' : 'lead-time'}
+                projectKey={projectKey}
+                provenance={{
+                  project: projectLabel,
+                  // The measure is IN the window line, not only in the title: the
+                  // two measures are different numbers over different sets, and an
+                  // image of one filed beside an image of the other is exactly how
+                  // a cycle time gets quoted as a lead time.
+                  window: `${cycle.data.from} → ${cycle.data.to} (UTC) · ${MEASURE_LABEL[measure].toLowerCase()}`,
+                  computedAt: cycle.data.meta.computedAt,
+                  basedOnIssues: cycle.data.meta.basedOnIssues,
+                  truncated: cycle.data.meta.truncated,
+                  cap: cycle.data.meta.cap,
+                }}
+              />}
             </div>
             {/* The sample size printed beside the lines, as §2.2 words it. */}
             <p className="text-sm mb-3" style={{ color: 'var(--color-text-secondary)', margin: '0 0 12px' }}>
@@ -558,7 +622,7 @@ export default function CycleTimeReportPage() {
                 )}
               </p>
             ) : (
-              <div aria-hidden="true">
+              <div aria-hidden="true" ref={scatterRef}>
                 <Suspense fallback={<div style={{ height: 320 }} />}>
                   <CycleTimeChart
                     items={plotted}
@@ -689,6 +753,19 @@ export default function CycleTimeReportPage() {
                   refreshing…
                 </span>
               )}
+              {/* The one chart in this feature with NO image export, said out
+                  loud rather than left as a missing button somebody hunts for.
+                  The four SVG charts are serialised and rasterised as they
+                  stand; these columns are an HTML layout, and rasterising HTML
+                  needs the DOM-to-canvas library this slice deliberately does
+                  not add. The CSV above carries every row of it. */}
+              <span
+                className="text-xs"
+                style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}
+                title={AGING_IMAGE_HINT}
+              >
+                no image export — use “Aging WIP (CSV)” above
+              </span>
             </div>
 
             {agingItems.length === 0 ? (
@@ -764,6 +841,11 @@ function IssueLink({ issueKey, href }: { issueKey: string; href: string | null }
 function filterValue(list: { id: string; name: string }[] | undefined, id: string): ReactNode {
   const hit = list?.find(x => x.id === id)
   return hit ? <>“{hit.name}”</> : <span className="mono">{id}</span>
+}
+
+/** The same answer as a plain string — an exported image has no JSX in it. */
+function nameOrId(list: { id: string; name: string }[] | undefined, id: string): string {
+  return list?.find(x => x.id === id)?.name ?? id
 }
 
 function Stat({ label, value, hint, color }: {

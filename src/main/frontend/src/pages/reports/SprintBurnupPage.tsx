@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type ReactNode } from 'react'
+import { Suspense, lazy, useMemo, useRef, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ApiResponseError, apiListWorkspaceMembers, reportsApi } from '../../api'
@@ -11,7 +11,8 @@ import {
 } from './common'
 import {
   CURRENT_POINTS_FOOTNOTE, SPRINT_MEASURE_LABEL, SPRINT_MEASURE_UNIT, burnupRows, formatDelta,
-  formatMeasure, lastMeasuredDay, readSprintReportState, resolveSprintChoice, writeBurnupParams,
+  formatMeasure, lastMeasuredDay, readSprintReportState, resolveSprintChoice, sprintWindow,
+  writeBurnupParams,
   writeBurnupUrl, type BurnupRow,
 } from './sprint'
 import {
@@ -19,6 +20,7 @@ import {
   SprintReportPicker, useReportSprints, useSprintReportGate,
 } from './sprintCommon'
 import { todayIso } from './window'
+import { ChartExport, ReportExportBar, useReportProject } from './export'
 
 // Split out of the page chunk: the chrome — picker, measure, every disclosure,
 // both tables — is readable and interactive before Recharts has parsed, and the
@@ -107,6 +109,13 @@ export default function SprintBurnupPage() {
   function update(patch: Partial<{ sprintId: string; measure: SprintMeasure }>) {
     setSearchParams(writeBurnupUrl({ sprintId, measure, ...patch }), { replace: true })
   }
+
+  // The RESOLVED state, for the shareable link and the series CSV. A burn-up URL
+  // with no sprint means "whichever is active", which is a different sprint next
+  // fortnight — so a link that leaves this page names the sprint it was showing.
+  const pinned = writeBurnupUrl({ sprintId, measure })
+  const { projectKey, projectLabel } = useReportProject(wsId, projectId)
+  const chartRef = useRef<HTMLDivElement>(null)
 
   const report = burnup.data
   const rows = useMemo(
@@ -245,6 +254,18 @@ export default function SprintBurnupPage() {
         )}
       </div>
 
+      {/* Export (R7). The CSV is the day-by-day series — scope, completed and the
+          ideal guide — not the sprint's issue list, which is the confusion the
+          two labels exist to prevent. */}
+      <ReportExportBar
+        wsId={wsId}
+        projectId={projectId}
+        projectKey={projectKey}
+        shareParams={pinned}
+        csv={[{ kind: 'sprint-burnup', label: 'Chart series', params: pinned, slug: 'sprint-burnup' }]}
+        disabled={!report}
+      />
+
       <SprintChoiceNote choice={choice} sprintId={state.sprintId} />
 
       {!gate.estimation && state.measure === 'POINTS' && (
@@ -353,6 +374,26 @@ export default function SprintBurnupPage() {
                   refreshing…
                 </span>
               )}
+              {/* Only when there is a chart — a sprint with no history draws
+                  none, and a button that can only answer "not yet" is noise. */}
+              {rows.length > 0 && <ChartExport
+                chartRef={chartRef}
+                title={`Sprint burn-up — ${report.sprint.name}`}
+                subtitle={`Measured in ${SPRINT_MEASURE_UNIT[measure]}`}
+                slug="sprint-burnup"
+                projectKey={projectKey}
+                provenance={{
+                  project: projectLabel,
+                  // The SPRINT is this report's window, so it is what the footer
+                  // states — a burn-up image dated only by `computedAt` would not
+                  // say which fortnight it is about.
+                  window: sprintWindow(report.sprint.name, report.startAt, report.endAt),
+                  computedAt: report.meta.computedAt,
+                  basedOnIssues: report.meta.basedOnIssues,
+                  truncated: report.meta.truncated,
+                  cap: report.meta.cap,
+                }}
+              />}
             </div>
 
             {rows.length === 0 ? (
@@ -363,9 +404,11 @@ export default function SprintBurnupPage() {
                   : 'No day of this sprint carries a scope or a completed figure.'}
               </p>
             ) : (
-              <Suspense fallback={<div style={{ height: 320 }} />}>
-                <BurnupChart rows={rows} measure={measure} actorName={actorName} />
-              </Suspense>
+              <div ref={chartRef}>
+                <Suspense fallback={<div style={{ height: 320 }} />}>
+                  <BurnupChart rows={rows} measure={measure} actorName={actorName} />
+                </Suspense>
+              </div>
             )}
           </ReportCard>
 

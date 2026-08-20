@@ -1,6 +1,7 @@
 package com.hamstrack.report;
 
 import com.hamstrack.report.dto.ReportMeasure;
+import com.hamstrack.report.service.ReportCsvService;
 import com.hamstrack.report.service.VelocityService;
 import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
@@ -48,6 +49,7 @@ class VelocityQueryCountTest extends SprintReportTestBase {
 
     @Autowired EntityManagerFactory entityManagerFactory;
     @Autowired VelocityService velocityService;
+    @Autowired ReportCsvService reportCsvService;
 
     @Test
     void velocityIsThreeStatementsWhateverItSamples() throws Exception {
@@ -94,10 +96,47 @@ class VelocityQueryCountTest extends SprintReportTestBase {
                   + " — there are no sprints to sweep, so there is no sweep to run.";
     }
 
+    /**
+     * <strong>The CSV export costs the report plus exactly one statement</strong> (HD-141 R7).
+     *
+     * <p>That one is the project's key and name, which the file's comment header needs and no
+     * report response carries — a downloaded file has no URL to be read alongside, so it has to
+     * say what it is about. It is read through a two-column workspace-scoped projection
+     * <em>after</em> the delegate has resolved tenancy.
+     *
+     * <p>The number this actually guards is the <strong>4</strong> it is not. The obvious way to
+     * write an export is {@code resolveProject} for the header and then call the report service,
+     * which resolves it again — doubling the tenancy cost of every download, invisibly, because
+     * both answers are identical. This epic's other query-count tests exist for the same reason:
+     * a report's cost has to be a property somebody asserted, not a thing that drifts.
+     */
+    @Test
+    void theVelocityExportAddsExactlyOneStatementToTheReportItExports() throws Exception {
+        var ctx = newProject();
+        completedSprints(ctx, 2);
+
+        run(ctx, null);
+        export(ctx);
+
+        long json = count(() -> run(ctx, null));
+        long csv = count(() -> export(ctx));
+
+        assert csv == json + 1
+                : "the velocity export took " + csv + " statements against the report's " + json
+                  + ". One more is the project header (key + name) the comment block needs; four "
+                  + "more means the export resolved the project a second time instead of letting "
+                  + "the report service do it once.";
+    }
+
     // ------------------------------------------------------------------ plumbing
 
     private void run(Ctx ctx, Integer sprints) {
         velocityService.velocity(ctx.owner(), ctx.wsId(), ctx.projectId(), sprints,
+                ReportMeasure.POINTS);
+    }
+
+    private void export(Ctx ctx) {
+        reportCsvService.velocity(ctx.owner(), ctx.wsId(), ctx.projectId(), null,
                 ReportMeasure.POINTS);
     }
 

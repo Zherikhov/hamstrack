@@ -20,6 +20,7 @@ import {
   NoSprintsCard, ScrumRequiredCard, SprintChoiceNote, SprintHeadline, SprintReportPicker,
   useReportSprints, useSprintReportGate,
 } from './sprintCommon'
+import { ReportExportBar, useReportProject } from './export'
 
 /**
  * **Sprint review record** (`/w/:wsId/p/:projectId/reports/sprint-review`) — the
@@ -159,6 +160,11 @@ export default function SprintReviewPage() {
     },
   ]), [config, members, wsId, projectId])
 
+  // Above the capability gate, because every early return below is a return —
+  // a hook called after one of them runs on some renders and not others, which
+  // is the "rendered more hooks" crash and not a style question.
+  const { projectKey } = useReportProject(wsId, projectId)
+
   // ── Capability gate: DECLARED, never inferred from the data ────────────────
   if (!gate.ready) {
     return <p className="mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</p>
@@ -182,6 +188,9 @@ export default function SprintReviewPage() {
 
   const summary = report ? reviewSummary(report) : null
   const deletedRows = report ? countDeleted(report) : 0
+  // The sprint this page RESOLVED, pinned into the link it hands out.
+  const pinned = writeReviewParams({ sprintId })
+
   const neverStarted = !!report && !report.startAt
 
   return (
@@ -195,6 +204,19 @@ export default function SprintReviewPage() {
           onChange={id => setSearchParams(writeReviewParams({ sprintId: id }), { replace: true })}
         />
       </div>
+
+      {/* Export (R7). **No image** — this report is five lists and a header line,
+          not a chart, and a PNG of a table is a worse table. The CSV is the
+          record itself; the shareable link names the sprint, which a URL that
+          left it out would resolve to a different one next fortnight. */}
+      <ReportExportBar
+        wsId={wsId}
+        projectId={projectId}
+        projectKey={projectKey}
+        shareParams={pinned}
+        csv={[{ kind: 'sprint-review', label: 'Sprint record', params: pinned, slug: 'sprint-review' }]}
+        disabled={!report}
+      />
 
       <SprintChoiceNote choice={choice} sprintId={state.sprintId} />
 

@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import FlowReportPage from './FlowReportPage'
-import { reportsApi } from '../../api'
+import { apiDownloadReportCsv, reportsApi } from '../../api'
 import type { FlowReport } from '../../types'
 
 /**
@@ -69,6 +69,13 @@ vi.mock('../../api', () => ({
       return mockState.report
     }),
   },
+  // R7: the page now carries an export bar, which reads the project (for the
+  // image footer's identity) and downloads the series CSV.
+  apiGetProject: vi.fn(async () => ({
+    id: 'p1', workspaceId: 'w1', name: 'Payments', key: 'PAY', archived: false,
+    myRole: 'MEMBER', myPermissions: [], createdAt: '2026-01-01T00:00:00Z',
+  })),
+  apiDownloadReportCsv: vi.fn(async () => undefined),
 }))
 
 /** A weekly report whose window starts on a Monday and ends on a Sunday (aligned). */
@@ -514,5 +521,36 @@ describe('FlowReportPage — no failure is silent', () => {
     mockState.reportError = new TypeError('Failed to fetch')
     renderPage()
     expect(await screen.findByText(/Couldn’t load this report/)).toBeInTheDocument()
+  })
+})
+
+/**
+ * R7 (HD-141) — export, wired to a real report page rather than to a fixture.
+ *
+ * The component's own contract is asserted in `export.test.tsx`; what these two
+ * cover is the wiring only this page can get wrong: that the CSV asks for the
+ * window **on screen**, and that the shareable link is pinned even when the URL
+ * that produced the page carried no window at all.
+ */
+describe('FlowReportPage — export (R7)', () => {
+  it('asks the CSV for the window on screen, not for the one in the URL', async () => {
+    // Landing with no window: the SERVER picked one and echoed it back, and that
+    // echo is what an export has to carry — a CSV of "whatever the default is"
+    // would not be a copy of the chart above it.
+    renderPage('/w/w1/p/p1/reports/flow')
+    await screen.findByTestId('flow-chart')
+
+    await userEvent.click(screen.getByRole('button', { name: /Chart series \(CSV\)/ }))
+    await waitFor(() => expect(apiDownloadReportCsv).toHaveBeenCalled())
+    const [ws, project, kind, params] = vi.mocked(apiDownloadReportCsv).mock.calls[0]
+    expect([ws, project, kind]).toEqual(['w1', 'p1', 'flow'])
+    expect(params).toMatchObject({ from: '2026-08-03', to: '2026-08-16', interval: 'WEEK' })
+  })
+
+  it('lists both exports, and only the series one is clickable today', async () => {
+    renderPage()
+    await screen.findByTestId('flow-chart')
+    expect(screen.getByRole('button', { name: /Chart series \(CSV\)/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /Matching issues \(CSV\)/ })).toBeDisabled()
   })
 })

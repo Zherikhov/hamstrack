@@ -35,7 +35,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "app.reports.max-rows=2"
 })
 @AutoConfigureMockMvc
-class ReportRowCapTest extends SprintReportTestBase {
+class ReportRowCapTest extends ReportCsvTestBase {
 
     @Test
     void aCappedCycleTimeReportShipsTheMostRecentAndSaysSo() throws Exception {
@@ -227,5 +227,37 @@ class ReportRowCapTest extends SprintReportTestBase {
         assertThat(forecast.get("sampleSize").asInt())
                 .as("suppressed, but still stating what there was")
                 .isEqualTo(1);
+    }
+
+    /**
+     * <strong>Truncation is disclosed in the exported file too</strong> (HD-141 R7).
+     *
+     * <p>The rule this class exists for — a capped report never stays quiet about it — is the one
+     * an export is most likely to lose, because a CSV has no {@code meta} block to carry
+     * {@code truncated} and {@code cap} and nobody misses a field that was never rendered. A file
+     * that silently holds the first 2 of 5 rows is the "these numbers don't match" failure with a
+     * filename attached, and unlike a chart it outlives the tab it was downloaded from.
+     */
+    @Test
+    void aCappedExportSaysSoInItsHeaderRatherThanShippingFewerRowsQuietly() throws Exception {
+        var ctx = newProject();
+        for (int day = 1; day <= 5; day++) {
+            completed(ctx, "issue " + day,
+                    "2025-03-0" + day + "T00:00:00Z",
+                    "2025-03-0" + day + "T00:00:00Z",
+                    "2025-03-1" + day + "T00:00:00Z");
+        }
+
+        var csv = csv(ctx, "cycle-time.csv", "?from=2025-03-01&to=2025-03-31");
+
+        assertThat(dataRows(csv)).hasSize(2);
+        assertThat(comment(csv, "Truncated"))
+                .as("the file has to say it is a subset; nobody can tell from the rows")
+                .startsWith("YES - the row cap of 2");
+        assertThat(comment(csv, "Based on issues"))
+                .as("the denominator survives the cap in the file exactly as it does in the JSON, "
+                    + "so 'showing 2 of 5' is expressible")
+                .isEqualTo("5");
+        assertThat(comment(csv, "Sample size")).isEqualTo("5");
     }
 }

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type ReactNode } from 'react'
+import { Suspense, lazy, useMemo, useRef, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ApiResponseError, apiGetProjectConfig, reportsApi } from '../../api'
@@ -15,6 +15,7 @@ import {
   RANGE_PRESETS, THIN_HISTORY_DAYS, daysInclusive, historyDays, presetOf, presetWindow,
   readFlowState, todayIso, writeFlowParams, type FlowState,
 } from './window'
+import { ChartExport, ReportExportBar, useReportProject } from './export'
 
 // The chart chunk (Recharts) is split off even inside the already-lazy reports
 // area, so the report's chrome — controls, totals, table, the disclosures — is
@@ -129,6 +130,14 @@ export default function FlowReportPage() {
   }
 
   const preset = presetOf(shownFrom, shownTo, today)
+
+  // The state the export bar shares and the CSV asks for: PINNED, so the link a
+  // reader is sent describes this window rather than "whatever the server
+  // defaults to", which is a different report tomorrow.
+  const pinned = writeFlowParams({ ...state, from: shownFrom, to: shownTo })
+  const { projectKey, projectLabel } = useReportProject(wsId, projectId)
+  const chartRef = useRef<HTMLDivElement>(null)
+
   const buckets = data?.buckets ?? []
   // Straight off the response. Partiality is a fact about where the SERVER cut
   // the window, and re-deriving it here would be Monday truncation implemented a
@@ -143,6 +152,20 @@ export default function FlowReportPage() {
   // far back THIS CHART reaches, not how old the project is, and the sentence
   // below says the different thing.
   const filtered = !!(state.typeId || state.componentId || state.labelId)
+
+  /**
+   * The active filters in words, for the exported image's subtitle.
+   *
+   * A picture of a filtered chart that does not say it is filtered is the most
+   * portable way to mislead somebody with numbers that are all true. Unresolvable
+   * ids are printed raw, exactly as the on-page disclosure prints them.
+   */
+  const filterParts = [
+    state.typeId && `type ${nameOrId(config?.issueTypes, state.typeId)}`,
+    state.componentId && `component ${nameOrId(components, state.componentId)}`,
+    state.labelId && `label ${nameOrId(labels, state.labelId)}`,
+  ].filter(Boolean) as string[]
+  const filterSummary = filterParts.length ? `Filtered by ${filterParts.join(' · ')}` : ''
   const history = historyDays(data?.meta.firstIssueAt, today)
   const unmatched = data?.meta.unmatchedFilters ?? []
   const empty = buckets.length > 0 && buckets.every(b => b.created === 0 && b.resolved === 0)
@@ -273,6 +296,17 @@ export default function FlowReportPage() {
         </Select>
       </div>
 
+      {/* Export (R7) — the shareable URL and the SERIES csv, kept separate from
+          the issue-list export by two labels and a sentence (§1.6 #1). */}
+      <ReportExportBar
+        wsId={wsId}
+        projectId={projectId}
+        projectKey={projectKey}
+        shareParams={pinned}
+        csv={[{ kind: 'flow', label: 'Chart series', params: pinned, slug: 'flow' }]}
+        disabled={!data}
+      />
+
       {/* ── The 400s — ALL of them through one path. Every refusal on this
           endpoint has the same shape: it names the bound it measured against
           (`max-window-days` for a too-wide window, 1970…2200 for an out-of-band
@@ -365,6 +399,24 @@ export default function FlowReportPage() {
                   refreshing…
                 </span>
               )}
+              {/* The picture of THIS chart, carrying the project, the window and
+                  `computedAt` in its footer — a chart pasted into a chat is
+                  separated from its URL the moment it is pasted. */}
+              {!empty && <ChartExport
+                chartRef={chartRef}
+                title="Flow — created vs resolved"
+                subtitle={filterSummary}
+                slug="flow"
+                projectKey={projectKey}
+                provenance={{
+                  project: projectLabel,
+                  window: `${data.from} → ${data.to} (UTC), ${shownInterval === 'WEEK' ? 'weekly' : 'daily'} buckets`,
+                  computedAt: data.meta.computedAt,
+                  basedOnIssues: data.meta.basedOnIssues,
+                  truncated: data.meta.truncated,
+                  cap: data.meta.cap,
+                }}
+              />}
             </div>
 
             {empty ? (
@@ -388,7 +440,7 @@ export default function FlowReportPage() {
               // the chart marks itself too, but the Suspense fallback is not the
               // chart and would otherwise be announced as an empty region. The
               // accessible reading of this report is the table below.
-              <div aria-hidden="true">
+              <div aria-hidden="true" ref={chartRef}>
                 <Suspense fallback={<div style={{ height: 300 }} />}>
                   <FlowChart buckets={buckets} interval={data.interval} />
                 </Suspense>
@@ -469,6 +521,11 @@ const HANDLED_STATUSES = [400, 404, 429]
 function filterValue(list: { id: string; name: string }[] | undefined, id: string): ReactNode {
   const hit = list?.find(x => x.id === id)
   return hit ? <>“{hit.name}”</> : <span className="mono">{id}</span>
+}
+
+/** The same answer as a plain string — an exported image has no JSX in it. */
+function nameOrId(list: { id: string; name: string }[] | undefined, id: string): string {
+  return list?.find(x => x.id === id)?.name ?? id
 }
 
 /** `+5` / `-3` / `0` — a net figure is only readable when its sign is explicit. */

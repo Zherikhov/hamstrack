@@ -98,6 +98,14 @@ completed). It is deliberately disjoint from the colours that already mean somet
   on bar corners. Chart surface = a normal white card (`--radius-lg`, `--shadow-card`).
 - **Library:** Recharts (MIT), imported **only** inside the lazy `/reports` chunk so the
   main bundle never carries it (precedent: the Swagger UI chunk).
+- **An exported chart is a surface of its own** (added 2026-08-20, R7). It gets an **opaque
+  white** background — never a transparent PNG, which is unreadable the moment it is pasted
+  onto a dark surface, and these images are pasted into chats for a living — the report name
+  above it, and a **footer band** carrying project, window and `computedAt`, plus the words
+  *axes zero-based, fixed ticks*. The claim is in the picture because that is where it is
+  used: the value of the axis rule is entirely in a reader holding two exports side by side,
+  and one who does not know the rule holds will not try. The image is the chart's own SVG,
+  serialised — never a second renderer drawing the same numbers a second way.
 
 ## Spacing
 - **Base unit:** 8px (4px half-step for 2xs/xs). Scale: 2xs(2) xs(4) sm(8) md(16) lg(24) xl(32) 2xl(48) 3xl(64).
@@ -132,3 +140,4 @@ completed). It is deliberately disjoint from the colours that already mean somet
 | 2026-08-19 | **Added a data-visualisation palette** — a 5-hue colour-blind-safe categorical ramp (Okabe–Ito derived) plus context/grid/axis tokens, disjoint from every semantic hue | Charts arrived with the reports epic (HD-5) and the system had no series colours at all. Reusing priority/status/safety-state hues would let a bar be misread as a state, so the ramp deliberately contains no red, amber, yellow, teal or slate; a chart sliced BY a taxonomy entity still reads that entity's configured colour (config-driven rendering does not stop at the chart) |
 | 2026-08-19 | **Recharts (MIT), lazy-loaded inside the `/reports` chunk only** | Owner decision (reports-proposal §9 OQ 1). Hand-rolled SVG is fine for lines and bars but not for the scatter-with-reference-lines that carries the most value in R3. Lazy import keeps the main bundle unchanged — same pattern as the Swagger UI chunk |
 | 2026-08-19 | **Every chart ships a table equivalent underneath it** | It is the accessibility answer (the chart is decoration over a real table) and it is the series CSV export R7 needs — one artefact, two requirements |
+| 2026-08-20 | **Exported images are opaque, titled and footed** — white background, report name, and a footer carrying project / window / `computedAt` / the axis claim | R7 (HD-141). A PNG leaves the app's theme and lands anywhere, so a transparent background plus dark text is unreadable on half the surfaces it reaches; and a chart pasted into a chat is separated from its URL the instant it is pasted, so everything needed to say what it is a picture of has to be inside it |

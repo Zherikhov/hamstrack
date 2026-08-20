@@ -1,5 +1,9 @@
 package com.hamstrack.report;
 
+import com.hamstrack.report.csv.ReportCsv;
+import com.hamstrack.report.csv.ReportSubject;
+import com.hamstrack.report.dto.ReportMeasure;
+import com.hamstrack.report.dto.ReportMeta;
 import com.hamstrack.report.dto.VelocityForecast;
 import com.hamstrack.report.dto.VelocityReportResponse;
 import com.hamstrack.report.dto.VelocitySprint;
@@ -16,15 +20,20 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.RecordComponent;
 import java.lang.reflect.Type;
 import java.lang.reflect.TypeVariable;
 import java.lang.reflect.WildcardType;
+import java.math.BigDecimal;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -378,6 +387,129 @@ class VelocityRefusalTest {
                 .as("if the walk cannot see %s, the refusals above are asserted over an empty set",
                         VelocitySprint.class.getSimpleName())
                 .contains("committed", "completed", "carriedOver", "addedAfterStart");
+    }
+
+    /**
+     * <strong>Refusal 1, in the export — the CSV's columns are the record's components and
+     * nothing else</strong> (HD-141 R7).
+     *
+     * <p>Every refusal above is keyed on a <em>record</em>: the allow-list walks
+     * {@link VelocityReportResponse}, the open-shape test walks its component types, and the
+     * headline-word test walks its names. R7 added a handler that returns none of them —
+     * {@code GET …/reports/velocity.csv} returns {@code ResponseEntity<String>} — so a column named
+     * {@code assigneeId} in that file would be a per-person velocity breakdown, published, with
+     * every test in this class still green. "Not as a filter, not as a tooltip, not in the CSV"
+     * (§2.5) says the CSV in so many words, and until this test existed the CSV was the one place
+     * the sentence was unenforced.
+     *
+     * <p>Rather than duplicate the allow-list for a second surface — two lists that agree today and
+     * diverge at the first edit — the export is held to the record itself: its columns are
+     * {@code VelocitySprint}'s components, in order, exactly. That makes every guard above apply to
+     * the CSV transitively, and it means a new column is not reachable without first adding a
+     * component to the record, which is the edit {@code PUBLISHED_COMPONENTS} already refuses in
+     * silence.
+     *
+     * <p>Equality rather than {@code isSubsetOf} on purpose: a dropped column is also a change to a
+     * published shape, and the person dropping it should say so here.
+     */
+    @Test
+    void theVelocityCsvColumnsAreExactlyTheBarRecordsComponents() {
+        var components = Arrays.stream(VelocitySprint.class.getRecordComponents())
+                .map(RecordComponent::getName)
+                .toList();
+
+        assertThat(ReportCsv.VELOCITY_COLUMNS)
+                .as("the velocity CSV exports a column that is not a component of %s. A .csv "
+                    + "handler returns a String, so NOTHING else in this file can see what it "
+                    + "writes — the type net resolves no velocity record from it and the path net "
+                    + "only checks where it is mounted. Keeping the columns equal to the record is "
+                    + "what puts the export back inside the refusals: a per-person column has to "
+                    + "be added to VelocitySprint first, where PUBLISHED_COMPONENTS refuses it.",
+                        VelocitySprint.class.getSimpleName())
+                .isEqualTo(components);
+    }
+
+    /**
+     * <strong>The export is visible to the path net — which is the only net that can see it at
+     * all</strong> (HD-141 R7).
+     *
+     * <p>{@link #everyHandlerThatServesVelocityIsServedFromBelowAProject} would pass whether or not
+     * the {@code .csv} handler existed, because {@code ReportController}'s typed {@code /velocity}
+     * keeps its set non-empty. So "the CSV is covered" is asserted here rather than assumed: the
+     * mapping list must actually contain a {@code .csv} path.
+     *
+     * <p>The failure it guards is specific and was a live design option. A single generic
+     * {@code @GetMapping("/{report}.csv")} serving all six exports is shorter code and is invisible
+     * to <em>both</em> nets at once — its return type is {@code ResponseEntity<String>}, which
+     * resolves to no velocity record, and its path string contains no "velocity". A workspace-level
+     * copy of that handler could then union two projects with every test in this file green, which
+     * is exactly the artefact §2.5 names. Six literal paths cost nothing and keep the export inside
+     * a guard that already exists.
+     */
+    @Test
+    void theVelocityCsvExportIsFoundByThePathNet() {
+        assertThat(velocityMappings(restControllers()))
+                .as("no handler with a .csv path serves velocity. Either the export was removed — "
+                    + "in which case delete this test — or it was folded into a generic "
+                    + "'{report}.csv' mapping, which is invisible to BOTH nets here: a CSV handler "
+                    + "returns a String (so the type net resolves no velocity record) and a "
+                    + "templated path contains no 'velocity' (so the path net does not match). "
+                    + "That combination is how a workspace-level velocity rollup ships silently.")
+                .anyMatch(mapping -> mapping.endsWith("/velocity.csv"));
+    }
+
+    /**
+     * The same refusal over the <strong>rendered file</strong>, comment header included.
+     *
+     * <p>The column check above constrains the table; this constrains everything else in the
+     * document, which is where the next per-person field would actually go. A
+     * {@code # Top contributor: …} line, or a {@code # Completed per assignee: …} summary, is not a
+     * column and would pass every other test here — and it is exactly the kind of "helpful" header
+     * addition §1.4 documents the harm of, because a quotable name in a status report is the whole
+     * failure mode.
+     *
+     * <p>Rendered from a hand-built response rather than over HTTP so this stays a plain unit test
+     * with no context, and so the assertion is about the renderer rather than about one project's
+     * data.
+     */
+    @Test
+    void theRenderedVelocityCsvNamesNobodyAndQuotesNoHeadlineNumber() {
+        var bar = new VelocitySprint(UUID.randomUUID(), "Sprint 7",
+                OffsetDateTime.parse("2026-08-01T00:00:00Z"),
+                OffsetDateTime.parse("2026-08-14T00:00:00Z"),
+                BigDecimal.valueOf(21), BigDecimal.valueOf(18), BigDecimal.valueOf(4),
+                BigDecimal.valueOf(3), 0);
+        var report = new VelocityReportResponse(ReportMeasure.COUNT, List.of(bar),
+                new VelocityForecast(18.0, 23.0, 6),
+                new ReportMeta(OffsetDateTime.parse("2026-08-20T09:14:22Z"), 42, false, 20000,
+                        null, List.of()));
+
+        var rendered = ReportCsv.velocity(
+                new ReportSubject(UUID.randomUUID(), "DEMO", "Demo project"), report)
+                .toLowerCase(Locale.ROOT);
+
+        for (var column : PERSON_COLUMNS) {
+            assertThat(rendered)
+                    .as("the rendered velocity CSV mentions %s. §1.4 refuses a per-person view on "
+                        + "evidence and §2.5 says 'not in the CSV' explicitly; a comment line is "
+                        + "still the CSV.", column)
+                    .doesNotContain(column);
+        }
+        assertThat(rendered)
+                .as("the rendered velocity CSV names a person-shaped field. The header block is "
+                    + "prose, which is precisely why it is the easiest place to add one.")
+                .doesNotContain("assignee").doesNotContain("actor").doesNotContain("owner")
+                .doesNotContain("per person").doesNotContain("contributor");
+        for (var word : HEADLINE_WORDS) {
+            if (word.equals("velocity")) {
+                continue;   // the report is named velocity; the file says so in its first line
+            }
+            assertThat(rendered)
+                    .as("the rendered velocity CSV offers '%s' — the band is a range with a sample "
+                        + "size precisely so that there is nothing to quote in a status report, "
+                        + "and a header line is as quotable as a field", word)
+                    .doesNotContain(word);
+        }
     }
 
     // ------------------------------------------------------------------ mappings

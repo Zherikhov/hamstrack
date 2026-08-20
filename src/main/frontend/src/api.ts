@@ -1837,3 +1837,103 @@ export const reportsApi = {
       `/workspaces/${wsId}/projects/${projectId}/reports/velocity${q ? `?${q}` : ''}`)
   },
 }
+
+// ── Report CSV export — HD-141 (R7) ──────────────────────────────────────────
+
+/**
+ * The `.csv` variants of the report endpoints (§4.4): **the plotted series**,
+ * one row per data point, with a comment header carrying project, window,
+ * measure, `computedAt` and `basedOnIssues`.
+ *
+ * That "series, not issue list" is the whole point and it is the documented
+ * disappointment everywhere else: users ask to export the chart and are handed a
+ * flat issue dump, which is a different artefact answering a different question.
+ * The UI therefore labels this one as the chart's own numbers and keeps the
+ * issue-list export as a separate, separately-labelled thing.
+ */
+export type ReportCsvKind =
+  | 'flow' | 'cycle-time' | 'aging' | 'sprint-burnup' | 'sprint-review' | 'velocity'
+
+/** The path a CSV link points at — same base, same params, `.csv` on the report name. */
+export function reportCsvPath(
+  wsId: string, projectId: string, kind: ReportCsvKind, params: Record<string, string> = {},
+): string {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+  const q = qs.toString()
+  return `/workspaces/${wsId}/projects/${projectId}/reports/${kind}.csv${q ? `?${q}` : ''}`
+}
+
+/**
+ * Download a report's series CSV.
+ *
+ * **This cannot be a plain `<a href>`, and that is not a style choice.** The API
+ * authenticates with a bearer token held in memory; an anchor the browser
+ * navigates sends no `Authorization` header, so the link would 401 — and a
+ * copied "download link" would be a URL that never works for the person it was
+ * sent to. So the bytes are fetched with the same auth (and the same silent
+ * refresh) as every other call and saved from a blob.
+ *
+ * The server's `Content-Disposition` filename wins when it sends one; otherwise
+ * the caller's name is used, so the file is never called `download`.
+ *
+ * Failures arrive as `ApiResponseError` with the server's own `detail` — a
+ * report CSV inherits every refusal of the report itself (400 on a too-wide
+ * window naming the cap, 404, 429 with `Retry-After`), and those sentences are
+ * the ones the page already knows how to render.
+ */
+export async function apiDownloadReportCsv(
+  wsId: string,
+  projectId: string,
+  kind: ReportCsvKind,
+  params: Record<string, string>,
+  fallbackFilename: string,
+): Promise<void> {
+  const res = await authFetch(reportCsvPath(wsId, projectId, kind, params))
+  if (!res.ok) {
+    let detail = ''
+    let body: unknown = null
+    try {
+      const text = await res.text()
+      body = text ? JSON.parse(text) : null
+      const b = body as Record<string, string | undefined> | null
+      detail = b?.detail ?? b?.message ?? b?.title ?? ''
+    } catch { /* a non-JSON error body is no reason to render nothing */ }
+    if (!detail) detail = `Request failed (${res.status})`
+    throw new ApiResponseError(res.status, detail, undefined, undefined, conflictOf(body, res))
+  }
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filenameFromDisposition(res.headers.get('Content-Disposition')) ?? fallbackFilename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * The filename out of a `Content-Disposition`, or null.
+ *
+ * Handles the RFC 5987 `filename*` form first — a project name with a non-ASCII
+ * character reaches this header — and falls back to the plain quoted form. Any
+ * path separator in the value is dropped: a filename is a name, and the one
+ * place a server-supplied string becomes a local path is the one place to say so.
+ */
+export function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null
+  const extended = header.match(/filename\*\s*=\s*[^']*'[^']*'([^;]+)/i)
+  const plain = header.match(/filename\s*=\s*"([^"]+)"/i) ?? header.match(/filename\s*=\s*([^;]+)/i)
+  const raw = extended ? safeDecode(extended[1]) : plain?.[1]
+  const name = raw?.trim().replace(/^["']|["']$/g, '').split(/[\\/]/).pop()
+  return name ? name : null
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}

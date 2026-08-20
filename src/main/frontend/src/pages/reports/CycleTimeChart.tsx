@@ -5,7 +5,7 @@ import {
 import type { CycleMeasure, CycleTimeItem } from '../../types'
 import { CHART_AXIS, CHART_CONTEXT, CHART_GRID, CHART_SERIES } from './common'
 import { MEASURE_LABEL, formatDays, measureValue } from './cycle'
-import { niceAxis } from './scale'
+import { niceAxis, windowAxis } from './scale'
 
 /**
  * The finished-work half (§2.2): **one dot per completed issue**, x = the day it
@@ -63,7 +63,10 @@ export default function CycleTimeChart({
     points.push({ x, y, item })
   }
 
-  const domain = windowDomain(from, to, points)
+  // The x domain is the WINDOW, never the data — and it comes from the shared
+  // axis module, because the comparability rule is one rule and a chart-local
+  // copy of it is a copy that drifts (scale.ts).
+  const domain = windowAxis(from, to, points.map(p => p.x))
   const axis = niceAxis(Math.max(0, p85 ?? 0, ...points.map(p => p.y)))
 
   return (
@@ -133,37 +136,6 @@ export default function CycleTimeChart({
       </ResponsiveContainer>
     </div>
   )
-}
-
-/**
- * The x domain: the window the server answered with, widened only if a point
- * somehow falls outside it (a closure timestamped on the boundary day in another
- * timezone). Never narrowed to the data — that is the rescaling-per-timeframe
- * habit §1.6 #4 exists to refuse.
- */
-function windowDomain(from: string, to: string, points: CyclePoint[]): { min: number; max: number; ticks: number[] } {
-  const DAY = 86_400_000
-  let min = Date.parse(`${from}T00:00:00Z`)
-  let max = Date.parse(`${to}T00:00:00Z`) + DAY - 1
-  if (Number.isNaN(min) || Number.isNaN(max) || max <= min) {
-    // No usable window — fall back to the data's own span so the chart still
-    // draws something readable rather than collapsing to a single column.
-    const xs = points.map(p => p.x)
-    min = xs.length ? Math.min(...xs) : Date.now() - 30 * DAY
-    max = xs.length ? Math.max(...xs) + DAY : Date.now()
-  }
-  for (const p of points) {
-    if (p.x < min) min = p.x
-    if (p.x > max) max = p.x
-  }
-  const ticks: number[] = []
-  const steps = 5
-  for (let i = 0; i <= steps; i++) {
-    // Snapped to UTC midnight: the axis reads as days, like every other date in
-    // this feature.
-    ticks.push(Math.floor((min + ((max - min) * i) / steps) / DAY) * DAY)
-  }
-  return { min, max, ticks: [...new Set(ticks)] }
 }
 
 /** UTC day label — every date in this feature is a UTC date and the page says so. */

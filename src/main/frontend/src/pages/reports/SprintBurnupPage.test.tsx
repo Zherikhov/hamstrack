@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import SprintBurnupPage from './SprintBurnupPage'
-import { reportsApi } from '../../api'
+import { apiDownloadReportCsv, reportsApi } from '../../api'
 import type { ProjectDelivery, Sprint, SprintBurnupReport } from '../../types'
 
 /**
@@ -84,6 +84,8 @@ vi.mock('../../api', () => ({
       return mockState.burnup
     }),
   },
+  // R7 — the export bar's CSV.
+  apiDownloadReportCsv: vi.fn(async () => undefined),
 }))
 
 const DAY = 86_400_000
@@ -490,5 +492,37 @@ describe('SprintBurnupPage — the log carries the ledger’s own snapshot', () 
     expect(rows[2]).toHaveTextContent('not recorded')
     expect(screen.getByText(/rows of a deleted issue, where naming a person/))
       .toBeInTheDocument()
+  })
+})
+
+/**
+ * R7 (HD-141) — the URL audit, on the report where it bites hardest.
+ *
+ * A burn-up URL with no `sprintId` means *"whichever sprint is active"*, which
+ * is a different sprint next fortnight and a different report to whoever the
+ * link was sent to. Browsing may leave it unpinned; **sharing may not** — so
+ * Copy link writes the sprint this page resolved before it copies, and the CSV
+ * asks for that same sprint rather than for the endpoint's own default.
+ */
+describe('SprintBurnupPage — export (R7)', () => {
+  it('pins the resolved sprint into the link, even though the URL named none', async () => {
+    renderPage('/w/w1/p/p1/reports/sprint-burnup')
+    await screen.findByTestId('burnup-chart')
+    expect(screen.getByTestId('loc')).not.toHaveTextContent('sprintId=')
+
+    await userEvent.click(screen.getByRole('button', { name: /Copy link/ }))
+    await waitFor(() => expect(screen.getByTestId('loc')).toHaveTextContent('sprintId=s1'))
+    expect(screen.getByTestId('loc')).toHaveTextContent('measure=COUNT')
+  })
+
+  it('asks the CSV for the sprint and measure on screen', async () => {
+    renderPage('/w/w1/p/p1/reports/sprint-burnup')
+    await screen.findByTestId('burnup-chart')
+
+    await userEvent.click(screen.getByRole('button', { name: /Chart series \(CSV\)/ }))
+    await waitFor(() => expect(apiDownloadReportCsv).toHaveBeenCalled())
+    const [ws, project, kind, params] = vi.mocked(apiDownloadReportCsv).mock.calls[0]
+    expect([ws, project, kind]).toEqual(['w1', 'p1', 'sprint-burnup'])
+    expect(params).toMatchObject({ sprintId: 's1', measure: 'COUNT' })
   })
 })

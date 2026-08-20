@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, type CSSProperties } from 'react'
+import { Suspense, lazy, useMemo, useRef, type CSSProperties } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ChevronUp } from 'lucide-react'
 import { ApiResponseError, apiSearchInsights } from '../../api'
@@ -17,6 +17,7 @@ import {
   type ChartRow, type InsightsState, type SegmentSeries,
 } from './insights'
 import { seriesColor } from './palette'
+import { ChartExport } from '../reports/export'
 
 // Split out of the panel chunk exactly as the report pages split theirs: the
 // controls, the caption and the TABLE are readable — and clickable — before
@@ -107,6 +108,7 @@ export default function InsightsPanel({
   const hidden = hiddenChoices(state, schema)
   const measures = offeredMeasures(schema)
   const dimensions = offeredDimensions(schema)
+  const chartRef = useRef<HTMLDivElement>(null)
   const unclickable = rows.filter(r => !narrowClause(r.bucket)).length
 
   /** Narrow the query to one bar (and optionally one band inside it). */
@@ -309,9 +311,39 @@ export default function InsightsPanel({
         {/* ── The chart ─────────────────────────────────────────────────── */}
         {data && rows.length > 0 && (
           <>
-            <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: 0 }}>
-              {insightsCaption(data, slice, segment)}
-            </p>
+            <div className="flex flex-wrap items-start gap-3">
+              <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: 0 }}>
+                {insightsCaption(data, slice, segment)}
+              </p>
+              {/* R7: this panel gets the **image** and neither CSV, and both
+                  halves of that are deliberate. A picture is exactly what an
+                  ad-hoc chart is for — it is the artefact somebody pastes into
+                  the conversation that prompted the question — and its footer
+                  carries the QUERY, because unlike a report this chart's identity
+                  is its dataset and nothing else names it. The series CSV has no
+                  endpoint here (insights is a POST, with no `.csv` variant), and
+                  "matching issues" would be absurd: the matching issues are the
+                  result table this panel is sitting on top of. */}
+              {measure !== 'NONE' && (
+                <ChartExport
+                  chartRef={chartRef}
+                  title={`${sliceDef.label} breakdown`}
+                  subtitle={insightsCaption(data, slice, segment)}
+                  slug={`insights-${slice.toLowerCase()}`}
+                  projectKey={null}
+                  provenance={{
+                    project: 'Search insights',
+                    window: query.trim()
+                      ? `query: ${query.trim()}`
+                      : 'every issue you can see (no query)',
+                    computedAt: data.meta.computedAt,
+                    basedOnIssues: data.meta.basedOnIssues,
+                    truncated: data.meta.truncated || data.slicesTruncated || data.cellsTruncated,
+                    cap: data.meta.truncated ? data.meta.cap : data.sliceCap,
+                  }}
+                />
+              )}
+            </div>
 
             {measure === 'NONE' ? (
               <Notice>
@@ -326,14 +358,16 @@ export default function InsightsPanel({
                     {series.map((s, i) => <SegmentSwatch key={s.key} series={s} index={i} />)}
                   </div>
                 )}
-                <Suspense fallback={<div style={{ height: 300 }} />}>
-                  <InsightsChart
-                    rows={drawn}
-                    series={series}
-                    measure={measure}
-                    onNarrow={narrow}
-                  />
-                </Suspense>
+                <div ref={chartRef}>
+                  <Suspense fallback={<div style={{ height: 300 }} />}>
+                    <InsightsChart
+                      rows={drawn}
+                      series={series}
+                      measure={measure}
+                      onNarrow={narrow}
+                    />
+                  </Suspense>
+                </div>
               </>
             )}
 

@@ -327,3 +327,31 @@ describe('InsightsPanel — disclosures', () => {
     expect(screen.getAllByRole('row')).toHaveLength(32)
   })
 })
+
+/**
+ * R7 (HD-141) — what this panel exports, and what it deliberately does not.
+ *
+ * **The image, yes**: an ad-hoc chart is exactly the thing somebody pastes back
+ * into the conversation that prompted the question, and its footer carries the
+ * QUERY, because unlike a fixed report this chart's identity is its dataset and
+ * nothing else names it.
+ *
+ * **Neither CSV**: the series has no `.csv` variant (insights is a POST), and
+ * "download matching issues" would be absurd here — the matching issues are the
+ * result table this panel is sitting on top of.
+ */
+describe('InsightsPanel — export (R7)', () => {
+  it('offers the picture, and no CSV of any kind', async () => {
+    renderPanel()
+    expect(await screen.findByRole('button', { name: /Copy image/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'PNG' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /CSV/ })).toBeNull()
+  })
+
+  it('offers no picture when there is no chart — a measure of NONE draws none', async () => {
+    renderPanel({ state: { ...DEFAULT_STATE, measure: 'NONE' } })
+    // The breakdown is still there; the chart is not, so neither is its export.
+    await screen.findByRole('table')
+    expect(screen.queryByRole('button', { name: /Copy image/ })).toBeNull()
+  })
+})

@@ -449,3 +449,20 @@ export function reviewHeadline(report: SprintReviewReport, range: string | null)
   }
   return `${parts.join(' · ')}.`
 }
+
+/**
+ * The sprint as a window sentence, for an exported image's footer (R7).
+ *
+ * A sprint **is** this report's window, so an image dated only by `computedAt`
+ * would not say which fortnight it is about — and two burn-ups filed side by
+ * side would be indistinguishable. A sprint that never started has no dates and
+ * says so rather than inventing them: `startAt` is null until the commitment
+ * event exists, which is the same fact the empty chart above it states.
+ */
+export function sprintWindow(name: string, startAt: string | null, endAt: string | null): string {
+  const from = startAt ? startAt.slice(0, 10) : ''
+  const to = endAt ? endAt.slice(0, 10) : ''
+  if (from && to) return `${name} · ${from} → ${to} (UTC)`
+  if (from) return `${name} · from ${from} (UTC), no planned end`
+  return `${name} · not started`
+}

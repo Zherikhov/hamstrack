@@ -21,6 +21,28 @@ public interface ProjectRepository extends JpaRepository<Project, UUID> {
     Optional<Project> findByIdAndWorkspace(UUID id, Workspace workspace);
 
     /**
+     * The key and name of one project, <strong>scoped by workspace</strong> — the identity a
+     * downloaded report CSV has to print in its comment header (HD-141 R7), because a file that
+     * has been renamed and mailed on has no URL to be read alongside.
+     *
+     * <p>A projection rather than {@code findById} for two reasons, and the second is the one that
+     * matters. It reads two columns instead of hydrating a {@code Project} with its four taxonomy
+     * associations; and it takes the <em>workspace</em> id, so it cannot answer for a project
+     * outside the tenant even though every caller has already resolved one through
+     * {@code WorkspaceAccessService}. That second check is redundant today and is the kind of
+     * redundancy this codebase keeps: the top bug class here is a lookup that was scoped by its
+     * caller until the caller changed.
+     */
+    Optional<ProjectHeader> findHeaderByIdAndWorkspaceId(UUID id, UUID workspaceId);
+
+    /** Just enough of a project to name it in an exported file. */
+    interface ProjectHeader {
+        String getKey();
+
+        String getName();
+    }
+
+    /**
      * The workspace-scoped batch form of {@link #findByIdAndWorkspace} — used by
      * {@code ProjectAdminGuard} to name the projects a workspace member removal would
      * strand. Scoped rather than {@code findAllById} even though the ids come from a query

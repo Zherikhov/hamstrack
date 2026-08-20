@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo } from 'react'
+import { Suspense, lazy, useMemo, useRef } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { ApiResponseError, reportsApi } from '../../api'
@@ -16,6 +16,7 @@ import {
   unestimatedSummary, velocityBand, velocityRows, velocitySentence, writeVelocityParams,
   type VelocityRow,
 } from './velocity'
+import { ChartExport, ReportExportBar, useReportProject } from './export'
 
 // Split out of the page chunk, as on the burn-up: the sentence this report
 // exists for, the controls and the table are readable before Recharts has
@@ -94,6 +95,13 @@ export default function VelocityPage() {
       { replace: true },
     )
   }
+
+  // The state this page RESOLVED — the count is clamped here before it is sent,
+  // so a shared link carries the report that was drawn rather than the number a
+  // hand-edited URL asked for.
+  const pinned = writeVelocityParams({ sprints: state.sprints, measure })
+  const { projectKey, projectLabel } = useReportProject(wsId, projectId)
+  const chartRef = useRef<HTMLDivElement>(null)
 
   const report = velocity.data
   const rows = useMemo(() => velocityRows(report), [report])
@@ -186,6 +194,19 @@ export default function VelocityPage() {
           <EstimationOffHint wsId={wsId} projectId={projectId} canEdit={gate.canEdit} />
         )}
       </div>
+
+      {/* Export (R7). The CSV is the per-sprint series — committed, completed,
+          added, carried over — and, like every other surface of this report, it
+          carries **no person**: not a column, not a filter, not a tooltip
+          (§1.4/§2.5). */}
+      <ReportExportBar
+        wsId={wsId}
+        projectId={projectId}
+        projectKey={projectKey}
+        shareParams={pinned}
+        csv={[{ kind: 'velocity', label: 'Chart series', params: pinned, slug: 'velocity' }]}
+        disabled={!report}
+      />
 
       {/* A clamp is only acceptable when it is stated. The alternative — sending
           the number through and rendering the endpoint's 400 — replaces a chart
@@ -300,10 +321,30 @@ export default function VelocityPage() {
                       refreshing…
                     </span>
                   )}
+                  <ChartExport
+                    chartRef={chartRef}
+                    title="Velocity — recent completed sprints"
+                    subtitle={VELOCITY_CAPTION}
+                    slug="velocity"
+                    projectKey={projectKey}
+                    provenance={{
+                      project: projectLabel,
+                      // The window is a COUNT of sprints, not a date range, and
+                      // the sample size is the number the band must never be
+                      // read without.
+                      window: `last ${rows.length} completed sprint${rows.length === 1 ? '' : 's'} · ${SPRINT_MEASURE_UNIT[measure]}`,
+                      computedAt: report.meta.computedAt,
+                      basedOnIssues: report.meta.basedOnIssues,
+                      truncated: report.meta.truncated,
+                      cap: report.meta.cap,
+                    }}
+                  />
                 </div>
-                <Suspense fallback={<div style={{ height: 280 }} />}>
-                  <VelocityChart rows={rows} measure={measure} band={band} />
-                </Suspense>
+                <div ref={chartRef}>
+                  <Suspense fallback={<div style={{ height: 280 }} />}>
+                    <VelocityChart rows={rows} measure={measure} band={band} />
+                  </Suspense>
+                </div>
               </ReportCard>
             </div>
           </div>

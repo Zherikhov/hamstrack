@@ -69,7 +69,7 @@ public class CycleTimeReportService {
      * hardware can afford, and the one thing worse than a suppressed line is a line whose
      * threshold differs between installs.
      */
-    static final int MIN_PERCENTILE_SAMPLES = 5;
+    public static final int MIN_PERCENTILE_SAMPLES = 5;
 
     private final WorkspaceAccessService workspaceAccess;
     private final CycleTimeReportRepository cycleTimeReportRepository;
