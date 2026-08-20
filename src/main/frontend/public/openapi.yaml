@@ -261,9 +261,10 @@ tags:
 
       Two things vary between reports rather than across them. **Not every
       report has a window**: `/aging` answers a current-state question and takes
-      no parameters at all, so it is the only endpoint here with **no `400` of
-      its own** — a malformed path UUID still `400`s there, as it does
-      everywhere, while binding and before any handler runs. The sprint reports
+      no parameters at all, so **it has no `400` of its own** — and neither does
+      its `.csv` sibling, for the same reason: a report that asks the caller for
+      nothing has nothing to refuse. A malformed path UUID still `400`s on both,
+      as it does everywhere, while binding and before any handler runs. The sprint reports
       have no window either; their span is the sprint's, and an over-long sprint
       is **clipped and disclosed** (`seriesTruncatedAt`) rather than refused,
       because the caller never stated that window. `/velocity` bounds its sample
@@ -317,9 +318,21 @@ tags:
       `/velocity` sits on the same rule from the other side: **its subject is the
       PROJECT**, which the path already names, so it takes no `sprintId` at all
       (its sample is resolved from the project) and has no `404` of its own. It
-      is also the one report defined as much by its refusals as by its output —
-      no per-person breakdown, no aggregate above the project, and no single
-      quotable average — and those are contract, not UI.
+      is where the family’s three refusals bite hardest.
+
+
+      **Three things this family will not do, and they are policy rather than
+      backlog**: no per-person breakdown of a published metric; no aggregate
+      above the project (every report is served from below `/projects/{pId}/`,
+      and the friction of comparing two teams by hand is the design); and no
+      single quotable number, so where this family forecasts it returns a range
+      with its sample size attached. The line is a **published metric versus an
+      ad-hoc query**, which is what makes `/search/insights` consistent with
+      `/velocity` rather than an exception to it: velocity has a stable URL and
+      is read out in a ceremony, so it refuses `ASSIGNEE`; insights is whatever
+      HQL somebody just typed and is not addressable as "the team’s number", so
+      it offers `ASSIGNEE` as a grouping dimension. Same policy, opposite
+      answers, because they are different objects.
   - name: Search
     description: >-
       Cross-project issue search via HQL (Hamstrack Query Language). The Insights
@@ -5395,7 +5408,8 @@ paths:
         would be meaningless (every open issue is open today) or actively
         misleading (a window on `created_at` hides exactly the oldest items,
         which are the entire point). This is therefore **the one endpoint on
-        this base path with no `400` of its own**: it validates nothing, because
+        this base path whose *question* takes no input, so it has **no `400` of
+        its own** (its `.csv` sibling inherits that): it validates nothing, because
         there is nothing here for a caller to state wrongly, and a stray query
         parameter is ignored rather than refused. Its failures are `401`, `404`
         and `429` — plus the two that belong to every endpoint rather than to
@@ -11597,10 +11611,10 @@ components:
             It is the first *issue*, not the project's own creation date.
 
 
-            **`null` on `/search/insights`**, which is the one report in the
-            family that spans a workspace rather than a project: this is a
-            per-project property, and inventing a workspace-wide meaning for it
-            would give one field name two definitions.
+            **`null` on any report that spans a workspace rather than a project**
+            — today that is `/search/insights`. This is a per-project property,
+            and inventing a workspace-wide meaning for it would give one field
+            name two definitions.
         unmatchedFilters:
           type: array
           items: { type: string }
@@ -11980,7 +11994,8 @@ components:
       description: >-
         `GET …/reports/aging`. No window and no parameters — "what is rotting
         now" is a current-state question — which makes this the one report on
-        this base path with no `400` of its own (a malformed path UUID still
+        this base path whose question takes no input, so it has no `400` of its
+        own — as does its `.csv` sibling (a malformed path UUID still
         `400`s here, as it does on every endpoint, while binding).
       properties:
         columns:
