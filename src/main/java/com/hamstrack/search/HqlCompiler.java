@@ -41,7 +41,9 @@ import java.util.UUID;
  * the tree.
  *
  * <p><strong>Tenancy invariant:</strong> {@link SearchScope#scopePredicate} is
- * ALWAYS ANDed as the outermost conjunction (both the page and count query). The
+ * ALWAYS ANDed as the outermost conjunction — on the page query, on the count query and
+ * on the Insights aggregate, all three of which get their predicate from the one
+ * {@link #scopedPredicate} method rather than assembling their own. The
  * parsed predicate is nested strictly inside it, so no parsed token can widen or
  * escape the workspace/visible-project boundary. All scope values are derived
  * server-side from the authenticated actor.
@@ -86,7 +88,7 @@ public class HqlCompiler {
         // No distinct: only ToOne assocs are fetch-joined (they never multiply rows),
         // and DISTINCT would forbid ORDER BY on a joined column (priority.position).
         cq.select(root);
-        cq.where(fullPredicate(query, cq, root, cb, actor, ws, ctx));
+        cq.where(scopedPredicate(query, cq, root, cb, actor, ws, ctx));
         cq.orderBy(orderBy(query, root, cb, ctx));
         return cq;
     }
@@ -97,7 +99,7 @@ public class HqlCompiler {
         CriteriaQuery<Long> cq = cb.createQuery(Long.class);
         Root<Issue> root = cq.from(Issue.class);
         cq.select(cb.count(root));
-        cq.where(fullPredicate(query, cq, root, cb, actor, ws, ctx));
+        cq.where(scopedPredicate(query, cq, root, cb, actor, ws, ctx));
         return cq;
     }
 
@@ -105,11 +107,68 @@ public class HqlCompiler {
 
     /**
      * Scope predicate ANDed OUTERMOST with the (optional) parsed filter. {@code outer}
-     * is the enclosing query (page or count), threaded through so custom-field
+     * is the enclosing query (page, count or aggregate), threaded through so custom-field
      * comparisons can create correlated {@code EXISTS} subqueries (HD-52).
+     *
+     * <p><strong>Public because a second consumer exists, and deliberately shaped so that
+     * consumer cannot get the predicate wrong</strong> (HD-140 R6). The Insights panel runs a
+     * {@code GROUP BY} over <em>the query already in the search box</em>, and the one way that
+     * feature could reintroduce this project&#39;s #1 bug class is by rebuilding the predicate
+     * beside this one — two paths to the same rows, one of which someday forgets
+     * {@link SearchScope}. So the aggregate rebuilds nothing: it calls this method, which is the
+     * same method {@link #buildPageQuery} and {@link #buildCountQuery} call.
+     *
+     * <p>Note what is and is not exposed. There is no accessor for the parsed filter alone —
+     * the only {@link Predicate} this class will hand out is one that <em>already contains</em>
+     * {@link SearchScope#scopePredicate} as its outermost conjunction. So nothing here will give a
+     * caller a scopeless predicate.
+     *
+     * <h2>What the caller owes this method — the obligation a fragment carries and a whole query
+     * does not</h2>
+     * An earlier revision of this javadoc claimed the worst a caller could do was AND further
+     * conjunctions on, "which can only narrow". <strong>That is a property of the two callers, not
+     * of this method</strong> (HD-140 R6 round 2, tenancy + security). Handing out a predicate
+     * instead of a finished {@link CriteriaQuery} moved one invariant from "the compiler owns the
+     * query" to "the caller applies this correctly", and this class is a {@code @Component} that
+     * any bean can inject. Four obligations, none of which this method can verify:
+     * <ol>
+     *   <li><strong>One root.</strong> This restricts <em>the {@link Root} it is handed</em>, not
+     *       the query that root belongs to. A caller that adds a second {@code from(Issue.class)}
+     *       and selects from <em>that</em> root has assembled a scopeless query entirely out of
+     *       scoped parts: the predicate is present, it is satisfied, and it filters a root nothing
+     *       is read from, while the second root cross-joins the whole table. So: apply the result
+     *       to the sole {@code Root<Issue>} of the query — the one passed in — and reach every
+     *       further axis by a {@code join} off it, the way {@code InsightsService.axis} does.</li>
+     *   <li><strong>Conjunction only.</strong> {@code cb.or(scopedPredicate(…), somethingElse)} and
+     *       {@code cb.not(scopedPredicate(…))} both compile, and both widen. The result may be
+     *       ANDed with more predicates and nothing else.</li>
+     *   <li><strong>{@code ws} is a resolved membership.</strong> Pass the workspace from
+     *       {@code WorkspaceAccessService.requireMember}. This method authorizes nothing; it will
+     *       happily scope to a workspace the actor is not a member of.</li>
+     *   <li><strong>{@code ctx} is built from that same {@code ws}.</strong> A context built for
+     *       another workspace resolves names against the wrong tenant, and the foreign ids it
+     *       yields then meet a predicate for this one and match nothing. That leaks no row — but
+     *       "unknown name" (422) and "known name, zero rows" (200) are distinguishable answers, so
+     *       a mismatch is an existence oracle.</li>
+     * </ol>
+     *
+     * <p>Obligation 1 is guarded on <strong>addition</strong> rather than on behaviour, which is
+     * what {@code ReportQueryScopeTest} gives the native reports and what a behavioural test of the
+     * callers that exist cannot give: {@code HqlCompilerConsumerTest} scans the classpath and fails
+     * when any type other than {@link SearchService} and {@code InsightsService} references this
+     * class, so a third consumer is a deliberate, reviewable edit instead of a silent one. Read
+     * this list when that test fails; it is the checklist it is asking you to have gone through.
+     * {@code InsightsTenancyTest} covers the behaviour of the consumer that does exist.
+     *
+     * <p><strong>The escape hatch, deliberately not taken.</strong> If a later slice wants a second
+     * aggregate, the alternative is a {@code buildAggregateQuery(...)} here that takes the axis
+     * expressions as a callback and returns a finished {@code CriteriaQuery} — the from-clause goes
+     * back to being owned by this class and obligations 1 and 2 stop existing. It is not built for
+     * one caller: a callback API justified by a single consumer is speculative generality, and the
+     * scan is the cheaper guard until a second one appears.
      */
-    private Predicate fullPredicate(Query query, CommonAbstractCriteria outer, Root<Issue> root,
-                                    CriteriaBuilder cb, User actor, Workspace ws, ResolutionContext ctx) {
+    public Predicate scopedPredicate(Query query, CommonAbstractCriteria outer, Root<Issue> root,
+                                     CriteriaBuilder cb, User actor, Workspace ws, ResolutionContext ctx) {
         Predicate scope = searchScope.scopePredicate(actor, ws, root, cb);
         return query.filter()
                 .map(f -> cb.and(scope, compile(f, outer, root, cb, ctx)))

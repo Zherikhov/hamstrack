@@ -37,6 +37,56 @@ export function setOrderBy(query: string, field: string, dir: SortDir): string {
   return body ? `${body} ${order}` : order
 }
 
+/**
+ * Split a query into the part before `ORDER BY` and the RAW `ORDER BY …` tail.
+ *
+ * Deliberately not `parseOrderBy`, which keeps only the first sort term:
+ * anything that rewrites the body has to put the sort back **byte for byte**, or
+ * narrowing a multi-column sort would quietly drop every term after the first.
+ */
+export function splitOrderBy(query: string): { body: string; orderBy: string } {
+  const m = query.match(ORDER_BY_RE)
+  if (!m || m.index == null) return { body: query.trim(), orderBy: '' }
+  return { body: query.slice(0, m.index).trim(), orderBy: query.slice(m.index).trim() }
+}
+
+/**
+ * `query AND clause`, preserving the sort — the click-through of the Insights
+ * panel (HD-140 §2.6), where clicking a bar narrows the query in the box.
+ *
+ * **The existing body is parenthesised**, always. HQL binds `AND` tighter than
+ * `OR`, so appending to `type = "Bug" OR type = "Story"` without brackets would
+ * narrow only the right-hand side and silently answer a different question than
+ * the bar the user clicked — a wrong result that looks exactly like a right one.
+ * Redundant brackets around an already-bracketed body are harmless.
+ *
+ * A clause already present in the body is not appended twice: clicking the same
+ * bar again (after the first click re-ran and re-drew the panel) would otherwise
+ * grow the query by a term that cannot change the result.
+ */
+export function andClause(query: string, clause: string): string {
+  const { body, orderBy } = splitOrderBy(query)
+  const trimmed = clause.trim()
+  if (!trimmed) return query
+  const nextBody = !body || containsClause(body, trimmed)
+    ? (body || trimmed)
+    : `(${body}) AND ${trimmed}`
+  return orderBy ? `${nextBody} ${orderBy}`.trim() : nextBody
+}
+
+/**
+ * Whether the body already states this exact clause. A textual test on purpose —
+ * this module is a set of string rewrites and not a parser (the server
+ * validates) — and it is bounded by word edges so `status = "Done"` is not
+ * considered present in `status = "Done reviewing"`.
+ */
+function containsClause(body: string, clause: string): boolean {
+  const i = body.indexOf(clause)
+  if (i < 0) return false
+  const after = body.slice(i + clause.length)
+  return after === '' || /^[\s)]/.test(after)
+}
+
 // The direction a header click should apply: toggle if it's already the active
 // sort field, else default to ASC (DESC for date-ish fields feels more useful, but
 // keep it predictable/uniform).

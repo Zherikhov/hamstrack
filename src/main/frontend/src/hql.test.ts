@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseOrderBy, setOrderBy, nextSortDir,
+  parseOrderBy, setOrderBy, nextSortDir, splitOrderBy, andClause,
   hqlQuote, sanitizeForHql, hqlTextContains, hqlAssigneeIs,
 } from './hql'
 
@@ -215,5 +215,54 @@ describe('HQL fragment builders', () => {
 
   it('emits `assignee = "…"` for a member email', () => {
     expect(hqlAssigneeIs('ann@example.com')).toBe('assignee = "ann@example.com"')
+  })
+})
+
+// ── andClause / splitOrderBy — the Insights click-through (HD-140 §2.6) ───────
+// Clicking a bar narrows the query in the box. The two failure modes worth
+// locking down are both SILENT: a dropped multi-column sort, and an AND that
+// binds to one side of an OR and answers a different question than the bar that
+// was clicked while looking exactly like an answer to the right one.
+
+describe('splitOrderBy', () => {
+  it('hands back the ORDER BY tail byte for byte, every term of it', () => {
+    const q = 'status = "Done" ORDER BY priority DESC, created ASC'
+    expect(splitOrderBy(q)).toEqual({
+      body: 'status = "Done"',
+      orderBy: 'ORDER BY priority DESC, created ASC',
+    })
+  })
+
+  it('is empty-tailed when there is no sort', () => {
+    expect(splitOrderBy('type = "Bug"')).toEqual({ body: 'type = "Bug"', orderBy: '' })
+  })
+})
+
+describe('andClause', () => {
+  it('parenthesises the existing body — an OR must not absorb the new term', () => {
+    expect(andClause('type = "Bug" OR type = "Story"', 'status = "Done"'))
+      .toBe('(type = "Bug" OR type = "Story") AND status = "Done"')
+  })
+
+  it('keeps every sort term, unchanged, at the end', () => {
+    expect(andClause('type = "Bug" ORDER BY priority DESC, created ASC', 'status = "Done"'))
+      .toBe('(type = "Bug") AND status = "Done" ORDER BY priority DESC, created ASC')
+  })
+
+  it('is the clause alone when the query was only a sort, or empty', () => {
+    expect(andClause('', 'status = "Done"')).toBe('status = "Done"')
+    expect(andClause('ORDER BY created DESC', 'status = "Done"'))
+      .toBe('status = "Done" ORDER BY created DESC')
+  })
+
+  it('does not append a clause the query already states', () => {
+    const q = '(type = "Bug") AND status = "Done"'
+    expect(andClause(q, 'status = "Done"')).toBe(q)
+  })
+
+  it('still appends when the existing text merely STARTS with the clause', () => {
+    // `status = "Done"` is not present in `status = "Done reviewing"`.
+    expect(andClause('status = "Done reviewing"', 'status = "Done"'))
+      .toBe('(status = "Done reviewing") AND status = "Done"')
   })
 })

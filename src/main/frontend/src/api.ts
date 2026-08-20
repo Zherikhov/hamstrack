@@ -12,6 +12,7 @@ import type {
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
   FlowReport, ReportInterval, CycleTimeReport, AgingReport,
   SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
+  InsightsDimension, InsightsMeasure, InsightsResponse,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1565,6 +1566,11 @@ export async function apiRankIssue(
 // Workspace-scoped; a non-member gets 404. A bad query POST throws an
 // ApiResponseError with .status === 422 and a populated .hql (position/length/
 // token/field/errorType) so the input can underline the offending span.
+// 429 — `POST …/search`, `…/search/schema` and `…/search/suggest` are all on
+// this caller's search budget. A retryable throttle, not a fault: nothing was
+// computed and the identical request succeeds after `Retry-After`
+// (`ApiResponseError.retryAfter` carries it). Spent BEFORE the workspace is
+// resolved, so a 429 says nothing about whether the caller can see it.
 
 export async function apiSearch(
   wsId: string,
@@ -1589,9 +1595,68 @@ export async function apiSearchSuggest(
   return request(`/workspaces/${wsId}/search/suggest?${params.toString()}`)
 }
 
+/**
+ * The Insights panel's one endpoint (HD-140, R6 — §2.6).
+ *
+ * **The dataset is the query, and nothing else.** There is no window, no project
+ * id and no filter list: the panel aggregates exactly the rows the search box
+ * would return, with page and sort dropped, which is what gives it a global
+ * filter by construction and is the reason it replaces the gadget dashboard
+ * rather than reimplementing it.
+ *
+ * **`measure` is on the wire even though both numbers come back on every row.**
+ * The response carries `count` AND `points` for each slice and cell, so the
+ * toggle is a re-render — but the measure is what the server *ranks* by when it
+ * applies its two caps, so the same query under `POINTS` can ship a different
+ * set of bars. It therefore joins the cache key, and changing it is a refetch.
+ *
+ * Errors are the search errors, because it IS the search query:
+ *   • 422 — bad HQL, with `.hql` populated exactly as `apiSearch` fills it;
+ *     also `slice === segment`, which the panel never offers (a diagonal is not
+ *     a breakdown) but which a hand-edited URL can ask for.
+ *   • 404 — workspace not visible (non-member and non-existent alike).
+ *   • 429 — past a throttle budget, and this endpoint sits inside TWO of them:
+ *     it is bound to the reports limiter explicitly (`ReportRateLimitConfig`,
+ *     because it does NOT live under `/reports`) and it also falls under the
+ *     search path pattern. It spends both budgets, the lower configured value
+ *     binds, and lowering either property lowers the panel. The explicit
+ *     binding only looks redundant — deleting it would silently raise the
+ *     panel's allowance to the search budget as a side effect. A retryable
+ *     throttle, never a fault (`ApiResponseError.retryAfter` carries the wait).
+ *
+ * **A capability never changes the answer** (delivery-paths Rule A). The panel
+ * omits the `sprint` slice when no visible project runs sprints, and the story
+ * points measure when none estimates — reading `/search/schema`'s own `insights`
+ * block, which narrows on exactly the terms its `fields` list does — but a link
+ * that asks for either is sent as written and answered 200, because a hidden
+ * control is not a permission.
+ */
+export async function apiSearchInsights(
+  wsId: string,
+  payload: {
+    query: string
+    measure: InsightsMeasure
+    slice: InsightsDimension
+    /** Omitted entirely when there is no colour dimension — never sent as ''. */
+    segment?: InsightsDimension
+  },
+): Promise<InsightsResponse> {
+  return request(`/workspaces/${wsId}/search/insights`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 // ── Saved filters — HD-26 ─────────────────────────────────────────────────────
 // Own + shared, workspace-scoped. Create/update/delete are owner-only server-side
 // (a non-owner PATCH/DELETE 404s). Create: 422 invalid HQL (.hql set), 409 dup name.
+// 429 on EVERY call here: the whole `…/filters/**` path is on the search budget,
+// because validating a filter's HQL builds the same resolution context
+// `…/search/schema` pays for — so an invalid-body loop here was the same cost
+// wearing different clothes. The binding is by PATH, not by method, so `list`,
+// `get` and `remove` are throttled too, surprising as that is for a read and a
+// delete. A retryable throttle, not a validation failure: retry after
+// `Retry-After` (`ApiResponseError.retryAfter`).
 
 export const savedFilters = {
   list: (wsId: string) =>

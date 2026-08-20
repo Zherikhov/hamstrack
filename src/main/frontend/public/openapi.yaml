@@ -103,14 +103,20 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds). Two non-auth surfaces have throttles of their own:
+    header (seconds). **Three** non-auth surfaces have throttles of their own:
     `POST …/issues/{number}/rank` allows at most one whole-project rank
     rebalance per project per 60 s and answers `429` + `Retry-After` for a
-    second one inside that window — a retryable throttle, not a fault — and
-    every `…/reports/**` endpoint shares a **per-principal** budget
-    (`app.reports.requests-per-minute`, 60/min by default), which is checked
-    **before** the workspace/project is resolved, so an over-budget caller sees
-    `429` even for a project they could not otherwise see.
+    second one inside that window — a retryable throttle, not a fault; every
+    `…/reports/**` endpoint shares a **per-principal** budget
+    (`app.reports.requests-per-minute`, 60/min by default); and the whole HQL
+    surface — `…/search/**` **plus `…/filters/**`**, since validating a saved
+    filter is search-surface work wherever it is mounted — shares a **second,
+    separate** per-principal budget
+    (`app.search.requests-per-minute`, 120/min by default). Both report budgets are
+    checked **before** the workspace/project is resolved, so an over-budget
+    caller sees `429` even for a project they could not otherwise see.
+    `POST …/search/insights` is a report living on the search path and spends
+    **both** budgets — see the `Reports` tag.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/easyTask
@@ -218,8 +224,10 @@ tags:
       `estimation: false` gets the identical answers.
 
 
-      Four conventions are fixed here by the first report and inherited
-      unchanged by the rest: every response carries the shared `ReportMeta`
+      Four conventions are fixed here by the first report and inherited by the
+      rest — two of them with exceptions, both stated below (not every report
+      has a window, and the throttle is inherited by **path** rather than by
+      being a report): every response carries the shared `ReportMeta`
       provenance block (`computedAt`, `basedOnIssues`, `truncated`, `cap`,
       `firstIssueAt`, `unmatchedFilters`); every response is
       `Cache-Control: private, max-age=60` **plus `Vary: Authorization`** (one
@@ -229,13 +237,23 @@ tags:
       window nobody asked for is exactly how a report earns "these numbers don't
       match what I expected"; and the whole base path shares one **per-principal
       throttle** (`app.reports.requests-per-minute`, 60/min by default, master
-      switch `app.rate-limit.enabled`), so a report added later inherits the
-      budget instead of having to ask for one.
+      switch `app.rate-limit.enabled`), so a report added later **on this base
+      path** inherits the budget instead of having to ask for one.
 
 
-      The throttle is the one place in this API where `429` **precedes** `404`:
-      it runs in an interceptor, before the workspace and project are resolved,
-      so a caller over budget is refused even for a project they cannot see. The
+      That inheritance is a property of the path, not of being a report, and
+      there is already one counterexample: `POST …/search/insights` is a report
+      that lives on the search path, inherited nothing, and had to be bound to
+      the limiter explicitly. A report mounted anywhere else is unthrottled until
+      somebody says otherwise — which is why the binding is written down rather
+      than assumed.
+
+
+      The per-principal budgets — this one and the search budget over
+      `…/search/**` and `…/filters/**` — are **the one place in this API where
+      `429` precedes `404`**: they run in interceptors, before the workspace and
+      project are resolved, so a caller over budget is refused even for a project
+      they cannot see. The
       budget is keyed on the caller and never on the project, which is what keeps
       that refusal free of tenancy information — the `429` is identical for a
       real project, a nonexistent one and somebody else's.
@@ -283,7 +301,11 @@ tags:
       no per-person breakdown, no aggregate above the project, and no single
       quotable average — and those are contract, not UI.
   - name: Search
-    description: Cross-project issue search via HQL (Hamstrack Query Language)
+    description: >-
+      Cross-project issue search via HQL (Hamstrack Query Language). The Insights
+      panel (POST .../search/insights) hangs off this same base path and breaks
+      down the query in the box; it is documented under **Reports**, whose
+      conventions it follows.
   - name: Saved Filters
     description: Reusable, workspace-scoped HQL data sources (own + shared)
   - name: Notifications
@@ -6013,6 +6035,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
 
   /workspaces/{workspaceId}/search/schema:
     get:
@@ -6079,6 +6102,19 @@ paths:
         legitimately own sprints and a `releases: false` project may own
         versions, and those names vanish from suggestions while still matching
         in queries.
+
+
+        **The `insights` block follows the identical rule.** It publishes the
+        measures and grouping dimensions worth OFFERING to the Insights panel
+        (`POST …/search/insights`), narrowed the same way: the `SPRINT` dimension
+        appears only when at least one visible project has `board: SCRUM`, and
+        the `POINTS` measure only when at least one has `estimation` on —
+        mirroring how the `sprint` and `storyPoints` FIELDS are narrowed above.
+        And, exactly as with fields, **what is omitted still resolves**: the
+        panel answers `200` for a dimension or measure that is not in this list,
+        so a saved panel state cannot break because a curator flipped a project
+        toggle. It is published here rather than hardcoded in a client precisely
+        because it is capability-narrowed.
       operationId: searchSchema
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -6089,6 +6125,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SearchSchemaResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
 
   /workspaces/{workspaceId}/search/suggest:
     get:
@@ -6155,6 +6192,161 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
+
+  /workspaces/{workspaceId}/search/insights:
+    post:
+      tags: [Reports]
+      summary: Insights — break down the query in the search box
+      description: >-
+        The dashboard replacement, and the seventh and last report of the set.
+        Instead of a grid of independently-configured widgets, **one panel whose
+        dataset is the HQL query already in the search box**: `slice` picks the x
+        axis, `segment` optionally colours it, and the answer is the same
+        population the result list underneath is showing.
+
+
+        One dataset is the entire argument for it. There is nothing to
+        double-count across widgets, no layout to migrate, and a saved filter
+        becomes a saved report at no cost — the panel cannot disagree with the
+        list beneath it, because both compile from one query through one
+        predicate.
+
+
+        **It is workspace-scoped, not project-scoped**, which is why it sits on
+        the search base path rather than under `/projects/{pId}/reports`: it
+        answers a question about a query somebody typed, and that query already
+        spans whatever the caller can see. Membership is the family's — a missing
+        workspace and a non-member are the same `404`, never a `403`.
+
+
+        **It is the only POST in the reports family, and that changes what
+        caching means.** The query is a body (up to 2 000 characters), not a
+        query string. **A POST response is not served from an HTTP cache** —
+        browsers do not cache them, and RFC 9111's narrow allowance needs a
+        `Content-Location` that no client here sends. So the
+        `Cache-Control: private, max-age=60` and `Vary: Authorization` this
+        endpoint carries are for **consistency and defence**, not for effect:
+        they match the rest of the surface, and they mean that if an intermediary
+        ever cached this anyway the response is already marked private and keyed
+        on the credential. **The real 60-second de-duplication is client-side**
+        (the SPA's query `staleTime`), which is where it has to be for a POST —
+        do not expect the browser to do it for you.
+
+
+        **Its refusals are `422`, not `400` — do not generalise from the five
+        `/reports` GETs.** There, `?measure=BOGUS` is a binding failure Spring
+        raises before the handler runs, so it is a `400`. Here the parameters
+        arrive inside a JSON body and are resolved in the service, so an unknown
+        `measure`, `slice` or `segment` is a **`422` naming the parameter and
+        listing what it accepts** — which is also what every other refusal under
+        `/search` looks like. Same idea, different mechanism, and a client that
+        generalises the reports family's `400` will handle the wrong code.
+
+
+        **`measure` ranks; it does not filter.** Every bucket always carries
+        `count`, `points` **and** `unestimatedCount` — they come out of one
+        `GROUP BY` and cost nothing measurable, so flipping the client's toggle
+        needs no round trip. What the measure decides is the `ORDER BY`, and
+        therefore **which buckets survive the caps**: a response is the top
+        `sliceCap` buckets *by that measure*, so `POINTS` can legitimately return
+        a **different set of bars** than `COUNT` over the identical query. That is
+        the point — "the ten statuses with the most issues" and "the ten with the
+        most points" are different questions, and a truncated top-N has to know
+        which one it was asked. `NONE` means "no y axis, draw a table"; it ranks
+        by count server-side (a bucket must be ordered by something to be capped
+        at all) and is echoed back so the client knows not to draw bars.
+
+
+        **A bar's height is not the sum of its stacks, and must not be computed
+        that way.** Bars and cells are capped **separately** (`sliceCap` = 200,
+        `cellCap` = 1000, both fixed constants), and the bars get their own
+        `GROUP BY`, so **`slices[].count` / `points` are always exact** while
+        `cells` may be partial. Summing the cells to get a bar would make every
+        truncated response quietly understate its own chart.
+
+
+        **Two different truncations, and a client should be able to say which
+        happened**: `slicesTruncated` means bars are missing from the x axis
+        (there were more buckets than `sliceCap`, and you got the largest by
+        `measure`); `cellsTruncated` means the breakdown inside the bars is
+        partial. They are different pictures. Note that `meta.truncated` stays
+        **`false`** and `meta.cap` keeps meaning `app.reports.max-rows` — a fact
+        rather than a stub: this report materialises **no issue rows at all**
+        (PostgreSQL aggregates and returns buckets), so the row cap cannot bite.
+        What can truncate here is buckets, and that has its own two flags rather
+        than borrowing a field that means rows.
+
+
+        **`meta.basedOnIssues` is deliberately not the sum of the series.** It is
+        the distinct issues matching the query — the same number the search
+        result list reports — computed independently of every cap above. With a
+        many-valued dimension such as `LABEL` one issue lands in several buckets,
+        so the bars sum to **more**; when a cap bites they sum to **less**. Both
+        are arithmetic rather than defects, and `sliceMultiValued` /
+        `segmentMultiValued` are on the response so a client can label its total
+        honestly instead of leaving the reader to discover the mismatch.
+
+
+        **Capability narrows the offered list, never the resolution.**
+        `GET /search/schema` drops the `SPRINT` dimension when no visible project
+        plans in sprints and the `POINTS` measure when none estimates — but a
+        dimension omitted there **still resolves if you ask for it**, exactly as
+        an omitted HQL field still parses. No status code depends on a
+        capability, so a saved panel state cannot break because a curator flipped
+        a project toggle.
+      operationId: searchInsights
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InsightsRequest' }
+      responses:
+        '200':
+          description: >-
+            OK — the bars, the optional breakdown, both caps, both truncation
+            flags and the shared `meta` block.
+          headers:
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InsightsResponse' }
+        '400':
+          description: >-
+            A malformed body, a `query` longer than 2 000 characters or a
+            `measure`/`slice`/`segment` longer than **32** (both rejected at
+            binding, before the token is ever looked at — so an oversized token is
+            a `400` while an unrecognised one is the `422` below), or a path id
+            that is not a UUID. All are raised while
+            binding, before the handler runs, so they disclose nothing about the
+            workspace. **Every refusal the endpoint itself makes is a `422`
+            instead** — see below.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422':
+          description: >-
+            Four refusals, all field-anchored, all `422` — never `400`:
+
+            * an **unparseable HQL query** — `errorType: "PARSE_ERROR"` with a
+              highlight span (`position`, `length`, nullable `token`);
+            * a **semantic HQL error** — `errorType: "SEMANTIC_ERROR"` with the
+              offending `field` and `position`. Identical to what `POST …/search`
+              returns for the same query, because it is the same pipeline;
+            * an **unknown `measure`, `slice` or `segment`** — the detail names
+              the parameter and lists what it accepts;
+            * **`segment` equal to `slice`** — a diagonal is not a breakdown, and
+              it is refused rather than rendered, because the response would look
+              like a broken chart with nothing in it to explain why.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
 
   /workspaces/{workspaceId}/filters:
     get:
@@ -6175,6 +6367,7 @@ paths:
                 type: array
                 items: { $ref: '#/components/schemas/SavedFilterResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
     post:
       tags: [Saved Filters]
       summary: Create a saved filter
@@ -6213,6 +6406,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
 
   /workspaces/{workspaceId}/filters/{filterId}:
     get:
@@ -6233,6 +6427,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SavedFilterResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
     patch:
       tags: [Saved Filters]
       summary: Update a saved filter
@@ -6267,6 +6462,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
     delete:
       tags: [Saved Filters]
       summary: Delete a saved filter
@@ -6280,6 +6476,7 @@ paths:
       responses:
         '204': { description: Deleted }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
 
   /workspaces/{workspaceId}/filters/{filterId}/usage:
     get:
@@ -6302,6 +6499,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SavedFilterUsageResponse' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/SearchThrottled' }
 
 components:
   securitySchemes:
@@ -7027,12 +7225,36 @@ components:
         fit a budget.
 
 
-        The budget covers the whole `…/reports/**` path per principal — **all
-        six reports share one budget rather than holding one each**, so a page
-        opening `/sprint-burnup` and `/sprint-review` together spends two of it —
-        and it is spent **before** the workspace and project are resolved. This is
-        therefore the one place in this API where `429` **precedes** `404`: an
-        over-budget caller is refused even for a project they cannot see. Keying
+        The budget covers the whole `…/reports/**` path per principal **plus
+        `POST …/search/insights`**, which is a report that does not live under
+        the reports base path (its dataset is an HQL query, so it hangs off
+        `/search`) and is therefore bound explicitly rather than by prefix. **All
+        seven reports share one budget rather than holding one each**, so a page
+        opening `/sprint-burnup` and `/sprint-review` together spends two of it,
+        and a panel refresh spends one from the same pot. The budget is spent
+        **before** the workspace and project are resolved.
+
+
+        **There is a second, separate budget over `…/search/**` and
+        `…/filters/**`** (`app.search.requests-per-minute`, 120/min by default),
+        covering `POST …/search`, `/search/schema`, `/search/suggest` and every
+        saved-filter operation — validating a saved filter is search-surface work
+        wherever it is mounted, and a saved filter is a saved search. It is
+        deliberately not folded into the reports pot: somebody typing in a search
+        box legitimately fires several requests a minute and must not be starved
+        to protect charts.
+
+
+        **`POST …/search/insights` spends BOTH budgets, and the LOWER CONFIGURED
+        VALUE binds.** It sits on the reports limiter deliberately, because
+        removing that binding would raise the panel’s allowance to the search
+        budget as a side effect. Do not assume which one governs: it follows from
+        whatever an operator has configured, so lowering *either* property lowers
+        the panel. **A panel refresh therefore competes with report fetches *and*
+        with searches.** The per-principal budgets — this one and the search
+        budget — are therefore **the one place in this API where `429` precedes
+        `404`**: an over-budget caller is refused even for a project they cannot
+        see. Keying
         on the caller rather than the project is what keeps that refusal free of
         tenancy information — and it means the budget bounds one **user**, not
         one workspace: aggregate report load still scales with the number of
@@ -7075,6 +7297,54 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
 
+    SearchThrottled:
+      description: >-
+        Past this caller's **search** budget (`app.search.requests-per-minute`,
+        120/min by default, in-memory per app node, disabled wholesale by
+        `app.rate-limit.enabled=false`). A retryable throttle, not a fault: nothing
+        was computed, and the identical request succeeds after the number of
+        seconds in `Retry-After`.
+
+
+        The budget covers the whole `…/search/**` path per principal **and the
+        whole `…/filters/**` path** — every saved-filter operation, `GET` and
+        `DELETE` included, since the binding is by path and not by method. Saved
+        filters are on this budget because **HQL validation is search-surface work
+        wherever it is mounted**: validating a filter builds the same
+        `ResolutionContext` that `GET …/search/schema` pays for — roughly eight
+        statements, including a workspace-wide label projection and a full member
+        scan — so `POST …/filters` with a deliberately invalid body was an
+        unthrottled eight-query refusal loop. It is charged here rather than to the
+        reports pot, or to a third one, because a saved filter *is* a saved search:
+        the same person doing the same work.
+
+
+        The budget is **separate from the reports budget** — a person typing in a
+        search box legitimately fires several requests a minute, and starving them
+        to protect charts would be the wrong trade. It exists because these
+        endpoints are the expensive ones rather than the cheap ones: a query may
+        carry dozens of text predicates that compile to unanchored, unindexable
+        scans over a text column, and the endpoint runs the whole predicate
+        **twice** per request (count, then page).
+
+
+        Keyed on the caller, and spent **before** the workspace is resolved — so an
+        over-budget caller is refused even for a workspace they cannot see, and the
+        `429` is identical for a real workspace and a nonexistent one.
+
+
+        **`POST …/search/insights` spends BOTH budgets, and the LOWER CONFIGURED
+        VALUE binds.** It sits on the reports limiter deliberately, because
+        removing that binding would raise the panel’s allowance to the search
+        budget as a side effect. Lowering *either* property lowers the panel, so
+        do not assume which one governs. See `ReportThrottled`.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
   headers:
     ReportCacheControl:
       description: >-
@@ -9616,7 +9886,396 @@ components:
           additionalProperties:
             type: array
             items: { $ref: '#/components/schemas/SearchValueOption' }
+        insights:
+          allOf:
+            - $ref: '#/components/schemas/SearchSchemaInsights'
+          description: >-
+            The vocabulary of the Insights panel
+            (`POST …/search/insights`) — capability-narrowed on exactly the
+            same terms as `fields`, and suggestion-only in exactly the same
+            way: a dimension omitted here still resolves if it is requested.
 
+    InsightsMeasure:
+      type: string
+      enum: [COUNT, POINTS, NONE]
+      default: COUNT
+      description: >-
+        What the Insights panel plots on the y axis. **Not `ReportMeasure`** — that
+        one is bound off a query string by `/sprint-burnup` and `/velocity`, where
+        a third `NONE` constant would bind happily and then mean nothing.
+
+
+        **It ranks; it does not filter.** Every bucket carries `count`, `points`
+        *and* `unestimatedCount` whatever you send — they fall out of one
+        `GROUP BY` and cost nothing measurable, so a client toggle needs no round
+        trip. What this decides is the `ORDER BY`, and therefore which buckets
+        survive `sliceCap` / `cellCap`: **`COUNT` and `POINTS` can return
+        different buckets from the same query**, which is correct, because "the
+        top ten by issues" and "the top ten by points" are different questions.
+
+
+        `POINTS` sums `issues.story_points` with unestimated issues contributing
+        `0` and counted in `unestimatedCount` beside it, and is accepted whatever
+        the visible projects declare — `estimation: false` hides the toggle in the
+        UI and never changes a status code.
+
+
+        `NONE` means "no y axis — draw a breakdown table, not a chart". It ranks
+        by count server-side (a bucket has to be ordered by something to be capped
+        at all) and is echoed back, so the distinction is real but entirely the
+        client's. The counts still ship: withholding them would return strictly
+        less data for exactly the same work and leave the table blank.
+
+    InsightsDimension:
+      type: string
+      enum: [STATUS, TYPE, PRIORITY, ASSIGNEE, COMPONENT, LABEL, SPRINT, PROJECT]
+      description: >-
+        What the panel groups by. One list serves **both** roles — the x axis
+        (`slice`) and the colour (`segment`) — because "group by A, coloured by B"
+        is symmetric; the only rule is that the two must differ (`422` otherwise).
+
+
+        `ASSIGNEE`, `COMPONENT`, `LABEL` and `SPRINT` are nullable and produce a
+        **no-value bucket** (unassigned, no component, no labels, not in a
+        sprint), whose `id` and `label` are both `null`. **`LABEL` is the one
+        many-valued dimension**: an issue with three labels appears in three
+        buckets, so those buckets sum to more than `meta.basedOnIssues` — see
+        `sliceMultiValued` / `segmentMultiValued`.
+
+
+        **`PROJECT` groups but never clicks through.** Issues carry a project and
+        the search scope already restricts which are visible, so the bucket is
+        perfectly good — but HQL has no `project` field yet, so every project
+        bucket ships `hql: null` and the bar is not clickable. A known gap with
+        its own ticket, not a defect.
+
+
+        **`ASSIGNEE` is offered here and refused by `/velocity`, and that is not
+        an inconsistency.** Velocity is a *published metric* — stable URL, quoted
+        in a ceremony — where a per-person column becomes a comparison whether
+        anyone meant it or not. This is an *ad-hoc query somebody typed*: its
+        dataset is whatever HQL is in the box, it is not addressable as "the
+        team's number", and the same person could get the same breakdown by
+        running eight searches by hand. The line is **published metric vs. ad-hoc
+        query**.
+
+    InsightsRequest:
+      type: object
+      description: >-
+        The panel's whole input. Every field is optional, so `{}` is a valid body
+        meaning *"count everything I can see, grouped by status"*.
+      properties:
+        query:
+          type: string
+          maxLength: 2000
+          nullable: true
+          example: 'status IN ("In Progress", "In Review") AND due < now()'
+          description: >-
+            The dataset, as HQL — **the same string `POST …/search` takes**,
+            parsed, validated, resolved and compiled by the same machinery, which
+            is what guarantees the panel and the result list under it cannot
+            disagree. `null` or empty means every issue the caller can see,
+            exactly as on search. Longer than 2 000 characters is a `400` at
+            binding; anything unparseable or semantically wrong is a `422`
+            carrying the same `PARSE_ERROR` / `SEMANTIC_ERROR` detail search
+            returns.
+        measure:
+          allOf:
+            - $ref: '#/components/schemas/InsightsMeasure'
+          nullable: true
+          maxLength: 32
+          description: >-
+            Case-insensitive; `null` or blank means `COUNT`. An unknown token is a
+            `422` naming the parameter and listing what it accepts — **not** the
+            `400` the `/reports` GETs raise for the same mistake.
+        slice:
+          allOf:
+            - $ref: '#/components/schemas/InsightsDimension'
+          nullable: true
+          maxLength: 32
+          description: >-
+            The x axis. Case-insensitive; `null` or blank means `STATUS`. Unknown
+            token → `422`.
+        segment:
+          allOf:
+            - $ref: '#/components/schemas/InsightsDimension'
+          nullable: true
+          maxLength: 32
+          description: >-
+            The optional colour dimension. `null` or blank means unsegmented, in
+            which case `cells` and `segments` come back empty and the bars alone
+            are the answer. Unknown token → `422`; **equal to `slice`** → `422`
+            too, because a diagonal is not a breakdown.
+
+    InsightsBucket:
+      type: object
+      description: >-
+        One value of a dimension — a bar on the x axis, or an entry in the legend.
+
+
+        **Buckets are keyed by id, not by name, and that is visible.** Each
+        visible project owns its own statuses, types, priorities, components and
+        sprints, so two projects can both have an "In Progress": two catalog rows,
+        **two buckets, one label**, and the panel shows both. Grouping by name was
+        rejected because it fails more quietly — a name that no longer resolves
+        (a completed sprint, an archived component) would produce a bar whose own
+        filter fragment `422`s the moment somebody clicked it.
+      properties:
+        id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The catalog / user / project id, or **`null` for the "has no value"
+            bucket** (unassigned, no component, not in a sprint, no labels).
+            `cells` reference buckets by this id, so `null` is a **real key** and
+            must be matched as one, not treated as missing.
+        label:
+          type: string
+          nullable: true
+          example: In Progress
+          description: >-
+            The display name, or **`null` for the no-value bucket** — the client
+            supplies "Unassigned" / "No component" / "Backlog", because that
+            wording is UI copy and belongs where the rest of the UI copy lives.
+            The server deliberately does not send it.
+        hql:
+          type: string
+          nullable: true
+          example: 'status = "In Progress"'
+          description: >-
+            An HQL fragment selecting **exactly the issues in this bucket**, for
+            the click-to-narrow affordance — the panel is a navigation device as
+            much as a chart. `null` when no such fragment exists, in which case
+            **the bar is not clickable**.
+
+
+            **Do not rebuild this client-side.** It looks trivial and it is not:
+            the rule behind every `null` is *the fragment reproduces this bucket
+            exactly, or there is no fragment*, and a locally-built clause fails
+            that quietly by producing valid-looking HQL over the wrong set. It is
+            `null` in four cases:
+
+            * the dimension has no HQL vocabulary at all (`PROJECT`);
+            * the bucket's name does not resolve — a **completed sprint**, an
+              **archived** component or label. HQL drops those from name
+              resolution on purpose, so a fragment naming one would `422` on
+              click;
+            * the name resolves to **more than one id** — the cross-project "In
+              Progress" above. The fragment would be strictly **wider than the
+              bar**, and a filter returning more issues than the bar you clicked
+              is exactly the "these numbers don't match" failure;
+            * `ASSIGNEE` only: the member has no email to address them by (the
+              fragment uses email, which is unique in a workspace; a display name
+              is not, and would silently widen to every match).
+
+
+            A `null` here is therefore information — "this bar is not safely
+            clickable" — rather than a gap to fill in.
+
+    InsightsSlice:
+      type: object
+      description: >-
+        One bar: a bucket of the slice dimension plus its **exact** totals.
+
+
+        Exact **even when the breakdown is truncated**, which is the whole reason
+        this record exists rather than letting a client sum the cells. These
+        totals come from their own `GROUP BY` over the slice alone, so a bar is
+        right whatever happened to `cells`; a bar whose height was the sum of its
+        surviving cells would silently shrink when `cellCap` bit — a wrong number
+        with no symptom.
+
+
+        All three numbers are populated regardless of the requested `measure`.
+      properties:
+        bucket: { $ref: '#/components/schemas/InsightsBucket' }
+        count: { type: integer, format: int64, example: 42, description: Distinct issues in this bucket. }
+        points:
+          type: number
+          example: 118
+          description: >-
+            Sum of `issues.story_points`; unestimated issues contribute `0`.
+            **Never null** — an all-unestimated bucket is `0`, which is a fact,
+            with `unestimatedCount` beside it saying how much of that zero is
+            missing data rather than free work.
+        unestimatedCount:
+          type: integer
+          format: int64
+          example: 7
+          description: How many of `count` carry no estimate. Read it with `points`, never without.
+
+    InsightsCell:
+      type: object
+      description: >-
+        One (slice, segment) intersection — a stack in a stacked bar, or a cell of
+        the table. Present only on a segmented request; an unsegmented response
+        ships an empty list.
+
+
+        Cells reference their buckets **by id** rather than repeating them: a
+        segmented response is a product of two axes, and inlining both buckets
+        into every cell is where a 1 000-cell response stops being small. `null`
+        is a real id (the no-value bucket), so match it as one.
+
+
+        **The cells of one bar can sum to more than that bar** — only when the
+        segment dimension is many-valued (`segmentMultiValued`, today `LABEL`
+        alone): an issue with three labels contributes to three cells of the same
+        bar while counting once in the bar. And when `cellsTruncated` is set they
+        can sum to **less**. Both directions are disclosed on the response, and
+        neither is a defect in the bar, whose total is computed independently.
+      properties:
+        sliceId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Id of the slice bucket, or `null` for its no-value bucket.
+        segmentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Id of the segment bucket, or `null` for its no-value bucket.
+        count: { type: integer, format: int64, example: 12 }
+        points: { type: number, example: 34 }
+        unestimatedCount: { type: integer, format: int64, example: 2 }
+
+    InsightsResponse:
+      type: object
+      description: >-
+        `POST …/search/insights`. Shaped as a small pivot rather than one flat
+        array for a single reason: **a bar's height and its breakdown are capped
+        separately, so they are computed separately.** `slices` are exact;
+        `cells` may be partial. Deriving the bars by summing the cells would make
+        every truncated response quietly understate its own chart.
+      properties:
+        measure:
+          allOf:
+            - $ref: '#/components/schemas/InsightsMeasure'
+          description: >-
+            Echo of the requested measure. **It ranked the buckets; it did not
+            filter them** — every bucket carries both numbers.
+        slice: { $ref: '#/components/schemas/InsightsDimension' }
+        segment:
+          allOf:
+            - $ref: '#/components/schemas/InsightsDimension'
+          nullable: true
+          description: Echo of the colour dimension, or `null` when unsegmented.
+        slices:
+          type: array
+          description: >-
+            The bars, ordered by `measure` descending then label ascending, at
+            most `sliceCap`. **Totals are exact.**
+          items: { $ref: '#/components/schemas/InsightsSlice' }
+        segments:
+          type: array
+          description: >-
+            The legend: every segment value appearing in `cells`, ordered the same
+            way. Empty when unsegmented.
+          items: { $ref: '#/components/schemas/InsightsBucket' }
+        cells:
+          type: array
+          description: >-
+            The (slice, segment) intersections, at most `cellCap`. Empty when
+            unsegmented — the bars already are the answer. A cell is only ever
+            emitted for a bar that survived `sliceCap`: a stack belonging to no
+            bar is unrenderable, not merely useless, and dropping one also sets
+            `cellsTruncated`.
+          items: { $ref: '#/components/schemas/InsightsCell' }
+        sliceMultiValued:
+          type: boolean
+          description: >-
+            Whether one issue can occupy several bars (`LABEL` only). When `true`
+            **the bars sum to more than `meta.basedOnIssues`** — arithmetic rather
+            than a defect, but it is published so the panel can label its total
+            honestly instead of letting the reader discover the mismatch.
+        segmentMultiValued:
+          type: boolean
+          description: The same for the colour dimension — when `true`, a bar's stacks can sum to more than the bar.
+        slicesTruncated:
+          type: boolean
+          description: >-
+            Whether there were more slice buckets than `sliceCap`. The ones you
+            got are the **largest by `measure`**. This means *bars are missing
+            from the x axis* — a different picture from `cellsTruncated`, and a
+            client should be able to say which happened.
+        cellsTruncated:
+          type: boolean
+          description: >-
+            Whether the breakdown is partial — either there were more cells than
+            `cellCap`, or a cell belonged to a bar that did not survive
+            `sliceCap`. **The bars are still exact**; only the stacking is
+            incomplete.
+        sliceCap:
+          type: integer
+          example: 200
+          description: >-
+            The bar cap that would bite — a fixed constant, not an operator
+            setting. Always reported, so a client never has to guess what a
+            truncation was measured against (the `ReportMeta.cap` convention,
+            applied to the axis this report can actually truncate).
+        cellCap: { type: integer, example: 1000, description: 'The cell cap that would bite; likewise a fixed constant.' }
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance, with three of its fields carrying report-specific values
+            that are **facts here, not stubs**:
+
+
+            `basedOnIssues` is the distinct issues matching the query — the same
+            number the search result list reports — counted independently of every
+            cap above and **deliberately not the sum of the series** (see
+            `sliceMultiValued`).
+
+
+            `truncated` is always `false` and `cap` is `app.reports.max-rows`,
+            because this report materialises **no issue rows at all**: PostgreSQL
+            aggregates and returns buckets, so the row cap cannot bite. What can
+            truncate is buckets, and that is what `slicesTruncated` /
+            `cellsTruncated` are for.
+
+
+            `firstIssueAt` is **`null`** — it is a per-*project* property and this
+            report spans a workspace, so inventing a fourth meaning for it was
+            refused. `unmatchedFilters` is always empty: it belongs to id-shaped
+            filter parameters, and an HQL name that matches nothing is a `422`
+            from the resolver long before it could be reported as unmatched.
+
+    SearchSchemaInsights:
+      type: object
+      description: >-
+        What the Insights panel on this page may be **offered** — the measures and
+        grouping dimensions worth putting in front of this caller.
+
+
+        **Suggestions, not a contract** — the same sentence that governs `fields`,
+        meaning the same thing. `SPRINT` is dropped when no visible project plans
+        in sprints and `POINTS` when none estimates, mirroring how the `sprint`
+        and `storyPoints` *fields* are dropped. **What is omitted still
+        resolves**: `POST …/search/insights` answers `200` for a dimension that is
+        not in this list, because a capability is a presentation preference and
+        may never change a status code — so a saved panel state cannot break
+        because a curator flipped a project toggle.
+
+
+        Published here rather than hardcoded in the client precisely because it is
+        capability-narrowed, and built by filtering the enums, so a dimension
+        added later is offered without a second edit.
+      properties:
+        measures:
+          type: array
+          items: { $ref: '#/components/schemas/InsightsMeasure' }
+          example: [COUNT, POINTS, NONE]
+          description: '`POINTS` is present only when at least one visible project has `estimation` on.'
+        dimensions:
+          type: array
+          items: { $ref: '#/components/schemas/InsightsDimension' }
+          example: [STATUS, TYPE, PRIORITY, ASSIGNEE, COMPONENT, LABEL, PROJECT]
+          description: >-
+            One list serves both `slice` and `segment` — grouping is symmetric —
+            with the single rule that the two must differ. `SPRINT` is present
+            only when at least one visible project has `board: SCRUM`.
     SearchField:
       type: object
       description: A queryable HQL field's public schema
@@ -10426,7 +11085,10 @@ components:
             on `/sprint-burnup` and `/sprint-review` the distinct issues that
             have ever been in that sprint; on `/velocity` the distinct issues the
             sampled sprints' ledgers hold, an issue that appeared in two of them
-            counted once.
+            counted once; on `/search/insights` the distinct issues matching the
+            query — the same number the search result list reports, and
+            **deliberately not the sum of the series**, since a many-valued
+            dimension puts one issue in several buckets.
 
 
             **On every report it is counted independently of the row cap**, which
@@ -10442,7 +11104,11 @@ components:
             Whether `cap` actually bit; when `true` the report is a partial view
             and the client must say so. **Always `false` on `/flow`**, which
             aggregates in SQL and returns at most one row per bucket, so the row
-            cap physically cannot bite there.
+            row cap physically cannot bite there. **Always `false` on
+            `/search/insights` too, and for the same reason** — it aggregates in
+            PostgreSQL and materialises no issue row at all. What truncates there
+            is buckets, disclosed by its own `slicesTruncated` / `cellsTruncated`
+            rather than by this flag.
 
 
             It does bite on the row-level reports, and **which end survives
@@ -10516,6 +11182,12 @@ components:
             first issue carrying it. A filter that matches **nothing** therefore
             makes this `null`, beside that filter's name in `unmatchedFilters`.
             It is the first *issue*, not the project's own creation date.
+
+
+            **`null` on `/search/insights`**, which is the one report in the
+            family that spans a workspace rather than a project: this is a
+            per-project property, and inventing a workspace-wide meaning for it
+            would give one field name two definitions.
         unmatchedFilters:
           type: array
           items: { type: string }
@@ -10528,7 +11200,10 @@ components:
             one straight back to the control the user touched. Always empty on
             `/aging`, `/sprint-burnup`, `/sprint-review` and `/velocity`, which
             take no filters — `sprintId` is a **subject**, so an id that matches nothing
-            is a `404` there rather than an entry here.
+            is a `404` there rather than an entry here. Always empty on
+            `/search/insights` as well: it belongs to id-shaped filter parameters,
+            and an HQL name matching nothing is a `422` from the resolver long
+            before it could be reported as unmatched.
 
 
             It exists because a typo'd or stale filter id otherwise renders a

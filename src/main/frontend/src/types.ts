@@ -1035,6 +1035,12 @@ export interface SearchSchema {
   keywords: string[];
   // Value picklists keyed by value-source token (STATUS/TYPE/PRIORITY); USER absent.
   values: Record<string, SearchValueOption[]>;
+  // What the Insights panel may be OFFERED (HD-140). Optional so a client can
+  // still talk to a server that predates the panel — absent means "offer
+  // everything", never "offer nothing": withholding a control because an
+  // unrelated request was thin is the same mistake as inferring a capability
+  // from data.
+  insights?: SearchSchemaInsights;
 }
 
 // A saved, workspace-scoped HQL data source (own + shared). `mine` is
@@ -1610,4 +1616,124 @@ export interface VelocityReport {
   /** Always present; its percentiles are null when the band is suppressed. */
   forecast: VelocityForecast;
   meta: ReportMeta;
+}
+
+// ── Search insights (epic HD-5, slice R6 — the dashboard replacement) ────────
+// `POST /api/workspaces/{wsId}/search/insights` (§2.6). Workspace-scoped, not
+// project-scoped: its dataset is **the HQL query already in the search box**,
+// which is what a gadget grid can never have — one global filter by
+// construction, so no two numbers on the panel can come from different sets.
+//
+// Mirrors `com.hamstrack.report.dto.Insights*`. The response is a **cross tab,
+// not a tree**: the bars (`slices`), the legend (`segments`) and their
+// intersections (`cells`) are three flat lists, because the two are capped
+// SEPARATELY and a bar's height is deliberately not the sum of its stacks.
+
+/** The y axis. `NONE` draws no chart — the panel becomes a pure breakdown. */
+export type InsightsMeasure = 'COUNT' | 'POINTS' | 'NONE';
+
+/**
+ * The x axis (`slice`) and the optional colour dimension (`segment`) — one list
+ * serves both, and the only rule is that they must differ (422 otherwise).
+ *
+ * `ASSIGNEE` is here and is **refused in velocity** (§2.5/§1.4). Not an
+ * inconsistency: this is an ad-hoc query a member runs over their own result
+ * set, not a published metric with a permanent home in the navigation.
+ */
+export type InsightsDimension =
+  | 'STATUS' | 'TYPE' | 'PRIORITY' | 'ASSIGNEE'
+  | 'COMPONENT' | 'LABEL' | 'SPRINT' | 'PROJECT';
+
+/**
+ * One bar, or one legend entry — **and the HQL that reproduces exactly it**.
+ *
+ * `id` is the entity id, or **null for the no-value bucket** (unassigned, no
+ * component, no sprint), which is a real answer and not an error.
+ *
+ * `hql` is the whole click-through, and it is **the server's job, never the
+ * client's**. A fragment is emitted only when it returns precisely the issues
+ * this bar counted, and is `null` otherwise — which happens for three separate
+ * reasons the panel must not paper over:
+ *
+ *  1. `PROJECT`, which HQL has no vocabulary for at all;
+ *  2. a name owned by two visible projects (two "Billing" components), where
+ *     `component = "Billing"` would match a WIDER set than the bar;
+ *  3. a name deliberately outside HQL name resolution — a COMPLETED sprint, an
+ *     archived component or label — where the fragment would 422 on click.
+ *
+ * Never rebuild it locally from `label`. Getting (2) and (3) right needs the
+ * workspace's whole name→id map, and the failure mode of guessing is a click
+ * that returns a different set than the bar and looks exactly like success.
+ */
+export interface InsightsBucket {
+  id: string | null;
+  label: string;
+  hql: string | null;
+}
+
+/** One bar. Both measures are always present — the toggle is a re-render. */
+export interface InsightsSlice {
+  bucket: InsightsBucket;
+  count: number;
+  /** Sum of story points; unestimated issues weigh zero, and are counted below. */
+  points: number | null;
+  unestimatedCount: number;
+}
+
+/** One (slice, segment) intersection. Ids match `slices[].bucket.id`/`segments[].id`. */
+export interface InsightsCellValue {
+  sliceId: string | null;
+  segmentId: string | null;
+  count: number;
+  points: number | null;
+  unestimatedCount: number;
+}
+
+/**
+ * `POST /search/insights` (§2.6, §4.3).
+ *
+ * **The two truncation flags are not `meta.truncated`.** This report never
+ * materialises an issue row, so the row cap physically cannot bite (`meta`
+ * reports that honestly). What truncates here is *buckets* — the axis at
+ * `sliceCap`, the cross tab at `cellCap` — and each has its own flag because a
+ * chart missing bars and a chart missing stacks are different sentences.
+ *
+ * **`sliceMultiValued` is the one that changes what the numbers mean.** An issue
+ * with three labels lands in three bars, so on a many-valued dimension the bars
+ * sum to more than `meta.basedOnIssues` and the panel has to say so — an
+ * unexplained "sum ≠ total" is precisely the "these numbers don't match"
+ * complaint this epic's disclosure rules exist to prevent.
+ */
+export interface InsightsResponse {
+  measure: InsightsMeasure;
+  slice: InsightsDimension;
+  /** Null when no colour dimension was requested. */
+  segment: InsightsDimension | null;
+  /** The bars, ranked by the requested measure, then by label. */
+  slices: InsightsSlice[];
+  /** The legend — every segment bucket the shipped cells refer to. */
+  segments: InsightsBucket[];
+  /** The cross tab. Empty when unsegmented. */
+  cells: InsightsCellValue[];
+  sliceMultiValued: boolean;
+  segmentMultiValued: boolean;
+  slicesTruncated: boolean;
+  cellsTruncated: boolean;
+  sliceCap: number;
+  cellCap: number;
+  meta: ReportMeta;
+}
+
+/**
+ * What `/search/schema` says the Insights panel may be OFFERED (`schema.insights`).
+ *
+ * **Suggestions, not a contract** — the same sentence that governs `fields`.
+ * `SPRINT` is dropped when no visible project plans in sprints and `POINTS` when
+ * none estimates; what is omitted still RESOLVES, because a capability may never
+ * change a status code (delivery-paths Rule A). So the panel hides the control
+ * and still sends, and still renders, a shared URL that names one.
+ */
+export interface SearchSchemaInsights {
+  measures: InsightsMeasure[];
+  dimensions: InsightsDimension[];
 }

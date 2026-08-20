@@ -259,7 +259,11 @@ The ledger's snapshot is **not** made redundant by this. It answers a different 
 
 **Why this instead of gadgets:** one dataset means no double-counting across widgets (§1.5); no layout to save, break or migrate; a saved filter *becomes* a saved report at zero cost; and the whole feature is one endpoint over machinery that already exists.
 
-**Cost:** one `GROUP BY` over the existing search Criteria query with page/sort dropped. Same cap and `meta` as everything else. Assignee slice is allowed here (ad-hoc query, not a published metric) but **not** in §2.5.
+**Cost:** one `GROUP BY` over the existing search Criteria query with page/sort dropped. Same cap and `meta` as everything else.
+
+**The assignee slice is allowed here and refused in §2.5, and the combination that looks like a loophole is reachable.** Slicing by sprint, colouring by assignee and measuring in points produces, in substance, the cross-project per-person velocity chart §2.5 exists to refuse. That is accepted, not overlooked, and the reason is the distinction the whole section rests on: this is a query a person typed, against the filter they were already looking at, with no stable address. §2.5 is a *published metric* — a named report, at a URL, that people quote at each other and that acquires authority by being on a page called Velocity. The harm §1.4 documents comes from the second thing, not the first.
+
+Two consequences worth stating rather than leaving implied. **No structural guard can see this combination** — §2.5's refusals are enforced by tests keyed on its own records and paths, and an ad-hoc slice matches neither, so the line is held by this paragraph and the javadoc rather than by a mechanism. And it follows that the line must not be defended by narrowing the panel: removing the assignee slice would break the ad-hoc case the panel exists for while leaving anyone determined to build a scoreboard one export away. **What must never happen is the reverse — this combination acquiring a name, a saved home or a navigation entry.** The moment it does, it is §2.5 with the refusals stripped off, and it should be refused as such.
 
 **Capability:** the slice list omits `sprint` when `board = KANBAN` and `story points` when estimation is off — mirroring `/search/schema`'s existing "suggestions narrow, resolution never does" rule. A slice the UI hides still resolves if requested (Rule A).
 

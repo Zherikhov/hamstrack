@@ -70,6 +70,13 @@ completed). It is deliberately disjoint from the colours that already mean somet
   status / priority / issue type reads `color` from the project `config` endpoint, exactly
   as badges do — never the ramp, never a hardcoded hex. Config-driven rendering does not
   stop at the chart boundary.
+- **Exception — a chart above the project uses the ramp** (added 2026-08-20, search
+  insights, HD-140). The rule above assumes one project's `config`. A workspace-scoped
+  chart has none: the same status name can carry different configured colours in two
+  projects, so there is no correct single answer to inherit, only a guess about which
+  project wins. The ramp is the honest answer there — "this is series three" reads as a
+  position, where a borrowed teal reads as *done* and is wrong wherever the borrowing was.
+  Reach for the entity's colour again the moment a chart is back inside one project.
 - **Five is the limit.** A slice with more than five categories groups the tail into
   **"Other"** rather than inventing a sixth hue: colours 6–10 of any ramp are not reliably
   distinguishable for colour-blind readers, and a 12-slice legend is unreadable for
