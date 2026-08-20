@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.search.FieldResolver.Resolved;
 import com.hamstrack.search.parser.ast.Expr;
 import com.hamstrack.search.parser.ast.OrderBy;
 import com.hamstrack.search.parser.ast.Query;
@@ -26,20 +27,23 @@ import org.springframework.stereotype.Component;
  *       custom field — custom fields are non-sortable in MVP).</li>
  * </ul>
  *
- * <p><strong>Lookup precedence:</strong> a system field ({@link FieldRegistry}) FIRST;
- * only if the name isn't a system field is it matched against the ctx's visible custom
- * fields (HD-52); only if THAT misses is it matched against the retired-key aliases
- * ({@link RetiredFieldAliases}, HD-107 §9.2). A custom field a caller can't see is
- * never in ctx → "unknown field" (never leaked). Value resolvability (no such
- * status/user/option/date) is validated later, during compilation, because it needs
- * the workspace state.
+ * <p><strong>What a name means is not decided here.</strong> Every name in the tree —
+ * in a comparison, in an {@code IN} list, in {@code IS EMPTY}, in {@code ORDER BY} —
+ * goes through {@link FieldResolver}, which owns the registry → custom field →
+ * retired-alias precedence and the two errors that end it (unknown / not yet
+ * queryable). This class only decides what may be <em>done</em> with a resolved field.
+ * That split is what makes "validated, then unknown while compiling" impossible: a name
+ * this class accepted resolves the same way for anything that later executes it (HD-114;
+ * HD-107 §9.2 is the bug that happened when the order was written down more than once).
+ *
+ * <p>Value resolvability (no such status/user/option/date) is validated later, during
+ * compilation, because it needs the workspace state.
  */
 @Component
 @RequiredArgsConstructor
 public class HqlValidator {
 
-    private final FieldRegistry registry;
-    private final RetiredFieldAliases retiredAliases;
+    private final FieldResolver fieldResolver;
 
     public void validate(Query query, ResolutionContext ctx) {
         query.filter().ifPresent(f -> validateExpr(f, ctx));
@@ -58,49 +62,52 @@ public class HqlValidator {
             }
             case Expr.Not n -> validateExpr(n.operand(), ctx);
             case Expr.Comparison c -> {
-                var sys = systemField(c.field(), ctx);
-                if (sys != null) {
-                    if (!sys.allows(c.op())) {
-                        throw new HqlSemanticException(
-                                "Operator '" + c.op().symbol() + "' is not allowed on field '" + sys.name() + "'",
-                                sys.name());
+                switch (fieldResolver.resolve(c.field(), ctx)) {
+                    case Resolved.SystemField(FieldDescriptor sys) -> {
+                        if (!sys.allows(c.op())) {
+                            throw new HqlSemanticException(
+                                    "Operator '" + c.op().symbol() + "' is not allowed on field '" + sys.name() + "'",
+                                    sys.name());
+                        }
                     }
-                } else {
-                    var cf = requireCustom(c.field(), ctx);
-                    if (!CustomFieldOps.comparisonOps(cf.type()).contains(c.op())) {
-                        throw new HqlSemanticException(
-                                "Operator '" + c.op().symbol() + "' is not allowed on field '" + cf.key() + "'",
-                                cf.key());
+                    case Resolved.CustomField(CustomFieldMeta cf) -> {
+                        if (!CustomFieldOps.comparisonOps(cf.type()).contains(c.op())) {
+                            throw new HqlSemanticException(
+                                    "Operator '" + c.op().symbol() + "' is not allowed on field '" + cf.key() + "'",
+                                    cf.key());
+                        }
                     }
                 }
             }
             case Expr.InList in -> {
-                var sys = systemField(in.field(), ctx);
-                if (sys != null) {
-                    if (!sys.supportsIn()) {
-                        throw new HqlSemanticException(
-                                "The IN operator is not allowed on field '" + sys.name() + "'", sys.name());
+                switch (fieldResolver.resolve(in.field(), ctx)) {
+                    case Resolved.SystemField(FieldDescriptor sys) -> {
+                        if (!sys.supportsIn()) {
+                            throw new HqlSemanticException(
+                                    "The IN operator is not allowed on field '" + sys.name() + "'", sys.name());
+                        }
                     }
-                } else {
-                    var cf = requireCustom(in.field(), ctx);
-                    if (!CustomFieldOps.supportsIn(cf.type())) {
-                        throw new HqlSemanticException(
-                                "The IN operator is not allowed on field '" + cf.key() + "'", cf.key());
+                    case Resolved.CustomField(CustomFieldMeta cf) -> {
+                        if (!CustomFieldOps.supportsIn(cf.type())) {
+                            throw new HqlSemanticException(
+                                    "The IN operator is not allowed on field '" + cf.key() + "'", cf.key());
+                        }
                     }
                 }
             }
             case Expr.IsEmpty e -> {
-                var sys = systemField(e.field(), ctx);
-                if (sys != null) {
-                    if (!sys.nullable()) {
-                        throw new HqlSemanticException(
-                                "Field '" + sys.name() + "' cannot be empty", sys.name());
+                switch (fieldResolver.resolve(e.field(), ctx)) {
+                    case Resolved.SystemField(FieldDescriptor sys) -> {
+                        if (!sys.nullable()) {
+                            throw new HqlSemanticException(
+                                    "Field '" + sys.name() + "' cannot be empty", sys.name());
+                        }
                     }
-                } else {
-                    var cf = requireCustom(e.field(), ctx);
-                    if (!CustomFieldOps.nullable(cf.type())) {
-                        throw new HqlSemanticException(
-                                "Field '" + cf.key() + "' cannot be empty", cf.key());
+                    case Resolved.CustomField(CustomFieldMeta cf) -> {
+                        if (!CustomFieldOps.nullable(cf.type())) {
+                            throw new HqlSemanticException(
+                                    "Field '" + cf.key() + "' cannot be empty", cf.key());
+                        }
                     }
                 }
             }
@@ -109,54 +116,17 @@ public class HqlValidator {
 
     private void validateOrderBy(OrderBy orderBy, ResolutionContext ctx) {
         for (var key : orderBy.keys()) {
-            var sys = systemField(key.field(), ctx);
-            if (sys != null) {
-                if (!sys.sortable()) {
-                    throw new HqlSemanticException(
-                            "Field '" + sys.name() + "' is not sortable", sys.name());
+            switch (fieldResolver.resolve(key.field(), ctx)) {
+                case Resolved.SystemField(FieldDescriptor sys) -> {
+                    if (!sys.sortable()) {
+                        throw new HqlSemanticException(
+                                "Field '" + sys.name() + "' is not sortable", sys.name());
+                    }
                 }
-            } else {
                 // Custom fields are non-sortable in MVP.
-                var cf = requireCustom(key.field(), ctx);
-                throw new HqlSemanticException(
+                case Resolved.CustomField(CustomFieldMeta cf) -> throw new HqlSemanticException(
                         "Field '" + cf.key() + "' is not sortable", cf.key());
             }
         }
-    }
-
-    /**
-     * Resolve a name to a system {@link FieldDescriptor}, or {@code null} if the name
-     * isn't a system field. A registered-but-not-available field is still a system
-     * name and throws its own "not yet queryable" error here.
-     *
-     * <p><strong>Precedence (HD-107 §9.2):</strong> the registry first; a
-     * retired-key alias is consulted ONLY when the registry misses AND the caller
-     * has no visible custom field with that key — so a tenant's own custom field
-     * keyed {@code story_points} always resolves to itself, and the alias is a
-     * last-resort fallback that can never shadow it. Returning {@code null} here
-     * hands the name on to {@link #requireCustom}, which owns the "unknown field"
-     * error.
-     */
-    private FieldDescriptor systemField(String name, ResolutionContext ctx) {
-        var found = registry.find(name);
-        if (found.isEmpty()) {
-            if (ctx.customField(name).isPresent()) return null;   // the tenant's own field wins
-            found = retiredAliases.canonicalName(name).flatMap(registry::find);
-            if (found.isEmpty()) return null;
-        }
-        var f = found.get();
-        if (!f.available()) {
-            throw new HqlSemanticException(
-                    "Field '" + f.name() + "' is not yet queryable", f.name());
-        }
-        return f;
-    }
-
-    /** Resolve a non-system name to a visible custom field, or throw "unknown field". */
-    private CustomFieldMeta requireCustom(String name, ResolutionContext ctx) {
-        return ctx.customField(name).orElseThrow(() -> {
-            String suggestion = registry.suggest(name).map(s -> " Did you mean '" + s + "'?").orElse("");
-            return new HqlSemanticException("Unknown field '" + name + "'." + suggestion, name);
-        });
     }
 }

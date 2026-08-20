@@ -7,6 +7,7 @@ import com.hamstrack.issue.entity.IssueFieldValue;
 import com.hamstrack.issue.entity.IssueLabel;
 import com.hamstrack.issue.entity.IssueVersionLink;
 import com.hamstrack.issue.entity.VersionLinkType;
+import com.hamstrack.search.FieldResolver.Resolved;
 import com.hamstrack.search.parser.ast.ComparisonOp;
 import com.hamstrack.search.parser.ast.Expr;
 import com.hamstrack.search.parser.ast.OrderBy;
@@ -59,11 +60,10 @@ import java.util.UUID;
 public class HqlCompiler {
 
     private final EntityManager em;
-    private final FieldRegistry registry;
+    private final FieldResolver fieldResolver;
     private final HqlValueResolver valueResolver;
     private final HqlParentResolver parentResolver;
     private final SearchScope searchScope;
-    private final RetiredFieldAliases retiredAliases;
 
     /**
      * Build the page query: scope-ANDed predicate + ToOne fetch joins + ORDER BY
@@ -187,56 +187,32 @@ public class HqlCompiler {
         };
     }
 
-    private FieldDescriptor field(String name, ResolutionContext ctx) {
-        // Validated already, but re-resolve defensively (never trust the raw string).
-        return registry.find(name)
-                .filter(FieldDescriptor::available)
-                .or(() -> retiredAlias(name, ctx))
-                .orElseThrow(() -> new HqlSemanticException("Unknown field '" + name + "'", name));
-    }
-
-    /**
-     * True when the name is a custom field (not a system field) — routes to the JSONB path.
-     *
-     * <p>The registry is checked FIRST and wins: a name it knows is never treated as a
-     * custom field. That precedence is why a retired key must NOT be a registry entry
-     * (HD-107 §9.2) — {@code story_points} in {@link FieldRegistry} would permanently
-     * shadow any tenant's own custom field with that key. The alias is applied only
-     * after this method has said "not custom" (see {@link #retiredAlias}).
-     */
-    private boolean isCustom(String name, ResolutionContext ctx) {
-        return registry.find(name).filter(FieldDescriptor::available).isEmpty()
-                && ctx.customField(name).isPresent();
-    }
-
-    /**
-     * Last-resort resolution of a <em>retired</em> field key to the system field that
-     * replaced it (HD-107 §9.2) — the step that keeps a saved filter written as
-     * {@code story_points = 5} running after V11 archived that custom field.
-     *
-     * <p>Consulted only when the registry missed, and it yields nothing when the caller
-     * CAN see a custom field with that key: system field → visible custom field →
-     * retired alias → "unknown field". The custom check is redundant on the paths that
-     * already ran {@link #isCustom}, and deliberately kept anyway — the ordering is a
-     * tenancy-safety property (a tenant's own {@code story_points} must resolve to
-     * itself, never to the native column) and must hold at every entry point,
-     * including ORDER BY.
-     */
-    private java.util.Optional<FieldDescriptor> retiredAlias(String name, ResolutionContext ctx) {
-        if (ctx.customField(name).isPresent()) return java.util.Optional.empty();
-        return retiredAliases.canonicalName(name)
-                .flatMap(registry::find)
-                .filter(FieldDescriptor::available);
-    }
+    // ---- name resolution ----
+    //
+    // Which field a name refers to is NOT decided in this class: every name — in a
+    // comparison, an IN list, IS EMPTY or ORDER BY — goes to FieldResolver, which owns
+    // the registry → visible custom field → retired-key alias precedence and the errors that
+    // end it (HD-114). Whatever checked this query beforehand asked that same component the
+    // same question, so a name it accepted cannot turn into an unknown field here — the
+    // "validated, then unknown" failure HD-107 §9.2 hit when the sequence was written down in
+    // more than one place.
+    // Resolution still runs here rather than being carried over from validation: the raw
+    // string is never trusted, and re-asking is free.
 
     // ---- comparison ----
 
     private Predicate comparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
                                  CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(c.field(), ctx)) {
-            return customComparison(c, outer, root, cb, ctx);
-        }
-        FieldDescriptor f = field(c.field(), ctx);
+        return switch (fieldResolver.resolve(c.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) ->
+                    customComparison(c, meta, outer, root, cb, ctx);
+            case Resolved.SystemField(FieldDescriptor f) ->
+                    systemComparison(c, f, outer, root, cb, ctx);
+        };
+    }
+
+    private Predicate systemComparison(Expr.Comparison c, FieldDescriptor f, CommonAbstractCriteria outer,
+                                       Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         ComparisonOp op = c.op();
 
         // text ~ term
@@ -340,10 +316,16 @@ public class HqlCompiler {
 
     private Predicate inList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
                              CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(in.field(), ctx)) {
-            return customInList(in, outer, root, cb, ctx);
-        }
-        FieldDescriptor f = field(in.field(), ctx);
+        return switch (fieldResolver.resolve(in.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) ->
+                    customInList(in, meta, outer, root, cb, ctx);
+            case Resolved.SystemField(FieldDescriptor f) ->
+                    systemInList(in, f, outer, root, cb, ctx);
+        };
+    }
+
+    private Predicate systemInList(Expr.InList in, FieldDescriptor f, CommonAbstractCriteria outer,
+                                   Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         // priority IN (...) always uses id equality (§5.3: >/< use position, IN uses id)
         var ids = new ArrayList<UUID>();
         for (Value v : in.values()) {
@@ -368,13 +350,18 @@ public class HqlCompiler {
 
     private Predicate isEmpty(Expr.IsEmpty e, CommonAbstractCriteria outer, Root<Issue> root,
                               CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(e.field(), ctx)) {
-            // Empty = no issue_field_values row for this field at all (HD-52).
-            var meta = ctx.customField(e.field()).orElseThrow();
-            Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
-            return e.negated() ? anyRow : cb.not(anyRow);
-        }
-        FieldDescriptor f = field(e.field(), ctx);
+        return switch (fieldResolver.resolve(e.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) -> {
+                // Empty = no issue_field_values row for this field at all (HD-52).
+                Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
+                yield e.negated() ? anyRow : cb.not(anyRow);
+            }
+            case Resolved.SystemField(FieldDescriptor f) -> systemIsEmpty(e, f, outer, root, cb);
+        };
+    }
+
+    private Predicate systemIsEmpty(Expr.IsEmpty e, FieldDescriptor f, CommonAbstractCriteria outer,
+                                    Root<Issue> root, CriteriaBuilder cb) {
         // label IS EMPTY = "carries no label at all" (no id filter on the subquery).
         if (f.dataType() == FieldDataType.LABEL_REF) {
             Predicate anyLabel = cb.exists(labelSubquery(outer, root, cb, null));
@@ -513,9 +500,8 @@ public class HqlCompiler {
     // field_id, so it can NEVER reach outside the workspace/visible-project boundary
     // (SearchScope stays outermost). JSONB access uses cb.function(...) exclusively.
 
-    private Predicate customComparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
-                                       CriteriaBuilder cb, ResolutionContext ctx) {
-        var meta = ctx.customField(c.field()).orElseThrow();
+    private Predicate customComparison(Expr.Comparison c, CustomFieldMeta meta, CommonAbstractCriteria outer,
+                                       Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         ComparisonOp op = c.op();
 
         // != on a scalar custom field: match issues whose field is absent OR differs.
@@ -530,9 +516,8 @@ public class HqlCompiler {
         return cb.exists(valueSubquery(outer, root, cb, meta, valuePred(meta, op, c.value(), ctx)));
     }
 
-    private Predicate customInList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
-                                   CriteriaBuilder cb, ResolutionContext ctx) {
-        var meta = ctx.customField(in.field()).orElseThrow();
+    private Predicate customInList(Expr.InList in, CustomFieldMeta meta, CommonAbstractCriteria outer,
+                                   Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         // IN = "any of": one EXISTS whose value predicate is an OR of per-element preds.
         var perElement = new ArrayList<Predicate>();
         var sq = valueSubqueryOpen(outer, root, cb, meta);
@@ -797,16 +782,15 @@ public class HqlCompiler {
 
     // ---- ORDER BY ----
 
-    // `ctx` is threaded in for one reason: a sort key may be a RETIRED key
-    // (`ORDER BY story_points`, HD-107 §9.2), and resolving it needs the same
-    // system → custom → alias precedence the predicate paths use. Without it the
-    // validator would accept the key and the compiler would then throw "unknown
-    // field" on the very same query.
+    // `ctx` is threaded in for one reason: a sort key is a field name like any other, so
+    // it is resolved by the same component the predicate paths use (see sortField). A sort
+    // key that resolved by its own rules is how HD-107 §9.2 produced a query the validator
+    // accepted and the compiler then called an unknown field.
     private List<Order> orderBy(Query query, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         var orders = new ArrayList<Order>();
         if (query.orderBy().isPresent()) {
             for (OrderBy.SortKey key : query.orderBy().get().keys()) {
-                FieldDescriptor f = field(key.field(), ctx);
+                FieldDescriptor f = sortField(key.field(), ctx);
                 Path<?> path = sortPath(root, f);
                 boolean desc = key.direction() == OrderBy.Direction.DESC;
                 // priority rank is inverted vs its `position` column (lower position =
@@ -822,6 +806,25 @@ public class HqlCompiler {
         // Always break ties on id for a stable, deterministic page.
         orders.add(cb.desc(root.get("id")));
         return orders;
+    }
+
+    /**
+     * The system field a sort key names — resolved through {@link FieldResolver} like every
+     * other name, which is what makes {@code ORDER BY story_points} work (HD-107 §9.2: this
+     * was the entry point that had its own copy of the precedence and did not learn the alias
+     * step, so validation accepted the key and compilation then called it unknown).
+     *
+     * <p>A custom field is not sortable in MVP, so it is refused here in the words the
+     * validator uses. Validation rejects it first, so this is unreachable through search —
+     * kept because a sort key that resolved and then fell off the end of a switch would be a
+     * 500, and because "not sortable" is the true statement about it either way.
+     */
+    private FieldDescriptor sortField(String name, ResolutionContext ctx) {
+        return switch (fieldResolver.resolve(name, ctx)) {
+            case Resolved.SystemField(FieldDescriptor f) -> f;
+            case Resolved.CustomField(CustomFieldMeta meta) -> throw new HqlSemanticException(
+                    "Field '" + meta.key() + "' is not sortable", meta.key());
+        };
     }
 
     private Path<?> sortPath(Root<Issue> root, FieldDescriptor f) {

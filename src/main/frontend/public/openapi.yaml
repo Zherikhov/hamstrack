@@ -6504,8 +6504,10 @@ paths:
 
         **Not** served here: `sprint`. Its `/search/schema` `SPRINT` picklist is
         already bounded by `app.agile.max-open-sprints-per-project`, so no
-        typeahead fallback was wired — `?field=sprint` returns the same `422`
-        any other non-suggestable field returns.
+        typeahead fallback was wired — asking for it gets the `422` that any
+        resolvable field with no value picklist gets, which is worded
+        differently from the `422` a name that resolves to nothing gets (see
+        the `422` response below).
       operationId: searchSuggest
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -6515,8 +6517,10 @@ paths:
           description: >-
             The HQL field to suggest values for — a user-valued field (e.g.
             `assignee`), `label`/`labels`, `component`/`components`, or
-            `fixVersion`/`affectsVersion`. Anything else (including `sprint`) is
-            a `422`.
+            `fixVersion`/`affectsVersion`. Any other name (including `sprint`)
+            is a `422`, in one of the two wordings described under that
+            response: a name that resolves to nothing reads differently from a
+            name that resolves to a field with no value picklist.
           schema: { type: string }
         - name: q
           in: query
@@ -6533,8 +6537,19 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
-            `field` is unknown or is not a suggestable field — `sprint` is the
-            notable one: it has a `/search/schema` picklist but no typeahead.
+            Two different refusals, told apart by their `detail` — both carry
+            `errorType: SEMANTIC_ERROR` and the offending `field` exactly as
+            the caller spelled it. **A name that resolves to nothing** (not a
+            system field, not a custom field this caller can see, not a retired
+            key) is refused in the same words — and with the same "did you
+            mean …?" hint, when a near match exists — that every other HQL
+            surface gives an unknown name; a custom field the caller cannot see
+            is indistinguishable from a typo, so its existence is never leaked.
+            **A name that does resolve, to a field with no bounded value lookup
+            behind it** (a numeric, a date, or a picklist small enough for
+            `/search/schema` to carry whole) is refused as having no value
+            suggestions: that field exists, and it is the value question being
+            declined.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }

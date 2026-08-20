@@ -2709,7 +2709,14 @@ The same endpoint serves **labels** — `field=label` (or `labels`) returns up t
   "suggestions": [ { "label": "2.4.0", "value": "2.4.0" } ] }
 ```
 
-**`sprint` is intentionally not served here.** Its `/search/schema` `SPRINT` picklist is already bounded by the per-project open-sprint cap, so no typeahead was wired — `?field=sprint` returns the same `422` any other non-suggestable field returns. `storyPoints` is numeric and has no picklist either.
+**`sprint` is intentionally not served here.** Its `/search/schema` `SPRINT` picklist is already bounded by the per-project open-sprint cap, so no typeahead was wired — asking for it gets the `422` that any resolvable field with no value picklist gets. `storyPoints` is numeric and has no picklist either.
+
+**There are two ways this endpoint refuses, and they read differently.** Both are `422`s carrying `"errorType": "SEMANTIC_ERROR"` and the offending `field` exactly as you spelled it; the `detail` is what tells you which case you are in:
+
+- **the name resolves to nothing** — not a system field, not a custom field you can see, not a [retired key](#search-hql) — and you get the same unknown-field message, with the same `did you mean …?` hint when a near match exists, that every other HQL surface gives an unknown name. A custom field you cannot see is simply absent from your vocabulary, so it is indistinguishable from a typo and its existence is never leaked;
+- **the name resolves to a field that has no bounded value lookup behind it** — a numeric, a date, or a picklist small enough for `/search/schema` to carry whole — and the message says that field has no value suggestions. The field exists; it is the value question being declined.
+
+Treat the first as a name to fix and the second as "read the value list out of `/search/schema` instead".
 
 ## Saved filters
 

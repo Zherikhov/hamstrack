@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.dto.Paging;
 import com.hamstrack.issue.dto.IssueResponse;
+import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.service.IssueService;
 import com.hamstrack.issue.service.ComponentService;
@@ -11,6 +12,7 @@ import com.hamstrack.issue.service.LabelService;
 import com.hamstrack.issue.service.VersionService;
 import com.hamstrack.report.dto.InsightsDimension;
 import com.hamstrack.report.dto.InsightsMeasure;
+import com.hamstrack.search.FieldResolver.Resolved;
 import com.hamstrack.search.dto.SearchRequest;
 import com.hamstrack.search.dto.SearchResultRow;
 import com.hamstrack.search.dto.SearchSchemaResponse;
@@ -52,6 +54,7 @@ public class SearchService {
     private final HqlValidator validator;
     private final HqlCompiler compiler;
     private final FieldRegistry registry;
+    private final FieldResolver fieldResolver;
     private final IssueService issueService;
     private final LabelService labelService;
     private final ComponentService componentService;
@@ -162,8 +165,15 @@ public class SearchService {
         // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field
         // value key so autocomplete offers the labels; USER fields reuse /suggest.
         for (CustomFieldMeta meta : ctx.customFieldsByKey().values()) {
-            // A key that shadows a system field is not queryable (system wins) — skip it.
-            if (registry.find(meta.key()).filter(FieldDescriptor::available).isPresent()) continue;
+            // A key the registry has claimed is a system name, so a query against it means the
+            // system field and not this workspace's — advertising it here would offer a name
+            // whose answers come from somewhere else. Registration is what claims a name;
+            // availability only says WHEN it starts answering (see FieldResolver), so a
+            // reserved-but-not-yet-queryable entry claims its key just as firmly, and reading
+            // that any other way puts a key in this list that every query against it refuses.
+            // Vocabulary omits rather than refuses: /schema is a list of what exists, so a
+            // claimed key is simply absent here and the refusal is the query's to give.
+            if (registry.find(meta.key()).isPresent()) continue;
             String valueSuggest = customValueSuggest(meta);
             fields.add(new SearchSchemaResponse.Field(
                     meta.key(), meta.type().name(), customOperatorTokens(meta),
@@ -177,40 +187,59 @@ public class SearchService {
         return new SearchSchemaResponse(fields, keywords(), values, insights(ctx));
     }
 
+    /**
+     * Bounded value typeahead for one field (§16.4) — the fallback for value sets too large,
+     * or too caller-specific, for a {@code /schema} picklist to carry whole.
+     *
+     * <p><strong>What the name means is not decided here</strong> (HD-114): it resolves through
+     * {@link FieldResolver} exactly as a query does, and the suggester follows from the
+     * <em>kind</em> that comes back. So a name this endpoint offers values for is a name a query
+     * accepts, and a name the resolver refuses — unknown, or reserved and not yet queryable — is
+     * refused here in the resolver's own words. A vocabulary surface that judged for itself which
+     * names the product has claimed is how a key came to be offered by one surface and rejected
+     * by another (HD-107 §9.2); nothing is left here to judge differently.
+     *
+     * <p>The response echoes the name <em>as the caller wrote it</em>, aliases included: a client
+     * matches the answer to the request it made, not to a canonical spelling it never sent.
+     */
     @Transactional(readOnly = true)
     public SuggestResponse suggest(User actor, UUID workspaceId, String fieldName, String q) {
         var ws = resolveWorkspace(actor, workspaceId);
         var ctx = resolutionContextFactory.build(actor, ws);
 
+        // Exhaustive over Resolved on purpose: a kind of field added later cannot become
+        // silently unsuggestable here, it stops this from compiling.
+        return switch (fieldResolver.resolve(fieldName, ctx)) {
+            case Resolved.SystemField(FieldDescriptor sys) -> systemSuggestions(sys, fieldName, q, ws, ctx);
+            case Resolved.CustomField(CustomFieldMeta cf) -> customSuggestions(cf, fieldName, q, ctx);
+        };
+    }
+
+    // ---- helpers ----
+
+    /**
+     * Values for a field the product ships, chosen from the resolved <strong>descriptor</strong>
+     * and never from the spelling that arrived — an alias shares its field's descriptor instance,
+     * so it reaches the same suggester for free.
+     *
+     * <p>A system field with no bounded lookup behind it (a numeric, a date, a picklist small
+     * enough for {@code /schema} to embed whole) declines with {@link #noSuggestions}: the field
+     * exists, and the value question is the one being refused.
+     */
+    private SuggestResponse systemSuggestions(FieldDescriptor sys, String fieldName, String q,
+                                              Workspace ws, ResolutionContext ctx) {
         // label (HD-30): a bounded prefix search straight over the workspace's
         // non-archived labels — the fallback when the /schema LABEL picklist is capped.
-        boolean isLabel = registry.find(fieldName)
-                .filter(FieldDescriptor::available)
-                .filter(f -> f.dataType() == FieldDataType.LABEL_REF)
-                .isPresent();
-        if (isLabel) {
-            var suggestions = labelService.suggestNames(ws, q, SUGGEST_LIMIT).stream()
-                    .map(name -> new SuggestResponse.Suggestion(name, name))
-                    .toList();
-            return new SuggestResponse(fieldName, suggestions);
+        if (sys.dataType() == FieldDataType.LABEL_REF) {
+            return names(fieldName, labelService.suggestNames(ws, q, SUGGEST_LIMIT));
         }
-
         // component (HD-31): a bounded prefix search over the non-archived components
         // of the caller's VISIBLE projects — the fallback when the /schema COMPONENT
-        // picklist is capped. Matched on the descriptor's canonical name, so the
-        // `components` alias resolves here too.
-        boolean isComponent = registry.find(fieldName)
-                .filter(FieldDescriptor::available)
-                .filter(f -> "component".equals(f.name()))
-                .isPresent();
-        if (isComponent) {
-            var suggestions = componentService
-                    .suggestNames(ctx.visibleProjectIds(), q, SUGGEST_LIMIT).stream()
-                    .map(name -> new SuggestResponse.Suggestion(name, name))
-                    .toList();
-            return new SuggestResponse(fieldName, suggestions);
+        // picklist is capped.
+        if ("component".equals(sys.name())) {
+            return names(fieldName, componentService.suggestNames(
+                    ctx.visibleProjectIds(), q, SUGGEST_LIMIT));
         }
-
         // fixVersion / affectsVersion (HD-32): a bounded prefix search over the
         // non-archived versions of the caller's VISIBLE projects — the fallback when the
         // /schema VERSION picklist is capped. Both roles share one catalog, so the
@@ -220,32 +249,32 @@ public class SearchService {
         // the same way — visible projects with `releases` on. Still a strict subset of
         // the visible set (narrowing only, never widening), and still suggestion-only:
         // a version name that no longer appears here keeps resolving in a query.
-        boolean isVersion = registry.find(fieldName)
-                .filter(FieldDescriptor::available)
-                .filter(f -> f.dataType() == FieldDataType.VERSION_REF)
-                .isPresent();
-        if (isVersion) {
-            var suggestions = versionService
-                    .suggestNames(ctx.capabilities().releaseProjectIds(), q, SUGGEST_LIMIT).stream()
-                    .map(name -> new SuggestResponse.Suggestion(name, name))
-                    .toList();
-            return new SuggestResponse(fieldName, suggestions);
+        if (sys.dataType() == FieldDataType.VERSION_REF) {
+            return names(fieldName, versionService.suggestNames(
+                    ctx.capabilities().releaseProjectIds(), q, SUGGEST_LIMIT));
         }
-
-        // A user-valued field: a system USER_REF (assignee/reporter) OR a visible USER
-        // custom field (HD-52). Both resolve via the same member typeahead.
-        boolean systemUser = registry.find(fieldName)
-                .filter(FieldDescriptor::available)
-                .filter(f -> f.dataType() == FieldDataType.USER_REF)
-                .isPresent();
-        boolean customUser = !systemUser && ctx.customField(fieldName)
-                .filter(m -> m.type() == com.hamstrack.issue.entity.FieldType.USER)
-                .isPresent();
-        if (!systemUser && !customUser) {
-            throw new HqlSemanticException(
-                    "Field '" + fieldName + "' has no value suggestions", fieldName);
+        // assignee / reporter: the member typeahead, the same one user-valued custom fields get.
+        if (sys.dataType() == FieldDataType.USER_REF) {
+            return members(fieldName, q, ctx);
         }
+        throw noSuggestions(fieldName);
+    }
 
+    /**
+     * Values for a custom field the caller can see (HD-52). A user-valued one draws on the same
+     * member typeahead its system counterparts do — the value a caller pastes back is a member
+     * either way; any other type declines exactly like an unsuggestable system field.
+     */
+    private SuggestResponse customSuggestions(CustomFieldMeta cf, String fieldName, String q,
+                                              ResolutionContext ctx) {
+        if (cf.type() == FieldType.USER) {
+            return members(fieldName, q, ctx);
+        }
+        throw noSuggestions(fieldName);
+    }
+
+    /** The bounded member typeahead behind every user-valued field, whoever defined the field. */
+    private SuggestResponse members(String fieldName, String q, ResolutionContext ctx) {
         String prefix = q == null ? "" : q.trim().toLowerCase(Locale.ROOT);
 
         var suggestions = ctx.members().stream()
@@ -261,7 +290,22 @@ public class SearchService {
         return new SuggestResponse(fieldName, suggestions);
     }
 
-    // ---- helpers ----
+    /** Name-valued suggestions: label and value are the same string a query would carry. */
+    private SuggestResponse names(String fieldName, List<String> names) {
+        return new SuggestResponse(fieldName, names.stream()
+                .map(name -> new SuggestResponse.Suggestion(name, name))
+                .toList());
+    }
+
+    /**
+     * The refusal for a field that resolves but has no bounded value lookup behind it — a 422
+     * anchored on the name as the caller wrote it, which is the one they can see in their own
+     * request.
+     */
+    private HqlSemanticException noSuggestions(String fieldName) {
+        return new HqlSemanticException(
+                "Field '" + fieldName + "' has no value suggestions", fieldName);
+    }
 
     /**
      * Whether {@code /schema} <em>suggests</em> a system field to this caller

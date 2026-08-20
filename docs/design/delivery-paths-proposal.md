@@ -386,16 +386,20 @@ field"** — silently, and only when the user next runs it.
 **Decision: retired keys become permanent aliases, resolved as a last-resort fallback — not as a
 `FieldRegistry` entry, and not by rewriting anybody's stored filter text.**
 
-The mechanism matters, because of an existing precedence trap: `HqlCompiler.isCustom` treats a name
-as a custom field **only when the registry does not know it** — the registry wins. Registering
-`story_points` in `FieldRegistry` would therefore permanently **shadow** any workspace- or
-project-scoped custom field a tenant happens to key `story_points`, in every workspace, forever.
+The mechanism matters, because of an existing precedence trap: a name is treated as a custom field
+**only when the registry does not know it** — the registry wins. Registering `story_points` in
+`FieldRegistry` would therefore permanently **shadow** any workspace- or project-scoped custom field
+a tenant happens to key `story_points`, in every workspace, forever.
 
 So the alias lives in a small retired-key map consulted **after** both normal resolution steps:
 
 ```
 system field (FieldRegistry)  →  visible custom field (ResolutionContext)  →  retired-key alias  →  "unknown field"
 ```
+
+That sequence is applied in exactly one place — `search.FieldResolver`, which HD-114 introduced after
+this slice shipped the alias to one name-resolution path and not another (see §9.2's own bug: the
+sort path had its own copy of the order and never learned the alias step).
 
 `story_points` → `storyPoints` is the only entry today. (V11 also archived the `sprint` placeholder
 field, but `sprint` is already a live registry name, so it resolves natively with no alias needed.)

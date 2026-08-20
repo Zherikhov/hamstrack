@@ -21,11 +21,10 @@ import java.util.Optional;
  * {@link FieldRegistry} name, so it resolves natively and needs no alias.)
  *
  * <p><strong>This is deliberately NOT a {@link FieldRegistry} entry, and the
- * precedence is the whole point.</strong> {@code HqlCompiler.isCustom} treats a
- * name as a custom field only when the registry does <em>not</em> know it — the
- * registry always wins. Registering {@code story_points} there would therefore
- * permanently shadow any workspace's own custom field keyed {@code story_points},
- * in every tenant, forever. So the alias is consulted <em>last</em>:
+ * precedence is the whole point.</strong> A registered name outranks any workspace's
+ * own custom field, so registering {@code story_points} there would permanently shadow
+ * the {@code story_points} custom field of every tenant that has one, forever. The alias
+ * is therefore consulted <em>last</em>, after both normal resolution steps have missed:
  *
  * <pre>
  *   system field (FieldRegistry) → visible custom field (ResolutionContext)
@@ -36,6 +35,12 @@ import java.util.Optional;
  * custom field {@code story_points} resolves to <em>its own field</em>, never to
  * the native column; and a workspace with no such custom field resolves the retired
  * key to the native {@code storyPoints}, so the saved filter keeps working.
+ *
+ * <p><strong>That sequence is defined and enforced in {@link FieldResolver}</strong>
+ * (HD-114) — this class only says which key maps to which canonical name. The ordering
+ * rationale lives with the resolver because it is a property of resolution as a whole,
+ * not of the alias table: any name lookup that derived its own order could put this step
+ * in the wrong place, and one that asks the resolver cannot.
  *
  * <p><strong>Caveat — that precedence is not purely a per-tenant decision.</strong>
  * {@code FieldDef.scopeWorkspaceId} is nullable, so a <em>global</em> field def is
@@ -63,9 +68,10 @@ public class RetiredFieldAliases {
      * The canonical field name a retired key maps to, or empty when the name is not
      * a retired key. Case-insensitive, like every other HQL name lookup.
      *
-     * <p>Callers MUST consult this only after both normal resolution steps have
-     * missed — see the class javadoc; the ordering is a tenancy-safety property,
-     * not a style choice.
+     * <p>This step is only correct as the LAST one — see the class javadoc; the ordering
+     * is a tenancy-safety property, not a style choice. Resolve names through
+     * {@link FieldResolver}, which is where that ordering is applied, rather than calling
+     * this and deciding where it fits.
      */
     public Optional<String> canonicalName(String retiredKey) {
         if (retiredKey == null) return Optional.empty();

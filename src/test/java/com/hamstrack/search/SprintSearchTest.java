@@ -326,7 +326,64 @@ class SprintSearchTest extends SprintTestBase {
         assert !row.has("position") : "the rank must never be exposed: " + row;
     }
 
+    /**
+     * <strong>{@code sprint} is registered, queryable, and deliberately has no value
+     * typeahead</strong> — {@code /search/suggest?field=sprint} is a 422 refusing the
+     * <em>value</em> question, never the name. Its {@code /schema} SPRINT picklist is already
+     * bounded by the per-project open-sprint cap, so no overflow endpoint was ever wired, and
+     * both API references document exactly this refusal.
+     *
+     * <p>Pinned because HD-114 moved this endpoint's resolution step onto {@link FieldResolver}:
+     * a name that resolves to nothing now carries the resolver's own "Unknown field … Did you
+     * mean …?" instead of the "no value suggestions" wording it used to borrow. That is the
+     * improvement — but the two refusals must stay distinguishable, because they answer
+     * different questions and a client cannot tell "I mistyped" from "this field has no
+     * picklist" when both arrive in the same words. A field that resolves keeps the old
+     * message; only a name nothing resolves gets the new one.
+     */
+    @Test
+    void suggestRefusesSprintAsUnsuggestableAndATypoAsUnknown() throws Exception {
+        var ctx = newProject();
+        setDelivery(ctx, "\"board\":\"SCRUM\",\"estimation\":true");
+        createSprint(ctx, "Sprint 1");
+
+        // Registered, resolvable and offered by /schema — the refusal is about VALUES.
+        suggest(ctx, "sprint")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
+                .andExpect(jsonPath("$.field").value("sprint"))
+                .andExpect(jsonPath("$.detail").value("Field 'sprint' has no value suggestions"));
+
+        // The alias shares the descriptor, so it reaches the same refusal — echoed back under
+        // the spelling the caller actually sent, not the canonical one.
+        suggest(ctx, "sprints")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.detail").value("Field 'sprints' has no value suggestions"));
+
+        // storyPoints is numeric and has no picklist at all — same refusal, same reason.
+        suggest(ctx, "storyPoints")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.detail")
+                        .value("Field 'storyPoints' has no value suggestions"));
+
+        // A name nothing resolves is the OTHER refusal, in the resolver's words (HD-114).
+        suggest(ctx, "sprnt")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
+                .andExpect(jsonPath("$.field").value("sprnt"))
+                .andExpect(jsonPath("$.detail")
+                        .value("Unknown field 'sprnt'. Did you mean 'sprint'?"));
+    }
+
     // ==================================================== helpers
+
+    /** {@code GET …/search/suggest?field=<field>} as the ctx owner, with an empty {@code q}. */
+    private ResultActions suggest(Ctx ctx, String field) throws Exception {
+        return mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/suggest")
+                .param("field", field)
+                .param("q", "")
+                .header("Authorization", "Bearer " + ctx.token()));
+    }
 
     private JsonNode fieldNamed(JsonNode schema, String name) {
         for (var f : schema.get("fields")) {
