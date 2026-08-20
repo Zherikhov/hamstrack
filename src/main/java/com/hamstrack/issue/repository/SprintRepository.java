@@ -95,6 +95,79 @@ public interface SprintRepository extends JpaRepository<Sprint, UUID> {
             + "AND s.state = com.hamstrack.issue.entity.SprintState.FUTURE ORDER BY s.sequence ASC")
     List<Sprint> findFutureByProject(@Param("project") Project project);
 
+    /**
+     * The project's most recently COMPLETED sprints, newest first — velocity's sample
+     * (reports-proposal §2.5), and <strong>the only way its sprint ids are ever obtained</strong>.
+     *
+     * <p>That is the point of the method existing at all rather than the report accepting a list
+     * of sprint ids. Velocity's ledger sweep is scoped by {@code workspace_id} plus a set of
+     * sprint ids, which is a complete tenant scope only while those ids were themselves resolved
+     * through a project the caller has proved membership of. Bound from a request they would not
+     * be: {@code workspace_id} would still be right and the report would silently describe another
+     * project's sprints inside this project's page. So the ids come from here, keyed by a
+     * {@link Project} the caller already resolved — the invariant this whole interface is built on
+     * ("no method takes a bare id"), applied to a report.
+     *
+     * <p>COMPLETED only, and that is a decision rather than a filter: a running sprint has not
+     * delivered yet, so counting it would pull every band down by however far through the sprint
+     * the reader happens to be looking. {@code sprints_completed_ck} guarantees a COMPLETED sprint
+     * has a {@code completed_at}, which is what makes the ordering total and what
+     * {@code SprintLedger.endBoundaryOf} measures each of them at.
+     *
+     * <p>Newest first, because the cap keeps the {@code n} most RECENT sprints — a forecast made
+     * from the oldest twelve of a project's history would be a forecast for a team that no longer
+     * exists. The caller reverses the list for display. {@code sequence} breaks a tie so two
+     * sprints completed in one transaction cannot swap places between requests.
+     *
+     * <p>{@code pageable} is a {@code PageRequest.of(0, n)} with {@code n} bounded by
+     * {@code VelocityService.MAX_SPRINTS}; a {@code List} return type means no count query.
+     *
+     * <p>It returns {@link CompletedSprint}, a five-scalar projection, rather than the entity —
+     * see there for why that is part of §1.4's refusal and not a micro-optimisation.
+     */
+    @Query("SELECT s.id AS id, s.name AS name, s.state AS state, s.startAt AS startAt, "
+            + "s.completedAt AS completedAt FROM Sprint s WHERE s.project = :project "
+            + "AND s.state = com.hamstrack.issue.entity.SprintState.COMPLETED "
+            + "ORDER BY s.completedAt DESC, s.sequence DESC")
+    List<CompletedSprint> findRecentCompletedByProject(@Param("project") Project project,
+                                                       Pageable pageable);
+
+    /**
+     * <strong>The five scalars a velocity bar is drawn from, and nothing else</strong> — a
+     * projection rather than the entity, because of what the entity carries.
+     *
+     * <p>{@code VelocityService} states that nothing reaching it knows who anybody is, and §1.4
+     * makes that a product decision rather than a coding preference. The ledger sweep is written
+     * to keep it: it selects no {@code actor_id} and no {@code assignee_id}, and
+     * {@code VelocityRefusalTest} fails if either appears. A {@code List<Sprint>} quietly undid
+     * half of that — {@code Sprint.getCreatedBy()} is a lazy {@code User}, so a per-person
+     * breakdown was ONE dereference away, needing no change to any statement and tripping neither
+     * refusal test. The claim was true of the sweep and merely aspirational of the service.
+     *
+     * <p>So the sample comes back as five scalars: the sprint's identity, its label, and the two
+     * instants its four numbers are measured at — {@code startAt} for the commitment,
+     * {@code completedAt} for everything else, through
+     * {@code SprintLedger.endBoundaryOf(state, completedAt)}. {@code state} is carried only
+     * because that boundary is defined in terms of it, and is deliberately not re-derived here.
+     * There is no person on this interface and nowhere to reach one from, which is what makes the
+     * service's claim structural rather than a habit.
+     *
+     * <p>It also drops an entity graph per request — up to twelve managed {@code Sprint}s a
+     * read-only report never mutates — which is a real saving but not the reason.
+     */
+    interface CompletedSprint {
+
+        UUID getId();
+
+        String getName();
+
+        SprintState getState();
+
+        OffsetDateTime getStartAt();
+
+        OffsetDateTime getCompletedAt();
+    }
+
     /** The project's ACTIVE sprint, if any (at most one — {@code sprints_one_active_per_project_uk}). */
     @Query("SELECT s FROM Sprint s WHERE s.project = :project "
             + "AND s.state = com.hamstrack.issue.entity.SprintState.ACTIVE")

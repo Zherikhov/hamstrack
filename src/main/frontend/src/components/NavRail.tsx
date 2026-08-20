@@ -242,16 +242,14 @@ export default function NavRail() {
           {delivery.releases && (
             <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/releases`} icon={Rocket} label="Releases" collapsed={collapsed} />
           )}
-          {/* Reports — no backend yet */}
-          <div
-            style={{ display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11, padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: MUTED, cursor: 'default' }}
-            title={collapsed ? 'Reports — coming soon' : 'Coming soon'}
-          >
-            <BarChart3 size={17} />
-            {!collapsed && <>Reports
-              <span className="mono" style={{ marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em', color: MUTED, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 5, padding: '1px 5px' }}>SOON</span>
-            </>}
-          </div>
+          {/* Reports (HD-5 / HD-28). Per Rule C this item is ALWAYS visible — it
+              is not gated on a delivery capability and not gated on a permission
+              (reads are not permission-gated in this product, reports-proposal
+              §4.2). The sprint-dependent reports inside it are the ones that get
+              listed-but-disabled with their enabling affordance, so a Kanban
+              project can still discover that they exist and what turns them on;
+              that decision belongs in the reports list, never here. */}
+          <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/reports`} icon={BarChart3} label="Reports" collapsed={collapsed} />
           {canOpenSettings && (
             <RailLink to={`/w/${cur.wsId}/p/${cur.projectId}/settings`} icon={Settings} label="Settings" collapsed={collapsed} />
           )}

@@ -1,0 +1,81 @@
+-- ---------------------------------------------------------------------------
+-- HD-28 / R1 (Reports — Flow) — reports-proposal §5.1
+-- ---------------------------------------------------------------------------
+-- The flow report (created vs resolved over a window) reads TWO columns and
+-- nothing else: issues.created_at and issues.closed_at. No new column, no
+-- history table, no ledger — those land in R2. This migration therefore adds
+-- INDEXES ONLY: there is no schema change for Hibernate to validate against and
+-- no entity edit that pairs with it.
+--
+-- Why each index exists, in terms of the three statements the report runs:
+--
+--   1. created-per-bucket  -> range scan on (project_id, created_at)
+--   2. resolved-per-bucket -> range scan on (project_id, closed_at) WHERE NOT NULL
+--   3. opening balance     -> two counts, one on each of the above, plus a
+--                             bitmap-OR "issues touched in the window" count
+--
+-- Without them every one of those degrades to a scan of the project's whole
+-- issue set through idx_issues_project — the difference between "a 90-day window
+-- reads a few thousand index entries" and "a 100k-issue project reads 100k rows
+-- three times per page load", which is exactly the "why is this report so slow?"
+-- complaint the proposal's research names (§1.5).
+--
+-- The `started_at` index from §5.1 is deliberately NOT here: the column it would
+-- serve does not exist until R2, and an index on a missing column is not a
+-- migration you can write early.
+--
+-- WRITE COST, measured rather than asserted — and these are NOT the first extra
+-- indexes on `issues`. Fifteen already exist (8 from V1, 5 from V4, 1 from V9,
+-- 1 from V11), so these two are ~12% marginal: +16% on a 50k bulk insert, about
+-- 1.9us per row. What makes that cheap is structural rather than lucky: V17
+-- introduces ZERO new HOT-update breakage. idx_issues_project_created covers
+-- created_at (@Column(updatable=false)) and project_id (never changes), so no
+-- UPDATE can touch it at all; idx_issues_project_closed only bites on close and
+-- reopen, a path that is already non-HOT because it writes status_id.
+--
+-- Deliberately NOT added: an INCLUDE column to cover the filtered case. The
+-- unfiltered plans are index-only as it is, and covering the rarer filtered path
+-- would grow the hottest table's index by roughly half to speed it up.
+--
+-- Separate-ticket opportunity, recorded so it is not rediscovered: idx_issues_project
+-- is now a strict prefix of BOTH idx_issues_project_position and the new
+-- idx_issues_project_created, i.e. redundant twice over. Dropping it would more than
+-- pay for one of these two — but measure first, because the planner still picks it
+-- for a bare project-wide bitmap.
+--
+-- LOCKING NOTE (deliberate, not an oversight): these are plain CREATE INDEX, not
+-- CREATE INDEX CONCURRENTLY. Flyway runs each migration in a transaction and
+-- CONCURRENTLY cannot run inside one; the mechanism that WOULD allow it is a
+-- per-script config file (V17__report_flow_indexes.sql.conf with
+-- executeInTransaction=false), and it is declined for two reasons, the second
+-- stronger than the first:
+--
+--   1. it gives up the "a failed migration rolls back" property for two indexes
+--      that take seconds on any realistic issues table; and
+--   2. a CREATE INDEX CONCURRENTLY that FAILS leaves an INVALID index behind —
+--      one that is maintained on every write but used by no query — and Flyway
+--      cleans up nothing, because the statement was outside a transaction on
+--      purpose. Recovery is a manual DROP INDEX by an operator who has to know to
+--      look for it. Trading a guaranteed rollback for a failure mode that is
+--      silent, costly and invisible in the schema history is the wrong trade for
+--      an index build measured in seconds.
+--
+-- An operator upgrading a very large install takes a brief write lock on `issues`
+-- during the upgrade window, which is where an upgrade already lives. If these
+-- ever grow to a size where that is unacceptable, the answer is a separate
+-- concurrent migration with its own .conf and an explicit INVALID-index check,
+-- not a quiet flag on this one.
+-- ---------------------------------------------------------------------------
+
+-- Series A: "created in this bucket", and the "created before the window" half of
+-- the opening balance. Not partial — created_at is NOT NULL on every issue.
+CREATE INDEX idx_issues_project_created ON issues (project_id, created_at);
+
+-- Series B: "resolved in this bucket", and the "closed before the window" half of
+-- the opening balance. PARTIAL, because closed_at is NULL for every open issue and
+-- is CLEARED again when an issue leaves a DONE status (V3 system fields) — on a
+-- healthy project most rows are NULL, and none of them can ever match a predicate
+-- of the form `closed_at >= x`. The partial index is therefore both smaller and a
+-- better match for every query the report writes.
+CREATE INDEX idx_issues_project_closed ON issues (project_id, closed_at)
+    WHERE closed_at IS NOT NULL;

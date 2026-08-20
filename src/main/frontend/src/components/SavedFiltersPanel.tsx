@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Pencil, Play, Share2, SquarePen, Trash2, X } from 'lucide-react'
+import { BarChart3, Check, Pencil, Play, Share2, SquarePen, Trash2, X } from 'lucide-react'
 import { ApiResponseError, savedFilters } from '../api'
 import type { SavedFilter } from '../types'
 
@@ -15,12 +15,17 @@ import type { SavedFilter } from '../types'
  * shared filter), so they are rendered as React text content ONLY — never
  * dangerouslySetInnerHTML or an HTML-building highlighter (stored-XSS otherwise).
  */
-export default function SavedFiltersPanel({ wsId, onLoad, onEditQuery, onClose }: {
+export default function SavedFiltersPanel({ wsId, onLoad, onEditQuery, onInsights, onClose }: {
   wsId: string
   onLoad: (hql: string) => void
   // Owner-only "edit query" — loads the filter's body into the search for editing
   // (with autocomplete) and puts the page into "update this filter" mode.
   onEditQuery: (f: { id: string; name: string; hql: string }) => void
+  // Run the filter AND open the Insights panel over it (HD-140 §2.6). Offered on
+  // every row, owned or shared, because "a saved filter becomes a saved report at
+  // zero cost" is the whole argument for the panel and ownership has nothing to
+  // do with it.
+  onInsights: (hql: string) => void
   onClose: () => void
 }) {
   const qc = useQueryClient()
@@ -103,6 +108,7 @@ export default function SavedFiltersPanel({ wsId, onLoad, onEditQuery, onClose }
               onCommitEdit={() => saveRename(f)}
               onCancelEdit={() => setEditingId(null)}
               onLoad={() => onLoad(f.hql)}
+              onInsights={() => onInsights(f.hql)}
               onEditQuery={() => onEditQuery({ id: f.id, name: f.name, hql: f.hql })}
               onToggleShare={() => toggleShare(f)}
               onDelete={() => remove(f)}
@@ -115,6 +121,7 @@ export default function SavedFiltersPanel({ wsId, onLoad, onEditQuery, onClose }
               editing={false} editName="" onEditName={() => {}}
               onStartEdit={() => {}} onCommitEdit={() => {}} onCancelEdit={() => {}}
               onLoad={() => onLoad(f.hql)}
+              onInsights={() => onInsights(f.hql)}
               onEditQuery={() => {}}
               onToggleShare={() => {}} onDelete={() => {}}
             />
@@ -138,12 +145,13 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 
 function FilterRow({
   f, busy, editing, editName, onEditName, onStartEdit, onCommitEdit, onCancelEdit,
-  onLoad, onEditQuery, onToggleShare, onDelete,
+  onLoad, onEditQuery, onInsights, onToggleShare, onDelete,
 }: {
   f: SavedFilter; busy: boolean
   editing: boolean; editName: string; onEditName: (v: string) => void
   onStartEdit: () => void; onCommitEdit: () => void; onCancelEdit: () => void
-  onLoad: () => void; onEditQuery: () => void; onToggleShare: () => void; onDelete: () => void
+  onLoad: () => void; onEditQuery: () => void; onInsights: () => void
+  onToggleShare: () => void; onDelete: () => void
 }) {
   return (
     <div
@@ -154,6 +162,17 @@ function FilterRow({
     >
       <button onClick={onLoad} className="cursor-pointer flex-shrink-0" title="Run filter" style={{ color: 'var(--color-brand)' }}>
         <Play size={13} />
+      </button>
+      {/* Beside "run", not hidden in the owner-only cluster: a shared filter is
+          exactly the one a team wants to read as a report. */}
+      <button
+        onClick={e => { e.stopPropagation(); onInsights() }}
+        className="cursor-pointer flex-shrink-0"
+        title="Run filter and open Insights"
+        aria-label={`Insights for ${f.name}`}
+        style={{ color: 'var(--color-text-muted)' }}
+      >
+        <BarChart3 size={13} />
       </button>
       <div className="flex-1 min-w-0 cursor-pointer" onClick={onLoad}>
         {editing ? (

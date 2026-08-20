@@ -37,6 +37,7 @@ import org.springframework.web.server.ResponseStatusException;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -64,6 +65,13 @@ public class IssueService {
     private final ComponentService componentService;
     private final VersionService versionService;
     private final SprintService sprintService;
+    /**
+     * HD-137: the ONE writer of {@code sprint_scope_events}. Three of this class's
+     * statements move an issue in or out of a sprint ({@code create}, {@code update},
+     * {@code rank}) and each of them records it — see {@link SprintScopeLedger} for the
+     * full list of doors and why missing one is invisible until a chart lies.
+     */
+    private final SprintScopeLedger scopeLedger;
     private final IssueRankService rankService;
     private final AttachmentService attachmentService;
     private final ApplicationEventPublisher eventPublisher;
@@ -242,8 +250,23 @@ public class IssueService {
         issue.setPosition(bottomPosition);
         issue.setSprint(sprint);
         issue.setStoryPoints(storyPoints);
+        // UTC, never OffsetDateTime.now(): every timestamp this API serializes is UTC,
+        // and stamping one field in the JVM's default zone is a bug VersionService and
+        // SprintService each had to fix once already (HD-137 review R2-7). The instant is
+        // the same either way in a timestamptz column — the offset that comes back out to
+        // the SPA is not.
         if (status.getCategory() == StatusCategory.DONE) {
-            issue.setClosedAt(OffsetDateTime.now());
+            issue.setClosedAt(OffsetDateTime.now(ZoneOffset.UTC));
+        }
+        // HD-137 (§5.1): filing an issue straight into an in-progress OR a done status IS
+        // its first entry into one, so work started now. DONE counts on purpose — an item
+        // created already finished was started and finished in one move, and pretending
+        // otherwise drops exactly the fastest work out of every cycle-time percentile.
+        // Never derived from createdAt for anything else: an issue filed into a TODO
+        // status keeps startedAt = null until it actually moves (§2.2).
+        if (status.getCategory() == StatusCategory.IN_PROGRESS
+            || status.getCategory() == StatusCategory.DONE) {
+            issue.setStartedAt(OffsetDateTime.now(ZoneOffset.UTC));
         }
 
         issue.setAssignee(assignee);
@@ -258,6 +281,13 @@ public class IssueService {
         }
         issue.setDueDate(req.dueDate());
         issueRepository.save(issue);
+        // HD-137, DOOR 1 — and the one door no history-based audit could ever find: an
+        // issue filed straight into a RUNNING sprint enlarges that sprint's scope, but
+        // create-time values write no `sprint` history row (see just below), so the
+        // burn-up would step up with nothing to explain it. After save(), because the
+        // event carries the issue's id. A FUTURE sprint records nothing — its scope is
+        // committed when it starts (SprintScopeLedger).
+        scopeLedger.recordMove(workspaceId, project.getKey(), issue, null, sprint, actor);
         // Labels attach after the insert (the join rows need a persisted issue id).
         // No history entries for create-time values (consistent with custom fields).
         labelService.attachAll(issue, labels);
@@ -597,7 +627,23 @@ public class IssueService {
 
             if (!Objects.equals(oldCategory, newCategory) && newCategory != null) {
                 boolean isDone = newCategory.equals(StatusCategory.DONE);
-                issue.setClosedAt(isDone ? OffsetDateTime.now() : null);
+                issue.setClosedAt(isDone ? OffsetDateTime.now(ZoneOffset.UTC) : null);
+            }
+            // HD-137 (§5.1): the FIRST entry into an IN_PROGRESS *or* DONE status stamps
+            // startedAt. Three deliberate details, each of which is a wrong report if
+            // reversed:
+            //   * `getStartedAt() == null` — first entry only. A re-open followed by a
+            //     second start must not move the mark, or the cycle time of exactly the
+            //     work that went badly would shrink.
+            //   * DONE counts as a start (dragged straight to Done = started, then
+            //     finished), so the fastest items are not silently excluded.
+            //   * NEVER cleared on the way out, unlike closedAt one line above: "is it
+            //     closed" is a current-state question, "when did work start" is not.
+            // Guarded by the category CHANGE like closedAt, so a TODO→TODO status move
+            // (two to-do columns) is not a start.
+            if (issue.getStartedAt() == null && !Objects.equals(oldCategory, newCategory)
+                && (newCategory == StatusCategory.IN_PROGRESS || newCategory == StatusCategory.DONE)) {
+                issue.setStartedAt(OffsetDateTime.now(ZoneOffset.UTC));
             }
         }
         if (newPriority != null && !newPriority.getId().equals(issue.getPriority().getId())) {
@@ -644,12 +690,18 @@ public class IssueService {
         // The freeze cuts BOTH ways: a completed sprint's membership is the delivery
         // record `complete` already reported, so an issue may no more be pulled OUT of
         // one than pushed INTO one.
+        // The sprint the issue is LEAVING, captured before the field is overwritten: the
+        // ledger (HD-137, door 2) closes that sprint's scope with it, and it is written
+        // after the save below rather than here, so a body that also changes the estimate
+        // records the points the sprint actually received.
+        Sprint leftSprint = null;
         if (sprintChanges) {
             sprintService.requireDetachable(issue.getSprint());
             sprintService.requireAssignable(newSprint);
             String oldName = issue.getSprint() != null ? issue.getSprint().getName() : null;
             String newName = newSprint != null ? newSprint.getName() : null;
             historyEntries.add(makeHistory(issue, actor, "sprint", oldName, newName));
+            leftSprint = issue.getSprint();
             issue.setSprint(newSprint);
         }
 
@@ -712,6 +764,14 @@ public class IssueService {
         labelService.applyLabelChange(issue, labelChange);
         versionService.applyVersionChanges(issue, fixChange, affectsChange);
         historyRepository.saveAll(historyEntries);
+        // Door 2 (HD-137) — written last, next to the history rows it mirrors, so the
+        // story points recorded are this request's final ones. A re-estimate on its own
+        // is NOT a scope event (§2.3) and passes through here without a row, because
+        // sprintChanges is false.
+        if (sprintChanges) {
+            scopeLedger.recordMove(workspaceId, project.getKey(), issue, leftSprint,
+                    issue.getSprint(), actor);
+        }
 
         // changeSet mirrors the history diff for future consumers (Phase-5 triggers);
         // the SSE payload is unchanged (the listener ignores it).
@@ -831,16 +891,29 @@ public class IssueService {
         var moved = issueRepository.findByProjectAndNumber(project, number)
                 .orElseThrow(IssueNotFoundException::new);
         var historyEntries = new ArrayList<IssueHistory>(1);
+        // HD-137, DOOR 3 — the door the proposal's table of five missed, because a drag
+        // between the backlog and a sprint is a real membership change that merely
+        // travels with a rank. `leftSprint` is read off the PRE-rebalance `issue` on
+        // purpose: requireDetachable already dereferenced that association above, so its
+        // state is loaded, whereas `moved.getSprint()` is a fresh lazy proxy the ledger
+        // would have to initialise with an extra SELECT on every drag.
+        Sprint leftSprint = null;
+        Sprint targetSprint = null;
         if (sprintChanges) {
-            var targetSprint = targetSprintId == null ? null
+            targetSprint = targetSprintId == null ? null
                     : sprintService.resolveForIssue(project, targetSprintId);
             historyEntries.add(makeHistory(moved, actor, "sprint", oldSprintName,
                     targetSprint == null ? null : targetSprint.getName()));
+            leftSprint = issue.getSprint();
             moved.setSprint(targetSprint);
         }
         moved.setPosition(newPosition);
         issueRepository.save(moved);
         historyRepository.saveAll(historyEntries);
+        if (sprintChanges) {
+            scopeLedger.recordMove(workspaceId, project.getKey(), moved, leftSprint,
+                    targetSprint, actor);
+        }
 
         var changeSet = historyEntries.stream()
                 .map(h -> new FieldChange(h.getField(), h.getOldValue(), h.getNewValue()))
@@ -860,6 +933,12 @@ public class IssueService {
      * <p>The issue is loaded before the check because {@code isOwn} is a property of the
      * object; the archived-project 409 runs after it, because a 403 must not depend on
      * project state (§10.3.6). That is a deliberate flip of the old order.
+     *
+     * <p><strong>This is door 8 onto sprint membership</strong> (HD-137 review R3-1), and
+     * the only one the {@code SprintScopeLedgerDoorsTest} source scan structurally cannot
+     * find: deleting an issue ends its membership without ever writing {@code sprint_id},
+     * so there is no {@code setSprint(…)} and no {@code SET sprint_id =} to match. See
+     * {@link #recordDepartureOnDelete} for what it does and why it is conditional.
      */
     @Transactional
     public void delete(User actor, UUID workspaceId, UUID projectId, long number) {
@@ -894,10 +973,72 @@ public class IssueService {
             historyRepository.saveAll(historyEntries);
         }
 
+        recordDepartureOnDelete(workspaceId, project, issue, actor);
+
+        // Must precede the delete: this reads issue_attachments to collect the storage keys,
+        // and once `issue` is REMOVED there is no reliable rescue if reordered — Hibernate
+        // autoflushes on query-space intersection, and the pending DELETE is on `issues`
+        // while this query reads `issue_attachments` (disjoint spaces, so no autoflush).
         attachmentService.removeStoredFilesForIssue(issue);
         issueRepository.delete(issue);
 
         eventPublisher.publishEvent(new IssueDeleted(workspaceId, projectId, number));
+    }
+
+    /**
+     * Door 8 (HD-137 review R3-1): a deleted issue leaves whatever sprint it was in, and
+     * that departure is recorded — <strong>unless the sprint is COMPLETED</strong>.
+     *
+     * <p>The conditional IS the rule, so both halves are worth spelling out.
+     *
+     * <p><strong>COMPLETED → write nothing.</strong> A completed sprint's membership is
+     * frozen: {@code SprintService.requireDetachable} refuses (422) to let even a curator
+     * pull a DONE issue out of one, so "17 of 21 points delivered" cannot quietly become
+     * another number. If a delete wrote a {@code REMOVED} there, the actor who was
+     * explicitly refused the detach would get its exact effect by deleting the issue
+     * instead — the review record would re-draw months later, with no error and nothing
+     * to see. Deleting is a different act from editing history and must not be blocked;
+     * the ledger simply keeps saying what the sprint delivered. (V18's issue FK is
+     * {@code ON DELETE SET NULL (issue_id)} precisely so the existing rows survive the
+     * issue and stay readable via {@code issue_key} + {@code story_points}.)
+     *
+     * <p><strong>Anything else (in practice ACTIVE) → record it.</strong> Here there is no
+     * freeze to protect: {@code requireDetachable} would have allowed the removal through
+     * the API, so a delete that wrote nothing would leave an {@code ADDED} with no
+     * matching {@code REMOVED} and the running sprint's scope line would never come back
+     * down — the burn-up would keep counting work that no longer exists. One
+     * {@code REMOVED} restores the arithmetic; the FK then nulls its {@code issue_id}
+     * moments later, which is exactly the case that column was made nullable for, and
+     * both steps stay in the sum.
+     *
+     * <p>FUTURE needs no branch: {@code SprintScopeLedger} writes nothing for a sprint
+     * that has not started (planning is not scope change), so the ledger's own gate
+     * handles it.
+     *
+     * <p>It must run BEFORE {@code issueRepository.delete(issue)}, and the ledger method it
+     * calls is a separate one from every other door's for a mechanical reason worth reading
+     * once — see {@link SprintScopeLedger#recordDepartureBeforeDelete}: the row has to be
+     * inserted while the issue is still merely managed, flushed, and then DETACHED, or
+     * Hibernate's commit-time transient-reference check finds a managed row pointing at a
+     * deleted entity and 500s the whole delete. That is not hypothetical — the same shape
+     * without the detach is what made deleting an issue with an attachment fail until R4
+     * (see {@code AttachmentService.removeStoredFilesForIssue}).
+     *
+     * <p><strong>One accepted anomaly, named rather than locked.</strong> The branch above
+     * reads {@code sprint.getState()} from a row this transaction holds no lock on, so a
+     * delete racing {@code POST /sprints/{id}/complete} can append a {@code REMOVED} to a
+     * record that is frozen by the time it lands — one row, on one sprint, in the
+     * milliseconds between the completion's conditional UPDATE and this read. It is
+     * accepted deliberately: reaching it requires {@code SPRINT_MANAGE} (i.e. someone
+     * already allowed to complete the sprint and to delete the issue), it is single-shot
+     * rather than repeatable, and the only remedy — a row lock on {@code sprints} taken by
+     * every issue delete — would serialise the most common write in the product behind
+     * sprint lifecycle transactions for a race nobody has hit. Cheaper anomaly than cure.
+     */
+    private void recordDepartureOnDelete(UUID workspaceId, Project project, Issue issue, User actor) {
+        var sprint = issue.getSprint();
+        if (sprint == null || sprint.getState() == SprintState.COMPLETED) return;
+        scopeLedger.recordDepartureBeforeDelete(workspaceId, project.getKey(), issue, sprint, actor);
     }
 
     // ---- catalog resolution ----

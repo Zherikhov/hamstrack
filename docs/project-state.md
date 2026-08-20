@@ -108,7 +108,7 @@ Global search is a **fully implemented** feature — NOT a stub (older docs/api-
 
 **Tenancy (critical):** `SearchScope` is a Criteria predicate builder — `workspace = :ws AND project.id IN :visibleProjectIds` (the workspace's **non-archived** projects; empty set → match-nothing, never "all"), ANDed as the **outermost** conjunction on both page and count queries. Membership gate (`resolveWorkspace`) returns **404** whether the workspace is missing or the caller isn't a member (never 403). Name/member/custom-field resolution derives from the same visible-project set, so nothing resolves through a hidden project; all user input is bound parameters (injection-safe).
 
-**Frontend:** `pages/SearchResultsPage.tsx` (route `/w/:wsId/search`), `components/TopSearchBar.tsx` (HQL box + `/schema` autocomplete; hidden without workspace context), `components/SavedFiltersPanel.tsx`. **No `app.search.*` config** — always-on, gated purely by membership; no DC/Cloud difference.
+**Frontend:** `pages/SearchResultsPage.tsx` (route `/w/:wsId/search`), `components/TopSearchBar.tsx` (HQL box + `/schema` autocomplete; hidden without workspace context), `components/SavedFiltersPanel.tsx`. **Config:** `app.search.requests-per-minute` (`SEARCH_REQUESTS_PER_MINUTE`, default 120) — a per-principal budget over the whole `…/workspaces/*/search/**` path (`POST …/search`, `/schema`, `/suggest` and the Insights panel) **and `…/workspaces/*/filters/**`** (every saved-filter operation — HQL validation is search-surface work wherever it is mounted, and validating a filter builds the same `ResolutionContext` `/schema` pays for), 429 + `Retry-After` past it, master switch `app.rate-limit.enabled`. The Insights panel is inside this budget **and** the reports one (`ReportRateLimitConfig.INSIGHTS_PATH`), so it spends both and **the lower configured value binds** — it sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect. Otherwise always-on and gated purely by membership; **no DC/Cloud difference** (identical in both, no profile override).
 
 ## Saved filters (HD-26, V5)
 
@@ -232,6 +232,102 @@ Cost (`PermissionResolutionQueryCountTest` asserts all three): **2** statements 
 **Frontend (S5/S6/S7).** `hooks/usePermissions.ts` is the **single place the SPA is allowed to answer "may I?"**: it reads `myPermissions` off the workspace/project responses the app already fetches and compares against the literal key the server checks. **No component may read `myRole` for a decision** — that is what produced HD-98 and HD-116, the same client-side copy of a server predicate drifting from it, twice, and `myRole === 'MANAGER'` cannot express a custom role at all. A missing, failed or unloaded permission set **denies**; `isLoading` distinguishes "not yet" from "no" so a control can render *disabled* rather than vanish; `:own` is a suffix, not a prefix. Screens: `pages/settings/WorkspacePeoplePage`, `WorkspaceRolesPage` (+ the role editor), `ProjectPeoplePage` — with the always-visible **Default access** card, this feature's Rule C affordance — and the project-access switch on `WorkspaceGeneralPage`.
 
 **`myPermissions` is advisory, for rendering only.** The API is the enforcement boundary: a client that hides nothing is still safe, and a gate that is wrong shows a button that 403s rather than a door that silently opens. The same rule governs S7's impact preview and the `settable` block — **counts are advisory, refusals are authoritative**: `strandedProjects` and every ceiling check are re-derived inside the write's own transaction whether or not anyone previewed.
+
+## Reports (epic HD-5, V17–V18)
+
+**Seven read-only surfaces, one provenance contract, and a list of things they refuse to do.** Spec: `docs/design/reports-proposal.md`. The user-facing contract is `docs/api-cloud.md` / `docs/api-dc.md` → *Reports* and `openapi.yaml`. Eight slices: **R1** HD-28 (flow) · **R2** HD-137 (the sprint scope ledger, landed dark) · **R3** HD-138 (cycle/lead time, aging WIP) · **R4** HD-29 (sprint burn-up, sprint review) · **R5** HD-139 (velocity) · **R6** HD-140 (Insights) · **R7** HD-141 (CSV exports) · **R8** HD-142 (docs).
+
+**Six are project-scoped** under `/api/workspaces/{wsId}/projects/{pId}/reports` — `flow`, `cycle-time`, `aging`, `sprint-burnup`, `sprint-review`, `velocity` — **each with a `.csv` sibling** (append `.csv`). The seventh, **Insights**, is `POST …/search/insights`: it is workspace-scoped and lives on the search path because its dataset is an HQL query rather than a project. Packages `com.hamstrack.report.{controller,service,repository,dto,csv,ratelimit}`.
+
+**Gated by project membership and nothing else.** There is deliberately no `report.view` permission: this product has no read permissions, and every number a report prints is derivable by the same member from the search API they already hold, so a gate here would protect nothing while being the first read gate in the codebase. The recorded trigger for revisiting is the day a per-assignee breakdown or a cross-project rollup is proposed — see the refusals below.
+
+### The sprint scope ledger (V18) — why it exists
+
+`sprint_scope_events` is an append-only log of membership changes: one row per `(sprint, issue, ADDED|REMOVED)` with `occurred_at`, the actor, and **snapshots of the issue key and story points**. R2 built it dark, one slice ahead of its first reader, because the alternative is unbuildable — you cannot reconstruct "what was in the sprint on the 14th" from current state, and a burn-up drawn from current state is the reason burndowns get distrusted.
+
+Three properties are load-bearing and each cost a review round:
+
+- **The issue FK is `ON DELETE SET NULL`, never `CASCADE`** — so deleting an issue cannot quietly rewrite a completed sprint's record. The consequence for every reader: **the join to `issues` must be `LEFT`.** An inner join silently drops exactly those rows, and the report becomes a smaller, plausible, wrong sprint with nothing to notice. Both sprint repositories say so in-file.
+- **A scope change is a membership change only.** Re-estimating an issue writes no row. That single rule is what makes the burn-up trustworthy where a burndown is not: every step in the scope line has a timestamp, an issue and an author.
+- **Membership has exactly one implementation.** `SprintLedger.LedgerIssue.memberAt` / `memberBefore` / `closedBefore` / `outcomeAt` are the only definitions of "in the sprint at time T", shared by the burn-up, the review and velocity. Two reports over one ledger that disagreed about "done in this sprint" would discredit both — and they did, at exactly one instant, until the rule moved onto the shared record.
+
+Velocity reads up to twelve sprints' ledgers in **one** sweep (`ORDER BY sprint_id`) rather than calling the single-sprint reader N times; it assembles the same `LedgerIssue` records, so the cheaper query did not buy a second definition of membership.
+
+### The provenance contract
+
+Every report response carries the same `ReportMeta`: `computedAt`, `basedOnIssues`, `truncated`, `cap`, `firstIssueAt`, `unmatchedFilters`. It exists because the recurring complaint about reporting features is *"these numbers don't match what I expected"*, and the mechanism behind it is always a report that quietly left data out.
+
+- **`basedOnIssues` is counted in the database, above the cap** — so when truncation bites it is deliberately *larger* than what came back, because its job is to say how many issues the report was *about*. R4 shipped it shrinking and had to be fixed; R5's statement was written the corrected way from the start.
+- **`firstIssueAt` takes filters and never a window.** It is a property of the *project*, not of the sample. Each report computed it its own way once and the field silently meant three different things (project-wide on flow, the windowed completed sample on cycle time, currently-open issues on aging) — three populations, one name, every one of them a plausible date. Applying the window is also circular: the earliest issue inside a fortnight is at most a fortnight old, so a five-year-old project reported a fortnight of history and the thin-data banner fired on every project. Insights leaves it `null` rather than inventing a workspace-wide meaning for a per-project field.
+- **Suppression is `null`s inside a present container, never a missing container.** Percentiles below five samples, a velocity band below three sprints. A statistic over too small a sample is arithmetically defined and informationally worthless, and printing noise is worse than printing nothing.
+- **Two limits, two signals.** `meta.truncated` means the row cap (`app.reports.max-rows`) bit. The burn-up's day clip is `seriesTruncatedAt`, and Insights' bucket caps are `slicesTruncated` / `cellsTruncated` — folding either into `truncated` once put "20 000" in a banner about a report that had dropped nothing.
+
+### The two point-reading rules
+
+All three sprint reports read the same ledger and deliberately do not read the same estimate. **Do not "fix" one to match the others** — each is wrong for the others' question:
+
+| Report | Points | Because |
+|---|---|---|
+| burn-up | the issue's **current** estimate | it charts a sprint still running; a re-estimate moves the line, including its past |
+| review | the ledger's **entry snapshot** | the retro question is what a thing weighed *when it entered* |
+| velocity | the ledger's **entry snapshot** | every sprint it describes is frozen; current points would move a bar drawn four months ago *and the band computed from it* |
+
+The one exception is inherited rather than chosen: a **deleted** issue has no current estimate, so the burn-up weighs it by its snapshot too — the only number left.
+
+### What the epic refused, and on what evidence
+
+These are policy, not backlog, and they are enforced structurally rather than annotated:
+
+- **No per-person breakdown of a published metric.** Velocity compared between people or teams is read as a productivity score, and teams respond by inflating estimates — the number rises and the delivery does not. `VelocityReportRepository` does not select `actor_id` or `assignee_id` at all, so there is nothing to break down *by* without first re-opening the statement; `VelocityRefusalTest` pins the DTO, the SQL and the CSV column list.
+- **No aggregate above the project.** There is no workspace-level velocity and there must not be one: comparing two teams means opening two pages and doing the arithmetic by hand, and *that friction is the design*. A rollup added "for convenience" deletes the mitigation and keeps the metric.
+- **No single quotable number.** The forecast is a p50/p85 with its sample size attached — there is no `averageVelocity` field — precisely so there is nothing to paste into a status report. Percentiles, never a mean: one washed-out sprint drags a mean somewhere no sprint ever was.
+- **The line is a published metric versus an ad-hoc query.** Insights offers `ASSIGNEE` as a grouping dimension while velocity refuses it, and that is the same policy rather than an exception: velocity has a stable URL and is read out in a ceremony, Insights is whatever HQL somebody just typed and is not addressable as "the team's number". That distinction is the one to defend if a later slice proposes an assignee *report*.
+- **No projection.** The burn-up line ends where it ends; forecasting is velocity's job, with a stated sample size.
+- **No configurable gadget dashboard.** Insights is the replacement: one panel whose dataset is the query already in the search box, so there is nothing to double-count across widgets and a saved filter becomes a saved report at no cost.
+
+### Insights (R6) — the shape that is different
+
+`POST …/search/insights` takes a `{query, measure, slice, segment}` body and returns a small pivot. Three deliberate divergences from the other six: it is a **POST** (the query is a 2 000-char body, so no HTTP cache will ever serve it — the 60-second de-duplication is client-side); its refusals are **422 naming the parameter**, not 400, because the tokens arrive in a JSON body and are resolved in the service, which is what every other refusal under `/search` looks like; and it is **workspace-scoped**. `GET /search/schema` grew an `insights` block listing the capability-narrowed measures and dimensions — suggestions narrow, resolution never does, exactly as with HQL fields.
+
+**Bars and cells are capped separately and computed separately** (200 slices, 1000 cells, fixed constants). Deriving a bar by summing its cells would make every truncated response quietly understate its own chart. `bucket.hql` is a server-built click-through fragment and is **null where a correct one cannot be produced** — an ambiguous name across two visible projects would be *wider* than the bar it came from, and a completed sprint or archived label would 422 on click. A client must not synthesise its own.
+
+### CSV exports (R7)
+
+**One row per plotted data point — not a list of issues.** That is the feature: where an export like this exists at all it usually hands back a flat issue list, which is the documented disappointment. Above the rows sits a comment header carrying the report, project, window, measure, percentiles-or-why-suppressed, `computedAt`, `basedOnIssues` and truncation — which is what makes an exported file still self-describing weeks later.
+
+**Every line in the file is CSV cells, the comment header included.** Both reviewers found the header formula-injectable: a raw comment line is still split on commas, so only its *first* cell begins with the hash, and a project or sprint name containing a comma opens a new cell free to begin with an equals sign. The whole line is now one quoted cell. Consequence: a reader configured to drop comment lines by a leading hash no longer skips the header — there is no format in which a line both starts with a bare hash and is a single cell. Text cells are apostrophe-guarded against formula injection; **numeric, date and enum cells deliberately are not**, because a negative `net` or `delta` legitimately starts with a minus and guarding it would turn a column into text that will not sum.
+
+**Known gap:** the proposal's "hands off to the existing search export path" — that path does not exist. There is no CSV or export endpoint under `/search`, and it cannot be built client-side either: HQL has no `project` field (so a handoff cannot be scoped) and no `resolved`/`closed` field (so the flow report's resolved half is not expressible as a query). The SPA ships the "Download matching issues" button **listed and disabled with the reason on it**, because hiding it would leave the series CSV as the only export — which is precisely how a reader concludes it holds the issue list. Filed as its own ticket.
+
+### Throttling, config and the rule behind them
+
+Two per-principal budgets, both in-memory per node, both switched off by `app.rate-limit.enabled`:
+
+- **`app.reports.requests-per-minute`** (`REPORTS_REQUESTS_PER_MINUTE`, default 60) over `…/projects/*/reports/**` **plus** `…/search/insights`, which is bound explicitly because it is a report that does not live under that path.
+- **`app.search.requests-per-minute`** (`SEARCH_REQUESTS_PER_MINUTE`, default 120) over `…/search/**` **and** `…/filters/**`. A separate pot because somebody typing in a search box legitimately fires several requests a minute and must not be starved to protect charts.
+
+**Insights is inside both patterns and spends both; the lower configured value binds.** It sits on the reports limiter deliberately — removing that binding would raise the panel's allowance to the search budget as a side effect.
+
+The durable rule underneath: **what earns a throttle is the work a handler does, not where it is mounted.** Saved filters are ordinary CRUD, but validating a filter's HQL builds the same `ResolutionContext` that `/search/schema` pays for (~8 statements, including a workspace-wide label projection and a full member scan), so creating one with an invalid body was an unthrottled eight-query refusal loop. `ThrottleCoverageTest.theThrottledPathSetIsSealed` **seals the set and prints the propagation checklist when it fails** — that failure message is the authoritative list of what to edit, and it is deliberately not duplicated as a count anywhere, because a number goes stale one entry before the list does.
+
+Other bounds: `app.reports.max-window-days` (365) refuses an over-long window with a 400 naming the cap — **never a silent clamp** — and separately bounds the burn-up's day series (clipped and disclosed, not refused, because there the caller stated no window: the sprint did). `app.reports.max-rows` (20 000) is the row cap behind `meta.cap`. Velocity's 1–12 sprint sample and Insights' bucket caps are **hard-coded constants on purpose**: twelve sprints is about half a year, and a band computed from further back describes a team that has since changed its members, its process and its definition of a point.
+
+**No status code anywhere depends on a delivery capability** (Rule A). A Kanban project's sprint reports answer exactly as a Scrum project's do, and `measure=POINTS` returns points in a project with `estimation` off. Capabilities narrow what `/search/schema` *offers*; they never narrow what resolves.
+
+### Where this subsystem is documented
+
+This is the reading list for the subsystem as a whole. **It is deliberately not a propagation checklist, and must not become one** — for a change to a *throttled path* the authoritative list is the one `ThrottleCoverageTest.theThrottledPathSetIsSealed` prints when it fails, which is the only copy that fires by itself. Two lists that overlap and disagree is how a maintainer edits six files and misses four.
+
+- `src/main/frontend/public/openapi.yaml` — the `Reports` tag, the seven operations, the six `.csv` operations, and the shared components (`ReportMeta`, `ReportThrottled`, `SearchThrottled`, `ReportCsvFile`, `ReportSprintNotFound`, `ReportCacheControl` / `ReportVary` / `ReportCsvDisposition`).
+- `docs/api-cloud.md` / `docs/api-dc.md` — the *Reports* chapter (identical in both except the Cloud-only multi-node throttle paragraph) plus the *Search* chapter's budget note; `api-dc.md` additionally carries the operator-settings rows.
+- `docs/self-hosting.md` — the operator table and the numbered "Nth mechanism is node-local" prose.
+- `.env.prod.example`, `src/main/resources/application.properties`, `common/config/ReportProperties.java`, `common/config/SearchProperties.java` — the two budgets and the three report bounds.
+- `docs/hql-search-maintainers-guide.md` — the `ratelimit/**` package row and the "add an endpoint to the search surface" cookbook entry.
+- `src/main/frontend/src/api.ts` and `src/main/frontend/src/pages/reports/**` — the SPA callers, including their `429` handling.
+- `docs/project-state.md` — this section.
+- `docs/design/reports-proposal.md` — the epic's own spec.
+
+**When editing any of them, sweep for the *shape* rather than the vocabulary.** "Only", "one place", "the only bound", "inherits", "the last of the N" are counts a new path invalidates, and they contain none of the words a search for the new path would find — that is how four rounds walked past four sentences claiming one budget was the singular case where a 429 precedes a 404, and how R7's `aging.csv` silently falsified "the only endpoint with no 400 of its own". **A claim phrased about a category outlives a claim phrased about a member.**
 
 ## Phase 3 API surface
 

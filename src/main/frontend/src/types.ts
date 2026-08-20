@@ -1035,6 +1035,12 @@ export interface SearchSchema {
   keywords: string[];
   // Value picklists keyed by value-source token (STATUS/TYPE/PRIORITY); USER absent.
   values: Record<string, SearchValueOption[]>;
+  // What the Insights panel may be OFFERED (HD-140). Optional so a client can
+  // still talk to a server that predates the panel — absent means "offer
+  // everything", never "offer nothing": withholding a control because an
+  // unrelated request was thin is the same mistake as inferring a capability
+  // from data.
+  insights?: SearchSchemaInsights;
 }
 
 // A saved, workspace-scoped HQL data source (own + shared). `mine` is
@@ -1049,4 +1055,685 @@ export interface SavedFilter {
   mine: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Reports (epic HD-5, slice R1) ────────────────────────────────────────────
+// Mirrors `com.hamstrack.report.dto`. Reads need project membership and nothing
+// else — reports are deliberately NOT permission-gated (reports-proposal §4.2),
+// so nothing here has a `myPermissions` twin.
+
+/** Bucket width. Boundaries are UTC; WEEK starts on Monday (PostgreSQL `date_trunc`). */
+export type ReportInterval = 'DAY' | 'WEEK';
+
+/**
+ * The provenance block every report response carries (§4.3). It exists to be
+ * PRINTED, not swallowed: the recurring complaint about competitors' reports is
+ * "these numbers don't match what I expected", and its mechanism is a report
+ * that quietly left data out.
+ */
+export interface ReportMeta {
+  /** When the server computed the numbers — the reader's anchor across two tabs. */
+  computedAt: string;
+  /** Distinct issues the numbers were computed from (not the sum of the series). */
+  basedOnIssues: number;
+  /**
+   * Whether `cap` actually bit. Always false on the flow report (it aggregates in
+   * SQL, so the row cap physically cannot bite) — but the UI still handles it,
+   * because the row-level reports of R3 return the same block and DO truncate.
+   */
+  truncated: boolean;
+  /** The row cap that would bite (`app.reports.max-rows`). */
+  cap: number;
+  /**
+   * When the earliest issue this report could ever have shown was created, or
+   * `null` when there is none.
+   *
+   * This — not `project.createdAt` — is what "we only have N days of history"
+   * must be measured from. **It is filtered exactly like the rest of the
+   * response**, so with a filter set it is the first issue *of that type /
+   * component / label* and the UI must not call it the project's age.
+   */
+  firstIssueAt: string | null;
+  /**
+   * Which of the supplied filter parameters (`typeId` / `componentId` /
+   * `labelId`) match **no issue in this project at all** — never null, empty
+   * when every filter matched something or none was sent.
+   *
+   * This is the difference between "nothing happened in this window" and "your
+   * filter matched nothing", which are the same all-zero picture without it.
+   * Note the deliberately weak claim: *no issue in this project carries this
+   * id*, NOT "this id does not exist" — a perfectly valid type nobody here has
+   * ever used is named too, so the copy may not say the thing was deleted.
+   */
+  unmatchedFilters: string[];
+}
+
+/**
+ * One point of the flow series.
+ *
+ * `resolved` reads as "issues that are closed NOW, dated by their most recent
+ * closure": `closed_at` is cleared when an issue leaves a DONE status, so a
+ * reopened issue leaves the bucket it used to sit in and joins a new one on
+ * reclosure. Past buckets are mutable and the UI is required to say so.
+ * `openAtEnd` inherits the same caveat, one integral further on.
+ */
+export interface FlowBucket {
+  /** Bucket START date (a Monday for WEEK). May precede `from` — that bucket is partial. */
+  date: string;
+  created: number;
+  resolved: number;
+  openAtEnd: number;
+  /**
+   * Whether this bucket covers less calendar than a full interval, because the
+   * window opens or closes inside it — so its bar is legitimately short.
+   *
+   * **Authoritative; never re-derived here.** Computing it client-side means
+   * re-implementing Monday truncation in a second language, and the first time
+   * the two disagree the chart footnotes the wrong bar. Always false at
+   * `interval=DAY`, where a day is the unit.
+   */
+  partial: boolean;
+}
+
+export interface FlowTotals {
+  created: number;
+  resolved: number;
+  /** `created - resolved`. Positive = the backlog grew. Computed server-side. */
+  net: number;
+}
+
+export interface FlowReport {
+  /** Echoed back EXACTLY as requested — a too-wide window is a 400, never a clamp. */
+  from: string;
+  to: string;
+  interval: ReportInterval;
+  /** Zero-filled and ascending: an empty bucket is present with zeros, never absent. */
+  buckets: FlowBucket[];
+  totals: FlowTotals;
+  meta: ReportMeta;
+}
+
+// ── Cycle time, lead time & aging WIP (epic HD-5, slice R3) ──────────────────
+// Mirrors `com.hamstrack.report.dto`. Two endpoints, one page: `/cycle-time` is
+// windowed and filtered, `/aging` is the CURRENT state and takes no parameters
+// at all — a difference the UI has to state out loud, because a reader with a
+// type filter set would otherwise read the aging columns as filtered too.
+
+/**
+ * Which duration the finished-work half plots. Purely a CLIENT concern: one
+ * response carries both measures and both percentile pairs, so the toggle is a
+ * re-render, never a refetch — but it still lives in the URL, because a link
+ * that loses the measure shows a colleague a different report.
+ */
+export type CycleMeasure = 'CYCLE' | 'LEAD';
+
+/**
+ * One completed issue in the window.
+ *
+ * `startedAt`/`cycleDays` are **null for an issue that has no recorded start**
+ * (`issues.started_at` was backfilled best-effort, so old issues legitimately
+ * lack one). Those issues are not plotted in the cycle measure and are counted
+ * in `missingStartCount`. We never substitute `createdAt` for a missing start —
+ * that turns a cycle-time report into a lead-time report wearing a false name
+ * (reports-proposal §2.2).
+ */
+export interface CycleTimeItem {
+  issueId: string;
+  key: string;
+  title: string;
+  typeId: string;
+  startedAt: string | null;
+  closedAt: string;
+  cycleDays: number | null;
+  /** Always defined: `created_at → closed_at` exists for every completed issue. */
+  leadDays: number;
+}
+
+/**
+ * A p50/p85 pair, or nothing.
+ *
+ * Nullable at BOTH levels on purpose: below the 5-issue floor the server
+ * suppresses percentiles rather than printing noise (§2.2), and the UI must
+ * behave identically whether that suppression arrives as a null pair or as null
+ * members. Reading it through one tolerant helper means a shape change on the
+ * server can never draw a reference line at `0` days.
+ */
+export interface Percentiles {
+  p50: number | null;
+  p85: number | null;
+}
+
+/** Both measures' percentiles, computed server-side (`percentile_cont`). */
+export interface CycleTimePercentiles {
+  cycle: Percentiles | null;
+  lead: Percentiles | null;
+}
+
+export interface CycleTimeReport {
+  /** Echoed back exactly as requested — an over-long window is a 400, not a clamp. */
+  from: string;
+  to: string;
+  /** One row per completed issue in the window; row-capped like every R3 report. */
+  items: CycleTimeItem[];
+  percentiles: CycleTimePercentiles | null;
+  /** Completed issues in the window — the denominator of the honesty sentence. */
+  sampleSize: number;
+  /**
+   * How many of those have **no recorded start**, i.e. no cycle time. Printed,
+   * always: *"cycle time available for 812 of 940 completed issues"*. A
+   * cycle-time chart that quietly rests on a subset is the exact failure this
+   * whole epic is built to avoid.
+   */
+  missingStartCount: number;
+  meta: ReportMeta;
+}
+
+/** One open issue in the aging half, aged from `startedAt` (or from creation). */
+export interface AgingItem {
+  issueId: string;
+  key: string;
+  title: string;
+  ageDays: number;
+  assigneeId: string | null;
+  /** Null when the issue was never started — it is then aged from its creation. */
+  startedAt: string | null;
+}
+
+/**
+ * One column of the aging half: a non-DONE status of the project's **effective**
+ * workflow, in board order.
+ *
+ * The trailing **"Not on this board"** column — an issue stranded in a status the
+ * workflow no longer carries — arrives here too, and is deliberate: those issues
+ * must not vanish (§6). It is recognised by a `statusId` the project config does
+ * not list (or none at all), never by matching its name.
+ */
+export interface AgingColumn {
+  statusId: string | null;
+  name: string;
+  category: 'TODO' | 'IN_PROGRESS' | 'DONE' | null;
+  items: AgingItem[];
+}
+
+export interface AgingReport {
+  columns: AgingColumn[];
+  /**
+   * The completed-work baseline the aging dots are read against. It comes with
+   * THIS response, so it does not move when the window above changes — which the
+   * page says, rather than letting the reader assume the two halves share a
+   * window.
+   */
+  percentiles: Percentiles | null;
+  meta: ReportMeta;
+}
+
+// ── Sprint burn-up & sprint review (epic HD-5, slice R4) ─────────────────────
+// Mirrors `com.hamstrack.report.dto` (`SprintBurnupResponse` / `SprintReviewResponse`).
+// Both endpoints are per-sprint, both read the R2 scope ledger
+// (`sprint_scope_events`), and both answer for ANY sprint in ANY project
+// regardless of `delivery.board` — a capability gates the UI and never the API
+// (delivery-paths §5.1, Rule A). Neither is permission-gated (§4.2).
+//
+// **Every point number arrives as a `BigDecimal` server-side** and lands here as
+// a plain number, already stripped of trailing zeros (`common.util.Points`), so
+// `3` and never `3.00`.
+
+/**
+ * Issue count (default) or story points — `ReportMeasure` on the server.
+ *
+ * Unlike {@link CycleMeasure} this one **is on the wire**: the two series are
+ * different sums over different rows, so the server computes the one asked for
+ * and echoes it back. It therefore joins the query key, and flipping the toggle
+ * is a refetch rather than a re-render.
+ */
+export type SprintMeasure = 'COUNT' | 'POINTS';
+
+/** A membership change. A re-estimate is NEVER one of these (§2.3 rule 1). */
+export type ScopeEventType = 'ADDED' | 'REMOVED';
+
+/**
+ * One day of the burn-up, `YYYY-MM-DD` in UTC.
+ *
+ * `scope` is the total work in the sprint that day — it steps up on an add and
+ * down on a remove, and never moves on a re-estimate. `completed` is cumulative
+ * work closed by the end of that day. Both are zero-filled, never absent.
+ *
+ * The series ends at **today** (or at `completedAt` for a finished sprint), not
+ * at the sprint's planned end: the server simply does not compute days that have
+ * not happened. The chart still draws the axis across the whole sprint, with
+ * nothing on it after the last real day — see `burnupRows`.
+ */
+export interface BurnupPoint {
+  date: string;
+  scope: number;
+  completed: number;
+}
+
+/**
+ * One row of the scope-change log — the ledger, rendered.
+ *
+ * `issueId` is **null once that issue has been deleted**: the ledger's FK is
+ * `ON DELETE SET NULL`, so the row outlives the issue and keeps both of its
+ * steps in the scope arithmetic. `key` is the snapshot taken at the event and is
+ * always present, which is what lets a deleted issue's line still say which
+ * issue it was — so a null `issueId` means "no longer linkable", never "hide me".
+ */
+export interface ScopeChange {
+  /** The ledger's `occurred_at` — when scope MOVED, not when the row was written. */
+  at: string;
+  issueId: string | null;
+  key: string;
+  event: ScopeEventType;
+  /** In the requested measure: ±1 under COUNT, ±the issue's points under POINTS. */
+  delta: number;
+  /**
+   * Who moved it — **null in two different cases, and neither is an error.**
+   *
+   * The ordinary one is an account that has since been deleted: the event is a
+   * fact about the sprint and outlives the user who caused it. The second is a
+   * decision rather than a foreign key — attribution is dropped on the rows of a
+   * **deleted issue**, because `issue_history` cascades away with the issue
+   * while the ledger row survives, which would otherwise leave this log as the
+   * only place in the product still naming who touched a since-deleted issue and
+   * when. The design preserves the key and the estimate on purpose; it does not
+   * preserve a person. So render a null actor as ordinary, never as a fault.
+   */
+  actorId: string | null;
+  /**
+   * The points the issue carried at the moment of the event — the ledger's
+   * snapshot, and **independent of `delta`**: `delta` is ±1 under COUNT, while
+   * this is what the issue weighed either way. Null when it entered unestimated.
+   *
+   * This is what closes Rule B (§5.2 — "a value the project already recorded
+   * stays visible when a capability is switched off"): a project with
+   * `estimation` off is charted in COUNT, so without this column the log would
+   * carry no point value at all and estimates the project had already recorded
+   * would vanish with the toggle.
+   */
+  storyPoints: number | null;
+}
+
+export interface SprintBurnupReport {
+  /**
+   * Null only for a parameterless request against a project with no ACTIVE
+   * sprint — `SprintRef.of(null)` is null. The SPA never makes that request (it
+   * resolves a sprint for its picker first and always names one), but the field
+   * is typed honestly so a page cannot dereference it by accident.
+   */
+  sprint: SprintRef | null;
+  /**
+   * The sprint's start — the ledger dates the commitment batch to it, not to the
+   * click. **Null for a sprint that has never been started**, which is a 200
+   * with an empty series: commitment is an event and it has not happened.
+   */
+  startAt: string | null;
+  /** The sprint's planned end; null when it was started without one. */
+  endAt: string | null;
+  measure: SprintMeasure;
+  /** Scope at `startAt` — what the ideal guide is drawn TO (never current scope). */
+  committedAtStart: number;
+  /**
+   * Issues in the sprint with no estimate. They weigh zero in a POINTS series
+   * **and are counted here** — never silently zero, which is documented failure
+   * mode #4 of the burndown (§1.2, §6). Always present; `0` under COUNT.
+   */
+  unestimatedCount: number;
+  /** One point per UTC day from the sprint's start to today, ascending. */
+  series: BurnupPoint[];
+  /**
+   * Every membership change after the start, ascending by instant then key.
+   *
+   * Clipped to {@link seriesTruncatedAt} **only when the chart is clipped**, and
+   * deliberately not otherwise: a completed sprint's carry-over rows are stamped
+   * a moment AFTER `completed_at`, so bounding the log at the last plotted point
+   * would drop the completion's own moves — the ones that explain where the
+   * remaining scope went.
+   */
+  scopeChanges: ScopeChange[];
+  /**
+   * The UTC day the series stops at, or null when the whole sprint is drawn.
+   *
+   * A sprint's start may be **backdated arbitrarily**, so the day count is
+   * caller-influenced and is bounded by `app.reports.max-window-days`, keeping
+   * the FIRST days because they carry the commitment. This is its own signal and
+   * **not** `meta.truncated`: that flag means the `app.reports.max-rows` cap bit
+   * and is printed beside `meta.cap`, so reusing it made a day-clipped
+   * twelve-issue sprint answer `truncated: true, cap: 20000` and quote twenty
+   * thousand at a report that dropped nothing of the kind. Two limits, two
+   * signals; the one that fired names the day it fired on.
+   */
+  seriesTruncatedAt: string | null;
+  meta: ReportMeta;
+}
+
+/**
+ * One issue row of the sprint review.
+ *
+ * The rule that shapes it: **a completed sprint's record may not quietly shed
+ * rows.** An issue deleted since the sprint ran still appears — from the
+ * ledger's snapshot — with `deleted: true`, its key, and the points it carried
+ * on entry; everything that lives on the issue itself (`title`, `typeId`,
+ * `assigneeId`, `statusId`, `closedAt`) is null. It is rendered as a real row
+ * that says the issue is gone, not hidden and not drawn as a broken link.
+ */
+export interface SprintReviewIssue {
+  /** Null once the issue was deleted — the row is a snapshot, not a join. */
+  issueId: string | null;
+  /** Snapshotted at the event; present on every row, including a deleted one. */
+  key: string;
+  title: string | null;
+  /** Resolved against the project `config`, exactly as every other type badge is. */
+  typeId: string | null;
+  assigneeId: string | null;
+  statusId: string | null;
+  /**
+   * **What this issue weighed when it entered this sprint** — the ledger's
+   * snapshot, not today's estimate, and null when it entered unestimated.
+   *
+   * This is the one place the two halves of R4 deliberately disagree: the
+   * burn-up plots CURRENT points (so a re-estimate moves its whole line), while
+   * the review is a retrospective record and a retro asks what was committed.
+   */
+  points: number | null;
+  /**
+   * The issue's CURRENT closure stamp, null when it is open — or when the issue
+   * is gone. `closed_at` is cleared on reopen, so a reopened issue leaves its
+   * old sprint's completed list; the record answers "is it done", and that
+   * answer changed.
+   */
+  closedAt: string | null;
+  /** The issue no longer exists. Authoritative — never re-derived from `issueId`. */
+  deleted: boolean;
+}
+
+/**
+ * One of the review's five lists, with its own count and point sum.
+ *
+ * `points` is **null when nothing in the list was estimated**, empty lists
+ * included — never `0`. The distinction is the whole reason it is nullable: "it
+ * added up to nothing" is a measurement and "nobody estimated any of it" is the
+ * absence of one, and a sum alone renders them identically. A null point sum is
+ * therefore a fact to print as "no estimates here", not a number to default.
+ */
+export interface SprintReviewList {
+  count: number;
+  points: number | null;
+  unestimatedCount: number;
+  issues: SprintReviewIssue[];
+}
+
+/**
+ * The numbers behind the header line, computed server-side so the sentence and
+ * the lists cannot drift: *"completed 18 of 23 issues (41 of 55 points) · 5
+ * added after start."*
+ *
+ * The denominator is **`atEndCount`** — completed plus carried over, i.e. what
+ * the sprint held when it ended. That is the population the completed list is a
+ * subset of, by construction, so the ratio can never exceed one. Committing it
+ * to `committedCount` instead compared two different populations: work added
+ * after the start can be completed, so "completed 25 of 23" was reachable.
+ *
+ * The commitment does not disappear — it stays a labelled list with its own
+ * count and sum, and the "5 added after start" clause is the disclosure of the
+ * drift between the two.
+ */
+export interface SprintReviewTotals {
+  committedCount: number;
+  /** Null when nothing committed was estimated — see {@link SprintReviewList}. */
+  committedPoints: number | null;
+  /** Completed + carried over: what the sprint held at its end. The denominator. */
+  atEndCount: number;
+  atEndPoints: number | null;
+  completedCount: number;
+  completedPoints: number | null;
+  addedAfterStartCount: number;
+}
+
+/**
+ * The artefact a team opens at a retrospective (§2.4) — five lists, not a chart.
+ *
+ * For a COMPLETED sprint this is a permanent, exact record: the ledger is
+ * append-only and id-keyed, so it survives every rename and every re-estimate.
+ * A sprint that never started answers 200 with five empty lists, not a 404.
+ */
+export interface SprintReviewReport {
+  /** Null under the same condition as {@link SprintBurnupReport.sprint}. */
+  sprint: SprintRef | null;
+  /** Null for a sprint that never started — then every list is empty. */
+  startAt: string | null;
+  endAt: string | null;
+  completedAt: string | null;
+  /** In the sprint at the moment it started. */
+  committed: SprintReviewList;
+  addedAfterStart: SprintReviewList;
+  /** Out of the sprint before it ended — disjoint from completed and carried over. */
+  removedBeforeEnd: SprintReviewList;
+  completed: SprintReviewList;
+  carriedOver: SprintReviewList;
+  totals: SprintReviewTotals;
+  meta: ReportMeta;
+}
+
+/**
+ * One completed sprint of the velocity report (R5, §2.5) — **a sprint, never a
+ * person.**
+ *
+ * There is deliberately no assignee, no member list and no per-person split
+ * anywhere in this shape, and none may be added: §1.4 is an evidence-backed
+ * refusal, not a preference. *"Velocity was never intended to be used to compare
+ * two teams"*; when it escapes the team, *"leaders misinterpret higher story
+ * point averages to mean one team is more productive"*, which *"harms their
+ * estimating process, creates inflated estimates, and demoralizes the team"*. A
+ * per-person breakdown is the same failure one level down, and a tooltip is not
+ * a smaller version of it.
+ *
+ * All four figures are in the report's `measure`: issue counts under `COUNT`,
+ * story points under `POINTS`.
+ */
+export interface VelocitySprint {
+  sprintId: string;
+  /** The sprint's name as it stands today — the bars' only label. */
+  name: string;
+  /** When it started — the instant `committed` is measured at. */
+  startAt: string;
+  /**
+   * When it was completed. **Never null** — only COMPLETED sprints are sampled —
+   * and it is what orders the bars, so chronology is a fact in the payload
+   * rather than something a client infers from sprint names.
+   */
+  completedAt: string;
+  /** What it held when it started. Marked as a level on the bar, never as a target. */
+  committed: number;
+  /** What was closed in it — the bar itself, and the only input to the forecast. */
+  completed: number;
+  addedAfterStart: number;
+  carriedOver: number;
+  /**
+   * Issues the sprint held at its end that carried **no estimate** — reported
+   * under BOTH measures, and an issue count under both (never a point sum,
+   * which for unestimated work would be zero by definition).
+   *
+   * It is the same disclosure the burn-up makes and it matters more here.
+   * Under `POINTS` an unestimated issue weighs zero in its bar — documented
+   * failure mode #4 (§1.2, §6) — **and the band is computed from those bars**,
+   * so `p50`/`p85` are biased low by exactly the work nobody sized. A forecast
+   * quietly reading low, in the report whose only purpose is the forecast, is
+   * the failure this field exists to prevent.
+   *
+   * Under `COUNT` every issue is in the bars whether it was sized or not, so
+   * the number distorts nothing — it is shown anyway, because it is what a
+   * points view of the same sprints would understate, and a reader flipping the
+   * measure must not have to discover that on the way past.
+   */
+  unestimatedCount: number;
+}
+
+/**
+ * The band — the thing this report exists for (§2.5).
+ *
+ * It is a **forecast input, not a scoreboard**: a p50 to plan with and a p85 to
+ * treat as a stretch, always printed with the sample size behind them. The
+ * sample size is not decoration — the epic refuses forecasting everywhere it
+ * cannot state one (§2.3 rule 2), and this is the one report that can.
+ *
+ * **Suppression is a null percentile, not a missing object** (§6): below three
+ * completed sprints the server sends this record with `p50`/`p85` null and
+ * `sampleSize` still stating what there was, so a client reads
+ * `forecast.p50 === null` rather than testing the parent for existence.
+ *
+ * The client re-checks the threshold anyway rather than trusting the shape,
+ * because a band drawn from two sprints is the failure mode this report exists
+ * to avoid, not a rounding error.
+ */
+export interface VelocityForecast {
+  /** The median completed — *plan for about this*. Null when suppressed. */
+  p50: number | null;
+  /** The 85th percentile — *a stretch, never a target*. Null when suppressed. */
+  p85: number | null;
+  /** Completed sprints behind the percentiles. Printed even when suppressed. */
+  sampleSize: number;
+}
+
+/**
+ * `GET /reports/velocity?sprints=6&measure=COUNT|POINTS` (§2.5, §4.3).
+ *
+ * **Project-scoped, and there is no aggregate above it.** No workspace endpoint,
+ * no multi-project variant, no comparison affordance in the UI — comparing two
+ * teams has to be done by hand, and that friction is the design (§1.4).
+ *
+ * `sprints` carries the last N COMPLETED sprints in **chronological order,
+ * oldest first**, so the bars read left to right in time without a client-side
+ * sort (N default 6, max 12 — `400` outside 1..12, with the bound named in the
+ * detail, never a silent clamp). A project with no completed sprint answers 200
+ * with an empty list, not a 404.
+ *
+ * Like every sprint report it is **not** gated by `board`: a Kanban project's
+ * request is answered exactly as a Scrum project's is (delivery-paths Rule A).
+ */
+export interface VelocityReport {
+  measure: SprintMeasure;
+  sprints: VelocitySprint[];
+  /** Always present; its percentiles are null when the band is suppressed. */
+  forecast: VelocityForecast;
+  meta: ReportMeta;
+}
+
+// ── Search insights (epic HD-5, slice R6 — the dashboard replacement) ────────
+// `POST /api/workspaces/{wsId}/search/insights` (§2.6). Workspace-scoped, not
+// project-scoped: its dataset is **the HQL query already in the search box**,
+// which is what a gadget grid can never have — one global filter by
+// construction, so no two numbers on the panel can come from different sets.
+//
+// Mirrors `com.hamstrack.report.dto.Insights*`. The response is a **cross tab,
+// not a tree**: the bars (`slices`), the legend (`segments`) and their
+// intersections (`cells`) are three flat lists, because the two are capped
+// SEPARATELY and a bar's height is deliberately not the sum of its stacks.
+
+/** The y axis. `NONE` draws no chart — the panel becomes a pure breakdown. */
+export type InsightsMeasure = 'COUNT' | 'POINTS' | 'NONE';
+
+/**
+ * The x axis (`slice`) and the optional colour dimension (`segment`) — one list
+ * serves both, and the only rule is that they must differ (422 otherwise).
+ *
+ * `ASSIGNEE` is here and is **refused in velocity** (§2.5/§1.4). Not an
+ * inconsistency: this is an ad-hoc query a member runs over their own result
+ * set, not a published metric with a permanent home in the navigation.
+ */
+export type InsightsDimension =
+  | 'STATUS' | 'TYPE' | 'PRIORITY' | 'ASSIGNEE'
+  | 'COMPONENT' | 'LABEL' | 'SPRINT' | 'PROJECT';
+
+/**
+ * One bar, or one legend entry — **and the HQL that reproduces exactly it**.
+ *
+ * `id` is the entity id, or **null for the no-value bucket** (unassigned, no
+ * component, no sprint), which is a real answer and not an error.
+ *
+ * `hql` is the whole click-through, and it is **the server's job, never the
+ * client's**. A fragment is emitted only when it returns precisely the issues
+ * this bar counted, and is `null` otherwise — which happens for three separate
+ * reasons the panel must not paper over:
+ *
+ *  1. `PROJECT`, which HQL has no vocabulary for at all;
+ *  2. a name owned by two visible projects (two "Billing" components), where
+ *     `component = "Billing"` would match a WIDER set than the bar;
+ *  3. a name deliberately outside HQL name resolution — a COMPLETED sprint, an
+ *     archived component or label — where the fragment would 422 on click.
+ *
+ * Never rebuild it locally from `label`. Getting (2) and (3) right needs the
+ * workspace's whole name→id map, and the failure mode of guessing is a click
+ * that returns a different set than the bar and looks exactly like success.
+ */
+export interface InsightsBucket {
+  id: string | null;
+  label: string;
+  hql: string | null;
+}
+
+/** One bar. Both measures are always present — the toggle is a re-render. */
+export interface InsightsSlice {
+  bucket: InsightsBucket;
+  count: number;
+  /** Sum of story points; unestimated issues weigh zero, and are counted below. */
+  points: number | null;
+  unestimatedCount: number;
+}
+
+/** One (slice, segment) intersection. Ids match `slices[].bucket.id`/`segments[].id`. */
+export interface InsightsCellValue {
+  sliceId: string | null;
+  segmentId: string | null;
+  count: number;
+  points: number | null;
+  unestimatedCount: number;
+}
+
+/**
+ * `POST /search/insights` (§2.6, §4.3).
+ *
+ * **The two truncation flags are not `meta.truncated`.** This report never
+ * materialises an issue row, so the row cap physically cannot bite (`meta`
+ * reports that honestly). What truncates here is *buckets* — the axis at
+ * `sliceCap`, the cross tab at `cellCap` — and each has its own flag because a
+ * chart missing bars and a chart missing stacks are different sentences.
+ *
+ * **`sliceMultiValued` is the one that changes what the numbers mean.** An issue
+ * with three labels lands in three bars, so on a many-valued dimension the bars
+ * sum to more than `meta.basedOnIssues` and the panel has to say so — an
+ * unexplained "sum ≠ total" is precisely the "these numbers don't match"
+ * complaint this epic's disclosure rules exist to prevent.
+ */
+export interface InsightsResponse {
+  measure: InsightsMeasure;
+  slice: InsightsDimension;
+  /** Null when no colour dimension was requested. */
+  segment: InsightsDimension | null;
+  /** The bars, ranked by the requested measure, then by label. */
+  slices: InsightsSlice[];
+  /** The legend — every segment bucket the shipped cells refer to. */
+  segments: InsightsBucket[];
+  /** The cross tab. Empty when unsegmented. */
+  cells: InsightsCellValue[];
+  sliceMultiValued: boolean;
+  segmentMultiValued: boolean;
+  slicesTruncated: boolean;
+  cellsTruncated: boolean;
+  sliceCap: number;
+  cellCap: number;
+  meta: ReportMeta;
+}
+
+/**
+ * What `/search/schema` says the Insights panel may be OFFERED (`schema.insights`).
+ *
+ * **Suggestions, not a contract** — the same sentence that governs `fields`.
+ * `SPRINT` is dropped when no visible project plans in sprints and `POINTS` when
+ * none estimates; what is omitted still RESOLVES, because a capability may never
+ * change a status code (delivery-paths Rule A). So the panel hides the control
+ * and still sends, and still renders, a shared URL that names one.
+ */
+export interface SearchSchemaInsights {
+  measures: InsightsMeasure[];
+  dimensions: InsightsDimension[];
 }

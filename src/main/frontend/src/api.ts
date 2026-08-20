@@ -10,6 +10,9 @@ import type {
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
+  FlowReport, ReportInterval, CycleTimeReport, AgingReport,
+  SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
+  InsightsDimension, InsightsMeasure, InsightsResponse,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1563,6 +1566,11 @@ export async function apiRankIssue(
 // Workspace-scoped; a non-member gets 404. A bad query POST throws an
 // ApiResponseError with .status === 422 and a populated .hql (position/length/
 // token/field/errorType) so the input can underline the offending span.
+// 429 — `POST …/search`, `…/search/schema` and `…/search/suggest` are all on
+// this caller's search budget. A retryable throttle, not a fault: nothing was
+// computed and the identical request succeeds after `Retry-After`
+// (`ApiResponseError.retryAfter` carries it). Spent BEFORE the workspace is
+// resolved, so a 429 says nothing about whether the caller can see it.
 
 export async function apiSearch(
   wsId: string,
@@ -1587,9 +1595,68 @@ export async function apiSearchSuggest(
   return request(`/workspaces/${wsId}/search/suggest?${params.toString()}`)
 }
 
+/**
+ * The Insights panel's one endpoint (HD-140, R6 — §2.6).
+ *
+ * **The dataset is the query, and nothing else.** There is no window, no project
+ * id and no filter list: the panel aggregates exactly the rows the search box
+ * would return, with page and sort dropped, which is what gives it a global
+ * filter by construction and is the reason it replaces the gadget dashboard
+ * rather than reimplementing it.
+ *
+ * **`measure` is on the wire even though both numbers come back on every row.**
+ * The response carries `count` AND `points` for each slice and cell, so the
+ * toggle is a re-render — but the measure is what the server *ranks* by when it
+ * applies its two caps, so the same query under `POINTS` can ship a different
+ * set of bars. It therefore joins the cache key, and changing it is a refetch.
+ *
+ * Errors are the search errors, because it IS the search query:
+ *   • 422 — bad HQL, with `.hql` populated exactly as `apiSearch` fills it;
+ *     also `slice === segment`, which the panel never offers (a diagonal is not
+ *     a breakdown) but which a hand-edited URL can ask for.
+ *   • 404 — workspace not visible (non-member and non-existent alike).
+ *   • 429 — past a throttle budget, and this endpoint sits inside TWO of them:
+ *     it is bound to the reports limiter explicitly (`ReportRateLimitConfig`,
+ *     because it does NOT live under `/reports`) and it also falls under the
+ *     search path pattern. It spends both budgets, the lower configured value
+ *     binds, and lowering either property lowers the panel. The explicit
+ *     binding only looks redundant — deleting it would silently raise the
+ *     panel's allowance to the search budget as a side effect. A retryable
+ *     throttle, never a fault (`ApiResponseError.retryAfter` carries the wait).
+ *
+ * **A capability never changes the answer** (delivery-paths Rule A). The panel
+ * omits the `sprint` slice when no visible project runs sprints, and the story
+ * points measure when none estimates — reading `/search/schema`'s own `insights`
+ * block, which narrows on exactly the terms its `fields` list does — but a link
+ * that asks for either is sent as written and answered 200, because a hidden
+ * control is not a permission.
+ */
+export async function apiSearchInsights(
+  wsId: string,
+  payload: {
+    query: string
+    measure: InsightsMeasure
+    slice: InsightsDimension
+    /** Omitted entirely when there is no colour dimension — never sent as ''. */
+    segment?: InsightsDimension
+  },
+): Promise<InsightsResponse> {
+  return request(`/workspaces/${wsId}/search/insights`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 // ── Saved filters — HD-26 ─────────────────────────────────────────────────────
 // Own + shared, workspace-scoped. Create/update/delete are owner-only server-side
 // (a non-owner PATCH/DELETE 404s). Create: 422 invalid HQL (.hql set), 409 dup name.
+// 429 on EVERY call here: the whole `…/filters/**` path is on the search budget,
+// because validating a filter's HQL builds the same resolution context
+// `…/search/schema` pays for — so an invalid-body loop here was the same cost
+// wearing different clothes. The binding is by PATH, not by method, so `list`,
+// `get` and `remove` are throttled too, surprising as that is for a read and a
+// delete. A retryable throttle, not a validation failure: retry after
+// `Retry-After` (`ApiResponseError.retryAfter`).
 
 export const savedFilters = {
   list: (wsId: string) =>
@@ -1611,4 +1678,262 @@ export const savedFilters = {
     request<{ usages: { type: string; id: string; name: string }[] }>(
       `/workspaces/${wsId}/filters/${id}/usage`
     ),
+}
+
+// ── Reports — HD-5 / HD-28 ────────────────────────────────────────────────────
+// Project-scoped, read-only, `Cache-Control: private, max-age=60` (match it with
+// a 60s `staleTime`; see `flowReportKey`). Reading needs project membership and
+// NOTHING else — there is no `report.view` permission and there is not meant to
+// be one (reports-proposal §4.2), so no caller of these gates on a permission.
+//
+// Error shapes the UI has to render as real sentences, not a generic banner:
+//   • 400 — `from > to`, a window wider than `app.reports.max-window-days`, or
+//     a date outside 1970-01-01…2200-12-31. Every one of them NAMES the bound it
+//     measured against, because a window is never silently clamped; surface
+//     `detail` verbatim (see `FlowReportPage`). All three share one shape, so
+//     they share one rendering path.
+//   • 404 — workspace/project not visible (non-member and non-existent alike).
+//   • 429 — past this caller's report budget (`app.reports.requests-per-minute`).
+//     A retryable throttle, not a fault: nothing was computed and a retry after
+//     `Retry-After` succeeds (`ApiResponseError.retryAfter` carries it). It is
+//     spent per principal BEFORE the project is resolved, which makes it the one
+//     place on this API where 429 precedes 404 — so a 429 says nothing about
+//     whether the caller can see the project, and no UI may imply otherwise.
+//
+// Unknown/foreign filter ids are NOT an error: the queries are project-scoped
+// first, so an id that does not exist here simply matches nothing and yields an
+// empty series. Answering otherwise would make this an existence oracle. The
+// caller is not left guessing, though — `meta.unmatchedFilters` names any filter
+// that matched no issue in the project, so an all-zero chart is never ambiguous.
+
+/**
+ * Every parameter is optional, and **sending none is the intended first call**:
+ * the server then reports the last `min(90, app.reports.max-window-days)` days,
+ * weekly and unfiltered. Deriving the default from the cap is what makes a
+ * parameterless request always succeed, including on an instance whose operator
+ * capped windows below 90 — so do not "help" by filling a window in here. There
+ * is exactly one definition of the default and it is the server's.
+ *
+ * Dates are ISO `YYYY-MM-DD` and the window INCLUDES both endpoints. Empty
+ * strings are dropped rather than sent, so an unset window really is absent.
+ */
+export interface FlowReportParams {
+  from?: string
+  to?: string
+  interval?: ReportInterval
+  typeId?: string
+  componentId?: string
+  labelId?: string
+}
+
+/**
+ * The finished-work half of the cycle-time report (HD-138). Same window and the
+ * same three filters as the flow report — and deliberately **no `measure`**: one
+ * response carries `cycleDays` AND `leadDays` plus both percentile pairs, so the
+ * page's toggle is a re-render rather than a second round trip. Keeping the
+ * measure out of the request is also what keeps it out of the cache key, so
+ * flipping it back and forth never refetches.
+ */
+export interface CycleTimeReportParams {
+  from?: string
+  to?: string
+  typeId?: string
+  componentId?: string
+  labelId?: string
+}
+
+export const reportsApi = {
+  flow: (wsId: string, projectId: string, params: FlowReportParams = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<FlowReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/flow${q ? `?${q}` : ''}`)
+  },
+
+  cycleTime: (wsId: string, projectId: string, params: CycleTimeReportParams = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<CycleTimeReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/cycle-time${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * Aging work in progress — **the current state, so it takes no parameters at
+   * all**: no window, no filters. That asymmetry with `cycleTime` is a fact the
+   * page has to state rather than hide; a reader who set a type filter above
+   * would otherwise read these columns as filtered too.
+   */
+  aging: (wsId: string, projectId: string) =>
+    request<AgingReport>(`/workspaces/${wsId}/projects/${projectId}/reports/aging`),
+
+  /**
+   * The sprint burn-up (R4). This client always SENDS `sprintId`, even though
+   * the endpoint defaults to the ACTIVE sprint: the page has to resolve a sprint
+   * to render its picker anyway, and a request that names the sprint is the one
+   * whose URL still means the same report tomorrow, when a different sprint is
+   * the active one.
+   *
+   * **`measure` IS on the wire here**, unlike the cycle-time page's toggle: the
+   * two series are different sums over different rows, so the server computes
+   * the one that was asked for. It therefore joins the cache key, and flipping
+   * the toggle is a refetch.
+   *
+   * 404 when the sprint is not in this project (or the project is not visible).
+   * Never a capability — `board = KANBAN` answers exactly the same, because a
+   * hidden control is not a permission (delivery-paths Rule A).
+   */
+  sprintBurnup: (
+    wsId: string, projectId: string,
+    params: { sprintId?: string; measure?: SprintMeasure } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<SprintBurnupReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/sprint-burnup${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * The sprint review record (R4) — five lists, no chart, and deliberately **no
+   * measure**: it always reports a count AND a point sum, because that is how a
+   * retrospective reads them ("18 of 23 issues, 41 of 55 points").
+   */
+  sprintReview: (wsId: string, projectId: string, params: { sprintId?: string } = {}) => {
+    const qs = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+    const q = qs.toString()
+    return request<SprintReviewReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/sprint-review${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * Velocity (R5) — the last N completed sprints, with the forecast band.
+   *
+   * **`sprints` is always sent**, so the request states what it asked for
+   * rather than leaning on a server default a later release could change under
+   * an already-shared URL. The page clamps it to 1..12 before it gets here: the
+   * endpoint answers 400 above the cap with the cap named, and a reader who
+   * pasted `sprints=99` is better served by the chart plus a sentence about the
+   * cap than by an error page.
+   *
+   * `measure` is on the wire for the same reason as on the burn-up — the two
+   * series are different sums over different rows — so it joins the cache key.
+   *
+   * **Project-scoped, permanently.** There is no workspace-level velocity call
+   * to add here later; §1.4 refuses one, and the absence of the endpoint is the
+   * enforcement.
+   */
+  velocity: (
+    wsId: string, projectId: string,
+    params: { sprints?: number; measure?: SprintMeasure } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.sprints !== undefined) qs.set('sprints', String(params.sprints))
+    if (params.measure) qs.set('measure', params.measure)
+    const q = qs.toString()
+    return request<VelocityReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/velocity${q ? `?${q}` : ''}`)
+  },
+}
+
+// ── Report CSV export — HD-141 (R7) ──────────────────────────────────────────
+
+/**
+ * The `.csv` variants of the report endpoints (§4.4): **the plotted series**,
+ * one row per data point, with a comment header carrying project, window,
+ * measure, `computedAt` and `basedOnIssues`.
+ *
+ * That "series, not issue list" is the whole point and it is the documented
+ * disappointment everywhere else: users ask to export the chart and are handed a
+ * flat issue dump, which is a different artefact answering a different question.
+ * The UI therefore labels this one as the chart's own numbers and keeps the
+ * issue-list export as a separate, separately-labelled thing.
+ */
+export type ReportCsvKind =
+  | 'flow' | 'cycle-time' | 'aging' | 'sprint-burnup' | 'sprint-review' | 'velocity'
+
+/** The path a CSV link points at — same base, same params, `.csv` on the report name. */
+export function reportCsvPath(
+  wsId: string, projectId: string, kind: ReportCsvKind, params: Record<string, string> = {},
+): string {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v) qs.set(k, v)
+  const q = qs.toString()
+  return `/workspaces/${wsId}/projects/${projectId}/reports/${kind}.csv${q ? `?${q}` : ''}`
+}
+
+/**
+ * Download a report's series CSV.
+ *
+ * **This cannot be a plain `<a href>`, and that is not a style choice.** The API
+ * authenticates with a bearer token held in memory; an anchor the browser
+ * navigates sends no `Authorization` header, so the link would 401 — and a
+ * copied "download link" would be a URL that never works for the person it was
+ * sent to. So the bytes are fetched with the same auth (and the same silent
+ * refresh) as every other call and saved from a blob.
+ *
+ * The server's `Content-Disposition` filename wins when it sends one; otherwise
+ * the caller's name is used, so the file is never called `download`.
+ *
+ * Failures arrive as `ApiResponseError` with the server's own `detail` — a
+ * report CSV inherits every refusal of the report itself (400 on a too-wide
+ * window naming the cap, 404, 429 with `Retry-After`), and those sentences are
+ * the ones the page already knows how to render.
+ */
+export async function apiDownloadReportCsv(
+  wsId: string,
+  projectId: string,
+  kind: ReportCsvKind,
+  params: Record<string, string>,
+  fallbackFilename: string,
+): Promise<void> {
+  const res = await authFetch(reportCsvPath(wsId, projectId, kind, params))
+  if (!res.ok) {
+    let detail = ''
+    let body: unknown = null
+    try {
+      const text = await res.text()
+      body = text ? JSON.parse(text) : null
+      const b = body as Record<string, string | undefined> | null
+      detail = b?.detail ?? b?.message ?? b?.title ?? ''
+    } catch { /* a non-JSON error body is no reason to render nothing */ }
+    if (!detail) detail = `Request failed (${res.status})`
+    throw new ApiResponseError(res.status, detail, undefined, undefined, conflictOf(body, res))
+  }
+  const blob = await res.blob()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filenameFromDisposition(res.headers.get('Content-Disposition')) ?? fallbackFilename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * The filename out of a `Content-Disposition`, or null.
+ *
+ * Handles the RFC 5987 `filename*` form first — a project name with a non-ASCII
+ * character reaches this header — and falls back to the plain quoted form. Any
+ * path separator in the value is dropped: a filename is a name, and the one
+ * place a server-supplied string becomes a local path is the one place to say so.
+ */
+export function filenameFromDisposition(header: string | null): string | null {
+  if (!header) return null
+  const extended = header.match(/filename\*\s*=\s*[^']*'[^']*'([^;]+)/i)
+  const plain = header.match(/filename\s*=\s*"([^"]+)"/i) ?? header.match(/filename\s*=\s*([^;]+)/i)
+  const raw = extended ? safeDecode(extended[1]) : plain?.[1]
+  const name = raw?.trim().replace(/^["']|["']$/g, '').split(/[\\/]/).pop()
+  return name ? name : null
+}
+
+function safeDecode(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
 }

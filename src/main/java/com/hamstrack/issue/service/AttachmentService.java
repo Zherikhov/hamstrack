@@ -200,11 +200,43 @@ public class AttachmentService {
     /**
      * Called by IssueService.delete — DB rows go away via ON DELETE CASCADE, but the
      * blobs must be cleaned up explicitly (after commit, so a rollback keeps them).
+     *
+     * <p><strong>Caller contract: this method authorizes nothing.</strong> It takes a bare
+     * {@code Issue} and deletes every blob attached to it, so the argument must come from a
+     * resolved {@link com.hamstrack.common.security.WorkspaceAccessService} context (as
+     * {@code IssueService.delete}'s does) — handing it an unscoped
+     * {@code issueRepository.findById(idFromUrl)} result is irreversible cross-tenant blob
+     * deletion with no error at all.
+     *
+     * <p><strong>Scalar keys, never the entities</strong> (HD-137 R4). Loading the
+     * {@code IssueAttachment} rows here left them MANAGED in a persistence context whose
+     * next act is {@code issueRepository.delete(issue)}. At commit,
+     * {@code AbstractFlushingEventListener.checkForTransientReferences} runs
+     * {@code Cascade.cascade(CascadingActions.CHECK_ON_FLUSH, …)} over every MANAGED/SAVING
+     * entry, walking <em>all</em> of its to-one associations — not just uncascaded ones;
+     * cascade-persist children merely pass because the earlier {@code PERSIST_ON_FLUSH} pass
+     * already persisted them. Its predicate is {@code CascadingActions.isChildTransient},
+     * which for an entity that HAS a persistence-context entry returns
+     * {@code entry.getStatus().isDeletedOrGone() && !isCascadeDeleteEnabled} — no database
+     * snapshot is consulted, and the DELETE does not have to have been executed. (Only when
+     * there is no entry at all does it fall through to {@code ForeignKeys.isTransient}.) So
+     * the commit threw {@code TransientPropertyValueException} and rolled back:
+     * <strong>deleting any issue that had at least one attachment was a 500</strong>, and
+     * there was no test anywhere that deleted an issue with an attachment on it. Now covered
+     * by {@code AttachmentCrudTenancyTest.deletingAnIssueThatHasAnAttachmentSucceeds}.
+     *
+     * <p>The projection is the fix rather than a detach: nothing scalar can be flushed, so
+     * there is nothing for the commit to re-check, and no future caller can reintroduce the
+     * problem by forgetting a line. (A third lever exists here and only here: the
+     * {@code && !isCascadeDeleteEnabled} clause means an {@code @OnDelete(action =
+     * OnDeleteAction.CASCADE)} on {@code IssueAttachment.issue} would also suppress the
+     * throw, since this FK really is {@code ON DELETE CASCADE}. It is not available to
+     * {@code SprintScopeLedger} — see the note there.)
      */
     @Transactional
     public void removeStoredFilesForIssue(Issue issue) {
-        attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue)
-                .forEach(a -> deleteFromStorageAfterCommit(a.getStorageKey()));
+        attachmentRepository.findStorageKeysByIssue(issue)
+                .forEach(this::deleteFromStorageAfterCommit);
     }
 
     // Blob deletion must not precede the commit (a rollback can't restore the file),

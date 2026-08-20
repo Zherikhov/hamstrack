@@ -9,6 +9,8 @@ import com.hamstrack.issue.service.IssueService;
 import com.hamstrack.issue.service.ComponentService;
 import com.hamstrack.issue.service.LabelService;
 import com.hamstrack.issue.service.VersionService;
+import com.hamstrack.report.dto.InsightsDimension;
+import com.hamstrack.report.dto.InsightsMeasure;
 import com.hamstrack.search.dto.SearchRequest;
 import com.hamstrack.search.dto.SearchResultRow;
 import com.hamstrack.search.dto.SearchSchemaResponse;
@@ -23,6 +25,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -171,7 +174,7 @@ public class SearchService {
             }
         }
 
-        return new SearchSchemaResponse(fields, keywords(), values);
+        return new SearchSchemaResponse(fields, keywords(), values, insights(ctx));
     }
 
     @Transactional(readOnly = true)
@@ -286,6 +289,35 @@ public class SearchService {
             case "storyPoints" -> caps.estimation();
             default -> true;
         };
+    }
+
+    /**
+     * The Insights panel's vocabulary for this caller (HD-140 R6, reports-proposal §2.6),
+     * narrowed by the visible projects' delivery capabilities on <strong>exactly</strong> the
+     * terms {@link #suggested} applies to fields — and for the same reason.
+     *
+     * <p>{@code SPRINT} is offered when at least one visible project plans in sprints, and
+     * {@code POINTS} when at least one estimates. Everything else is always offered. This is
+     * autocomplete vocabulary and nothing else: {@code POST …/search/insights} resolves every
+     * dimension and every measure whatever is in this list, so a panel state saved beside a
+     * filter cannot break because a curator flipped a project toggle, and no status code
+     * anywhere depends on a capability (Rule A, delivery-paths §5.1).
+     *
+     * <p>Built by filtering the enums rather than by listing strings, so a dimension added to
+     * {@link InsightsDimension} is offered here without a second edit — the failure mode a
+     * hand-written list has is that it silently stops matching what the endpoint accepts.
+     */
+    private SearchSchemaResponse.Insights insights(ResolutionContext ctx) {
+        var caps = ctx.capabilities();
+        var measures = Arrays.stream(InsightsMeasure.values())
+                .filter(m -> m != InsightsMeasure.POINTS || caps.estimation())
+                .map(Enum::name)
+                .toList();
+        var dimensions = Arrays.stream(InsightsDimension.values())
+                .filter(d -> d != InsightsDimension.SPRINT || caps.iterations())
+                .map(Enum::name)
+                .toList();
+        return new SearchSchemaResponse.Insights(measures, dimensions);
     }
 
     private List<String> operatorTokens(FieldDescriptor f) {

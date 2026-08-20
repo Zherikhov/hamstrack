@@ -173,3 +173,37 @@ export function projectIssuesKeyPrefix(
 ) {
   return [ISSUES_KEY_ROOT, wsId, projectId] as const
 }
+
+// ── Reports (HD-5 / HD-28) ───────────────────────────────────────────────────
+
+/**
+ * One report's cache entry: `['reports', kind, projectId, params]`.
+ *
+ * Deliberately NOT under `ISSUES_KEY_ROOT`: a report is a server-side aggregate
+ * over a window, so an optimistic issue patch must not invalidate it (the number
+ * it would refetch is the same number, one round trip later), and a report
+ * refetch must never look like an issue-list refetch to the board.
+ *
+ * `wsId` is absent on purpose — a project id is globally unique, and the report
+ * of a project is the report of a project whichever workspace path reached it.
+ *
+ * The params object is the LAST segment and is compared structurally by
+ * TanStack Query, so `{ interval: 'WEEK' }` and `{ interval: 'WEEK' }` share one
+ * entry. Undefined-valued keys are dropped first, so "the default window" and
+ * "the default window, explicitly" cannot split into two entries.
+ */
+export function reportKey(
+  kind: string,
+  projectId: string | undefined,
+  params: Record<string, string | undefined> = {},
+) {
+  const clean: Record<string, string> = {}
+  for (const k of Object.keys(params).sort()) {
+    const v = params[k]
+    if (v) clean[k] = v
+  }
+  return ['reports', kind, projectId, clean] as const
+}
+
+/** `staleTime` for every report query — matches the endpoints' `Cache-Control: max-age=60`. */
+export const REPORT_STALE_TIME = 60 * 1000

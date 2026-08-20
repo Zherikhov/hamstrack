@@ -48,17 +48,36 @@ public class LocalFileStorage implements FileStorage {
 
     @Override
     public void delete(String key) {
+        var target = resolve(key);
+        // Second, independent guard: only ever unlink a regular file. Even if a key
+        // somehow resolved to a directory, this refuses rather than attempting to
+        // remove it — defence in depth is the entire point of this class's checks,
+        // because a wrongly-deleted blob has no recovery.
+        if (!Files.isRegularFile(target)) {
+            return;
+        }
         try {
-            Files.deleteIfExists(resolve(key));
+            Files.deleteIfExists(target);
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to delete " + key, e);
         }
     }
 
-    // Keys are server-generated, but keep the escape check as defense in depth
+    /**
+     * Keys are server-generated, but this is the last line of defence for the one bug
+     * class on this path with no recovery — a key set too wide destroys files.
+     *
+     * <p>The resolved path must be <strong>strictly below</strong> the base dir, not
+     * merely not-above it: {@code ""}, {@code "."} and {@code "ws/.."} all normalize to
+     * {@code baseDir} itself, which passes a bare {@code startsWith} check and would have
+     * pointed {@link #delete} at the attachment root.
+     */
     private Path resolve(String key) {
+        if (key == null || key.isBlank()) {
+            throw new IllegalArgumentException("Storage key must not be blank");
+        }
         var path = baseDir.resolve(key).normalize();
-        if (!path.startsWith(baseDir)) {
+        if (!path.startsWith(baseDir) || path.equals(baseDir)) {
             throw new IllegalArgumentException("Storage key escapes base dir: " + key);
         }
         return path;

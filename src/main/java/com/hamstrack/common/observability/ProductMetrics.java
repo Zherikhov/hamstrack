@@ -53,7 +53,16 @@ public class ProductMetrics {
         IP_WINDOW("ip_window"),
         LOGIN_BACKOFF("login_backoff"),
         // Per-project cooldown on whole-project rank rebalances (IssueRankService).
-        RANK_REBALANCE("rank_rebalance");
+        RANK_REBALANCE("rank_rebalance"),
+        // Per-principal budget across the whole reports surface (ReportRateLimiter). The
+        // one alert worth building on it: a report is O(project history), so a sustained
+        // rate here is either an abusive client or a UI that lost its query cache.
+        REPORT_REQUESTS("report_requests"),
+        // Per-principal budget across the whole HQL search surface (SearchRateLimiter). Separate
+        // from REPORT_REQUESTS because the two are sized for different behaviour — a sustained
+        // rate here is a client that lost its debounce, or somebody replaying a 50-predicate
+        // query, and telling those apart from report load matters for the alert.
+        SEARCH_REQUESTS("search_requests");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }

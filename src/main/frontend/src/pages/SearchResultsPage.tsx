@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, Bookmark, ChevronDown, Save, SlidersHorizontal, X } from 'lucide-react'
+import {
+  ArrowDown, ArrowUp, BarChart3, Bookmark, ChevronDown, Save, SlidersHorizontal, X,
+} from 'lucide-react'
 import {
   apiGetProjectConfig, apiSearch, apiSearchSchema,
   ApiResponseError, savedFilters, type HqlError,
@@ -13,7 +15,23 @@ import HqlInput from '../components/HqlInput'
 import SavedFiltersPanel from '../components/SavedFiltersPanel'
 import SaveFilterDialog from '../components/SaveFilterDialog'
 import IssueSidePanel from './IssueSidePanel'
+import { readInsightsState, writeInsightsParams, type InsightsState } from './search/insights'
 import type { ProjectConfig, SearchResultRow } from '../types'
+
+/**
+ * The Insights panel (HD-140, R6 — reports-proposal §2.6), **lazily imported and
+ * mounted only while it is open**.
+ *
+ * This page is in the MAIN bundle, and the panel's chart is Recharts. The rule
+ * from DESIGN.md — the chart library never enters the main bundle — therefore
+ * has to be honoured on this route by the `lazy()` boundary here (and by the
+ * second one inside the panel, around the chart itself), not by the reports
+ * route's boundary, which this page does not go through. An eager
+ * `import InsightsPanel from …` at the top of this file would ship the whole
+ * chart stack to every user on every page load, including users who never open
+ * search.
+ */
+const InsightsPanel = lazy(() => import('./search/InsightsPanel'))
 
 // The result columns the chooser offers. `sort` is the HQL field the header
 // rewrites ORDER BY with (null = not sortable). `key` doubles as the column id.
@@ -138,6 +156,39 @@ export default function SearchResultsPage() {
     setEditingFilter({ id: f.id, name: f.name })
   }
 
+  // ── The Insights panel (HD-140 §2.6) ───────────────────────────────────────
+  // Its state is in the URL beside `q`, which is the whole design: the dataset
+  // IS the query, so a link carries the panel and its data together and a saved
+  // filter becomes a saved report at zero cost.
+  const insights = readInsightsState(searchParams)
+
+  function setInsights(patch: Partial<InsightsState>) {
+    setSearchParams(writeInsightsParams(searchParams, { ...insights, ...patch }), { replace: true })
+  }
+
+  // "Insights" on a saved filter — the sentence §2.6 is built around: *a saved
+  // filter becomes a saved report at zero cost*. One `setSearchParams`, not two:
+  // running the filter and opening the panel in separate calls would have the
+  // second read a stale `searchParams` and drop the `q` the first just set.
+  function openInsightsFor(hql: string) {
+    setEditingFilter(null)
+    setDraft(hql)
+    setHqlError(null)
+    setErrorMsg(null)
+    const params = writeInsightsParams(searchParams, { ...insights, open: true })
+    if (hql) params.set('q', hql); else params.delete('q')
+    setSearchParams(params)
+  }
+
+  // A bar was clicked. The narrowed query is committed exactly as a typed one is
+  // — same URL, same history entry, same re-run — so the panel narrows *the page*
+  // rather than only itself, and Back undoes the drill-down.
+  function narrowTo(nextQuery: string) {
+    setEditingFilter(null)
+    setDraft(nextQuery)
+    runQuery(nextQuery)
+  }
+
   const order = useMemo(() => parseOrderBy(committed), [committed])
 
   function onSortHeader(col: ColumnDef) {
@@ -205,9 +256,22 @@ export default function SearchResultsPage() {
                 onClose={() => setFiltersOpen(false)}
                 onLoad={(hql) => { loadFilter(hql); setFiltersOpen(false) }}
                 onEditQuery={(f) => { editFilterQuery(f); setFiltersOpen(false) }}
+                onInsights={(hql) => { openInsightsFor(hql); setFiltersOpen(false) }}
               />
             )}
           </div>
+          {/* Always offered, whether or not a query has run: a feature nobody can
+              find is a feature nobody has. With no query the panel opens and says
+              what it needs, which is how you learn it exists. */}
+          <Button
+            variant={insights.open ? 'primary' : 'secondary'}
+            size="md"
+            aria-pressed={insights.open}
+            onClick={() => setInsights({ open: !insights.open })}
+          >
+            <BarChart3 size={14} />
+            Insights
+          </Button>
           <div style={{ position: 'relative' }}>
             <Button variant="secondary" size="md" onClick={() => setColChooserOpen(o => !o)}>
               <SlidersHorizontal size={14} />
@@ -240,6 +304,30 @@ export default function SearchResultsPage() {
             <X size={14} style={{ color: 'var(--color-error)', marginTop: 2, flexShrink: 0 }} />
             <span className="text-xs" style={{ color: 'var(--color-error)' }}>{errorMsg}</span>
           </div>
+        )}
+
+        {/* Insights (HD-140 §2.6) — above the results it describes, and mounted
+            only while open so the chart chunk is never fetched otherwise. */}
+        {insights.open && wsId && (
+          <Suspense fallback={
+            <div
+              className="px-5 py-3 mono text-sm flex-shrink-0 border-b"
+              style={{ color: 'var(--color-text-muted)', background: 'white', borderColor: 'var(--color-border)' }}
+            >
+              loading insights…
+            </div>
+          }>
+            <InsightsPanel
+              wsId={wsId}
+              query={committed}
+              hasQuery={hasQueryParam}
+              schema={schema}
+              state={insights}
+              onState={setInsights}
+              onNarrow={narrowTo}
+              onClose={() => setInsights({ open: false })}
+            />
+          </Suspense>
         )}
 
         {/* Results */}

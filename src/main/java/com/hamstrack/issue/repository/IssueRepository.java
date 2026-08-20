@@ -595,66 +595,99 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
     long countBySprint(Sprint sprint);
 
     /**
-     * The {@code (id, number)} pairs (not the entities) of a sprint's unfinished issues
-     * — what a completion would move, the {@code issue_history} write list and the SSE
-     * fan-out list afterwards.
+     * The {@code (id, number, storyPoints)} rows of every issue currently in a sprint,
+     * in rank order — the membership a {@code start} COMMITS (HD-137).
      *
-     * <p>Deliberately a scalar projection: materializing the entities here and then
-     * running the bulk UPDATE below would leave those managed copies stale, and flushing
-     * them later would write the pre-move {@code sprint_id} back (the documented
-     * "bulk JPQL UPDATE desyncs already-loaded entities" trap). Nothing enters the L1
-     * cache, so the bulk update is safe — the history rows are written against
-     * {@code getReferenceById} proxies, which never load the row either.
+     * <p>The only remaining pure-read write-list: the two bulk doors now take theirs from
+     * their own {@code UPDATE … RETURNING} (see below), because a separate SELECT is a
+     * different snapshot. A start needs no such care — it runs after {@code markActive}
+     * has already arbitrated, and an issue added a microsecond later is an in-sprint
+     * scope change with its own ledger row, not a missing part of the commitment.
+     *
+     * <p>A scalar projection, deliberately: nothing must put a {@code Sprint} or an
+     * {@code Issue} back into a persistence context that {@code markActive}'s
+     * {@code clearAutomatically} has just cleared.
      */
-    @Query("SELECT i.id, i.number FROM Issue i WHERE i.sprint = :sprint AND i.status.category <> :done "
+    @Query("SELECT i.id, i.number, i.storyPoints FROM Issue i WHERE i.sprint = :sprint "
             + "ORDER BY i.position ASC")
-    List<Object[]> findUnfinishedRefsBySprint(@Param("sprint") Sprint sprint,
-                                              @Param("done") StatusCategory done);
-
-    /**
-     * The {@code (id, number)} pairs of EVERY issue currently in a sprint — the
-     * force-delete path's history/event list, read before {@link #clearSprint} detaches
-     * them. A scalar projection for the same reason as
-     * {@link #findUnfinishedRefsBySprint}: nothing must enter the L1 cache ahead of the
-     * bulk UPDATE that follows.
-     */
-    @Query("SELECT i.id, i.number FROM Issue i WHERE i.sprint = :sprint ORDER BY i.position ASC")
     List<Object[]> findRefsBySprint(@Param("sprint") Sprint sprint);
 
     /**
-     * Move every UNFINISHED issue of a completing sprint to {@code target}
-     * ({@code null} = the backlog). DONE issues deliberately keep their
-     * {@code sprint_id} — that is the sprint's record of what it delivered — and the
+     * Move every UNFINISHED issue of a completing sprint to {@code targetId}
+     * ({@code null} = the backlog) <strong>and return the rows it actually moved</strong>
+     * — {@code (id, number, storyPoints)}, in rank order. DONE issues deliberately keep
+     * their {@code sprint_id} (that is the sprint's record of what it delivered) and the
      * rank is NOT rewritten, so carried-over items keep their relative order (§4.5).
      *
-     * <p>Plain {@code @Modifying}: the caller has only read scalar {@code (id, number)}
-     * pairs (see {@link #findUnfinishedRefsBySprint}), so there are no managed {@code Issue}
-     * copies to desync and nothing to clear. Adding {@code clearAutomatically} here
-     * would risk discarding the transaction's other pending writes for no benefit.
+     * <p><strong>The write-list comes out of the UPDATE, not out of a SELECT before
+     * it</strong> (HD-137 review R2-5). The two used to be separate statements, and under
+     * READ COMMITTED they are two different snapshots: a concurrent
+     * {@code POST /sprints/{id}/issues} landing between them either hides a real
+     * membership change from {@code issue_history} and the scope ledger — an
+     * {@code ADDED} with no matching {@code REMOVED}, so the issue stays in the completed
+     * sprint's scope forever while its {@code sprint_id} points somewhere else — or
+     * invents a {@code REMOVED} for an issue that was never moved and double-decrements
+     * the scope line. Both records would agree with each other and both be wrong, which
+     * is the failure mode with no symptom. {@code UPDATE … RETURNING} is the same
+     * technique {@link com.hamstrack.project.repository.ProjectRepository#incrementAndGetIssueSeq}
+     * uses for the same class of reason.
+     *
+     * <p>Wrapped in a data-modifying CTE purely so the rows can come back {@code ORDER BY
+     * position}: bare {@code RETURNING} has no defined order, and the caller's SSE
+     * fan-out and history rows were ordered by rank before this change.
+     *
+     * <p>Native, and therefore NOT {@code @Modifying}: Spring Data's {@code @Modifying}
+     * only accepts a row count, and the rows are the point. Hibernate auto-flushes before
+     * a native query (it cannot narrow the query spaces, so it flushes everything), which
+     * is the {@code flushAutomatically} half of what the old JPQL statement carried. The
+     * {@code clearAutomatically} half is deliberately not replaced: it exists to evict
+     * stale managed {@code Issue} copies, and both callers read nothing but scalars
+     * precisely so that no such copy exists.
+     *
+     * <p>{@code CAST(:targetId AS uuid)} is required, not decorative: a NULL bind on an
+     * untyped native parameter reaches PostgreSQL as {@code bytea} and the statement
+     * fails with "column sprint_id is of type uuid".
      */
-    @Modifying
-    @Query("UPDATE Issue i SET i.sprint = :target WHERE i.sprint = :sprint "
-            + "AND i.status.category <> :done")
-    int moveUnfinishedOutOfSprint(@Param("sprint") Sprint sprint,
-                                  @Param("target") Sprint target,
-                                  @Param("done") StatusCategory done);
+    @Query(value = """
+            WITH moved AS (
+                UPDATE issues
+                   SET sprint_id = CAST(:targetId AS uuid)
+                 WHERE sprint_id = CAST(:sprintId AS uuid)
+                   AND EXISTS (SELECT 1 FROM statuses s
+                                WHERE s.id = issues.status_id AND s.category <> :done)
+             RETURNING id, number, story_points, position
+            )
+            SELECT id, number, story_points FROM moved ORDER BY position ASC
+            """, nativeQuery = true)
+    List<Object[]> moveUnfinishedOutOfSprint(@Param("sprintId") UUID sprintId,
+                                             @Param("targetId") UUID targetId,
+                                             @Param("done") String done);
 
     /**
-     * Detach every issue from a sprint that is about to be deleted (§4.3 trap). The FK
-     * is {@code ON DELETE SET NULL (sprint_id)}, which clears the column behind JPA's
-     * back — a managed, now-stale {@code Issue} flushed later in the same transaction
-     * would write the old id back (the {@code issue_seq}-clobber class of bug), so the
-     * detach is done explicitly and first.
+     * Detach every issue from a sprint that is about to be deleted, and return the rows
+     * it detached — {@code (id, number, storyPoints)}, in rank order (§4.3 trap).
      *
-     * <p>{@code clearAutomatically} evicts any {@code Issue} this transaction may have
-     * loaded so a later read sees the null; {@code flushAutomatically} writes pending
-     * changes first so this bulk UPDATE can't discard them. Safe in
-     * {@code SprintService.delete}, which has no other pending inserts — do NOT reuse
-     * this shape in a method that does.
+     * <p>The FK is {@code ON DELETE SET NULL (sprint_id)}, which clears the column behind
+     * JPA's back — a managed, now-stale {@code Issue} flushed later in the same
+     * transaction would write the old id back (the {@code issue_seq}-clobber class of
+     * bug), so the detach is done explicitly and first.
+     *
+     * <p>{@code RETURNING} for the same reason as
+     * {@link #moveUnfinishedOutOfSprint(UUID, UUID, String)}: the audit rows and the scope
+     * ledger must describe the issues this statement moved, not the ones a SELECT saw a
+     * moment earlier. See there for the CTE, the cast and why this is not
+     * {@code @Modifying}.
      */
-    @Modifying(clearAutomatically = true, flushAutomatically = true)
-    @Query("UPDATE Issue i SET i.sprint = null WHERE i.sprint = :sprint")
-    int clearSprint(@Param("sprint") Sprint sprint);
+    @Query(value = """
+            WITH detached AS (
+                UPDATE issues
+                   SET sprint_id = NULL
+                 WHERE sprint_id = CAST(:sprintId AS uuid)
+             RETURNING id, number, story_points, position
+            )
+            SELECT id, number, story_points FROM detached ORDER BY position ASC
+            """, nativeQuery = true)
+    List<Object[]> clearSprint(@Param("sprintId") UUID sprintId);
 
     /**
      * Opt this transaction OUT of the {@code set_updated_at()} trigger (V11 §3.3.4)

@@ -124,3 +124,19 @@ describe('NavRail — Releases follows the declared capability (HD-102)', () => 
     expect(await screen.findByRole('link', { name: 'Releases' })).toBeInTheDocument()
   })
 })
+
+describe('NavRail — Reports is always visible (HD-28, Rule C)', () => {
+  it('links to the reports area regardless of how the team delivers', async () => {
+    // Kanban, no releases, no estimation — the leanest project there is. The
+    // Reports item is NOT capability-gated and NOT permission-gated (reads are
+    // not gated in this product); the sprint-dependent reports are the ones that
+    // are listed-but-disabled, and that decision lives inside the area.
+    project = withDelivery({ board: 'KANBAN', releases: false, estimation: false, preset: 'CUSTOM' })
+    renderRail()
+
+    expect(await screen.findByRole('link', { name: 'Reports' }))
+      .toHaveAttribute('href', `/w/${WS_ID}/p/${PROJECT_ID}/reports`)
+    // …and it is a real link now, not the old "SOON" stub.
+    expect(screen.queryByText('SOON')).toBeNull()
+  })
+})

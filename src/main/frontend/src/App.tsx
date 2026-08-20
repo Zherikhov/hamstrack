@@ -32,6 +32,10 @@ import CookiesPage from './pages/legal/CookiesPage'
 const DocsPage = lazy(() => import('./pages/docs/DocsPage'))
 // Lazy: the admin console is only ever loaded by system admins
 const AdminArea = lazy(() => import('./pages/admin/AdminArea'))
+// Lazy: the reports area carries the chart library (Recharts) — importing it
+// here would put ~100KB gz of charting into the main bundle for every page load
+// (same reason the Swagger UI chunk is split).
+const ReportsArea = lazy(() => import('./pages/reports/ReportsArea'))
 
 function LazyFallback() {
   return (
@@ -162,6 +166,12 @@ export default function App() {
                 <Route path="p/:projectId" element={<ParamKeyed><BoardPage /></ParamKeyed>} />
                 <Route path="p/:projectId/backlog" element={<ParamKeyed><BacklogPage /></ParamKeyed>} />
                 <Route path="p/:projectId/releases" element={<ParamKeyed><ReleasesPage /></ParamKeyed>} />
+                {/* Reports (HD-5 / HD-28) — a splat area with its own left list;
+                    lazily loaded so the chart chunk stays out of the main bundle.
+                    ParamKeyed like every project page, so a report window/filter
+                    can never leak across projects. Not permission-gated: reads
+                    are not gated in this product (reports-proposal §4.2). */}
+                <Route path="p/:projectId/reports/*" element={<ParamKeyed><Suspense fallback={<LazyFallback />}><ReportsArea /></Suspense></ParamKeyed>} />
                 <Route path="p/:projectId/issues/:number" element={<ParamKeyed><IssueFullPage /></ParamKeyed>} />
                 <Route path="p/:projectId/settings/*" element={<ParamKeyed><ProjectSettingsArea /></ParamKeyed>} />
               </Route>

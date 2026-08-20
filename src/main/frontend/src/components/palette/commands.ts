@@ -1,5 +1,5 @@
 import {
-  Home, CheckSquare, Globe, Columns3, ListTodo, LayoutGrid, Settings, Shield,
+  Home, CheckSquare, Globe, Columns3, ListTodo, LayoutGrid, Settings, Shield, BarChart3,
   Plus, Search, Keyboard, Folder, Filter, Building2, User as UserIcon,
   type LucideIcon,
 } from 'lucide-react'
@@ -256,6 +256,18 @@ export function buildStaticCommands(input: CommandInput): Command[] {
       keywords: ['backlog', 'list', 'queue'],
       icon: ListTodo, shortcut: ['g', 'l'],
       run: ctx => ctx.navigate(`/w/${cur.wsId}/p/${cur.projectId}/backlog`),
+    })
+    // Reports (HD-5 / HD-28). Unconditional, like the rail item: reports are not
+    // permission-gated (reports-proposal §4.2) and not capability-gated — the
+    // sprint-dependent ones are listed-but-disabled INSIDE the area, which is
+    // where their enabling affordance belongs.
+    out.push({
+      id: 'nav.reports',
+      kind: 'nav', section: 'nav',
+      label: `Go to Reports${suffix}`,
+      keywords: ['reports', 'flow', 'created vs resolved', 'chart', 'analytics', 'metrics'],
+      icon: BarChart3,
+      run: ctx => ctx.navigate(`/w/${cur.wsId}/p/${cur.projectId}/reports`),
     })
   }
 

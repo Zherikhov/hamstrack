@@ -46,9 +46,14 @@ import java.util.UUID;
  *       within the project, COMPLETED rows included), 422 at the open-sprint cap;</li>
  *   <li>{@code GET    …/sprints/{id}} — any project member;</li>
  *   <li>{@code PATCH  …/sprints/{id}} — curator (name/goal/dates only; the lifecycle
- *       moves through start/complete and there is NO re-open);</li>
+ *       moves through start/complete and there is NO re-open). 422 when it would move
+ *       {@code startAt} on a sprint that has left FUTURE: the commitment rows are dated
+ *       the original start, so re-dating a running or completed sprint would silently
+ *       re-draw its burn-up;</li>
  *   <li>{@code POST   …/sprints/{id}/start} — curator; 409 when not FUTURE or when
- *       another sprint is already active;</li>
+ *       another sprint is already active, 422 on a {@code startAt} in the future (five
+ *       minutes of client clock skew tolerated): starting is the act that turns a plan
+ *       into history, and the PATCH freeze above would make a forward date permanent;</li>
  *   <li>{@code GET    …/sprints/{id}/completion-preview} — any project member;</li>
  *   <li>{@code POST   …/sprints/{id}/complete} — curator; 409 when not ACTIVE;</li>
  *   <li>{@code POST   …/sprints/{id}/issues} — the ISSUE-EDIT tier (any member who may
@@ -120,6 +125,11 @@ public class SprintController {
      * run it for {@code app.agile.default-sprint-length-days}". Idempotent-looking
      * success is deliberately NOT offered: a second call is a <strong>409</strong>, and
      * so is starting one while another sprint is already active.
+     *
+     * <p>A {@code startAt} in the FUTURE is a <strong>422</strong> (backdating stays
+     * legal) — see {@code SprintService.requireStartHasArrived}. The caller's remedy is
+     * to leave the sprint planned: a FUTURE sprint's dates stay editable, and this call
+     * stamps the start itself.
      */
     @PostMapping("/{sprintId}/start")
     public SprintResponse start(@AuthenticationPrincipal User actor,

@@ -25,6 +25,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
+import java.time.DateTimeException;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -207,6 +208,47 @@ public class GlobalExceptionHandler {
             problem.setProperty("position", ex.getPosition());
         }
         return ResponseEntity.status(HttpStatus.UNPROCESSABLE_CONTENT).body(problem);
+    }
+
+    /**
+     * <strong>A date the caller supplied that no arithmetic can survive is a 400, not a
+     * crash</strong> (HD-28 R1 round 2, item 3).
+     *
+     * <p>{@code @DateTimeFormat(iso = DATE)} parses with {@code ISO_DATE}, whose year field is
+     * {@code EXCEEDS_PAD} — so {@code ?to=+999999999-12-31} <em>binds</em>, as an ordinary
+     * {@link java.time.LocalDate}. It is the first {@code plusDays(1)} downstream that throws
+     * {@link DateTimeException}, and nothing declared it: the request surfaced as a 500 on an
+     * endpoint whose contract promises 400 for a bad date. The sibling case needs no overflow
+     * at all — a year inside Java's range but outside PostgreSQL's {@code timestamptz} fails
+     * in the driver instead. Both are the caller's input, so both are 4xx.
+     *
+     * <p>This is a <strong>backstop, not the message</strong>. A call site that takes dates
+     * should refuse an out-of-band one itself, naming the band it accepts
+     * ({@code FlowReportService.validateDateBand} is the pattern every later report slice
+     * inherits) — a caller cannot act on "invalid date" with no numbers in it. This handler
+     * exists so that the one that gets forgotten degrades to a clean 400 rather than to a
+     * stack trace.
+     *
+     * <p>It logs, at WARN, because that degradation is the interesting case: after the band
+     * checks, no known client path can reach here, so an entry means either a new endpoint
+     * without a band check or a genuine server-side date bug — and turning the 500 into a
+     * clean 400 removes the only signal an operator had. The client's message stays generic;
+     * the URI and the exception go to the log.
+     *
+     * <p>Not on Boot's list, per the class note: {@code ResponseEntityExceptionHandler}
+     * declares nothing from {@code java.time}, so the only behaviour that changes is 500 →
+     * 400. It is deliberately NOT extended to cover parse failures — those arrive as
+     * {@code MethodArgumentTypeMismatchException} and Boot already answers them 400.
+     */
+    @ExceptionHandler(DateTimeException.class)
+    public ResponseEntity<ProblemDetail> handleDateTime(DateTimeException ex,
+                                                        HttpServletRequest request) {
+        log.warn("Unhandled date arithmetic on {} {}: {} — answering 400. A call site that "
+                 + "takes dates should refuse an out-of-band one itself, naming the band.",
+                request.getMethod(), request.getRequestURI(), ex.toString(), ex);
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                "That date is outside the range this API can work with");
+        return ResponseEntity.badRequest().body(problem);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
