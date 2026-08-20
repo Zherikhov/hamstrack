@@ -162,4 +162,70 @@ class ReportRowCapTest extends SprintReportTestBase {
         assertThat(review.get("meta").get("basedOnIssues").asLong()).isEqualTo(3);
         assertThat(review.get("meta").get("truncated").asBoolean()).isTrue();
     }
+
+    /**
+     * <strong>A capped velocity report drops the sprints it could not read, and stops
+     * forecasting.</strong> The R5 half of the contract above, and the one where getting it wrong
+     * is invisible.
+     *
+     * <p>The sweep is {@code ORDER BY e.sprint_id … LIMIT cap + 1} over up to twelve sprints, and
+     * those ids are <strong>UUID v7 — time-ordered</strong>. So a cap that bites does not shave
+     * the tail off one sprint's ledger: it removes the most recently created sampled sprints
+     * <em>entirely</em>. An absent group is indistinguishable from a sprint nobody put anything
+     * in, whose honest reading is four zeros — so as first written, this fixture produced FOUR
+     * bars, three of them empty, and those three zeros went into {@code percentile_cont} as real
+     * samples and pulled p50 to 0. A forecast is exactly the number a reader cannot check, which
+     * is why it is the worst possible place to put a silent artefact of a row cap.
+     *
+     * <p>So: every sampled sprint with no shipped rows is dropped once the cap has bitten, and the
+     * band is suppressed — the surviving bars are complete and are still facts, but the sample is
+     * no longer the one the caller asked for. {@code meta.truncated} says the cap bit and
+     * {@code meta.basedOnIssues} still counts every issue the sampled ledgers hold, above the cap,
+     * so "showing 1 of 4 sprints" is expressible rather than merely true.
+     *
+     * <p>The fixture is built so that exactly one sprint fits: the oldest has two ledger rows
+     * (both its issues finished, so the completion moves nothing out) against a cap of two, and
+     * the three after it have three each.
+     */
+    @Test
+    void aCappedVelocityReportDropsTheSprintsItCouldNotReadAndSuppressesTheBand() throws Exception {
+        var ctx = newProject();
+        completedSprint(ctx, "S0", "2025-01-01T00:00:00Z", "2025-01-10T10:00:00Z", 2, 2, null);
+        for (int i = 1; i <= 3; i++) {
+            completedSprint(ctx, "S" + i, "2025-0" + (i + 1) + "-01T00:00:00Z",
+                    "2025-0" + (i + 1) + "-10T10:00:00Z", 2, 1, null);
+        }
+
+        var report = velocity(ctx, null);
+
+        assertThat(report.get("meta").get("truncated").asBoolean())
+                .as("eleven ledger rows against a cap of two")
+                .isTrue();
+        assertThat(report.get("meta").get("cap").asInt()).isEqualTo(2);
+        assertThat(report.get("meta").get("basedOnIssues").asLong())
+                .as("counted in the database, above the cap — eight distinct issues across the "
+                    + "four sampled sprints, which is what makes 'showing one of four' sayable")
+                .isEqualTo(8);
+
+        assertThat(report.get("sprints"))
+                .as("three of the four sprints were never read, and a sprint that was not read is "
+                    + "not a sprint that did nothing")
+                .hasSize(1);
+        for (var bar : report.get("sprints")) {
+            assertThat(bar.get("committed").asInt())
+                    .as("a bar of four zeros in a truncated report is the cap being reported as "
+                        + "an empty sprint")
+                    .isPositive();
+        }
+
+        var forecast = report.get("forecast");
+        assertThat(forecast.get("p50").isNull() && forecast.get("p85").isNull())
+                .as("a band computed over whatever fitted under the row cap is a number the "
+                    + "report cannot stand behind — it is suppressed, exactly as it is below three "
+                    + "completed sprints")
+                .isTrue();
+        assertThat(forecast.get("sampleSize").asInt())
+                .as("suppressed, but still stating what there was")
+                .isEqualTo(1);
+    }
 }

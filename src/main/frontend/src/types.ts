@@ -1507,3 +1507,107 @@ export interface SprintReviewReport {
   totals: SprintReviewTotals;
   meta: ReportMeta;
 }
+
+/**
+ * One completed sprint of the velocity report (R5, §2.5) — **a sprint, never a
+ * person.**
+ *
+ * There is deliberately no assignee, no member list and no per-person split
+ * anywhere in this shape, and none may be added: §1.4 is an evidence-backed
+ * refusal, not a preference. *"Velocity was never intended to be used to compare
+ * two teams"*; when it escapes the team, *"leaders misinterpret higher story
+ * point averages to mean one team is more productive"*, which *"harms their
+ * estimating process, creates inflated estimates, and demoralizes the team"*. A
+ * per-person breakdown is the same failure one level down, and a tooltip is not
+ * a smaller version of it.
+ *
+ * All four figures are in the report's `measure`: issue counts under `COUNT`,
+ * story points under `POINTS`.
+ */
+export interface VelocitySprint {
+  sprintId: string;
+  /** The sprint's name as it stands today — the bars' only label. */
+  name: string;
+  /** When it started — the instant `committed` is measured at. */
+  startAt: string;
+  /**
+   * When it was completed. **Never null** — only COMPLETED sprints are sampled —
+   * and it is what orders the bars, so chronology is a fact in the payload
+   * rather than something a client infers from sprint names.
+   */
+  completedAt: string;
+  /** What it held when it started. Marked as a level on the bar, never as a target. */
+  committed: number;
+  /** What was closed in it — the bar itself, and the only input to the forecast. */
+  completed: number;
+  addedAfterStart: number;
+  carriedOver: number;
+  /**
+   * Issues the sprint held at its end that carried **no estimate** — reported
+   * under BOTH measures, and an issue count under both (never a point sum,
+   * which for unestimated work would be zero by definition).
+   *
+   * It is the same disclosure the burn-up makes and it matters more here.
+   * Under `POINTS` an unestimated issue weighs zero in its bar — documented
+   * failure mode #4 (§1.2, §6) — **and the band is computed from those bars**,
+   * so `p50`/`p85` are biased low by exactly the work nobody sized. A forecast
+   * quietly reading low, in the report whose only purpose is the forecast, is
+   * the failure this field exists to prevent.
+   *
+   * Under `COUNT` every issue is in the bars whether it was sized or not, so
+   * the number distorts nothing — it is shown anyway, because it is what a
+   * points view of the same sprints would understate, and a reader flipping the
+   * measure must not have to discover that on the way past.
+   */
+  unestimatedCount: number;
+}
+
+/**
+ * The band — the thing this report exists for (§2.5).
+ *
+ * It is a **forecast input, not a scoreboard**: a p50 to plan with and a p85 to
+ * treat as a stretch, always printed with the sample size behind them. The
+ * sample size is not decoration — the epic refuses forecasting everywhere it
+ * cannot state one (§2.3 rule 2), and this is the one report that can.
+ *
+ * **Suppression is a null percentile, not a missing object** (§6): below three
+ * completed sprints the server sends this record with `p50`/`p85` null and
+ * `sampleSize` still stating what there was, so a client reads
+ * `forecast.p50 === null` rather than testing the parent for existence.
+ *
+ * The client re-checks the threshold anyway rather than trusting the shape,
+ * because a band drawn from two sprints is the failure mode this report exists
+ * to avoid, not a rounding error.
+ */
+export interface VelocityForecast {
+  /** The median completed — *plan for about this*. Null when suppressed. */
+  p50: number | null;
+  /** The 85th percentile — *a stretch, never a target*. Null when suppressed. */
+  p85: number | null;
+  /** Completed sprints behind the percentiles. Printed even when suppressed. */
+  sampleSize: number;
+}
+
+/**
+ * `GET /reports/velocity?sprints=6&measure=COUNT|POINTS` (§2.5, §4.3).
+ *
+ * **Project-scoped, and there is no aggregate above it.** No workspace endpoint,
+ * no multi-project variant, no comparison affordance in the UI — comparing two
+ * teams has to be done by hand, and that friction is the design (§1.4).
+ *
+ * `sprints` carries the last N COMPLETED sprints in **chronological order,
+ * oldest first**, so the bars read left to right in time without a client-side
+ * sort (N default 6, max 12 — `400` outside 1..12, with the bound named in the
+ * detail, never a silent clamp). A project with no completed sprint answers 200
+ * with an empty list, not a 404.
+ *
+ * Like every sprint report it is **not** gated by `board`: a Kanban project's
+ * request is answered exactly as a Scrum project's is (delivery-paths Rule A).
+ */
+export interface VelocityReport {
+  measure: SprintMeasure;
+  sprints: VelocitySprint[];
+  /** Always present; its percentiles are null when the band is suppressed. */
+  forecast: VelocityForecast;
+  meta: ReportMeta;
+}

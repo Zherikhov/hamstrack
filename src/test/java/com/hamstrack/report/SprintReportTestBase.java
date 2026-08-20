@@ -3,6 +3,7 @@ package com.hamstrack.report;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.test.web.servlet.ResultActions;
 
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -54,6 +55,19 @@ public abstract class SprintReportTestBase extends CycleTimeTestBase {
     /** The sprint review as the ctx owner; asserts 200 and returns the parsed body. */
     protected JsonNode review(Ctx ctx, String query) throws Exception {
         var body = getReview(ctx, ctx.token(), query)
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return json.readTree(body);
+    }
+
+    protected ResultActions getVelocity(Ctx ctx, String token, String query) throws Exception {
+        return mockMvc.perform(get(reportsBase(ctx) + "/velocity" + (query == null ? "" : query))
+                .header("Authorization", "Bearer " + token));
+    }
+
+    /** The velocity report as the ctx owner; asserts 200 and returns the parsed body. */
+    protected JsonNode velocity(Ctx ctx, String query) throws Exception {
+        var body = getVelocity(ctx, ctx.token(), query)
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         return json.readTree(body);
@@ -134,6 +148,62 @@ public abstract class SprintReportTestBase extends CycleTimeTestBase {
                  WHERE sprint_id = CAST(? AS uuid)
                    AND occurred_at > CAST(? AS timestamptz)
                 """, instant, sprintId.toString(), instant);
+    }
+
+    /**
+     * A whole finished sprint, built through the real doors and then placed in the past — the
+     * fixture R5 is made of, because velocity samples nothing but COMPLETED sprints and a sprint
+     * completed in this test completed <em>this millisecond</em>.
+     *
+     * <p>The order matters and is production's: the sprint is started (which writes the commitment
+     * batch), backdated with it, some of its issues are closed a day in, and only then is it
+     * completed — so the issues that were not finished are moved out by the completion itself, a
+     * microsecond after {@code completed_at}, which is what makes them <em>carried over</em> rather
+     * than <em>removed before end</em>. A fixture that wrote those rows itself would be testing a
+     * state the application cannot produce.
+     *
+     * @param finished   how many of the issues are closed before the sprint completes
+     * @param pointsEach story points on every issue, or {@code null} to leave them unestimated
+     * @return the sprint id
+     */
+    protected UUID completedSprint(Ctx ctx, String name, String startAt, String completedAt,
+                                   int issues, int finished, Integer pointsEach) throws Exception {
+        var ids = new UUID[issues];
+        var numbers = new long[issues];
+        for (int i = 0; i < issues; i++) {
+            var issue = pointsEach == null
+                    ? createIssue(ctx, name + "-" + i)
+                    : createIssue(ctx, name + "-" + i, "\"storyPoints\":" + pointsEach);
+            ids[i] = idOf(issue);
+            numbers[i] = numberOf(issue);
+        }
+        var sprint = createSprint(ctx, name);
+        if (issues > 0) {
+            addIssuesToSprint(ctx, ctx.token(), sprint, ids).andExpect(status().isOk());
+        }
+        startSprint(ctx, ctx.token(), sprint).andExpect(status().isOk());
+        startedAt(sprint, startAt);
+        var closedOn = OffsetDateTime.parse(startAt).plusDays(1).toString();
+        for (int i = 0; i < finished; i++) {
+            closedAt(ctx, numbers[i], ids[i], closedOn);
+        }
+        completedAt(ctx, sprint, completedAt);
+        return sprint;
+    }
+
+    /** The bar names of a velocity report, in the order the server returned them. */
+    protected static List<String> barNames(JsonNode report) {
+        var names = new ArrayList<String>();
+        for (var bar : report.get("sprints")) names.add(bar.get("name").asText());
+        return names;
+    }
+
+    /** The bar for {@code name}, or an assertion failure naming what was there. */
+    protected static JsonNode bar(JsonNode report, String name) {
+        for (var bar : report.get("sprints")) {
+            if (bar.get("name").asText().equals(name)) return bar;
+        }
+        throw new AssertionError("no bar named " + name + " in " + report.get("sprints"));
     }
 
     /** Delete an issue through the real endpoint — the ledger's door 8. */

@@ -15,8 +15,9 @@ import type { ProjectDelivery } from '../../types'
  *     only way to keep it fixed is to assert the rendered `href`.
  *  2. **The index and every unknown sub-path resolve to a report**, so a
  *     bookmark of `/reports` and a typo both land somewhere real.
- *  3. **The unbuilt reports are listed, not hidden** — a report nobody can see
- *     is a report nobody asks for.
+ *  3. **Every report in the epic is now built** (R5 was the last stub), so the
+ *     list carries no "coming soon" entry — but the rule that put those entries
+ *     here still governs the capability-gated ones below.
  *  4. **A capability a project does not have disables a report, it does not
  *     delete it** (R4). A Kanban project still sees both sprint reports, marked
  *     unavailable, and can still open the page that says what turns them on —
@@ -30,6 +31,7 @@ vi.mock('./FlowReportPage', () => ({ default: () => <div data-testid="flow-page"
 vi.mock('./CycleTimeReportPage', () => ({ default: () => <div data-testid="cycle-page">cycle</div> }))
 vi.mock('./SprintBurnupPage', () => ({ default: () => <div data-testid="burnup-page">burnup</div> }))
 vi.mock('./SprintReviewPage', () => ({ default: () => <div data-testid="review-page">review</div> }))
+vi.mock('./VelocityPage', () => ({ default: () => <div data-testid="velocity-page">velocity</div> }))
 
 const state = vi.hoisted(() => ({
   delivery: { board: 'SCRUM', releases: true, estimation: true, preset: 'SCRUM' } as ProjectDelivery,
@@ -104,15 +106,14 @@ describe('ReportsArea', () => {
       .toHaveAttribute('href', '/w/w1/p/p1/reports/sprint-review')
   })
 
-  it('lists the reports that are not built yet, labelled', async () => {
-    renderArea('/w/w1/p/p1/reports/flow')
-    await screen.findByTestId('flow-page')
-    // R4 took both sprint reports out of the SOON list and made them links — the
-    // list shrinks as the epic lands, and an entry that is still SOON must never
-    // pretend to be a destination.
-    expect(screen.getByText('Velocity')).toBeInTheDocument()
-    expect(screen.getAllByText('SOON')).toHaveLength(1)
-    expect(screen.queryByRole('link', { name: 'Velocity' })).toBeNull()
+  it('routes velocity, absolutely — R5 was the last SOON entry', async () => {
+    renderArea('/w/w1/p/p1/reports/velocity')
+    expect(await screen.findByTestId('velocity-page')).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'Velocity' }))
+      .toHaveAttribute('href', '/w/w1/p/p1/reports/velocity')
+    // Nothing in this list is a stub any more: an entry that promises numbers it
+    // cannot draw is exactly what the SOON label existed to prevent.
+    expect(screen.queryByText('SOON')).toBeNull()
   })
 })
 
@@ -131,6 +132,11 @@ describe('ReportsArea — a capability disables a report, it never deletes it', 
     expect(burnup).toHaveAttribute('href', '/w/w1/p/p1/reports/sprint-burnup')
     expect(await screen.findByRole('link', { name: /Sprint review/ }))
       .toHaveAttribute('aria-disabled', 'true')
+    // Velocity is measured from completed sprints, so it is gated identically —
+    // listed, disabled, and still a link to the page that says what turns it on.
+    const velocity = await screen.findByRole('link', { name: /Velocity/ })
+    expect(velocity).toHaveAttribute('aria-disabled', 'true')
+    expect(velocity).toHaveAttribute('href', '/w/w1/p/p1/reports/velocity')
   })
 
   it('marks nothing unavailable on a Scrum project', async () => {

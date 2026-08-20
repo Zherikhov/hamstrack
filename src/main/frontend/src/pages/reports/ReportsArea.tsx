@@ -6,20 +6,22 @@ import FlowReportPage from './FlowReportPage'
 import CycleTimeReportPage from './CycleTimeReportPage'
 import SprintBurnupPage from './SprintBurnupPage'
 import SprintReviewPage from './SprintReviewPage'
+import VelocityPage from './VelocityPage'
 
 /**
- * Reports area — `/w/:wsId/p/:projectId/reports/*` (epic HD-5, slices R1–R4).
+ * Reports area — `/w/:wsId/p/:projectId/reports/*` (epic HD-5, slices R1–R5).
  *
  * **Lazily loaded from `App.tsx`** so the chart library ships in this chunk and
  * nowhere else; `ParamKeyed`-wrapped like every other project page so a window,
  * an interval, a sprint or a filter can never leak from one project into the
  * next.
  *
- * A left list of reports, not tabs. The unbuilt ones are listed rather than
- * hidden — a report you cannot discover is a report nobody asks for — and, since
- * R4, so are the ones a project's delivery capabilities do not offer:
+ * A left list of reports, not tabs. With R5 every report in the epic is built,
+ * so nothing here is a "coming soon" stub any more — but the rule that put those
+ * stubs here still governs the reports a project's delivery capabilities do not
+ * offer, which are listed rather than hidden:
  *
- *  • the two **sprint** reports are listed always, and **disabled with a reason**
+ *  • the three **sprint** reports are listed always, and **disabled with a reason**
  *    when `delivery.board` is not SCRUM (Rule C: every capability needs an
  *    enabling affordance that is visible *while it is off*). The pages
  *    themselves carry the affordance, so a deep link lands on the way to turn
@@ -28,8 +30,8 @@ import SprintReviewPage from './SprintReviewPage'
  *    data. "This project has a sprint, so it must do Scrum" is the exact
  *    inference the capability model exists to delete, and it shipped once.
  *
- * The API is untouched by any of it (Rule A): `/sprint-burnup` and
- * `/sprint-review` answer for any sprint in any project whatever `board` says.
+ * The API is untouched by any of it (Rule A): `/sprint-burnup`, `/sprint-review`
+ * and `/velocity` all answer for any project whatever `board` says.
  *
  * Reports are **not permission-gated** (reports-proposal §4.2): any member who
  * can open the project can open its reports. There is deliberately no
@@ -100,29 +102,16 @@ export default function ReportsArea() {
               disabledHint={SPRINT_HINT}
             />
 
-            {/* Not yet built. Listed, dimmed and labelled — the house rule for a
-                surface whose backend does not exist yet (CLAUDE.md: draw a
-                visible "coming soon" stub rather than omit it). R5 replaces this
-                entry in place. */}
-            {UPCOMING.map(r => (
-              <span
-                key={r.label}
-                title={r.hint}
-                className="text-sm flex items-center gap-2"
-                style={{ padding: '8px 11px', color: 'var(--color-text-muted)', cursor: 'default' }}
-              >
-                {r.label}
-                <span
-                  className="mono"
-                  style={{
-                    marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em',
-                    border: '1px solid var(--color-border-2)', borderRadius: 5, padding: '1px 5px',
-                  }}
-                >
-                  SOON
-                </span>
-              </span>
-            ))}
+            {/* R5. Sprint-dependent exactly like the two above — velocity is
+                measured from completed SPRINTS — so it is listed whatever the
+                project does and disabled with the same reason when it does not
+                run them. */}
+            <ReportLink
+              to={`${base}/velocity`}
+              label="Velocity"
+              disabled={!iterations}
+              disabledHint={SPRINT_HINT}
+            />
           </nav>
 
           <div className="flex-1 min-w-0">
@@ -136,6 +125,7 @@ export default function ReportsArea() {
                   somewhere unrelated. */}
               <Route path="sprint-burnup" element={<SprintBurnupPage />} />
               <Route path="sprint-review" element={<SprintReviewPage />} />
+              <Route path="velocity" element={<VelocityPage />} />
               <Route path="*" element={<Navigate to={`${base}/flow`} replace />} />
             </Routes>
           </div>
@@ -195,8 +185,3 @@ function ReportLink({ to, label, disabled, disabledHint }: {
 /** The Rule C sentence, in the one place a hover can reach it. */
 const SPRINT_HINT =
   'This project doesn’t run sprints — turn on Scrum in project settings to use this report'
-
-/** The rest of the epic, visible while unbuilt so the shape of the area is honest. */
-const UPCOMING = [
-  { label: 'Velocity', hint: 'A forecast band over recent sprints, never a scoreboard — coming soon' },
-] as const

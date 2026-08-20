@@ -11,7 +11,7 @@ import type {
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
   FlowReport, ReportInterval, CycleTimeReport, AgingReport,
-  SprintBurnupReport, SprintMeasure, SprintReviewReport,
+  SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -1741,5 +1741,34 @@ export const reportsApi = {
     const q = qs.toString()
     return request<SprintReviewReport>(
       `/workspaces/${wsId}/projects/${projectId}/reports/sprint-review${q ? `?${q}` : ''}`)
+  },
+
+  /**
+   * Velocity (R5) — the last N completed sprints, with the forecast band.
+   *
+   * **`sprints` is always sent**, so the request states what it asked for
+   * rather than leaning on a server default a later release could change under
+   * an already-shared URL. The page clamps it to 1..12 before it gets here: the
+   * endpoint answers 400 above the cap with the cap named, and a reader who
+   * pasted `sprints=99` is better served by the chart plus a sentence about the
+   * cap than by an error page.
+   *
+   * `measure` is on the wire for the same reason as on the burn-up — the two
+   * series are different sums over different rows — so it joins the cache key.
+   *
+   * **Project-scoped, permanently.** There is no workspace-level velocity call
+   * to add here later; §1.4 refuses one, and the absence of the endpoint is the
+   * enforcement.
+   */
+  velocity: (
+    wsId: string, projectId: string,
+    params: { sprints?: number; measure?: SprintMeasure } = {},
+  ) => {
+    const qs = new URLSearchParams()
+    if (params.sprints !== undefined) qs.set('sprints', String(params.sprints))
+    if (params.measure) qs.set('measure', params.measure)
+    const q = qs.toString()
+    return request<VelocityReport>(
+      `/workspaces/${wsId}/projects/${projectId}/reports/velocity${q ? `?${q}` : ''}`)
   },
 }

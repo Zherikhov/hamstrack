@@ -10,11 +10,13 @@ import com.hamstrack.report.dto.ReportInterval;
 import com.hamstrack.report.dto.ReportMeasure;
 import com.hamstrack.report.dto.SprintBurnupResponse;
 import com.hamstrack.report.dto.SprintReviewResponse;
+import com.hamstrack.report.dto.VelocityReportResponse;
 import com.hamstrack.report.service.AgingReportService;
 import com.hamstrack.report.service.CycleTimeReportService;
 import com.hamstrack.report.service.FlowReportService;
 import com.hamstrack.report.service.SprintBurnupService;
 import com.hamstrack.report.service.SprintReviewService;
+import com.hamstrack.report.service.VelocityService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.CacheControl;
@@ -54,6 +56,13 @@ import java.util.UUID;
  *       <strong>never</strong> silently clamped), a date outside the supported band
  *       ({@code FlowQuery.MIN_DATE}..{@code MAX_DATE} — an extreme year parses but cannot be
  *       computed with), or an unparseable date/interval;</li>
+ *   <li>{@code 400} — {@code sprints} outside 1..{@code VelocityService.MAX_SPRINTS} on
+ *       {@code /velocity}. Not a window, but the same rule: a bound is refused with the
+ *       bound named, never quietly reduced to one the server prefers;</li>
+ *   <li>{@code 400} — a {@code measure} that is not {@code COUNT} or {@code POINTS} on
+ *       {@code /sprint-burnup} or {@code /velocity}. Like the malformed UUID below it, this
+ *       is a binding failure rather than a decision: the value never becomes a
+ *       {@code ReportMeasure}, so no handler runs;</li>
  *   <li>{@code 400} — also, on <em>every</em> endpoint here including the parameterless one,
  *       a path id that is not a UUID: that is a {@code MethodArgumentTypeMismatchException}
  *       raised while binding, before any handler method runs. It discloses nothing (a
@@ -67,6 +76,18 @@ import java.util.UUID;
  *       in the product, not just here. Stated so the list is what can actually happen
  *       rather than what was designed to happen.</li>
  * </ul>
+ *
+ * <p><strong>The two kinds of 400 sit on opposite sides of tenancy, and a client will guess
+ * this wrong.</strong> A <em>bind</em> failure — {@code measure=BOGUS}, {@code sprints=x}, a
+ * malformed path UUID — happens in Spring's argument binding, <strong>before</strong>
+ * {@code resolveProject} is ever called, so it comes back even for a project the caller
+ * cannot see. A <em>range</em> failure — {@code sprints=99}, {@code from > to} — binds fine
+ * and is judged by the service <strong>after</strong> resolution, so on an invisible project
+ * that same request is a <strong>404</strong>. That ordering is deliberate everywhere here
+ * (see {@code VelocityService.velocity}, which resolves before it validates): a 400 that
+ * confirmed the project existed would be a leak, while a 400 raised before any resource was
+ * named confirms nothing. So "did I send a valid request?" is answerable without access;
+ * "is 99 too many sprints?" is not.
  *
  * <p>Responses are {@code Cache-Control: private, max-age=60} <strong>and
  * {@code Vary: Authorization}</strong>: a report is a live read over one tenant's data, so it
@@ -99,8 +120,14 @@ import java.util.UUID;
  * a budget.
  *
  * <p>{@code /flow} (R1), {@code /cycle-time} and {@code /aging} (R3), {@code /sprint-burnup} and
- * {@code /sprint-review} (R4) exist so far. The rest of §4.3 — velocity and the {@code .csv}
- * variants — lands in later slices on this same base path and reuses this class's conventions.
+ * {@code /sprint-review} (R4) and {@code /velocity} (R5) exist so far. The rest of §4.3 — the
+ * {@code .csv} variants — lands in a later slice on this same base path and reuses these
+ * conventions.
+ *
+ * <p><strong>Every report on this path is project-scoped, and {@code /velocity} is the one where
+ * that is a product decision rather than a convention.</strong> §1.4 refuses cross-team velocity on
+ * evidence, so there is no workspace-level variant of it and there must not be one: the base path
+ * IS the refusal. See {@code VelocityService}.
  *
  * <p>R3 adds one distinction to the list above rather than a new rule: <strong>not every report
  * has a window</strong>. {@code /aging} answers a current-state question and therefore takes no
@@ -124,6 +151,7 @@ public class ReportController {
     private final AgingReportService agingReportService;
     private final SprintBurnupService sprintBurnupService;
     private final SprintReviewService sprintReviewService;
+    private final VelocityService velocityService;
 
     /**
      * {@code GET …/reports/flow} — created vs resolved, bucketed on UTC day/week
@@ -285,6 +313,50 @@ public class ReportController {
             @PathVariable UUID projectId,
             @RequestParam(required = false) UUID sprintId) {
         var report = sprintReviewService.review(actor, workspaceId, projectId, sprintId);
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
+                .varyBy(HttpHeaders.AUTHORIZATION)
+                .body(report);
+    }
+
+    /**
+     * {@code GET …/reports/velocity} — the last N completed sprints as bars, and the p50/p85 band
+     * to plan the next one with (§2.5).
+     *
+     * <p>Both parameters are optional. {@code sprints} defaults to
+     * {@code VelocityService.DEFAULT_SPRINTS} (6) and is capped at
+     * {@code VelocityService.MAX_SPRINTS} (12) — a larger value is a <strong>400 naming the
+     * cap</strong>, never a silent clamp, and the cap is deliberately an order of magnitude below
+     * Jira's 120 for the reason §1.7 records. {@code measure} defaults to {@code COUNT}.
+     *
+     * <p><strong>There is no {@code sprintId} here, and that is not an oversight.</strong> The
+     * sample is resolved from the project — the most recently completed sprints of it — so no
+     * caller-supplied sprint id reaches the ledger sweep, and there is consequently nothing on this
+     * endpoint that can 404 the way the two sprint reports can. It is the sibling of the
+     * subject-versus-filter rule above: velocity's subject is the PROJECT.
+     *
+     * <p>Under {@code VelocityService.MIN_FORECAST_SPRINTS} completed sprints the band comes back
+     * with null percentiles and a stated sample size rather than with noise, exactly as
+     * {@code /cycle-time} suppresses its percentiles — and the bars still render, because they are
+     * facts. A project that has never completed a sprint is a 200 with an empty list.
+     *
+     * <p>No status code depends on a delivery capability (Rule A): a KANBAN project answers with
+     * whatever sprints it has completed, and {@code measure=POINTS} answers with points in a
+     * project whose {@code estimation} is off.
+     *
+     * <p><strong>Nothing in the response is keyed by a person</strong>, there is no filter that
+     * could make it so, and the endpoint has no workspace-level sibling. Those three refusals are
+     * the report (§1.4); {@code VelocityService} carries the evidence and
+     * {@code VelocityRefusalTest} pins them.
+     */
+    @GetMapping("/velocity")
+    public ResponseEntity<VelocityReportResponse> velocity(
+            @AuthenticationPrincipal User actor,
+            @PathVariable UUID workspaceId,
+            @PathVariable UUID projectId,
+            @RequestParam(required = false) Integer sprints,
+            @RequestParam(required = false) ReportMeasure measure) {
+        var report = velocityService.velocity(actor, workspaceId, projectId, sprints, measure);
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.maxAge(CACHE_TTL).cachePrivate())
                 .varyBy(HttpHeaders.AUTHORIZATION)

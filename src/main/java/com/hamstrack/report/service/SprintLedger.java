@@ -2,6 +2,7 @@ package com.hamstrack.report.service;
 
 import com.hamstrack.issue.entity.Sprint;
 import com.hamstrack.issue.entity.SprintScopeEventType;
+import com.hamstrack.issue.entity.SprintState;
 import com.hamstrack.report.dto.ReportMeta;
 
 import java.math.BigDecimal;
@@ -91,6 +92,46 @@ public record SprintLedger(Sprint sprint, List<LedgerIssue> issues, boolean trun
     /** Nothing to report on: no sprint, or a sprint that never started and never held anything. */
     public boolean isEmpty() {
         return sprint == null || issues.isEmpty();
+    }
+
+    /**
+     * <strong>Where a sprint's record stops — the one definition, for every report that reads this
+     * ledger.</strong>
+     *
+     * <p>{@code completed_at} for a sprint that has been completed, and <strong>now</strong> for
+     * everything else, including one that has run past its planned {@code end_at}: the line ends
+     * where it ends, and drawing a record out to a future planned end would be a projection no
+     * report here makes.
+     *
+     * <p>It lives on this record rather than inside a reader because R5 (velocity) resolves it for
+     * <em>each</em> of up to twelve sprints without going through {@link SprintLedgerReader} at
+     * all. R4 already paid for two copies of this sentence drifting apart by one inclusivity; a
+     * third copy, in a loop, would have been the same bug spread over a year of history — and
+     * nothing about the resulting bar chart would have looked wrong.
+     *
+     * <p>See {@link #endBoundary()} for why it is an instant and not the end of a day. That
+     * reasoning is what makes a completed sprint's chart able to show a miss at all, and it is
+     * exactly as load-bearing for a bar as it is for a line.
+     */
+    public static OffsetDateTime endBoundaryOf(Sprint sprint) {
+        return endBoundaryOf(sprint.getState(), sprint.getCompletedAt());
+    }
+
+    /**
+     * The same boundary, from the two columns that define it rather than from the entity.
+     *
+     * <p>Velocity reads its sample as a five-scalar projection
+     * ({@code SprintRepository.CompletedSprint}) precisely so that no {@code Sprint} — and
+     * therefore no {@code Sprint.createdBy} — reaches the report at all, so it cannot call the
+     * overload above. This is <strong>the same sentence</strong>, not a second one: the entity
+     * form now delegates here, so there is still exactly one definition of where a sprint's
+     * record stops. That is the whole point of the method existing (see above) and it survives
+     * the projection only because the delegation goes this way round.
+     */
+    public static OffsetDateTime endBoundaryOf(SprintState state, OffsetDateTime completedAt) {
+        return state == SprintState.COMPLETED && completedAt != null
+                ? completedAt
+                : OffsetDateTime.now(ZoneOffset.UTC);
     }
 
     /**
@@ -205,6 +246,59 @@ public record SprintLedger(Sprint sprint, List<LedgerIssue> issues, boolean trun
             return closedAt != null && closedAt.isBefore(instant);
         }
 
+
+        /**
+         * <strong>The three-way cut of a sprint's final state, defined exactly once</strong>
+         * (HD-139 R5): was this issue taken OUT while the sprint ran, was it FINISHED by the
+         * boundary, or did it CARRY OVER?
+         *
+         * <p>It lives here, on the record both readers share, because two reports now need it —
+         * {@code SprintReviewService} for three of its five lists, and {@code VelocityService} for
+         * two of every bar's four numbers, twelve sprints at a time. Written twice, the two would
+         * be free to disagree about a completed sprint, and the way that failure presents is a
+         * velocity band computed from numbers the sprint review beside it does not show. The
+         * membership question already has one implementation ({@link #memberBefore}); so does the
+         * closure question ({@link #closedBefore}); this is the one sentence that composes them,
+         * and it is the sentence with the ordering in it.
+         *
+         * <p>The ordering is the subtle part and it is not commutative. Removal is asked FIRST,
+         * because an issue can be both closed and removed and the record must say it left: a
+         * completion stamps {@code sprints.completed_at} in the conditional UPDATE that arbitrates
+         * it and only then writes the ledger rows for the issues it moves out, so at
+         * {@code completed_at} the carried-over issues are still members while anything a person
+         * took off the sprint earlier is not. Asking closure first would move every issue somebody
+         * removed-after-finishing into {@code COMPLETED} and quietly inflate every velocity bar.
+         *
+         * @param endBoundary {@link SprintLedger#endBoundaryOf}, never the planned {@code endAt}
+         */
+        public Outcome outcomeAt(OffsetDateTime endBoundary) {
+            if (!memberBefore(endBoundary)) {
+                return Outcome.REMOVED_BEFORE_END;
+            }
+            return closedBefore(endBoundary) ? Outcome.COMPLETED : Outcome.CARRIED_OVER;
+        }
+
+        /**
+         * What became of one issue by {@link SprintLedger#endBoundary()} — a partition, unlike the
+         * sprint review's five lists, three of which are cuts of this one and two of which
+         * (committed / added after start) cut the same population the other way.
+         */
+        public enum Outcome {
+
+            /** Somebody took it off the sprint while it was running. Not carry-over. */
+            REMOVED_BEFORE_END,
+
+            /** Still a member at the boundary, and closed strictly before it. */
+            COMPLETED,
+
+            /**
+             * Still a member at the boundary and not closed by then — what the completion moved to
+             * the backlog or to the next sprint. A DELETED issue lands here too: its
+             * {@code closed_at} died with it, so "completed" is a claim the record can no longer
+             * prove, and a report may not assert what it cannot show.
+             */
+            CARRIED_OVER
+        }
 
         private boolean memberAsOf(OffsetDateTime instant, boolean inclusive) {
             boolean in = false;

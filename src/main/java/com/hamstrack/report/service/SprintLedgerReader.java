@@ -2,9 +2,7 @@ package com.hamstrack.report.service;
 
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.ReportProperties;
-import com.hamstrack.issue.entity.Sprint;
 import com.hamstrack.issue.entity.SprintScopeEventType;
-import com.hamstrack.issue.entity.SprintState;
 import com.hamstrack.issue.exception.SprintNotFoundException;
 import com.hamstrack.issue.repository.SprintRepository;
 import com.hamstrack.report.repository.SprintReportRepository;
@@ -116,22 +114,7 @@ public class SprintLedgerReader {
         boolean truncated = rows.size() > cap;
         var shipped = truncated ? rows.subList(0, cap) : rows;
         return new SprintLedger(sprint, group(shipped), truncated, cap, firstIssueAt,
-                endBoundary(sprint), basedOnIssues);
-    }
-
-    /**
-     * Where this sprint's record stops — resolved once per request, for both reports.
-     *
-     * <p>{@code completed_at} for a sprint that has been completed, and <strong>now</strong> for
-     * everything else, including a sprint that has run past its planned {@code end_at}: the line
-     * ends where it ends, and drawing a record out to a future planned end would be a projection
-     * neither report makes. {@link SprintLedger} carries the rest of the reasoning, including why
-     * this is an instant rather than the end of a day.
-     */
-    private static OffsetDateTime endBoundary(Sprint sprint) {
-        return sprint.getState() == SprintState.COMPLETED && sprint.getCompletedAt() != null
-                ? sprint.getCompletedAt()
-                : OffsetDateTime.now(ZoneOffset.UTC);
+                SprintLedger.endBoundaryOf(sprint), basedOnIssues);
     }
 
     // ------------------------------------------------------------------ grouping

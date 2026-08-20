@@ -1,6 +1,8 @@
 package com.hamstrack.report;
 
 import com.hamstrack.issue.repository.SprintScopeEventRepository;
+import com.hamstrack.report.repository.FlowReportRepository;
+import com.hamstrack.report.repository.VelocityReportRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.jpa.repository.Query;
 
@@ -81,6 +83,31 @@ import static org.assertj.core.api.Assertions.assertThat;
  * cannot see. {@link #unscopedDrivingTable} is the third mechanism, added a slice before the
  * statement that would have escaped it (R5's velocity sweep), and its hostile fixtures are the
  * last block of {@link #theGuardRejectsEveryWayAStatementCanLoseItsScope()}.
+ *
+ * <p><strong>The bet paid (HD-139).</strong> R5's sweep landed in the shape hostile fixture #1
+ * describes — {@code FROM sprint_scope_events e} with the {@code issues} scope in the {@code ON}
+ * clause — and is discharged by the restated {@code e.workspace_id = :workspaceId} the alias rule
+ * would never have asked for. Both spellings of the sweep are now controls at the end of that
+ * method: the one this rule anticipated, and the one that shipped.
+ *
+ * <h2>Round 4 (HD-139 R5): the driving-table rule had the flaw it was created to prevent</h2>
+ * Three corrections, and the first is the rule failing on its own lesson:
+ * <ul>
+ *   <li><strong>Position was not checked.</strong> {@link #tenantPredicate} searched the whole
+ *       statement, so the driver's tenant predicate discharged the rule <em>from inside a
+ *       {@code JOIN … ON}</em> — the one place it does not filter the driving side. Fixture #7 is
+ *       fixture #1 with {@code e.workspace_id = :workspaceId} moved three words to the left; it
+ *       passed. R5 makes {@code LEFT JOIN … ON … AND <scope>} the house style for this table, so
+ *       that is where the next author will put a predicate "with the others".</li>
+ *   <li><strong>Only the outermost block was checked.</strong> A scalar subquery drives from a
+ *       table of its own — velocity's {@code metaCounts} drives one from
+ *       {@code sprint_scope_events} — and deleting its predicates raised no complaint.
+ *       {@link #nestedBlockComplaint} now asks every nested block the same question, in the
+ *       weaker form a probe can actually answer.</li>
+ *   <li><strong>The controls were hand-copies.</strong> They had already drifted from the shipped
+ *       statement they claimed to be, which makes a green control a statement about a string in
+ *       this file. They are read off {@code VelocityReportRepository} now.</li>
+ * </ul>
  *
  * <p>A plain unit test — no Spring context. The annotation values are compile-time constants
  * (that is why {@code @Query} can splice them at all), so they can be read without a database.
@@ -166,6 +193,21 @@ class ReportQueryScopeTest {
      */
     private static final Pattern DRIVING_REFERENCE =
             Pattern.compile("(?i)(\\w+)(?:\\s+as)?(?:\\s+(\\w+))?");
+
+    /** The same, but wherever it appears — every table a block binds, not only its driver. */
+    private static final Pattern TABLE_REFERENCE =
+            Pattern.compile("(?i)\\b(?:from|join)\\s+(\\w+)(?:\\s+as)?(?:\\s+(\\w+))?");
+
+    /** A bracket group that opens a query block of its own — a subquery or a derived table. */
+    private static final Pattern NESTED_SELECT = Pattern.compile("\\(\\s*(?i:select)\\b");
+
+    /**
+     * The keywords that end a {@code JOIN … ON} clause. Everything that can follow one at the same
+     * level: another join, the {@code WHERE}, or the tail of the statement.
+     */
+    private static final Pattern CLAUSE_KEYWORD = Pattern.compile(
+            "(?i)\\b(?:join|inner|left|right|full|cross|natural|where|group|order|having|limit"
+            + "|offset|union|except|intersect|window|returning)\\b");
 
     /** SQL keywords that cannot be an alias, so that {@code FROM issues WHERE} is not "alias WHERE". */
     private static final Set<String> NOT_AN_ALIAS =
@@ -315,7 +357,7 @@ class ReportQueryScopeTest {
      * than by the suite.
      */
     @Test
-    void theGuardRejectsEveryWayAStatementCanLoseItsScope() {
+    void theGuardRejectsEveryWayAStatementCanLoseItsScope() throws Exception {
         // 1. The budget paid by another table. This is the shape R4's sprint burn-up would have
         //    written, and the counting guard scored it 1 table / 1 predicate and passed it.
         assertRejected("a sibling table's project_id does not scope issues", """
@@ -395,6 +437,104 @@ class ReportQueryScopeTest {
                 SELECT count(*) FROM sprint_scope_events WHERE workspace_id = :workspaceId
                 """);
 
+        // 7. THE SAME STATEMENT WITH THE PREDICATE THREE WORDS TO THE LEFT (HD-139 R5 round 2).
+        //    Fixture #1 plus a workspace predicate — but inside the ON clause, where it does not
+        //    filter the driving side of a LEFT JOIN at all: the foreign rows come back with their
+        //    `issues` columns nulled out and the aggregate is silently cross-tenant. This is the
+        //    rule's own lesson turned on the rule, and it passed until the matcher was made
+        //    positional. R5 makes `LEFT JOIN … ON … AND <scope>` the house style for this table,
+        //    so the next author putting a predicate "with the others" lands exactly here.
+        assertRejected("a tenant predicate inside a JOIN … ON does not scope the driving table", """
+                SELECT e.sprint_id, count(*)
+                  FROM sprint_scope_events e
+                  LEFT JOIN issues i ON i.id = e.issue_id AND i.project_id = :projectId
+                                    AND e.workspace_id = :workspaceId
+                 WHERE e.occurred_at >= :since
+                 GROUP BY 1
+                """);
+
+        // 8. A NESTED BLOCK'S OWN DRIVING TABLE (round 2, item 9). Everything above inspects the
+        //    outermost FROM; a scalar subquery has one of its own, and velocity's metaCounts drives
+        //    one from sprint_scope_events. This is that statement with its tenant predicates
+        //    deleted: the outer half is impeccably scoped and the number it returns is counted
+        //    across every workspace in the install.
+        assertRejected("a subquery is not scoped by the statement it is written inside", """
+                SELECT min(i.created_at) AS first_issue_at,
+                       (SELECT count(DISTINCT e.issue_id)
+                          FROM sprint_scope_events e
+                         WHERE e.event = 'ADDED') AS based_on_issues
+                  FROM issues i
+                 WHERE i.project_id = :projectId
+                """);
+
+        // 9. "CORRELATED" MEANT MENTIONS-AN-OUTER-ALIAS (HD-139 R5 round 3, item 1). The exemption
+        //    above claims a correlated block's rows are "already restricted by whatever restricts
+        //    the outer row". That holds when the correlation is an equality on the outer row's
+        //    IDENTITY — the label probe's `il.issue_id = i.id` — and not otherwise. Three shapes
+        //    mention an outer alias while restricting nothing, and all three read the ledger of
+        //    every workspace in the install.
+        assertRejected("a correlation by inequality restricts WHEN, not WHOSE", """
+                SELECT count(*) FROM issues i
+                 WHERE i.project_id = :projectId
+                   AND (SELECT count(*) FROM sprint_scope_events e
+                         WHERE e.occurred_at < i.created_at) > 0
+                """);
+        assertRejected("an outer alias in the SELECT list correlates the projection only", """
+                SELECT (SELECT count(*) || i.key FROM sprint_scope_events e
+                         WHERE e.event = 'ADDED') AS x
+                  FROM issues i WHERE i.project_id = :projectId
+                """);
+        //    And the third re-opened the disjunction hole round 2 closed, because the exemption
+        //    short-circuited BEFORE the tenant check, so isConjunct was never consulted at all.
+        assertRejected("a correlation behind an OR is not a correlation", """
+                SELECT count(*) FROM issues i
+                 WHERE i.project_id = :projectId
+                   AND (SELECT count(*) FROM sprint_scope_events e
+                         WHERE e.event = 'ADDED' OR e.issue_id = i.id) > 0
+                """);
+
+        // 10. THE JOIN REVERSED (round 3, item 2). A scope in a `JOIN … ON` counts for an `issues`
+        //     alias because `issues` is the OPTIONAL side of the LEFT joins this package writes.
+        //     Reverse the join and `issues` is the PRESERVED side: its unmatched rows come back
+        //     whatever the ON says, the driving-table rule sees a properly scoped `e`, and the
+        //     statement hands back every project's issue ids and titles.
+        assertRejected("a RIGHT join's ON does not scope the side it preserves", """
+                SELECT i.id, i.title
+                  FROM sprint_scope_events e
+                 RIGHT JOIN issues i ON i.id = e.issue_id AND i.project_id = :projectId
+                 WHERE e.workspace_id = :workspaceId
+                """);
+        assertRejected("...and FULL JOIN preserves it too", """
+                SELECT i.id, i.title
+                  FROM sprint_scope_events e
+                  FULL JOIN issues i ON i.id = e.issue_id AND i.project_id = :projectId
+                 WHERE e.workspace_id = :workspaceId
+                """);
+
+        // 11. A PREDICATE FROM A DIFFERENT BLOCK (round 3, item 3). The nested-block rule scanned
+        //     the block's whole text, so a predicate belonging to a block nested INSIDE it paid its
+        //     bill — round 2's "budget paid in the wrong currency", at block granularity. This is
+        //     metaCounts with the tenant predicate moved one level deeper: the middle block is
+        //     uncorrelated and counts distinct issue ids across every tenant.
+        assertRejected("a deeper block's tenant predicate does not scope the block above it", """
+                SELECT min(i.created_at),
+                       (SELECT count(DISTINCT e.issue_id) FROM sprint_scope_events e
+                         WHERE e.occurred_at >= (SELECT min(i2.created_at) FROM issues i2
+                                                  WHERE i2.project_id = :projectId)) AS n
+                  FROM issues i WHERE i.project_id = :projectId
+                """);
+
+        // 12. THE DRIVER'S PREDICATE INSIDE A NESTED PROBE (round 3, item 4). `JOIN … ON` was the
+        //     first place a predicate can sit without filtering the driver; a subquery is the
+        //     other. Here `e.workspace_id = :workspaceId` restricts the probe, not `e` — and the
+        //     enclosing OR is invisible because isConjunct stops at a subquery boundary.
+        assertRejected("a tenant predicate inside a probe does not scope the driving table", """
+                SELECT count(*) FROM sprint_scope_events e
+                 WHERE EXISTS (SELECT 1 FROM sprints s
+                                WHERE s.id = e.sprint_id AND e.workspace_id = :workspaceId)
+                    OR e.event = 'ADDED'
+                """);
+
         // And the controls: the real shapes, which must pass — otherwise the assertions above
         // prove only that the matcher rejects everything.
         assertThat(complaints("control", """
@@ -421,7 +561,7 @@ class ReportQueryScopeTest {
                 .as("the driving-table rule rejects the statement it was written for")
                 .isEmpty();
         // A velocity sweep can drive from the ledger across many sprints — it just has to say
-        // which tenant. This is the shape R5 is expected to write.
+        // which tenant. This was written as the shape R5 was EXPECTED to write.
         assertThat(complaints("control", """
                 SELECT e.sprint_id, count(*)
                   FROM sprint_scope_events e
@@ -431,6 +571,56 @@ class ReportQueryScopeTest {
                 """))
                 .as("a workspace-scoped sweep over several sprints is legitimate and must pass")
                 .isEmpty();
+        // And these are what R5 actually shipped (HD-139), read from the repository itself rather
+        // than copied here. A hand-copied control drifts from the statement it claims to be —
+        // round 2 found this one already differing from the shipped sweep in its select list and
+        // its LIMIT — and a control that is no longer the real statement asserts nothing about it.
+        // The package scan already checks both; what these two add is the SENTENCE, which a
+        // failure message can then quote: this shape must pass, and here is why it is the shape.
+        assertThat(complaints("control", shippedStatement("ledgerAcrossSprints")))
+                .as("R5's shipped velocity sweep must pass the rule that was written for it: it "
+                    + "drives from sprint_scope_events across many sprints, and it says which "
+                    + "tenant in its own WHERE rather than in the join that reaches issues")
+                .isEmpty();
+        assertThat(complaints("control", shippedStatement("metaCounts")))
+                .as("velocity's meta scalars must pass too — the outer half drives from issues and "
+                    + "the inner scalar subquery drives from sprint_scope_events, each stating its "
+                    + "own scope. That inner block is the one the driving-table rule could not see "
+                    + "until round 2")
+                .isEmpty();
+        // The optional-filter probe — the one shape the correlation exemption exists for, read off
+        // the fragment that defines it. Round 3 narrowed that exemption from "mentions an outer
+        // alias" to "is tied to the outer row's identity by a conjunctive equality", so this is the
+        // control that says the narrowing kept what it was narrowed around: `il.issue_id = i.id`
+        // still exempts the probe, and issue_labels has no tenant column with which to say
+        // anything else.
+        assertThat(complaints("control", FlowReportRepository.PROJECT_SCOPE_AND_FILTERS))
+                .as("the label probe is correlated to an already-scoped issues row by an equality "
+                    + "on that row's identity, which is exactly the correlation the exemption is "
+                    + "for — narrowing it must not have cost the idiom the package actually writes")
+                .isEmpty();
+    }
+
+    /** A statement as shipped, straight off the repository interface — never a copy of one. */
+    private static String shippedStatement(String method) throws Exception {
+        var query = VelocityReportRepository.class
+                .getDeclaredMethod(method, statementParameters(method))
+                .getAnnotation(Query.class);
+        assertThat(query)
+                .as("VelocityReportRepository.%s carries no @Query — the control below is "
+                    + "asserting over an empty string", method)
+                .isNotNull();
+        return query.value();
+    }
+
+    private static Class<?>[] statementParameters(String method) {
+        for (var candidate : VelocityReportRepository.class.getDeclaredMethods()) {
+            if (candidate.getName().equals(method)) {
+                return candidate.getParameterTypes();
+            }
+        }
+        throw new AssertionError("VelocityReportRepository has no method " + method
+                                 + " — move this control with it");
     }
 
     // ------------------------------------------------------------------ the matcher
@@ -475,10 +665,64 @@ class ReportQueryScopeTest {
      * an {@code issues} reference the rule below already checks.
      */
     private static Set<String> unscopedDrivingTable(String where, String sql) {
-        return drivingComplaint(where, sql, 0, sql.length());
+        var complaints = new LinkedHashSet<String>();
+        var checked = new LinkedHashSet<Integer>();
+        complaints.addAll(drivingComplaint(where, sql, 0, sql.length(), checked));
+        var block = NESTED_SELECT.matcher(sql);
+        while (block.find()) {
+            int start = block.start() + 1;
+            if (checked.contains(start)) {
+                continue;                   // a derived table — already held to the strict rule
+            }
+            complaints.addAll(nestedBlockComplaint(where, sql, start, closerOf(sql, start)));
+        }
+        return complaints;
     }
 
-    private static Set<String> drivingComplaint(String where, String sql, int from, int to) {
+    /**
+     * <strong>The same question, asked of every nested query block</strong> (HD-139 R5 round 2,
+     * item 9) — because the rule above stops at the outermost {@code FROM}, and a statement can
+     * drive a subquery from anything.
+     *
+     * <p>{@code metaCounts} is the shape that exposed the gap: its scalar subquery drives from
+     * {@code sprint_scope_events}, which is exactly the non-{@code issues} driver the rule was
+     * created for, and deleting either of its predicates would have raised no complaint at all.
+     *
+     * <p>The rule a nested block is held to is deliberately <em>weaker</em> than the top-level
+     * one, and the difference is not laziness — it is that the top-level rule is unsatisfiable
+     * inside a probe. A probe legitimately drives from a link table that HAS no tenant column:
+     * {@code issue_labels} has {@code issue_id} and {@code label_id} and nothing else, so
+     * "state the tenant on the driving table" cannot be written there in any form. What can be
+     * asked instead is that the block states a tenant <em>somewhere at its own level</em> — on
+     * whichever alias it binds — which for the label probe is the scoped {@code issues} row it
+     * joins.
+     *
+     * <p>And a <strong>correlated</strong> block is exempt outright: if a conjunctive equality ties
+     * a row it binds to a row of the enclosing query, its rows are already restricted by whatever
+     * restricts that outer row, and that outer block is checked by these same two rules. That is
+     * the package's optional-filter idiom ({@code EXISTS (SELECT 1 FROM issue_labels il WHERE
+     * il.issue_id = i.id …)}), which is correct and must keep passing — while an
+     * <em>uncorrelated</em> subquery with no tenant predicate is a whole-table read wearing a
+     * scalar's clothes. What counts as a correlation is the whole of round 3's item 1: an
+     * equality on the outer row's <em>identity</em>, not merely a mention of its alias, since
+     * {@code e.occurred_at < i.created_at} restricts when rather than whose. See
+     * {@link #correlated}.
+     */
+    private static Set<String> nestedBlockComplaint(String where, String sql, int from, int to) {
+        var block = sql.substring(from, to);
+        if (correlated(block) || statesATenant(block)) {
+            return Set.of();
+        }
+        return Set.of(where + " has a nested SELECT at offset " + from + " that states no tenant"
+                      + " predicate of its own and correlates to nothing outside itself, so it"
+                      + " reads its table across every tenant. A subquery is not scoped by the"
+                      + " statement it is written inside: only a correlation to an already-scoped"
+                      + " row, or a tenant predicate of its own, restricts it.");
+    }
+
+    private static Set<String> drivingComplaint(String where, String sql, int from, int to,
+                                                Set<Integer> checked) {
+        checked.add(from);
         int afterFrom = topLevelFrom(sql, from, to);
         if (afterFrom < 0) {
             return Set.of();                          // no FROM of its own — nothing drives it
@@ -489,7 +733,7 @@ class ReportQueryScopeTest {
         }
         if (start < to && sql.charAt(start) == '(') {
             // A derived table: what matters is the reference IT drives from.
-            return drivingComplaint(where, sql, start + 1, closerOf(sql, start + 1));
+            return drivingComplaint(where, sql, start + 1, closerOf(sql, start + 1), checked);
         }
         var matcher = DRIVING_REFERENCE.matcher(sql.substring(start, to));
         if (!matcher.lookingAt()) {
@@ -513,17 +757,267 @@ class ReportQueryScopeTest {
 
     /** Whether {@code alias} carries a conjunctive workspace/project/sprint predicate in {@code sql}. */
     private static boolean tenantScoped(String alias, String sql) {
+        return tenantPredicate("\\b" + Pattern.quote(alias) + "\\.", sql);
+    }
+
+    /**
+     * Whether any alias <strong>this block binds</strong> carries one — the nested-block rule's
+     * question, and it has to be asked of this block's own aliases at this block's own level.
+     *
+     * <p><strong>Round 3 (HD-139 R5), and it is round 2's bug at block granularity.</strong> The
+     * old version scanned the block's whole text for {@code \w+.<tenant column>} with no depth
+     * check and no binding check, though its own sentence said "on whichever alias it BINDS". So a
+     * predicate belonging to a block nested <em>inside</em> this one discharged it — the budget
+     * paid in the wrong currency, which is precisely what round 2 fixed for the alias rule.
+     * Literally {@code metaCounts} with the tenant predicate moved one level deeper:
+     * {@code (SELECT count(DISTINCT e.issue_id) FROM sprint_scope_events e WHERE e.occurred_at >=
+     * (SELECT min(i2.created_at) FROM issues i2 WHERE i2.project_id = :projectId))} counts distinct
+     * issue ids across every tenant and passed. An <em>outer</em> alias's predicate discharged it
+     * too, which is the same error pointing the other way.
+     */
+    private static boolean statesATenant(String block) {
+        for (var alias : boundAliases(block)) {
+            if (tenantScoped(alias, block)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * A conjunctive tenant predicate on a qualifier, <strong>outside every {@code JOIN … ON}
+     * clause of this block</strong> (HD-139 R5 round 2, item 7).
+     *
+     * <p>The position is the rule, and leaving it out was this matcher's own version of the bug it
+     * exists to catch. Searching the whole statement text let the driver's tenant predicate
+     * discharge the rule <em>from inside an {@code ON} clause</em> — and an {@code ON} predicate on
+     * the driving side of a {@code LEFT JOIN} does not filter the driving side at all. That is
+     * precisely the lesson {@link #unscopedDrivingTable} was created for, restated: move
+     * {@code e.workspace_id = :workspaceId} three words to the left, into the {@code ON} beside
+     * {@code i.project_id}, and the sweep reads every workspace's ledger while the statement still
+     * looks scoped and the guard still passes. It is hostile fixture #5.
+     *
+     * <p><strong>And at this block's own level</strong> (round 3, item 4). {@code JOIN … ON} was
+     * the first place a predicate can sit without filtering the driver; a nested block is the
+     * other. {@code FROM sprint_scope_events e WHERE EXISTS (SELECT 1 FROM sprints s WHERE
+     * s.id = e.sprint_id AND e.workspace_id = :workspaceId) OR e.event = 'ADDED'} discharged the
+     * driver's obligation from inside a probe, where it restricts the probe and not {@code e} —
+     * and the enclosing {@code OR} was invisible because {@link #isConjunct} stops at a subquery
+     * boundary, which is correct for the probe's own scope and wrong when the probe is being asked
+     * to pay the driver's bill. The nested-block rule is unaffected: it already passes a
+     * block-local substring, in which its own predicates are at depth 0.
+     *
+     * <p>The restriction belongs to the <em>driving</em>-table rule (and to the nested-block rule,
+     * which asks the same question of a whole block). A JOINED {@code issues} alias scoped in its
+     * own {@code ON} is a different and perfectly legitimate thing — R4's shipped ledger read is
+     * written that way — so {@link #conjunctiveScopes}, which the alias rule counts with,
+     * deliberately does not have it.
+     *
+     * <p>The bind may be plain ({@code :sprintId}) or wrapped in the package's
+     * {@code CAST(:sprintId AS uuid)} idiom, which is how a nullable id reaches a native statement
+     * here. An {@code = ANY (CAST(:sprintIds AS uuid[]))} over a resolved set is NOT accepted: a
+     * set of subject ids is not a tenant predicate, and velocity's sweep is discharged by its
+     * {@code workspace_id} exactly as this rule intends.
+     */
+    private static boolean tenantPredicate(String qualifier, String sql) {
         var matcher = Pattern.compile(
-                "(?i)\\b" + Pattern.quote(alias)
-                + "\\.(?:project_id\\s*=\\s*:projectId"
-                + "|workspace_id\\s*=\\s*:workspaceId"
-                + "|sprint_id\\s*=\\s*:sprintId)\\b").matcher(sql);
+                "(?i)" + qualifier
+                + "(?:project_id\\s*=\\s*" + bind("projectId")
+                + "|workspace_id\\s*=\\s*" + bind("workspaceId")
+                + "|sprint_id\\s*=\\s*" + bind("sprintId") + ")").matcher(sql);
+        var joinOn = joinOnClauses(sql);
         while (matcher.find()) {
+            if (depthAt(sql, matcher.start()) != 0) {
+                continue;
+            }
+            if (within(joinOn, matcher.start())) {
+                continue;
+            }
             if (isConjunct(sql, matcher.start(), matcher.end())) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** A named bind, plain or in the {@code CAST(:name AS type)} spelling this package uses. */
+    private static String bind(String name) {
+        return "(?:CAST\\(\\s*:" + name + "\\s+AS[^)]*\\)|:" + name + "\\b)";
+    }
+
+    /**
+     * The {@code [start, end)} span of every {@code JOIN … ON} clause at this block's own bracket
+     * level — from just after the {@code ON} to the next top-level clause keyword.
+     */
+    private static List<int[]> joinOnClauses(String sql) {
+        return onClauses(sql, false);
+    }
+
+    /**
+     * The same, restricted to the joins whose {@code ON} clause <strong>cannot</strong> filter
+     * their joined side: {@code RIGHT} and {@code FULL}, where that side is the preserved one
+     * (HD-139 R5 round 3, item 2).
+     *
+     * <p>{@link #conjunctiveScopes} deliberately accepts an {@code issues} scope written in a
+     * {@code JOIN … ON}, and the exemption is <em>earned</em> — but by something narrower than
+     * "a joined alias", which is what the rule said. It is earned by {@code issues} being the
+     * <strong>optional side of an INNER/LEFT join</strong>: a foreign row then never matches and
+     * its columns null out, and forcing the predicate into the {@code WHERE} would turn the
+     * {@code LEFT} join into an effective {@code INNER} one and drop exactly the
+     * {@code issue_id IS NULL} rows V18's {@code ON DELETE SET NULL} exists to preserve.
+     *
+     * <p>Reverse the join and the reasoning inverts with it. In
+     * {@code FROM sprint_scope_events e RIGHT JOIN issues i ON … AND i.project_id = :projectId} the
+     * preserved side is {@code issues}: unmatched issue rows come back regardless of the
+     * {@code ON}, so that statement returns every project's issue ids and titles in the install
+     * while the driving-table rule sees a properly scoped {@code e} and passes. {@code FULL JOIN}
+     * behaves the same. Nothing in the package writes either — {@link #CLAUSE_KEYWORD} already
+     * knew both words — which is exactly when a guard is cheap to correct.
+     *
+     * <p>Depth 0 only, like every other clause-position rule here: a {@code RIGHT} join written
+     * inside a subquery is not detected. That is the same bound {@link #joinOnClauses} has always
+     * had, and it is a tripwire over hand-written constants rather than a parser.
+     */
+    private static List<int[]> joinedSideIsPreserved(String sql) {
+        return onClauses(sql, true);
+    }
+
+    private static List<int[]> onClauses(String sql, boolean onlyPreservingTheJoinedSide) {
+        var clauses = new ArrayList<int[]>();
+        var on = Pattern.compile("(?i)\\bon\\b").matcher(sql);
+        while (on.find()) {
+            if (depthAt(sql, on.start()) != 0) {
+                continue;
+            }
+            if (onlyPreservingTheJoinedSide && !preservesTheJoinedSide(sql, on.start())) {
+                continue;
+            }
+            int end = sql.length();
+            var terminator = CLAUSE_KEYWORD.matcher(sql);
+            terminator.region(on.end(), sql.length());
+            while (terminator.find()) {
+                if (depthAt(sql, terminator.start()) == 0) {
+                    end = terminator.start();
+                    break;
+                }
+            }
+            clauses.add(new int[]{on.end(), end});
+        }
+        return clauses;
+    }
+
+    /**
+     * Whether the join introducing the {@code ON} at {@code onStart} keeps its joined side's
+     * unmatched rows — i.e. is a {@code RIGHT} or {@code FULL} join. Read off the words
+     * immediately before the nearest preceding top-level {@code JOIN}, which is where SQL puts
+     * them ({@code RIGHT OUTER JOIN issues i ON …}).
+     */
+    private static boolean preservesTheJoinedSide(String sql, int onStart) {
+        var join = Pattern.compile("(?i)\\bjoin\\b").matcher(sql);
+        int nearest = -1;
+        while (join.find()) {
+            if (join.start() >= onStart) {
+                break;
+            }
+            if (depthAt(sql, join.start()) == 0) {
+                nearest = join.start();
+            }
+        }
+        if (nearest < 0) {
+            return false;
+        }
+        var qualifiers = sql.substring(Math.max(0, nearest - 24), nearest);
+        return Pattern.compile("(?i)\\b(?:right|full)\\b").matcher(qualifiers).find();
+    }
+
+    private static boolean within(List<int[]> spans, int index) {
+        return spans.stream().anyMatch(span -> index >= span[0] && index < span[1]);
+    }
+
+    /** Bracket depth at {@code index}, counted from the start of the (block-local) string. */
+    private static int depthAt(String sql, int index) {
+        int depth = 0;
+        for (int i = 0; i < index; i++) {
+            char c = sql.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            }
+        }
+        return depth;
+    }
+
+    /**
+     * Whether a block is <strong>correlated</strong> to the query it sits in — tied to the outer
+     * row by a conjunctive equality between an alias it binds and one it does not, at its own
+     * bracket level and outside its own {@code JOIN … ON} clauses.
+     *
+     * <p><strong>Round 3 (HD-139 R5) narrowed this from "mentions an outer alias", and the two are
+     * not the same predicate.</strong> The exemption's justification is that such a block's rows
+     * "are already restricted by whatever restricts the outer row" — which is true when the
+     * correlation ties the inner row to the outer row's <em>identity</em>, i.e. the label probe's
+     * {@code il.issue_id = i.id}. It is false for every other way an outer alias can appear, and
+     * all three of these passed the old test and are hostile fixtures now:
+     * <ul>
+     *   <li><strong>an inequality</strong> — {@code WHERE e.occurred_at &lt; i.created_at} restricts
+     *       <em>when</em>, never <em>whose</em>, and counts the ledger of every workspace in the
+     *       install;</li>
+     *   <li><strong>a mention in the SELECT list only</strong> — {@code SELECT count(*) || i.key
+     *       FROM sprint_scope_events e WHERE …} correlates the projection and restricts nothing;</li>
+     *   <li><strong>a correlation behind an {@code OR}</strong> — which also re-opened the
+     *       disjunction hole round 2 closed, because this method short-circuits <em>before</em>
+     *       {@link #statesATenant}, so {@link #isConjunct} was never consulted at all.</li>
+     * </ul>
+     *
+     * <p>The {@code ON} exclusion is here for {@link #tenantPredicate}'s reason: a correlation in
+     * the {@code ON} of a {@code LEFT JOIN} does not restrict the block's preserved side either.
+     *
+     * <p>Only this block's own level is inspected: an alias bound inside a deeper subquery is that
+     * subquery's business, and that subquery is checked as its own block. An alias bound by a
+     * <em>derived table</em> at this level reads as unbound, since {@link #boundAliases} matches a
+     * table name after {@code FROM}/{@code JOIN} and a derived table has none — so such a block is
+     * exempted somewhat too readily. That is inherited rather than introduced (the old rule
+     * exempted it too, and on a weaker test), no statement in the package writes one, and the
+     * shape of the fix is the same as the one above: name what the correlation has to be.
+     */
+    private static boolean correlated(String block) {
+        var bound = boundAliases(block);
+        var joinOn = joinOnClauses(block);
+        var equality =
+                Pattern.compile("\\b([A-Za-z_]\\w*)\\.\\w+\\s*=\\s*([A-Za-z_]\\w*)\\.\\w+")
+                        .matcher(block);
+        while (equality.find()) {
+            if (depthAt(block, equality.start()) != 0 || within(joinOn, equality.start())) {
+                continue;
+            }
+            boolean leftBound = bound.contains(equality.group(1).toLowerCase());
+            boolean rightBound = bound.contains(equality.group(2).toLowerCase());
+            if (leftBound == rightBound) {
+                continue;             // both sides local, or neither — this ties nothing outwards
+            }
+            if (isConjunct(block, equality.start(), equality.end())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Every alias (or bare table name) this block binds at its own level. */
+    private static Set<String> boundAliases(String block) {
+        var aliases = new LinkedHashSet<String>();
+        var matcher = TABLE_REFERENCE.matcher(block);
+        while (matcher.find()) {
+            if (depthAt(block, matcher.start()) != 0) {
+                continue;
+            }
+            var alias = matcher.group(2);
+            var bound = alias == null || NOT_AN_ALIAS.contains(alias.toLowerCase())
+                    ? matcher.group(1)
+                    : alias;
+            aliases.add(bound.toLowerCase());
+        }
+        return aliases;
     }
 
     /**
@@ -601,14 +1095,25 @@ class ReportQueryScopeTest {
      * eyeballing the regex.) So the rule is positional instead: find the smallest bracket group
      * containing the predicate and require no {@code OR} at that group's own nesting level.
      *
+     * <p>Unlike {@link #tenantPredicate}, a scope written inside a {@code JOIN … ON} counts here —
+     * that is R4's and R5's house style for reaching {@code issues} from the ledger, and it is
+     * legitimate because {@code issues} is the <em>optional</em> side of those {@code LEFT} joins.
+     * {@link #joinedSideIsPreserved} is where that "unlike" stops: on a {@code RIGHT} or
+     * {@code FULL} join the joined side is preserved, its unmatched rows come back whatever the
+     * {@code ON} says, and a scope written there is not one.
+     *
      * @see #isConjunct for the one exception, which is load-bearing rather than a compromise
      */
     private static int conjunctiveScopes(String alias, String sql) {
         var predicate = Pattern.compile(
                 "(?i)\\b" + Pattern.quote(alias) + "\\.project_id\\s*=\\s*:projectId\\b");
         var matcher = predicate.matcher(sql);
+        var preserved = joinedSideIsPreserved(sql);
         int found = 0;
         while (matcher.find()) {
+            if (within(preserved, matcher.start())) {
+                continue;
+            }
             if (isConjunct(sql, matcher.start(), matcher.end())) {
                 found++;
             }

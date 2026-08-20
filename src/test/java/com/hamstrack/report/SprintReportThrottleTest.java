@@ -8,7 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * R4's two endpoints are inside the reports budget, and inside the <em>same</em> one.
+ * R4's two endpoints and R5's are inside the reports budget, and inside the <em>same</em> one.
  *
  * <p>Small on purpose: {@code FlowReportThrottleTest} and {@code AgingReportThrottleTest} already
  * establish what the limiter does and that it runs before tenancy is resolved. The only thing left
@@ -42,5 +42,22 @@ class SprintReportThrottleTest extends SprintReportTestBase {
                 .andExpect(status().isTooManyRequests())
                 .andExpect(header().exists("Retry-After"));
         getReview(ctx, ctx.token(), null).andExpect(status().isTooManyRequests());
+    }
+
+    /**
+     * R5, on the same pot. It inherits the budget from the path binding rather than from a line
+     * anybody remembered to add — which is the property {@code ReportRateLimitConfig} was built for
+     * and the one worth re-proving per endpoint, since the failure is invisible until it is abused.
+     */
+    @Test
+    void velocityIsOnTheSameBudget() throws Exception {
+        var ctx = newProject();
+
+        getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
+        getVelocity(ctx, ctx.token(), null).andExpect(status().isOk());
+
+        getVelocity(ctx, ctx.token(), null)
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().exists("Retry-After"));
     }
 }

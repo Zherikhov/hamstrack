@@ -248,7 +248,10 @@ tags:
       everywhere, while binding and before any handler runs. The sprint reports
       have no window either; their span is the sprint's, and an over-long sprint
       is **clipped and disclosed** (`seriesTruncatedAt`) rather than refused,
-      because the caller never stated that window.
+      because the caller never stated that window. `/velocity` bounds its sample
+      instead — `sprints` is **refused at both ends** (1…12) rather than clamped,
+      by the same never-answer-a-question-nobody-asked rule the window cap
+      follows.
 
 
       And a request-supplied id means one of two opposite things depending on
@@ -271,6 +274,14 @@ tags:
       `sprint: null`** — deliberately not a `404`, which would be
       indistinguishable from "that sprint is not in this project" and leave a
       client unable to tell a project between sprints from a bad id.
+
+
+      `/velocity` sits on the same rule from the other side: **its subject is the
+      PROJECT**, which the path already names, so it takes no `sprintId` at all
+      (its sample is resolved from the project) and has no `404` of its own. It
+      is also the one report defined as much by its refusals as by its output —
+      no per-person breakdown, no aggregate above the project, and no single
+      quotable average — and those are contract, not UI.
   - name: Search
     description: Cross-project issue search via HQL (Hamstrack Query Language)
   - name: Saved Filters
@@ -5607,6 +5618,169 @@ paths:
         '404': { $ref: '#/components/responses/ReportSprintNotFound' }
         '429': { $ref: '#/components/responses/ReportThrottled' }
 
+  /workspaces/{workspaceId}/projects/{projectId}/reports/velocity:
+    get:
+      tags: [Reports]
+      summary: Velocity — how much should we plan for next sprint
+      description: >-
+        The last N **completed** sprints as bars, each showing what it delivered
+        with its commitment marked on it, and beside them a p50/p85 band to plan
+        the next sprint with. Access, caching, the `meta` block and the throttle
+        are the family's; see the `Reports` tag.
+
+
+        The whole response is one sentence with a picture: *"Recent sprints
+        delivered between 14 and 23 issues; plan for ~18 (p50) and treat 23 (p85)
+        as a stretch. Based on 6 sprints."*
+
+
+        **This report is defined by what it refuses to do, and the refusals are
+        part of the contract rather than of the UI.** Velocity's documented harm
+        is not its arithmetic, it is its audience: a single number read as a
+        productivity score, compared between teams, and answered by inflating
+        estimates. So three things are absent on purpose and will not be added —
+        an integrator who assumes they are simply missing will ask for the wrong
+        thing.
+
+        * **No per-person breakdown.** Not a filter, not a field, not a tooltip
+          extra, not a future CSV column. The statement behind this endpoint does
+          not select `actor_id` or `assignee_id` at all, so there is nothing to
+          break down by; the refusal holds one layer below the response shape.
+        * **No cross-project or workspace-level aggregate**, and **the
+          endpoint's own path is the enforcement** — this shape exists only under
+          `/projects/{projectId}/`. Comparing two teams means opening two pages
+          and doing the arithmetic by hand, and **that friction is the design**:
+          the cost of the comparison is paid by the person making it, because the
+          harm above comes from comparisons cheap enough to make without thinking.
+          A rollup added "for convenience" removes the mitigation and keeps the
+          metric.
+        * **No single quotable average.** There is no `averageVelocity` field and
+          there is not meant to be one. The band is a range that always arrives
+          with its own sample size, precisely so there is nothing to paste into a
+          status report.
+
+
+        **`sprints` is refused at BOTH ends, never clamped.** Above `12` and below
+        `1` are both `400`s naming the bound. The lower bound is not pedantry:
+        `sprints=0` would otherwise fail deeper in as a `500` on an endpoint whose
+        contract promises a `400`, and "zero sprints" is a question with no answer
+        rather than a request for an empty chart. The cap of 12 is deliberately an
+        order of magnitude below Jira's 120 sprints / 25 000 issues, and not only
+        for cost: twelve sprints is roughly half a year, and **a band computed
+        from further back is a precise number about a team that no longer
+        exists** — different members, different process, a different idea of what
+        a point is.
+
+
+        **There is no `sprintId`, and no `404` of its own.** The sample is
+        resolved *from the project* — its most recently completed sprints — so no
+        caller-supplied sprint id ever reaches the query. This is the sibling of
+        the subject-versus-filter rule the two sprint reports sit on: **velocity's
+        subject is the project**, which the path already names, so there is
+        nothing here that could fail to resolve.
+
+
+        **The band is suppressed for two different reasons, and they are not the
+        same news.** `forecast` is always present; when it is suppressed both
+        percentiles are `null` and `sampleSize` still states what there was, so a
+        client says what it has rather than showing an empty box. The bars render
+        either way — they are facts, and only the band is an inference.
+
+        * **Fewer than three completed sprints** — *"Not enough completed sprints
+          to forecast (need 3, have 2)"*. Three is the smallest sample in which a
+          p50 and a p85 can name different sprints at all; at two the "band" would
+          be the range itself dressed up as a statistic. This is the same principle
+          as `/cycle-time`'s percentile suppression, one level up, and time fixes
+          it.
+        * **`meta.truncated` is true** — the row cap bit, so the bars that
+          survived are no longer the sample anybody asked for, and a p85 over a
+          subset the reader did not choose is a number this report may not stand
+          behind. Time does not fix this one. See
+          `VelocityReportResponse.sprints` for what the cap removes and why whole
+          sprints go rather than partial ones.
+
+        **Read `meta.truncated` to tell the two apart.** A client that treats null
+        percentiles as only ever meaning "not enough history" will tell its user
+        the wrong thing in the second case.
+
+
+        A project that has never completed a sprint is a `200` with an empty
+        `sprints` list and `sampleSize: 0` — never a `404`.
+
+
+        **Points are the ledger's entry SNAPSHOT, not current estimates** — the
+        sprint review's rule, and the opposite of the burn-up's. Velocity is
+        retrospective and every sprint it describes is frozen: with current points
+        a re-estimate today would move a bar drawn four months ago **and the band
+        computed from it**, so tomorrow's plan would change because somebody tidied
+        yesterday's backlog. It also keeps the bar and its drill-down honest — the
+        commitment number here is summed from the same snapshots
+        `/sprint-review` sums, so the review is literally the bar's breakdown.
+
+
+        **`sprints[]` is chronological, oldest first**, so a client renders left to
+        right in time without sorting, and every bar carries `startAt` /
+        `completedAt` so order never has to be inferred from a name.
+
+
+        **No status code depends on a delivery capability.** A `KANBAN` project
+        answers with whatever sprints it has completed, and `measure=POINTS`
+        answers with points in a project whose `estimation` is `false`.
+      operationId: getVelocityReport
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - name: sprints
+          in: query
+          description: >-
+            How many of the most recently completed sprints to sample. Defaults
+            to `6` — roughly a quarter of a year. **Refused, not clamped, at both
+            ends**: anything below `1` or above `12` is a `400` whose `detail`
+            names the bound and the value asked for.
+          schema: { type: integer, minimum: 1, maximum: 12, default: 6, example: 6 }
+        - name: measure
+          in: query
+          description: >-
+            What the four per-sprint numbers and the band count. Defaults to
+            `COUNT`. Echoed back in the response, so a cached or shared chart
+            always says what it is measuring. An unknown value is a `400`.
+          schema: { $ref: '#/components/schemas/ReportMeasure' }
+      responses:
+        '200':
+          description: >-
+            OK — the bars oldest first, the band, and the shared `meta` block.
+            Also the answer for a project that has never completed a sprint
+            (empty `sprints`, `forecast.sampleSize: 0`).
+          headers:
+            Cache-Control: { $ref: '#/components/headers/ReportCacheControl' }
+            Vary: { $ref: '#/components/headers/ReportVary' }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VelocityReportResponse' }
+        '400':
+          description: >-
+            `sprints` outside `1`…`12` — the `detail` names the bound and the
+            value asked for, and the sample is **never** clamped to fit, because a
+            forecast built from a different number of sprints than the one you
+            asked for is worse than no forecast. Also an unknown `measure`, or a
+            path id / `sprints` value that will not bind at all.
+
+
+            **The two kinds refuse in a different order relative to tenancy, and
+            the difference is visible.** A value that fails to *bind* (`sprints=x`,
+            an unknown `measure`, a malformed path UUID) is refused by Spring
+            before the handler runs, so it `400`s even on a project the caller
+            cannot see. A value that binds and is then judged (`sprints=99`) is
+            refused only **after** tenancy is resolved, so on a project the caller
+            cannot see it is a `404` — a `400` there would confirm the project
+            exists.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
+
   /notifications:
     get:
       tags: [Notifications]
@@ -6854,7 +7028,7 @@ components:
 
 
         The budget covers the whole `…/reports/**` path per principal — **all
-        five reports share one budget rather than holding one each**, so a page
+        six reports share one budget rather than holding one each**, so a page
         opening `/sprint-burnup` and `/sprint-review` together spends two of it —
         and it is spent **before** the workspace and project are resolved. This is
         therefore the one place in this API where `429` **precedes** `404`: an
@@ -10250,7 +10424,13 @@ components:
             two; on `/cycle-time` the completed issues in the window after
             filters (i.e. `sampleSize`); on `/aging` the project's open issues;
             on `/sprint-burnup` and `/sprint-review` the distinct issues that
-            have ever been in that sprint.
+            have ever been in that sprint; on `/velocity` the distinct issues the
+            sampled sprints' ledgers hold, an issue that appeared in two of them
+            counted once.
+
+
+            **On every report it is counted independently of the row cap**, which
+            is what lets it be the larger number when truncation bites.
 
 
             It is never `items.length`: when the cap bites this is deliberately
@@ -10286,6 +10466,16 @@ components:
             is a different limit and does not set this flag** — that one clips the
             day series against `app.reports.max-window-days` and names the day it
             stopped on; this one means the row cap printed beside it in `cap`.
+
+
+            **On `/velocity` this flag also changes what the response is willing
+            to say.** Its sweep reads up to twelve sprints' ledgers at once, so a
+            cap that bites removes whole sprints rather than shaving one; those
+            sprints are dropped from `sprints` instead of being drawn as
+            all-zero bars, **and `forecast` is suppressed**, because a band over
+            the bars that happened to fit is not the band the caller asked for. So
+            here `truncated: true` means "this chart is shorter than you asked for
+            and its forecast is withheld", not merely "a list was cut".
         cap:
           type: integer
           example: 20000
@@ -10336,8 +10526,8 @@ components:
             something or none was sent. Entries are the query-parameter names
             themselves (`typeId`, `componentId`, `labelId`), so a client can map
             one straight back to the control the user touched. Always empty on
-            `/aging`, `/sprint-burnup` and `/sprint-review`, which take no
-            filters — `sprintId` is a **subject**, so an id that matches nothing
+            `/aging`, `/sprint-burnup`, `/sprint-review` and `/velocity`, which
+            take no filters — `sprintId` is a **subject**, so an id that matches nothing
             is a `404` there rather than an entry here.
 
 
@@ -11024,8 +11214,11 @@ components:
           allOf:
             - $ref: '#/components/schemas/ReportMeta'
           description: >-
-            Provenance. Here `basedOnIssues` is the distinct issues this response
-            describes — everything that has ever been in this sprint — and
+            Provenance. Here `basedOnIssues` is every distinct issue that has
+            ever been in this sprint, counted in the database **above** the row cap
+            — so when `truncated` bites it is deliberately larger than what came
+            back, because its job is to say how many issues the report was
+            *about*. And
             `unmatchedFilters` is always empty, because this endpoint takes no
             filters. `firstIssueAt` is the family's, unchanged: the **project's**
             earliest issue, not the sprint's, and never scoped to the sprint.
@@ -11274,11 +11467,255 @@ components:
           allOf:
             - $ref: '#/components/schemas/ReportMeta'
           description: >-
-            Provenance. `basedOnIssues` is the distinct issues this response
-            describes — everything that has ever been in this sprint — and
+            Provenance. `basedOnIssues` is every distinct issue that has ever been
+            in this sprint, counted in the database **above** the row cap, so it is
+            deliberately larger than what came back when `truncated` bites. And
             `unmatchedFilters` is always empty, because this endpoint takes no
             filters. `firstIssueAt` is the family's: the **project's** earliest
             issue, never scoped to the sprint.
+
+    VelocitySprint:
+      type: object
+      description: >-
+        One completed sprint's output — one bar of the velocity chart. Four
+        numbers, **all in the requested `measure`**: what the sprint committed to,
+        what it delivered, what arrived after the start, and what carried over.
+
+
+        They are the sprint review's headline figures for a sprint nobody has to
+        open, which is what lets velocity be a forecast input rather than a
+        scoreboard: a bar reading 18 beside a commitment marker reading 21 and a
+        note that four issues arrived late is a *description of what happened*,
+        not a score.
+
+
+        **The four share one measure deliberately.** Under `POINTS` all four are
+        point sums; under `COUNT` all four are issue counts. A tooltip mixing "41
+        points delivered" with "4 issues added" would carry two units with no way
+        for a reader to tell which is which.
+
+
+        **Nothing here is keyed by a person, and nothing here may become so** — no
+        assignee, no actor, no owner, not as a field, a nested breakdown, a
+        tooltip extra or a later CSV column.
+      properties:
+        sprintId:
+          type: string
+          format: uuid
+          description: >-
+            The sprint, so a client can link to its **sprint review** —
+            the report that shows the issues behind these four numbers, and the
+            only per-issue breakdown velocity offers.
+        name: { type: string, example: Sprint 7, description: The bar's label. }
+        startAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When it started — the instant `committed` is measured at.
+        completedAt:
+          type: string
+          format: date-time
+          description: >-
+            When it was completed. **Never null**: only COMPLETED sprints are
+            sampled. This is the instant every other number here is measured at,
+            and what orders the bars.
+        committed:
+          type: number
+          example: 21
+          description: >-
+            What was in the sprint at `startAt` — the commitment batch its start
+            wrote. Marked **on** the bar rather than drawn as a second bar: it is
+            the plan, and the plan is context for the outcome, not a competing
+            outcome.
+        completed:
+          type: number
+          example: 18
+          description: >-
+            What was still in the sprint at `completedAt` and closed by then.
+            **The bar's height, and the only number the forecast band is computed
+            from.**
+        addedAfterStart:
+          type: number
+          example: 4
+          description: >-
+            Everything that entered after `startAt`. The clause that turns "we
+            missed the plan" into "the plan changed" — without it a bar below its
+            own commitment marker reads as a failure whatever actually happened.
+            With `committed` it partitions everything the sprint ever held.
+        carriedOver:
+          type: number
+          example: 3
+          description: >-
+            What was still in the sprint at `completedAt` and not closed. With
+            `completed` it partitions what the sprint **held at its end** — which
+            is the denominator the sprint review's headline uses, never
+            `committed`, since that counts a different population.
+        unestimatedCount:
+          type: integer
+          example: 2
+          description: >-
+            How many of the issues the sprint **held at its end** (i.e. the
+            `completed` + `carriedOver` population) carried no estimate.
+
+
+            **Reported under BOTH measures, and this is the field that keeps the
+            chart honest.** Under `POINTS` an unestimated issue contributes `0` to
+            the bar, so a sprint where nine of twenty-three issues were never
+            estimated is a silent zero nine times over — the bar **and the band
+            derived from it** are quietly biased low, with nothing in the response
+            to notice. Under `COUNT` it is the same disclosure a reader needs
+            before flipping the toggle.
+
+    VelocityForecast:
+      type: object
+      description: >-
+        The band — *"plan for ~18 (p50) and treat 23 (p85) as a stretch. Based on
+        6 sprints."* This object **is** the refusal the report is built around: a
+        p50/p85 pair that always arrives with its own sample size has no single
+        value to quote, is explicitly a range, and says how little it rests on.
+
+
+        **Percentiles, never a rolling average and never a mean.** A mean lets one
+        washed-out sprint drag the forecast somewhere no sprint ever was, and a
+        forecast naming an outcome the team has never had is exactly the "these
+        numbers don't match what I expected" failure the `meta` convention exists
+        to prevent.
+
+
+        **Always present, even when suppressed** — read `forecast.p50 === null`
+        and never test the parent for existence. Suppression is a fact about the
+        data, not a change of response shape.
+
+
+        **There are TWO reasons the percentiles are null, and a client that
+        assumes only the first will explain the second wrongly to its user:**
+
+        * **fewer than three completed sprints** — "not enough history yet", which
+          time fixes; or
+        * **`meta.truncated` is true** — the row cap bit, so the surviving bars
+          are no longer the sample anybody asked for, and a p85 over a subset the
+          reader did not choose is exactly the number this report may not stand
+          behind. Time does not fix this one; it is a bound being hit.
+
+        `meta.truncated` is what tells the two apart, and `sampleSize` is stated
+        in both cases.
+      properties:
+        p50:
+          type: number
+          format: double
+          nullable: true
+          example: 18
+          description: >-
+            The **median of the sampled sprints' `completed` values**, in the
+            requested measure — *plan for about this* — or `null` when suppressed.
+
+
+            Interpolated with PostgreSQL's `percentile_cont` definition, the same
+            one `/cycle-time` uses, so a "p85" means one thing across this
+            product. One consequence to render for: **the band is fractional even
+            under `COUNT`**, where every bar is a whole number — a six-sprint
+            sample can legitimately answer `p50: 18.5`. It is a `double` where the
+            bars are exact decimals, and the difference is meant: a bar is an exact
+            sum of things that happened, a percentile is an interpolated estimate
+            of something that has not.
+        p85:
+          type: number
+          format: double
+          nullable: true
+          example: 23
+          description: >-
+            The 85th percentile — *a stretch, not a target* — on the same terms.
+            85 rather than 90 or 95 because it is the number the flow-metrics
+            literature uses for a "most work finishes within" statement, and at
+            six-to-twelve samples a p95 is one sprint wide.
+        sampleSize:
+          type: integer
+          example: 6
+          description: >-
+            How many completed sprints these numbers came from. **Always stated,
+            including when the band is suppressed** — it is the sentence's last
+            clause, and a band whose sample size a reader has to go and count is
+            the scoreboard this object exists not to be.
+
+
+            It is the number of bars actually returned, so it can be **smaller
+            than `sprints`** for the ordinary reason — the project has not
+            completed that many — and, when `meta.truncated` is true, because
+            every sprint whose ledger rows fell past the cap was dropped, which can
+            be most of them. See `VelocityReportResponse.sprints`.
+
+
+            It is stated whenever the band is suppressed, under **both** causes:
+            below **3** completed sprints, and on a truncated read whatever the
+            count.
+
+    VelocityReportResponse:
+      type: object
+      description: >-
+        `GET …/reports/velocity`. The last N completed sprints as bars, and beside
+        them the band to plan the next one with.
+
+
+        What this response **cannot** say is as much a part of it as what it does:
+        nothing is keyed by a person, nothing aggregates above the project, and
+        there is no single headline number. See the endpoint description for why
+        each is a decision rather than a gap.
+      properties:
+        measure:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeasure'
+          description: >-
+            What the numbers count — `COUNT` by default, the measure every project
+            has. Echoed so a cached or shared response always says what it is
+            measuring.
+        sprints:
+          type: array
+          description: >-
+            The sampled sprints in **chronological order, oldest first**, so a
+            client renders them left to right in time without sorting. **Empty for
+            a project that has never completed a sprint** — a `200` with an empty
+            list and a suppressed band, never a `404` and never an error.
+
+
+            **When `meta.truncated` is true this list can be substantially
+            shorter than the sprints you asked for**, and a client must read it as
+            "some bars are missing" rather than as a quiet quarter. Once the cap
+            has bitten, every sampled sprint with no shipped ledger rows is
+            dropped — not merely the one cut in half.
+
+
+            The reason it is whole sprints rather than a shaved tail: the sweep
+            reads the ledgers ordered by sprint id, and those ids are **UUID v7**,
+            i.e. time-ordered — so a cap that bites removes the later-created
+            sampled sprints' rows *entirely*. An absent sprint is then
+            indistinguishable from the legitimate "nobody ever put anything in
+            this sprint", and read as the latter it would be drawn as a bar of four
+            zeros **and those zeros would enter the forecast as real samples**,
+            dragging the band toward zero. A truncated report would understate the
+            team's output with nothing but `meta.truncated` to hint at it. So the
+            conservative reading wins: a sprint that really was empty vanishes from
+            a truncated report, which is the cheaper error.
+
+
+            The bars that do ship are each complete, so they are facts and they
+            render — but the forecast is suppressed (see `VelocityForecast`),
+            `meta.truncated` says the cap bit, and `meta.basedOnIssues` (counted
+            above the cap) still states how many issues the report was about, so a
+            reader can see how much is missing. Unreachable on real data — twelve
+            sprints of hundreds of events against a cap of 20 000 — and handled
+            anyway.
+          items: { $ref: '#/components/schemas/VelocitySprint' }
+        forecast: { $ref: '#/components/schemas/VelocityForecast' }
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ReportMeta'
+          description: >-
+            Provenance. `basedOnIssues` is the distinct issues the sampled
+            sprints' ledgers hold, counted in the database **above** the row cap
+            and counted **once** for an issue that appeared in two of the sampled
+            sprints. `firstIssueAt` is the family's — the **project's** earliest
+            issue, never the sample's — and `unmatchedFilters` is always empty,
+            because this endpoint takes no filters.
 
     NotificationResponse:
       type: object

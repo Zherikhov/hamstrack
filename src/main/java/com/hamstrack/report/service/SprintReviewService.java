@@ -141,12 +141,13 @@ public class SprintReviewService {
             } else {
                 addedAfterStart.add(issue);
             }
-            if (!issue.memberBefore(endBoundary)) {
-                removedBeforeEnd.add(issue);
-            } else if (issue.closedBefore(endBoundary)) {
-                completed.add(issue);
-            } else {
-                carriedOver.add(issue);
+            // The three-way cut lives on LedgerIssue, not here: velocity (§2.5) needs the same
+            // sentence for twelve sprints at a time, and two copies of it would be free to
+            // disagree about a completed sprint that both reports describe.
+            switch (issue.outcomeAt(endBoundary)) {
+                case REMOVED_BEFORE_END -> removedBeforeEnd.add(issue);
+                case COMPLETED -> completed.add(issue);
+                case CARRIED_OVER -> carriedOver.add(issue);
             }
         }
 
