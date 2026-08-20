@@ -15,7 +15,9 @@ import java.util.UUID;
  * Custom field catalog and field sets for the system administrator. Field
  * type and key are immutable after creation (stored values depend on them);
  * deleting a field with values requires the explicit {@code dropValues=true}
- * confirmation. Guarded by hasRole(ADMIN) in SecurityConfig.
+ * confirmation. Creating a field also refuses (409) a key already claimed by
+ * {@link com.hamstrack.search.FieldRegistry}, checked after slugification and on
+ * create only. Guarded by hasRole(ADMIN) in SecurityConfig.
  */
 @RestController
 @RequestMapping("/api/admin")

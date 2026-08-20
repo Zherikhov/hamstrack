@@ -17,10 +17,9 @@ import java.util.Set;
  * validation, value resolution, Criteria compilation and the {@code /schema}
  * autocomplete endpoint. One place to register a queryable field.
  *
- * <p>Live fields: {@code status type priority assignee reporter parent text
- * created updated due label component fixVersion affectsVersion} (HD-30 promoted the
- * former {@code label} stub from not-available to live; HD-31 added
- * {@code component}; HD-32 added the two version roles). Custom fields are not
+ * <p><strong>The constructor below is the list of live fields</strong> — deliberately not
+ * restated in prose here, because an enumeration in a javadoc goes stale one entry before
+ * anybody notices and then misleads exactly the reader who trusted it. Custom fields are not
  * registered here at all — they are
  * resolved per request from the caller's {@link ResolutionContext}. A field can also
  * be registered as a <em>known-but-not-available</em> stub
@@ -53,6 +52,71 @@ public class FieldRegistry {
         // handled specially by the compiler (=/!=/IN on id, >/</>=/<= on position).
         register(new FieldDescriptor("priority", FieldDataType.ENUM_REF, ORDERED,
                 true, false, true, "priority.id", "PRIORITY", List.of(), true));
+
+        // ---- project (HD-101) ----
+        // Single-valued and NOT NULL, so it reuses the plain ENUM_REF id-set path — no new
+        // compiler branch, just `entityPath = "project.id"`.
+        //
+        // Why it exists: search is workspace-scoped by construction (SearchScope ANDs
+        // `project.id IN :visibleProjectIds` onto every compiled query), so before this field
+        // there was no way to ask the most ordinary question a workspace with more than one
+        // project has — "what is going on in THIS project". It also disambiguates the fields
+        // whose names resolve ACROSS the visible projects: two projects may each ship a "2.4.0"
+        // or run a "Sprint 1", and `project = "HD" AND fixVersion = "2.4.0"` is the only way to
+        // say which one is meant.
+        //
+        // A `project` clause can only NARROW: it compiles inside the scope predicate, never
+        // beside it, so `project != "HD"` means "in a visible project other than HD" and no
+        // operand can name a project the caller could not already search (an unknown or
+        // invisible one is a field-anchored 422 from HqlValueResolver — never a 404, never a
+        // silent empty result that would confirm the project exists somewhere).
+        //
+        // <strong>No parsed term may ever be folded into SearchScope.</strong> Narrowing
+        // `visibleProjectIds` to a named project would look like an optimisation and would make
+        // the tenant boundary a function of query text — the one property SearchScope's javadoc
+        // exists to protect. That holds for every term the language will ever gain; `project` is
+        // simply the first one for which the shortcut is tempting, because the scope predicate
+        // already restricts the same column. The term stays an ordinary predicate nested inside
+        // the scope, which is what makes the guarantee structural rather than case-by-case.
+        //
+        // KEY ONLY, never name: `UNIQUE(workspace_id, key)` makes a key an identity, while
+        // `projects.name` carries no uniqueness constraint at all — so a name operand would
+        // resolve to a SET, and this field would join the category of ambiguous name-resolved
+        // fields it was added to disambiguate. The human name still reaches the user, in the
+        // suggestion label and in the "did you mean" hint on a miss — see
+        // HqlValueResolver#resolveProject.
+        //
+        // nullable = FALSE: every issue has a project, so `project IS EMPTY` is a statement that
+        // could never be true. It is refused by HqlValidator ("Field 'project' cannot be empty")
+        // rather than silently matching nothing.
+        //
+        // sortable = TRUE, on `project.key`: an issue has exactly one project and a key is a
+        // total order that means the same thing in every row — the same argument that makes
+        // `component` sortable. (The reasons the non-sortable fields give are different ones:
+        // `sprint` has no cross-project order, `label`/`fixVersion` are SETS per issue.) The
+        // NOT NULL column also means no LEFT-join dance: an implicit inner join drops no rows.
+        //
+        // No plural alias. `labels`/`components`/`sprints` are plurals of many-valued or
+        // arguably-plural things; an issue has one project. Adding an alias later is free,
+        // removing one is not.
+        //
+        // DC and Cloud are identical here, deliberately and permanently: this is a query
+        // language term over data both modes hold, and a term that existed in one mode only
+        // would make saved-filter text non-portable across an export/import. It must not become
+        // profile- or property-gated.
+        //
+        // <strong>A workspace that already keys a CUSTOM field `project` is affected by this
+        // registration.</strong> A registered name is a reserved system name and outranks any
+        // tenant's own field (FieldResolver), so in such a workspace `project = …` stops meaning
+        // that custom field and starts meaning this one, and — the silent half — /schema drops
+        // the tenant's field from the search vocabulary with no message anywhere, while it keeps
+        // working everywhere else in the product. That is the intended precedence (the product's
+        // vocabulary cannot be captured per-tenant) and the same class of event
+        // RetiredFieldAliases documents from the other direction; AdminFieldService now refuses
+        // to create NEW fields under a registered key, which stops the recurrence but is not
+        // retroactive.
+        register(new FieldDescriptor("project", FieldDataType.ENUM_REF, EQ_ONLY,
+                true, false, true, "project.id", "PROJECT", List.of(), true));
 
         // ---- USER_REF ----
         register(new FieldDescriptor("assignee", FieldDataType.USER_REF, EQ_ONLY,

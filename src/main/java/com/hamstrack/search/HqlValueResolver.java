@@ -68,6 +68,11 @@ public class HqlValueResolver {
     // ---- ENUM_REF (status / type / priority by name → id set) ----
 
     private ResolvedValue resolveEnum(FieldDescriptor field, Value value, ResolutionContext ctx) {
+        // project (HD-101) is the one ENUM_REF whose operand addresses TWO namespaces, so it
+        // does not reduce to a single lookup map — see below.
+        if (field.name().equals("project")) {
+            return resolveProject(field, value, ctx);
+        }
         String name = requireName(field, value);
         var byName = switch (field.name()) {
             case "status" -> ctx.statusIdsByName();
@@ -90,6 +95,75 @@ public class HqlValueResolver {
                     "No " + field.name() + " named '" + name + "' in this workspace", field.name());
         }
         return new ResolvedValue.Ids(ids);
+    }
+
+    // ---- project (a KEY → one of the caller's VISIBLE project ids) ----
+
+    /**
+     * Resolve a {@code project} operand (HD-101). The lookup map is built from the caller's
+     * <em>visible projects</em> only, so an operand can never designate a project the search
+     * scope would hide, and an unresolvable one is the standard field-anchored 422 — a project
+     * the caller cannot search is indistinguishable from a misspelling, which is what stops this
+     * field from being used to probe which projects exist.
+     *
+     * <h2>A key resolves; a name does not</h2>
+     * A project carries two strings a caller might write — a {@code key} ({@code "HD"}) and a
+     * {@code name} ({@code "Hamstrack"}) — and only the key is an identity: {@code key} is
+     * {@code UNIQUE(workspace_id, key)} while {@code name} carries no uniqueness constraint and
+     * none is checked on create. Two projects in one workspace may legally both be called
+     * "Platform", so a name operand would denote a <em>set</em> — which would put this field in
+     * the very category of ambiguous, name-resolved fields it exists to disambiguate. Matching
+     * both namespaces would be worse still: keys are conventionally acronyms, so a workspace with
+     * one project named {@code OPS} and another keyed {@code OPS} is an ordinary accident, and
+     * one operand would silently mean two projects.
+     *
+     * <p><strong>The name is not lost — it moves to where being wrong is cheap.</strong>
+     * Suggestions carry it as the LABEL while inserting the key as the VALUE, and a miss that
+     * matches a visible project's name says so:
+     * {@code Did you mean "HD" (Hamstrack)?}. A hint cannot be ambiguous, because it does not
+     * change a result set; the whole benefit of name matching is available at that layer, at no
+     * semantic cost.
+     *
+     * <p>The hint is sourced from the caller's visible projects and nothing wider — the same set
+     * {@code ProjectService.list} already hands them — so it discloses nothing they could not
+     * already list. Widening it (to the workspace's archived projects, say, in order to tell
+     * "archived" from "unknown") is the change that would turn this 422 into an existence oracle
+     * the day read visibility becomes per-actor.
+     *
+     * <p>That is also why the refusal names the <em>rule</em> rather than the operand's fate:
+     * "archived projects are not searchable" is true whether or not this key belongs to one, and
+     * needs no lookup over projects outside the visible set. It prescribes nothing, deliberately
+     * — {@code project.archive} is a project-scoped permission outside the workspace curator set,
+     * so "unarchive it" would be a remedy most readers cannot perform.
+     *
+     * <p>The map is keyed with {@link SearchNames} and so is the operand, so a pasted
+     * {@code "hd "} resolves; canonical folding is a harmless no-op on a slug-shaped key.
+     */
+    private ResolvedValue resolveProject(FieldDescriptor field, Value value, ResolutionContext ctx) {
+        String raw = requireName(field, value);
+        var ids = ctx.projectIdsByKey().get(SearchNames.key(raw));
+        if (ids != null && !ids.isEmpty()) {
+            return new ResolvedValue.Ids(ids);
+        }
+        throw new HqlSemanticException(
+                "No project with key '" + raw + "' that you can search." + keyHint(raw, ctx),
+                field.name());
+    }
+
+    /**
+     * " Did you mean …?" when the operand is a visible project's NAME, else the category rule
+     * that explains the most common remaining cause. Exactly one of the two sentences is
+     * appended: a reader who typed a name gets the fix, and a reader who typed something else
+     * gets the rule.
+     */
+    private String keyHint(String raw, ResolutionContext ctx) {
+        String folded = SearchNames.key(raw);
+        for (var project : ctx.projects()) {
+            if (SearchNames.key(project.name()).equals(folded)) {
+                return " Did you mean \"" + project.key() + "\" (" + project.name() + ")?";
+            }
+        }
+        return " Archived projects are not searchable.";
     }
 
     // ---- LABEL_REF (label name → the workspace's label ids) ----

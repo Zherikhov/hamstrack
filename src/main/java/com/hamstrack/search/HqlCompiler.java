@@ -291,6 +291,26 @@ public class HqlCompiler {
             };
         }
 
+        // project (HD-101): the id-set shape, minus the null disjunct. `issues.project_id` is
+        // NOT NULL, so `cb.isNull` below is dead here — and worse, it reads as if the field were
+        // nullable, one edit away from somebody concluding `project IS EMPTY` ought to work.
+        //
+        // `project != "HD"` is complemented INSIDE the scope predicate, which is what makes it
+        // mean "in a visible project other than HD" rather than "not in HD": SearchScope stays
+        // the outermost conjunction and no shape of a nested term can negate its enclosing AND.
+        // The one change that WOULD break that is not a Criteria shape at all — it is folding
+        // this term into SearchScope.visibleProjectIds (see the note on the registry entry).
+        if (f.name().equals("project")) {
+            var projects = resolveIdSet(f, c.value(), ctx);
+            Path<UUID> projectId = path(root, f.entityPath());
+            return switch (op) {
+                case EQ -> projectId.in(projects.ids());
+                case NEQ -> cb.not(projectId.in(projects.ids()));
+                default -> throw new HqlSemanticException(
+                        "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
+            };
+        }
+
         // id-set membership fields: status/type/priority(=,!=), assignee/reporter,
         // component, sprint, parent
         var resolved = resolveIdSet(f, c.value(), ctx);
@@ -837,6 +857,10 @@ public class HqlCompiler {
             case "assignee" -> root.get("assignee").get("displayName");
             case "reporter" -> root.get("reporter").get("displayName");
             case "parent" -> root.get("parent").get("id");
+            // HD-101: sort by the project's KEY — the identity an operand is written with, so
+            // the sort order matches the vocabulary. No join dance is needed (see below):
+            // `issues.project_id` is NOT NULL, so the implicit inner join drops no rows.
+            case "project" -> root.get("project").get("key");
             // HD-31: sort by the component's NAME, through an explicit LEFT join.
             // `root.get("component").get("name")` would imply an INNER join and
             // silently drop every component-less issue from `ORDER BY component`.

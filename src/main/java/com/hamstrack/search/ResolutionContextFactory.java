@@ -79,11 +79,30 @@ public class ResolutionContextFactory {
         var iterationProjectIds = new LinkedHashSet<UUID>();
         var releaseProjectIds = new LinkedHashSet<UUID>();
         var estimationProjectIds = new LinkedHashSet<UUID>();
+        // The `project` field (HD-101) — built in this same pass, from entities the context has
+        // ALREADY loaded, so the field costs no query anywhere: not in /search, not in /schema,
+        // not in /suggest.
+        //
+        // Every project lookup this file will ever grow must be built from `visibleIds` and
+        // nothing else. A lookup with a wider source — "is the operand an ARCHIVED project?",
+        // "did you mean one of the workspace's other projects?" — is not merely a query on the
+        // hot path: it is a code path that reads projects the scope hides, and the day read
+        // visibility becomes per-actor every such convenience turns a 422 into an existence
+        // oracle. The rule is about the class of lookup, not about the two examples.
+        Map<String, List<UUID>> projectIdsByKey = new LinkedHashMap<>();
+        var projectRefs = new ArrayList<ResolutionContext.ProjectRef>();
         for (var project : visibleProjects) {
             if (project.getBoardMode() == BoardMode.SCRUM) iterationProjectIds.add(project.getId());
             if (project.isReleasesEnabled()) releaseProjectIds.add(project.getId());
             if (project.isEstimationEnabled()) estimationProjectIds.add(project.getId());
+            addId(projectIdsByKey, project.getKey(), project.getId());
+            projectRefs.add(new ResolutionContext.ProjectRef(
+                    project.getId(), project.getKey(), project.getName()));
         }
+        // Ordered by key for the picklist/typeahead: `findAllById` promises no order, and a
+        // suggestion list that reshuffles between requests is its own small bug.
+        projectRefs.sort(java.util.Comparator.comparing(
+                ResolutionContext.ProjectRef::key, String.CASE_INSENSITIVE_ORDER));
         var capabilities = new ResolutionContext.Capabilities(
                 List.copyOf(iterationProjectIds), List.copyOf(releaseProjectIds),
                 List.copyOf(estimationProjectIds));
@@ -202,7 +221,8 @@ public class ResolutionContextFactory {
 
         return new ResolutionContext(actor, ws, visibleIds,
                 statusIds, typeIds, priorityIds, prioritiesByName, labelIds, componentIds,
-                versionIds, sprintIds, members,
+                versionIds, sprintIds, projectIdsByKey,
+                members, List.copyOf(projectRefs),
                 List.copyOf(statusNames.values()),
                 List.copyOf(typeNames.values()),
                 List.copyOf(priorityNames.values()),

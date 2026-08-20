@@ -308,8 +308,8 @@ tags:
       assumption: a "download matching issues" button is a different feature,
       wired to a search-side export path that **does not exist yet** — there is no
       CSV or export endpoint under `/search`, and the handoff cannot be built by a
-      client either, because HQL has no `project` field to scope it with and no
-      `resolved`/`closed` field, so the flow report’s resolved half is not
+      client either: HQL can now scope a query to one project, but it still has
+      no `resolved`/`closed` field, so the flow report’s resolved half is not
       expressible as a query at all. It is tracked as its own ticket. Until it
       lands, do not read a report CSV as the issues behind the chart: it is the
       numbers that were drawn.
@@ -2389,6 +2389,21 @@ paths:
         type are immutable afterwards — stored values depend on them), PATCH
         `/{id}` updates name/config/description, POST `/{id}/archive` and
         `/{id}/unarchive` hide a field from forms without touching values.
+        POST also refuses (409) a `key` that the HQL search vocabulary has
+        claimed — any name a query resolves to a built-in field, its aliases
+        (`labels`, `points`, …) included, so the reserved set is slightly wider
+        than what `GET …/search/schema` advertises (that endpoint lists each
+        field once, under its canonical name, and is capability-narrowed).
+        A registered search name always outranks a custom field of the same key: such a
+        field would work everywhere in the product except search, where it
+        would be silently omitted from the vocabulary. The check runs **after**
+        the blank-`key` slugification, so a field merely *named* "Project" is
+        refused too. **Create only** — a key is immutable on update, so
+        enforcing it there would strand an existing field, and this guard is
+        never retroactive. The same refusal applies wherever a custom field is
+        created, including the delegated
+        `/workspaces/{workspaceId}/admin/fields` and
+        `/workspaces/{workspaceId}/projects/{projectId}/admin/fields` mirrors.
         DELETE `/{id}` refuses (409) while issues hold values for the field
         unless `?dropValues=true` is passed — the values are then dropped;
         there is no remap across arbitrary value shapes. DELETE also refuses
@@ -2421,7 +2436,12 @@ paths:
               schema: { $ref: '#/components/schemas/AdminField' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Name or key already exists or is inherited from a wider scope
+          description: >-
+            Either the name or key already exists / is inherited from a wider
+            scope, or the key (after slugification) is one the HQL search
+            vocabulary has claimed — `detail` says which. A reserved key reads
+            `'project' is a reserved search field name — pick a different key
+            (a custom field with this key would not be searchable)`.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -6241,22 +6261,24 @@ paths:
         **HQL in brief** — a boolean expression of `field OP value` comparisons.
 
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
-          `priority`, `created`, `updated`, `due`, `parent`, `text`, `label`
-          (alias `labels`), `component` (alias `components`), `fixVersion`,
-          `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias
-          `points`), plus any **custom field** (M2) by its `key` (e.g.
-          `severity`). `GET /search/schema` advertises the fields autocomplete
-          should offer; that list is capability-aware and may be a **subset** of
-          what actually resolves (see below). Field names are matched
-          case-insensitively, so the all-lowercase `fixversion` /
+          `priority`, `project`, `created`, `updated`, `due`, `parent`, `text`,
+          `label` (alias `labels`), `component` (alias `components`),
+          `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`),
+          `storyPoints` (alias `points`), plus any **custom field** (M2) by its
+          `key` (e.g. `severity`). `GET /search/schema` advertises the fields
+          autocomplete should offer; that list is capability-aware and may be a
+          **subset** of what actually resolves (see below). Field names are
+          matched case-insensitively, so the all-lowercase `fixversion` /
           `affectsversion` spellings work too (`/schema` always advertises the
-          camelCase name, exactly once per field). That list is exhaustive:
-          there is **no `project` field**, so a query cannot be narrowed to one
-          project — the scope is always the caller's visible projects, and each
-          result row names its owner (`projectId`/`projectKey`/`projectName`).
+          camelCase name, exactly once per field). Whatever the query says, the
+          scope stays the caller's visible projects: a `project` term can only
+          **narrow** it, never widen it, and every result row still names its
+          owner (`projectId`/`projectKey`/`projectName`).
         - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=` (which operators a
           field accepts comes from `GET /search/schema`; `~` is text only,
-          ordered comparisons are for dates and `priority`).
+          ordered comparisons are for dates and `priority`). Negation is the
+          prefix keyword, for every field alike: write `NOT field IN (…)` — the
+          grammar has no `field NOT IN (…)` form for any field at all.
         - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
@@ -6270,6 +6292,27 @@ paths:
           display name, `currentUser()`, or UUID fallback; dates as
           `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
           and description.
+        - **Project** (`project`) is single-valued and never empty, and is
+          resolved by project **key** only — `project = "HD"`, matched
+          case-insensitively with surrounding whitespace ignored. Operators
+          `= != IN`, and it **is sortable** (`ORDER BY project` orders by key).
+          A project's **name** is deliberately not a resolution source: unlike a
+          key, a name carries no uniqueness constraint, so a name operand would
+          denote a *set* — the ambiguity this field exists to remove. The name
+          is published as a **label** beside the key it inserts, both in the
+          `/schema` `PROJECT` picklist and in `/suggest?field=project`
+          (`{"label": "Hamstrack (HD)", "value": "HD"}`), and an operand that
+          matches a visible project's name comes back with a hint naming that
+          project's key. Every issue has a project, so `project IS [NOT] EMPTY`
+          is a `422` rather than a statement that could never be true. An
+          operand naming no project the caller can search is the ordinary
+          field-anchored `422`, and the wording is **the same** whether the key
+          is unknown, belongs to a project outside the caller's reach, or
+          belongs to an archived project — the three are indistinguishable on
+          purpose, so this field cannot be used to probe which projects exist.
+          Because it narrows the row set rather than the resolution of other
+          fields, it is also what disambiguates the project-scoped catalogs:
+          `project = "HD" AND fixVersion = "2.4.0"` says which "2.4.0" is meant.
         - **Labels** (`label`, alias `labels`) are many-valued and given by
           **name** (`= != IN` and `IS [NOT] EMPTY`; not sortable). `label = "x"`
           means "carries x", `label != "x"` means "does not carry x" (issues
@@ -6414,7 +6457,14 @@ paths:
         `/search/suggest` fallback**: `?field=sprint` is intentionally not wired
         and returns the standard `422`, because a project's open sprints are
         bounded by `app.agile.max-open-sprints-per-project` and cannot overflow
-        the picklist in practice. `storyPoints` has no picklist at all (it is
+        the picklist in practice. A `PROJECT` picklist holds the caller's
+        visible (non-archived) projects, capped at 200 the same way, with
+        `/search/suggest?field=project` as its overflow; each entry is
+        `{label: "<name> (<KEY>)", value: "<KEY>"}`, because the key is the only
+        string the `project` field resolves. It is **not** capability-narrowed —
+        every project has a project — and it can only ever offer what a query
+        already reaches, being the same visible set the scope predicate
+        restricts every search to. `storyPoints` has no picklist at all (it is
         numeric). Field names are matched
         case-insensitively internally, but each field is advertised here exactly
         **once**, under its canonical camelCase name (aliases such as `sprints`
@@ -6432,10 +6482,10 @@ paths:
         listed. The `SPRINT` and `VERSION` picklists are additionally scoped to
         the visible projects **with the capability on** — so on a workspace whose
         only visible project is Kanban with releases and estimation off,
-        `fields` holds exactly `status`, `type`, `priority`, `assignee`,
-        `reporter`, `parent`, `text`, `created`, `updated`, `due`, `label`,
-        `component` (plus the caller's custom fields) and both picklists are
-        empty.
+        `fields` holds exactly `status`, `type`, `priority`, `project`,
+        `assignee`, `reporter`, `parent`, `text`, `created`, `updated`, `due`,
+        `label`, `component` (plus the caller's custom fields) and both
+        picklists are empty.
 
 
         **An omitted field still resolves.** This endpoint is autocomplete
@@ -6476,13 +6526,13 @@ paths:
   /workspaces/{workspaceId}/search/suggest:
     get:
       tags: [Search]
-      summary: Typeahead for user-, label-, component- and version-valued fields
+      summary: Typeahead for fields whose values come from a bounded catalog
       description: >-
         Bounded server-side typeahead — the system `assignee`/`reporter` fields
         and any USER-typed **custom field** (M2, by its `key`), plus `label`
-        (alias `labels`), `component` (alias `components`) and
-        `fixVersion`/`affectsVersion` — so large workspaces never ship every
-        member, label, component or version. Returns at most 20 matches. For
+        (alias `labels`), `component` (alias `components`),
+        `fixVersion`/`affectsVersion` and `project` — so large workspaces never
+        ship a whole catalog to the client. Returns at most 20 matches. For
         `label`, `component` and the two version fields the match is a
         case-insensitive **substring** (over the workspace's non-archived label
         names, resp. the non-archived component/version names of the caller's
@@ -6498,8 +6548,17 @@ paths:
         the caller's visible projects **with `releases` on**. That is a
         suggestion narrowing only — a version whose project has releases off is
         still resolvable by name in a query, and no status code depends on a
-        capability. `label`, `component` and the user-valued fields are
-        unaffected.
+        capability. No other field served here is capability-narrowed.
+
+
+        `project` **prefix**-matches the caller's visible projects on **key**
+        and on **name** — someone typing `HD` and someone typing `Hams` are
+        after the same project — but the `value` offered is always the **key**,
+        because
+        that is the only string the field resolves; the name travels in the
+        `label`. Archived projects are never offered, here or in the `/schema`
+        `PROJECT` picklist this overflows: a value surface may only offer what
+        resolution accepts.
 
 
         **Not** served here: `sprint`. Its `/search/schema` `SPRINT` picklist is
@@ -6516,9 +6575,10 @@ paths:
           required: true
           description: >-
             The HQL field to suggest values for — a user-valued field (e.g.
-            `assignee`), `label`/`labels`, `component`/`components`, or
-            `fixVersion`/`affectsVersion`. Any other name (including `sprint`)
-            is a `422`, in one of the two wordings described under that
+            `assignee`), `label`/`labels`, `component`/`components`,
+            `fixVersion`/`affectsVersion`, or `project`. Any other name
+            (including `sprint`) is a `422`, in one of the two wordings
+            described under that
             response: a name that resolves to nothing reads differently from a
             name that resolves to a field with no value picklist.
           schema: { type: string }
@@ -8895,7 +8955,11 @@ components:
           type: string
           pattern: '[a-z0-9_]*'
           maxLength: 50
-          description: Blank on create = derived from the name; immutable afterwards
+          description: >-
+            Blank on create = derived from the name; immutable afterwards. On
+            create it may not be a key the HQL search vocabulary has claimed
+            (409) — the check runs after that derivation, so naming a field
+            "Project" is refused just as spelling `key: project` is.
         type: { $ref: '#/components/schemas/FieldType' }
         config: { $ref: '#/components/schemas/FieldConfig' }
         description: { type: string, maxLength: 500, nullable: true, description: Shown as a hint in issue forms }
@@ -10318,7 +10382,11 @@ components:
             `releases` on**, capped at 200 — one picklist serves both
             `fixVersion` and `affectsVersion`), `SPRINT` (the open sprint names
             of those visible projects **that have `board: SCRUM`**, capped at
-            200, with no `/search/suggest` fallback) and a
+            200, with no `/search/suggest` fallback), `PROJECT` (those visible
+            projects themselves, capped at 200, overflowing to
+            `/search/suggest?field=project`; `label` is `"<name> (<KEY>)"` and
+            `value` is the `<KEY>`, the only string the `project` field
+            resolves) and a
             `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field, whose
             options are `{label, value=optionId}` pairs. The capability scoping
             of `VERSION`/`SPRINT` narrows suggestions only: a name missing here
@@ -10387,9 +10455,12 @@ components:
 
         **`PROJECT` groups but never clicks through.** Issues carry a project and
         the search scope already restricts which are visible, so the bucket is
-        perfectly good — but HQL has no `project` field yet, so every project
-        bucket ships `hql: null` and the bar is not clickable. A known gap with
-        its own ticket, not a defect.
+        perfectly good. HQL now *has* a `project` field, but it resolves a
+        project **key** while this axis is grouped and labelled by **name** —
+        which resolves to nothing, names carrying no uniqueness — so every
+        project bucket still ships `hql: null` and the bar is not clickable.
+        Carrying the key down to the fragment is its own small slice; nothing
+        about the grouping itself is blocked meanwhile.
 
 
         **`ASSIGNEE` is offered here and refused by `/velocity`, and that is not
@@ -10745,7 +10816,8 @@ components:
           description: >-
             The value-source token
             (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`LABEL`/`COMPONENT`/`VERSION`/
-            `SPRINT`/…), `CUSTOM:<key>` for a SELECT/MULTI_SELECT custom field,
+            `SPRINT`/`PROJECT`/…), `CUSTOM:<key>` for a SELECT/MULTI_SELECT
+            custom field,
             or null when there is no picklist (e.g. `storyPoints`).
           example: USER
         functions:
@@ -10759,15 +10831,15 @@ components:
       description: A picklist entry — a display label and an optional resolvable value
       properties:
         label: { type: string, example: In Progress }
-        value: { type: string, nullable: true, description: 'Resolvable value when applicable (e.g. email for USER); null for name-resolved picklists' }
+        value: { type: string, nullable: true, description: 'Resolvable value when applicable (e.g. the email for USER, the project key for PROJECT); null for name-resolved picklists' }
 
     SuggestResponse:
       type: object
       description: >-
         Typeahead result (`GET /search/suggest`) — for a user-valued field
         (`assignee`/`reporter` or a USER-typed custom field, M2), for
-        `label`/`labels`, `component`/`components`, or
-        `fixVersion`/`affectsVersion`.
+        `label`/`labels`, `component`/`components`,
+        `fixVersion`/`affectsVersion`, or `project`.
       properties:
         field: { type: string, description: 'The queried field, echoed back', example: assignee }
         suggestions:
@@ -10776,12 +10848,13 @@ components:
             Matching workspace members — or non-archived label names for
             `label`, component names for `component`, version names (from the
             visible projects with `releases` on) for
-            `fixVersion`/`affectsVersion` — capped at 20, most relevant first
+            `fixVersion`/`affectsVersion`, or the caller's visible non-archived
+            projects for `project` — capped at 20, most relevant first
           items:
             type: object
             properties:
               label: { type: string, description: 'Display name shown in the dropdown', example: Ada Lovelace }
-              value: { type: string, description: 'The resolvable value the client inserts — the member email, or the label/component name for `label`/`component`', example: ada@example.com }
+              value: { type: string, description: 'The resolvable value the client inserts — never necessarily the same string as the label: the member email, the label/component/version name, or the project KEY for `project` (whose label carries the human name)', example: ada@example.com }
 
     SavedFilterResponse:
       type: object

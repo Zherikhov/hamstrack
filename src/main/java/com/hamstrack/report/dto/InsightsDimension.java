@@ -19,13 +19,15 @@ import java.util.Optional;
  * everything sitting with?"). The line is <strong>published metric vs. ad-hoc query</strong>, and
  * it is the line to defend if a later slice proposes an assignee <em>report</em>.
  *
- * @param hqlField the HQL field name a click on this bucket narrows by, or {@code null} when the
- *                 dimension has no HQL vocabulary at all. Today that is {@link #PROJECT}: it is a
- *                 perfectly good grouping (issues carry a project and {@code SearchScope} already
- *                 restricts which) but HQL has no {@code project} field, so a project bucket
- *                 carries no fragment and the panel cannot make it clickable. Adding one is its
- *                 own ticket — it is a {@code FieldRegistry} entry plus name resolution, and it
- *                 sits inside the scope predicate rather than beside it, so it can only narrow.
+ * @param hqlField the HQL field name a click on this bucket narrows by, or {@code null} when this
+ *                 panel cannot write a fragment that reproduces the bucket exactly. Today that is
+ *                 {@link #PROJECT}: HQL <em>does</em> have a {@code project} field since HD-101,
+ *                 but its operand is a project <strong>key</strong> and this axis is grouped and
+ *                 labelled by <strong>name</strong> — which resolves to nothing at all, project
+ *                 names carrying no uniqueness. Making the bucket
+ *                 clickable means carrying the key down to {@code fragment()} — a small, separate
+ *                 slice, not an omission. Nothing about the grouping itself is blocked: a project
+ *                 bucket renders, it just does not narrow on click.
  * @param multiValued whether one issue can land in more than one bucket of this dimension. True
  *                 only for {@link #LABEL}. It is published on the response because it changes what
  *                 the numbers mean: with a multi-valued dimension the buckets <strong>sum to more
@@ -51,7 +53,7 @@ public enum InsightsDimension {
     LABEL("label", true),
     /** Nullable — backlog issues (in no sprint) form the {@code null} bucket. */
     SPRINT("sprint", false),
-    /** Never null, and never clickable — see {@code hqlField}. */
+    /** Never null; not clickable while its buckets carry no key — see {@code hqlField}. */
     PROJECT(null, false);
 
     private final String hqlField;

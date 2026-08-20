@@ -107,6 +107,43 @@ a suffix, Actions → Build → *Run workflow* on the tag fixes it in one click.
 `main` (the `workflow_dispatch` trigger, added with this change). No new commit,
 no new tag, no need for an existing run to re-run. The deploy chains off it.
 
+## Releases that register a new HQL field name
+
+A `FieldRegistry` entry **reserves** a name: from that release on it outranks any
+workspace's custom field of the same key (`FieldResolver`). For an affected
+tenant the loud half is that `key = "…"` stops resolving their stored values
+(422); the **silent** half is that `/schema` omits a registry-claimed key, so
+their field disappears from search vocabulary with no error, no log line and no
+UI affordance, while continuing to work everywhere else in the product.
+
+Nothing detects that after the fact, so run this **before** the release and
+record the answer in the release notes — once per name the release registers:
+
+```sql
+SELECT id, key, name, scope_workspace_id, scope_project_id
+  FROM field_defs
+ WHERE lower(key) = '<the new field name>' AND archived_at IS NULL;
+```
+
+Archived defs are already out of resolution and are harmless. A row with
+`scope_workspace_id IS NULL` is a **global** def: the blast radius is every
+workspace on the instance at once, not one tenant. Nobody's stored filter text
+is ever rewritten, and a field's key is immutable, so the honest remedy for an
+affected tenant is a new field under a different key.
+
+`AdminFieldService` refuses to *create* a field under a claimed key (409, checked
+after slugification — a field called "Project" auto-slugs to `project`). That is
+the whole of its reach: **it covers fields created through the admin service, and
+nothing that reaches `field_defs` by any other route** — not rows that already
+exist, and not a row written by a migration, a seeder, or any future path that
+inserts without going through the service. Our own migrations are such a route:
+`V3__system_fields.sql` seeds `labels`, `sprint` and `components`, all three of
+them registry-claimed names. They are harmless only because `V8`, `V11` and `V9`
+respectively archive each placeholder once the real feature superseded it, and
+archived defs are out of resolution — that is an outcome of those migrations, not
+something the create-time guard could have produced. So the query above is the
+check; the 409 narrows how often it finds anything.
+
 ## Releases carrying a destructive migration
 
 Most releases need nothing here. A release whose migrations **drop or rename a

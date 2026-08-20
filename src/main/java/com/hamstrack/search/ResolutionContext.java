@@ -24,8 +24,23 @@ import java.util.UUID;
  * @param priorityIdsByName lowercase priority name → reachable catalog ids
  * @param prioritiesByName  lowercase priority name → the reachable {@link Priority}
  *                          rows (for the position-based {@code >}/{@code <} on §5.3)
+ * @param projectIdsByKey   canonical project KEY → the id of the visible project with that
+ *                          key (HD-101) — the ONLY namespace {@code project} operands
+ *                          resolve through. A key is unique within a workspace
+ *                          ({@code UNIQUE(workspace_id, key)}) so this maps to exactly one
+ *                          id; it is a list because the compiler's id-set contract takes
+ *                          one, not because two projects could share a key. Project
+ *                          <em>names</em> deliberately do NOT resolve — they carry no
+ *                          uniqueness constraint, so a name operand would denote a set —
+ *                          they only label suggestions and the "did you mean" hint
  * @param members           workspace members (id + email + displayName), for
  *                          USER_REF resolution without a cross-tenant lookup
+ * @param projects          the visible projects as (id, key, name), ordered by key — the
+ *                          source of the {@code /schema} PROJECT picklist, the
+ *                          {@code /suggest?field=project} typeahead and the name hint on a
+ *                          failed resolve (HD-101). It is a re-shaping of
+ *                          {@code visibleProjectIds}, whose entities this context already
+ *                          loads, so none of those surfaces costs a query
  * @param labelIdsByName    lowercase label name → label ids of THIS WORKSPACE (HD-30).
  *                          Labels are workspace-scoped, so the workspace <em>is</em>
  *                          the boundary — no per-project narrowing applies. Archived
@@ -99,7 +114,9 @@ public record ResolutionContext(
         Map<String, List<UUID>> componentIdsByName,
         Map<String, List<UUID>> versionIdsByName,
         Map<String, List<UUID>> sprintIdsByName,
+        Map<String, List<UUID>> projectIdsByKey,
         List<Member> members,
+        List<ProjectRef> projects,
         List<String> statusNames,
         List<String> typeNames,
         List<String> priorityNames,
@@ -112,6 +129,20 @@ public record ResolutionContext(
 ) {
     /** A workspace member's identity for USER_REF resolution. */
     public record Member(UUID id, String email, String displayName) {}
+
+    /**
+     * A visible project's identity for the {@code project} field (HD-101): both the things
+     * a caller may write as an operand, plus the id both resolve to.
+     *
+     * <p>The two are not interchangeable, and only one of them resolves. A {@code key} is
+     * unique within the workspace and is what the UI shows and what users type; a
+     * {@code name} is a label with no uniqueness of its own, so it never denotes a project
+     * in the query language. Value suggestions therefore offer the name as the LABEL and
+     * the key as the VALUE, so what a client pastes back is the identifier — the same
+     * split {@code /suggest} already makes for a member (display name shown, email
+     * inserted), and for the same reason.
+     */
+    public record ProjectRef(UUID id, String key, String name) {}
 
     /**
      * The delivery capabilities (delivery-paths proposal §2.3) declared by the actor's

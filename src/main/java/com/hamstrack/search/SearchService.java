@@ -76,6 +76,9 @@ public class SearchService {
     /** Max entries embedded in the {@code /schema} SPRINT picklist (HD-22 §4.7). */
     private static final int SPRINT_PICKLIST_LIMIT = 200;
 
+    /** Max entries embedded in the {@code /schema} PROJECT picklist (HD-101). */
+    private static final int PROJECT_PICKLIST_LIMIT = 200;
+
     @Transactional(readOnly = true)
     public PageResponse<SearchResultRow> search(User actor, UUID workspaceId, SearchRequest req) {
         var ws = resolveWorkspace(actor, workspaceId);
@@ -160,6 +163,21 @@ public class SearchService {
         // them would suggest values that then 422. HD-107 §9.1 narrows this to the
         // projects with `board = SCRUM`, on the same suggestion-only terms as VERSION.
         values.put("SPRINT", capped(labels(ctx.sprintNames()), SPRINT_PICKLIST_LIMIT));
+        // PROJECT (HD-101): the caller's VISIBLE projects — the same set the scope predicate
+        // restricts every search to, so the picklist can only ever offer what a query already
+        // reaches. Read straight off the context, which loaded those projects to build the
+        // scope: this picklist costs no query of its own. Capped like the others, with
+        // /suggest?field=project as the overflow.
+        //
+        // Label and value differ here, as they do for USER: the label shows the project's name
+        // (with its key, which is what the UI shows elsewhere) and the value IS the key — the
+        // only string the language resolves. That split is what lets a user find a project by
+        // its human name without the language having to match names, which it must not: project
+        // names carry no uniqueness constraint.
+        //
+        // Not capability-narrowed, and not an oversight: `suggested(...)` narrows the fields
+        // tied to a delivery capability, and every project has a project.
+        values.put("PROJECT", capped(projectOptions(ctx), PROJECT_PICKLIST_LIMIT));
 
         // Custom fields (HD-52): append after the system fields, hidden system-name
         // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field
@@ -257,6 +275,13 @@ public class SearchService {
         if (sys.dataType() == FieldDataType.USER_REF) {
             return members(fieldName, q, ctx);
         }
+        // project (HD-101): filtered in memory off the context, like the member typeahead and
+        // unlike component/version, which page a project-owned catalog. The visible project set
+        // is already loaded — it is what the scope predicate is built from — so the overflow of
+        // the PROJECT picklist costs no query either.
+        if ("project".equals(sys.name())) {
+            return projects(fieldName, q, ctx);
+        }
         throw noSuggestions(fieldName);
     }
 
@@ -288,6 +313,41 @@ public class SearchService {
                 .toList();
 
         return new SuggestResponse(fieldName, suggestions);
+    }
+
+    /**
+     * The bounded project typeahead (HD-101). Prefix-matches the key AND the name — a caller
+     * typing {@code HD} and one typing {@code Hams} are looking for the same project — but the
+     * value it offers is always the KEY, because the key is the only string the query language
+     * resolves. This is the surface that makes name-based discovery work without making the
+     * language ambiguous: being wrong here costs a redundant dropdown row, whereas matching a
+     * name in the language would cost a wrong result set.
+     */
+    private SuggestResponse projects(String fieldName, String q, ResolutionContext ctx) {
+        String prefix = q == null ? "" : q.trim().toLowerCase(Locale.ROOT);
+        var suggestions = ctx.projects().stream()
+                .filter(p -> prefix.isEmpty()
+                        || p.key().toLowerCase(Locale.ROOT).startsWith(prefix)
+                        || p.name().toLowerCase(Locale.ROOT).startsWith(prefix))
+                .limit(SUGGEST_LIMIT)
+                .map(p -> new SuggestResponse.Suggestion(projectLabel(p), p.key()))
+                .toList();
+        return new SuggestResponse(fieldName, suggestions);
+    }
+
+    /** The {@code /schema} PROJECT picklist — see the note at its {@code values.put}. */
+    private List<SearchSchemaResponse.ValueOption> projectOptions(ResolutionContext ctx) {
+        return ctx.projects().stream()
+                .map(p -> new SearchSchemaResponse.ValueOption(projectLabel(p), p.key()))
+                .toList();
+    }
+
+    /**
+     * One rendering of a project for both value surfaces, so the dropdown a caller sees is the
+     * same whether the picklist fit or the typeahead answered.
+     */
+    private String projectLabel(ResolutionContext.ProjectRef p) {
+        return p.name() + " (" + p.key() + ")";
     }
 
     /** Name-valued suggestions: label and value are the same string a query would carry. */

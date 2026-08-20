@@ -455,7 +455,9 @@ public class InsightsService {
                             ResolutionContext ctx) {
         var field = dimension.hqlField().orElse(null);
         if (field == null) {
-            return null;   // PROJECT — HQL has no vocabulary for it yet.
+            // PROJECT — the field exists (HD-101) but resolves a KEY, and this axis carries only
+            // the name; see InsightsDimension#hqlField.
+            return null;
         }
         if (id == null) {
             // The no-value bucket. Every dimension that can produce one is nullable in

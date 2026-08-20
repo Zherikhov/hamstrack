@@ -21,7 +21,18 @@ import org.springframework.stereotype.Component;
  *
  * <ul>
  *   <li><strong>Registry before custom fields.</strong> A registered name is a reserved system
- *       name, so no workspace's own field def can capture the vocabulary the product ships.</li>
+ *       name, so no workspace's own field def can capture the vocabulary the product ships.
+ *       The price is paid at the moment a name is <em>added</em> to {@link FieldRegistry}: any
+ *       workspace already keying a custom field with that name silently stops resolving to its
+ *       own field and starts resolving to the new system one, so its stored filters keep
+ *       running and quietly answer a different question. That is intended — the alternative is
+ *       vocabulary a tenant can take away from the product — but it makes registering a name a
+ *       release-note-worthy event rather than an additive one, and the damage is partly silent:
+ *       {@code /schema} omits a registry-claimed key, so the tenant's field disappears from the
+ *       search vocabulary with no message while working everywhere else in the product. HD-101's
+ *       {@code project} is the live instance of it; {@code AdminFieldService.requireUnreservedKey}
+ *       stops NEW fields being created under a claimed key (never retroactively); and
+ *       {@link RetiredFieldAliases} documents the same hazard pointed the other way.</li>
  *   <li><strong>A tenant's own custom field before a retired alias.</strong> This is why a
  *       retired key must NOT be registered in {@link FieldRegistry}: registering
  *       {@code story_points} there would permanently shadow the {@code story_points} custom
