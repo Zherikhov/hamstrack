@@ -100,6 +100,8 @@ export default function FlowReportPage() {
     enabled: !!wsId && !!projectId,
     // Matches the endpoint's `Cache-Control: private, max-age=60`.
     staleTime: REPORT_STALE_TIME,
+    // Narrower than the global default — queryClient.ts owns the never-retry-a-422/429
+    // rule. This surface is expensive enough to decline a retry for *any* failure.
     retry: false,
   })
 

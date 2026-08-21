@@ -233,6 +233,49 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
+      # A database statement was cancelled at DB_STATEMENT_TIMEOUT_MS (HD-151). This is the
+      # ONLY rule that can surface the condition: the refusal is a deliberate 422, not a
+      # fault, so HighErrorRate — which watches the 5xx ratio — stays green while an instance
+      # refuses every report it is asked for.
+      #
+      # Rate-based, not > 0, and unlike RoleScopeViolation below that is deliberate: one 422
+      # here is an ordinary user asking a large tenant for more than ten seconds of work, and
+      # paging on that teaches an operator to ignore the rule. A SUSTAINED rate means the
+      # instance has outgrown an index — or its heap, which 0.17.0 also bounded, and less
+      # heap makes the same query slower. The route label names the endpoint; the WARN log
+      # names the budget and the knob to turn.
+      - uid: hamstrack-statement-budget-exceeded
+        title: StatementBudgetExceeded
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 database statements were cancelled at the statement budget in the last 15m"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_db_statement_budget_exceeded_total[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       # A stored role_id failed the scope/ownership assertion (HD-127). No request can
       # create such a row — every write door resolves role ids through
       # RoleRepository.findAssignable(id, workspaceId, scope) — so any non-zero value is a

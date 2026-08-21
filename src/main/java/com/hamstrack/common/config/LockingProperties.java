@@ -9,10 +9,20 @@ import org.springframework.validation.annotation.Validated;
 /**
  * How long a transaction that takes row locks may wait for one (HD-136 review round 4).
  *
- * <p>Consumed by {@code common.persistence.LockTimeout}, which applies it with
- * {@code SET LOCAL} inside the one transaction that asked for it — never globally, and
- * never on the datasource, because Flyway shares that datasource and a migration taking a
- * lock on a large table would start failing on the timeout.
+ * <p>Applied with {@code SET LOCAL} to <strong>every transaction the application opens</strong>,
+ * by {@code common.persistence.BoundedJpaTransactionManager}, and re-asserted explicitly by
+ * {@code common.persistence.LockTimeout} on the paths that take a lock on purpose. Never on the
+ * <strong>datasource</strong>, because Flyway shares that datasource and a migration taking a lock
+ * on a large table must be allowed to wait; the transaction manager is the line between the two,
+ * so Flyway is unaffected by construction.
+ *
+ * <p>This paragraph used to say "never globally", and that was a guard phrased against the only
+ * mechanism that existed when it was written: {@code SET LOCAL} on the datasource. The reason was
+ * always <em>Flyway shares the datasource</em>, never <em>few transactions should be bounded</em>
+ * — and read as a prohibition it would have blocked HD-151, which had to bound every transaction
+ * because a statement bound applied without a lock bound turns an ordinary contended write into a
+ * non-retryable 422. A rule stated against one mechanism outlives that mechanism and starts
+ * forbidding things nobody decided to forbid.
  *
  * <p><strong>A DoS guard, not a mode switch</strong> ({@link BoardProperties}' posture):
  * identical in DC and Cloud, no profile override. The failure it bounds is

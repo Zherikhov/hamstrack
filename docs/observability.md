@@ -176,6 +176,7 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_invites_sent_total` / `_accepted_total` / `_declined_total` | counter | — | workspace invites |
 | `hamstrack_email_sent_total` | counter | `type`(verification/password_reset/invite), `outcome`(success/failure) | outbound email |
 | `hamstrack_role_scope_violation_total` | counter | `source`(workspace_members/project_members/workspace_invites/default_project_role) | a stored `role_id` failed the scope/ownership assertion — see the alert below |
+| `hamstrack_db_statement_budget_exceeded_total` | counter | `method`(HTTP method), `route`(**mapped pattern**, e.g. `/api/workspaces/{workspaceId}/projects/{projectId}/reports/flow`, or `unmapped`) | a database statement PostgreSQL cancelled at `DB_STATEMENT_TIMEOUT_MS` — see the alert below. `route` is the templated pattern and never the request URI, which would carry workspace and project ids |
 | `hamstrack_attachments_uploaded_total` | counter | — | attachment uploads |
 | `hamstrack_attachments_bytes_count` / `_sum` | summary | — | upload count / cumulative bytes stored |
 | `hamstrack_users_total` / `hamstrack_users_active` | gauge | — | total users / ACTIVE users |
@@ -234,8 +235,27 @@ are visible in Grafana → Alerting.
 | EmailFailures | `increase(hamstrack_email_sent_total{outcome="failure"}[15m]) > 0` | 0m | warning |
 | JVMHeapPressure | heap used/max > 90% | 10m | warning |
 | RoleScopeViolation | `increase(hamstrack_role_scope_violation_total[15m]) > 0` | 0m | warning |
+| StatementBudgetExceeded | `increase(hamstrack_db_statement_budget_exceeded_total[15m]) > 5` | 5m | warning |
 
 Grafana's SMTP reuses your `MAIL_*` settings (see below).
+
+**StatementBudgetExceeded is the only way this condition can reach you.** A statement the
+database cancelled at `DB_STATEMENT_TIMEOUT_MS` answers **`422`**, deliberately — it is a
+refusal the server decided, not a fault, and 5xx is the class intermediaries auto-retry. The
+consequence is that it is invisible to **HighErrorRate**, which watches the 5xx ratio: an
+instance can refuse every report it is asked for and stay green on every other rule here.
+That is why the counter exists, and it is the whole reason this rule does.
+
+**Rate-based, not `> 0`, and the difference is deliberate.** Unlike RoleScopeViolation above
+— where no request can produce the condition, so any occurrence is a bug — a single `422`
+here is an ordinary user asking a large tenant for more than ten seconds of work, and paging
+on that would train an operator to ignore the rule. What matters is the *sustained* rate:
+more than five in fifteen minutes, held for five, means the instance has outgrown an index
+(or its heap — 0.17.0 bounded that too, and a smaller heap makes the same query slower). The
+`route` label names which endpoint, and the matching WARN line names the budget. Two
+remedies, in order: check the heap first on a host of 4 GB or more, then raise
+`DB_STATEMENT_TIMEOUT_MS` — and raise `DB_POOL_MAX_SIZE` with it, since a longer bound means
+one request holds one connection for longer.
 
 **RoleScopeViolation is a data-integrity alert, not a load one.** It fires when a stored
 `role_id` — on `workspace_members`, `project_members`, `workspace_invites` or a

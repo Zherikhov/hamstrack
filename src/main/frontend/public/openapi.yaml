@@ -55,14 +55,16 @@ info:
     body that cannot be parsed at all is still a `400` but carries no `errors`
     map, because nothing was bound.
 
-    **Lock contention is a retryable `409`, never a `500`.** A few mutations
-    take row locks so an invariant holds under concurrency — membership changes
-    are the main ones — and when two of them overlap the database resolves it by
-    rolling one back (deadlock or lock timeout). Those transactions also bound
-    how long they will wait for a lock (3 s by default), so a pile-up drains
-    rather than hanging until a client gives up. Nothing is left half-applied,
-    so the loser is told to try again rather than shown a fault: `409` with
-    `detail: "Someone else is changing this right now — try again in a moment"`
+    **Lock contention is a retryable `409`, never a `500`.** From 0.17.0 **every
+    transaction this API opens bounds how long it will wait for a row lock**
+    (3 s by default), so any write that collides with a longer-running change
+    gives up and is told to retry rather than hanging until a client does — and
+    so does the other way a race ends, the database rolling one of two
+    overlapping writes back (deadlock or lock timeout). Writes that take row
+    locks deliberately — membership changes are the main ones — are simply the
+    likeliest to meet it: the bound is the API’s, not theirs. Nothing is left
+    half-applied, so the loser is told to try again rather than shown a fault:
+    `409` with `detail: "Someone else is changing this right now — try again in a moment"`
     and `Retry-After: 1`, the same retry shape `429` uses. This is app-wide
     rather than a property of any one endpoint, and it is the only `409` worth
     retrying automatically — an invariant conflict (stale `version`, name in
@@ -71,12 +73,46 @@ info:
     apart by the `Retry-After` header, not by the wording of `detail` — this
     variant deliberately carries no `errorType`.
 
+    **A request that outruns the server’s time budget is a `422`, and it is
+    not retryable.** Every transaction this API opens is bounded: a database
+    statement that runs longer than the instance’s budget
+    (`app.persistence.statement-timeout-ms`, 10 s by default) is cancelled, and
+    the request answers `422` with `errorType: "STATEMENT_BUDGET_EXCEEDED"` and
+    a `detail` naming that budget in human units. **This is a property of the
+    API rather than of a set of endpoints** — the bound is applied where
+    transactions begin, not at individual handlers, because how long a request
+    takes follows from how much a workspace has accumulated and not from which
+    feature was called. So any operation in this document that reads or writes
+    may answer it, whatever its own `responses` list enumerates, and it is
+    deliberately attached to no path: such a list could not be kept true. The
+    budget also bounds any *one* statement, so a request may spend longer than
+    it overall before being stopped. See `StatementBudgetProblemDetail`.
+
+    **There is deliberately no `Retry-After`, because an identical retry fails
+    identically.** The same request over the same data costs the same time, so
+    a retry — immediate, backed off, or automatic inside an SDK — spends the
+    whole budget again and is refused again. Never retry it. What clears it is
+    a *smaller* request (a narrower date range, a tighter filter, fewer rows)
+    or an operator raising the budget; `detail` offers the narrowing only where
+    narrowing is possible, since some requests take no parameter that could
+    narrow anything, and where nothing can be narrowed it closes the loop
+    rather than trailing off: it says the request is larger than this instance
+    is configured to answer. The sentence always ends somewhere, but it
+    deliberately prescribes no action there — it describes the situation rather
+    than dispatching the reader, because the setting behind the budget is not
+    one every reader’s administrator owns. This is the exact opposite of the
+    lock-contention `409` above, which it resembles: that one means *someone
+    else is changing this right now* and retrying works, this one means *this
+    took too long and will take too long again* and retrying does not.
+
     **`errorType` says which failure a body is**, wherever one status covers
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
-    query carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal
+    query carries `PARSE_ERROR` or `SEMANTIC_ERROR`, a member removal
     refused over project administrators carries `STRANDED_PROJECTS`,
-    `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`. Two rules for consuming
+    `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`, and any request stopped
+    for outrunning the server’s time budget carries
+    `STATEMENT_BUDGET_EXCEEDED`. Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
     not read its **absence** as an unknown value — a response that needs no
@@ -84,7 +120,8 @@ info:
     exactly that case, and is told apart by `Retry-After` instead).
 
 
-    It is not a `409`-only member. One `403` carries it as well —
+    It is not a `409`-only member. The time-budget `422` above carries it,
+    and one `403` carries it as well —
     `REACTIVATED_DEFAULT_ABOVE_CEILING`, when restoring open project access
     would make a *per-project* declared default live that the caller may not
     set — and the same two endpoints answer the plain grant-ceiling `403` with
@@ -1625,11 +1662,12 @@ paths:
 
 
         **The cap is exact, not advisory.** The count is taken under a row lock
-        on the workspace, so concurrent duplicates cannot overshoot it. That
-        lock is also the reason this is the one role endpoint that can answer a
-        retryable `409` with `Retry-After`: how long it waits is the same
-        deployment-wide lock timeout the membership mutations use, and a lost
-        race means nothing was created — just retry.
+        on the workspace, so concurrent duplicates cannot overshoot it. Taking
+        that lock deliberately makes this the **likeliest** role write to answer
+        a retryable `409` with `Retry-After`, but not the only one: from 0.17.0
+        the wait bound (3 s by default) belongs to every transaction the API
+        opens rather than to this endpoint. A lost race means nothing was
+        created — just retry.
       operationId: duplicateRole
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2066,9 +2104,10 @@ paths:
         this same guard exactly when it would orphan the project.
 
         Setting the role a member already holds is an accepted no-op. Like the
-        removal, this takes row locks on the project's administrators and bounds
-        how long it waits, so a lost race is a retryable `409` carrying
-        `Retry-After` rather than a hang.
+        removal, this takes row locks on the project's administrators, which
+        makes it likelier than most writes to meet the wait bound every
+        transaction this API opens carries, so a lost race is a retryable `409`
+        carrying `Retry-After` rather than a hang.
       operationId: updateProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2118,8 +2157,9 @@ paths:
         rows for every project at once and answers a `409` naming each affected
         project.
 
-        This removal takes row locks on the project's administrators and bounds
-        how long it will wait for one (3 s by default), so two overlapping
+        This removal takes row locks on the project's administrators, which
+        makes it likelier than most writes to meet the wait bound every
+        transaction this API opens carries (3 s by default), so two overlapping
         removals answer a retryable `409` with `Retry-After` instead of one of
         them hanging — see **Errors** in the introduction.
       operationId: removeProjectMember
@@ -6915,7 +6955,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
-            Four refusals, all field-anchored, all `422` — never `400`:
+            The field-anchored refusals, all `422` — never `400`:
 
             * an **unparseable HQL query** — `errorType: "PARSE_ERROR"` with a
               highlight span (`position`, `length`, nullable `token`);
@@ -7646,12 +7686,12 @@ components:
 
         The other `409` here is app-wide rather than specific to these
         endpoints: both the removal and the role change take row locks on the
-        project's administrators and bound how
-        long they wait for one, so a lost race answers lock contention — a plain
-        `ProblemDetail` carrying `Retry-After`, worth retrying **unchanged**
-        (see **Errors** in the introduction). The invariant above carries no such
-        header, because retrying it unchanged cannot help. Neither variant
-        carries an `errorType`.
+        project's administrators, which makes them likelier than most writes to
+        meet the wait bound every transaction carries, so a lost race answers
+        lock contention — a plain `ProblemDetail` carrying `Retry-After`, worth
+        retrying **unchanged** (see **Errors** in the introduction). The
+        invariant above carries no such header, because retrying it unchanged
+        cannot help. Neither variant carries an `errorType`.
       headers:
         Retry-After:
           description: >-
@@ -7750,7 +7790,7 @@ components:
               - $ref: '#/components/schemas/StrandedProjectsProblemDetail'
     RolePermissionUnprocessable:
       description: >-
-        A permission entry cannot be honoured. Four cases, all `422` and all
+        A permission entry cannot be honoured. Each case below is a `422` and is
         about a *value* rather than the shape of the request — the body is
         well-formed JSON and every field validates on its own:
 
@@ -7780,8 +7820,8 @@ components:
         two entries could disagree about `ownOnly`, and one would win invisibly.
 
 
-        `POST /workspaces/{workspaceId}/roles/preview` produces exactly these
-        same four, which is the point of the endpoint.
+        `POST /workspaces/{workspaceId}/roles/preview` produces exactly the
+        same refusals, which is the point of the endpoint.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -7879,6 +7919,25 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    StatementBudgetExceeded:
+      description: >-
+        The request was stopped for outrunning the server’s time budget:
+        `422` with `errorType: "STATEMENT_BUDGET_EXCEEDED"` and, deliberately,
+        no `Retry-After` — an identical retry costs identical time and is
+        refused identically.
+
+
+        **Deliberately referenced by no operation.** Every application
+        transaction is bounded, so this answer belongs to the API as a whole
+        rather than to a list of paths — and that list could not be kept true,
+        because whether a request outruns the budget follows from how much data
+        a workspace holds and not from which endpoint was called. It is defined
+        here so the shape has one home; do not "complete" the spec by attaching
+        it to whichever endpoints look expensive today.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/StatementBudgetProblemDetail' }
 
     ReportWindowRejected:
       description: >-
@@ -8118,6 +8177,51 @@ components:
               example:
                 key: Key must be uppercase letters and digits only
                 name: must not be blank
+
+    StatementBudgetProblemDetail:
+      description: >-
+        The `422` body of a request the server stopped for outrunning its time
+        budget. Any operation that touches the database can answer it — the
+        bound is applied to every application transaction rather than to a
+        chosen set of handlers — so it is documented as a property of the API
+        and deliberately listed under no individual path.
+
+
+        It carries **no `Retry-After`**, and that absence is the contract: the
+        same request over the same data costs the same time, so an identical
+        retry is refused identically. What clears it is a smaller request (a
+        shorter date range, a tighter filter, fewer rows) or an operator raising
+        the budget — not an administrator the caller can necessarily reach, which
+        is why `detail` never prescribes one.
+        Contrast the lock-contention `409`, which does carry `Retry-After` and
+        *is* worth retrying unchanged.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 422 }
+            detail:
+              type: string
+              description: >-
+                Names the budget in human units, and offers narrowing only where
+                narrowing is possible — some bounded requests take no parameter
+                that could narrow anything — so where nothing can be narrowed
+                the sentence closes the loop rather than trailing off: it says
+                the request is larger than this instance is configured to
+                answer. That ending describes the situation rather than
+                prescribing an action, since the reader may have none. It never
+                names the property, the environment variable or the database
+                setting behind the budget: those are the operator’s, and the
+                operator’s copy of this refusal is a log line.
+              example: >-
+                This request was stopped after 10 seconds — it is too expensive
+                to complete on this instance. If it takes a date range or
+                filters, narrow them; otherwise this request is larger than this
+                instance is configured to answer. Retrying it unchanged will take
+                just as long.
+            errorType:
+              type: string
+              enum: [STATEMENT_BUDGET_EXCEEDED]
 
     HqlProblemDetail:
       description: >-

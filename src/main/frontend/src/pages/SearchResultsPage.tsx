@@ -118,6 +118,8 @@ export default function SearchResultsPage() {
     queryFn: () => apiSearch(wsId!, { query: committed, page, size }),
     enabled: !!wsId && hasQueryParam,
     placeholderData: prev => prev,
+    // Narrower than the global default — queryClient.ts owns the never-retry-a-422/429
+    // rule. This surface is expensive enough to decline a retry for *any* failure.
     retry: false,
   })
 

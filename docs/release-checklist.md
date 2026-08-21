@@ -217,9 +217,20 @@ tying that to the upgrade. The test for this class is not "did behaviour change"
 
 Watch for the shape where a default is *better* on the machine it was reasoned against and
 quietly *takes something away* from every larger one — those releases read as an
-improvement in the PR and as a regression on the box. 0.17.0's is the worked example:
-`HD-152` bounded the JVM heap, which raises it on a 1 GB host and halves it on a 4 GB one
-([The heap is bounded from 0.17.0](self-hosting.md#the-heap-is-bounded-from-0170)).
+improvement in the PR and as a regression on the box. 0.17.0 is the worked example several
+times over, and its changes compound: `HD-152` bounded the JVM heap, which raises it on a 1 GB host and halves it on
+a 4 GB one ([The heap is bounded from 0.17.0](self-hosting.md#the-heap-is-bounded-from-0170));
+`HD-151` bounded how long a statement may run, which is invisible on a small install and turns
+a slow report into a `422` on a large one
+([Statements are bounded from 0.17.0](self-hosting.md#statements-are-bounded-from-0170)); and
+the same ticket widened `DB_LOCK_TIMEOUT_MS` from the handful of transactions that locked
+deliberately to **every** transaction, so a contended write that used to wait indefinitely now
+answers a retryable `409` — a changed default whose *value* never moved, which is why it is the
+easiest of the three to leave out of a list —
+*and the heap cut makes the statement bound easier to hit*, so one release produced two causes
+for one symptom. This sentence said "0.17.0's is the worked example", singular, for the day
+between the first two landing, then "two worked examples" until the lock bound made that wrong
+as well: a count goes stale one entry before its list does, in the paragraph that says so.
 
 Three steps, and **step 3 is the one that gets skipped**, because the first two feel like
 the work:
@@ -241,7 +252,40 @@ the work:
    reaches somebody who upgrades without opening a manual. Everything else in steps 1 and 2
    is read by people who were already looking.
 
-0.17.0's line, ready to paste:
+0.17.0 ships **several** changes in this class — one line each, below. (Note the shape, which
+this section has now got wrong twice about itself: it first said "0.17.0's line", singular, and
+was corrected to "two lines" on the day the second landed, which was stale again by the third.
+Each time the number was written by somebody looking straight at the list. Count nothing you
+are about to enumerate.
+
+**And a positional reference is a count in a costume.** `.env.prod.example` said a setting was
+"four lines above" another; the release grew the block between them to thirty-six, silently,
+because a release is precisely the thing that makes a file longer. It goes stale the same way a
+number does and is worse in one respect: no grep anybody would think to run for a stale count —
+"two", "three", "the only" — matches "four lines above". Point at names, never at distances.)
+
+Ready to paste:
+
+> **Every database statement is now bounded (`DB_STATEMENT_TIMEOUT_MS`, default 10 s).**
+> Before 0.17.0 a single query could run for ever while holding one of the ten pooled
+> connections; ten of them stopped the instance. From now on a statement still running after
+> 10 seconds is cancelled and the request answers **`422`** with
+> `errorType: STATEMENT_BUDGET_EXCEEDED` and no `Retry-After` — an identical retry costs
+> identical time. **On a large install this can turn a slow report, search or member removal
+> into an error**; a report can be narrowed, a member removal cannot. If it happens, raise
+> `DB_STATEMENT_TIMEOUT_MS` in `.env` (minimum twice `DB_LOCK_TIMEOUT_MS`, so ≥ 6000) and
+> `docker compose up -d`. Database migrations are deliberately not bounded.
+>
+> **Lock waits are bounded with it, and this half is a status-code change.** A write that
+> collides with a long-running change — most often removing a member with a lot of assigned
+> work — used to wait indefinitely and eventually succeed. It now gives up after
+> `DB_LOCK_TIMEOUT_MS` (3 s) with **`409` + `Retry-After`**, which is retryable and which clients
+> should retry. The two bounds ship together on purpose: `statement_timeout` counts lock-wait
+> time, so bounding statements alone would have answered that same collision with the
+> non-retryable `422` above. Details:
+> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
+
+And the heap line:
 
 > **The JVM heap is now bounded (`APP_MEMORY_LIMIT`, default `1g` → 512 MB heap).** Before
 > 0.17.0 the JVM claimed ~25% of *host* RAM, so on a host larger than 2 GB this is **less
@@ -359,7 +403,7 @@ already has them.
 
 **A changed default belongs here too, and is the entry most easily missed** — nothing was
 added, nothing was rejected, and the diff reads as configuration. See "Releases that change
-a resource default" above, which carries 0.17.0's line ready to paste.
+a resource default" above, which carries this release's lines ready to paste.
 
 Below is that text for the **roles & permissions** release (HD-123, V13–V16), which is also
 the worked example of the shape. See "Releases carrying a destructive migration" above for

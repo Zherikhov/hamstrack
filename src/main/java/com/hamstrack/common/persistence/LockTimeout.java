@@ -54,17 +54,51 @@ import org.springframework.util.Assert;
  * up to roughly twice the configured bound before it fails; and once it holds them it still
  * holds both across the unchunked {@code writeUnassignHistory}, whose size is the departing
  * member's assigned work. What this deletes is the <em>unbounded queue</em>, not the
- * critical section. The complementary control, if the held time ever needs bounding too, is
- * a {@code SET LOCAL statement_timeout} issued from this same helper — never on the
- * datasource, for exactly the Flyway reason above.
+ * critical section. The complementary control now exists: {@link BoundedJpaTransactionManager}
+ * applies {@code SET LOCAL statement_timeout} to <strong>every</strong> transaction the
+ * application opens, because a slow statement — unlike a lock wait — is volumetric and cannot be
+ * found by reading the code (HD-151). It carries the lock bound in the same round trip, for the
+ * reason below. Still never on the datasource, for exactly the Flyway reason above.
  *
- * <p><strong>Call it as the first statement of the transaction.</strong> Two reasons, both
- * hard: a bound applied after a locking read bounds nothing, and this runs a <em>native</em>
- * query, which Hibernate flushes the whole persistence context ahead of — harmless when
- * nothing is pending, which is only guaranteed at the top. {@link Propagation#MANDATORY}
+ * <p>Note that the two bounds do not share a status code: losing a lock race is a retryable 409
+ * with {@code Retry-After}, exceeding the statement bound is a 422 with none, because an identical
+ * retry of a slow query is slow again. Which of the two a contended statement gets is therefore a
+ * contract, not an accident, and it is decided entirely by their relative size —
+ * {@code DatabaseTimeoutConsistency} refuses to start unless the statement bound is at least twice
+ * this one, so for a pure lock wait this bound always fires first.
+ *
+ * <p><strong>Call it as the first statement the service issues.</strong> (It is no longer
+ * literally the transaction's first statement — {@link BoundedJpaTransactionManager} issues the
+ * statement bound at {@code doBegin}, before any application code runs. The reasons below are
+ * unaffected; only the wording had to move, because "first statement of the transaction" would
+ * now read as a broken guard.) Two reasons, both hard: a bound applied after a locking read
+ * bounds nothing, and this runs a <em>native</em> query, which Hibernate flushes the whole
+ * persistence context ahead of — harmless when nothing is pending, which is only guaranteed at
+ * the top. {@link Propagation#MANDATORY}
  * (plus the assertion, for a future self-invocation that would bypass the proxy) refuses
  * the misuse that would make it a silent no-op: outside a transaction PostgreSQL downgrades
  * {@code SET LOCAL} to a WARNING and the guard quietly stops guarding.
+ *
+ * <p><strong>This class is no longer the only source of the bound, and the finding that changed
+ * that is worth keeping</strong> (HD-151). {@link BoundedJpaTransactionManager} now issues
+ * {@code lock_timeout} alongside {@code statement_timeout} on <em>every</em> transaction the
+ * application opens, so an ordinary contended write — a plain {@code UPDATE} in a transaction that
+ * never called this class, which is most issue and comment writes — gives up after
+ * {@code app.locking.lock-timeout-ms} with the retryable <strong>409 + {@code Retry-After}</strong>
+ * rather than waiting for ever.
+ *
+ * <p>The reason both had to move together: {@code statement_timeout} counts lock-wait time, so a
+ * statement bound shipped <em>without</em> a global lock bound would have cancelled that same
+ * contended write at the statement bound and answered <strong>422 with no {@code Retry-After}</strong>
+ * — telling the caller a retry is pointless when it succeeds the moment the holder commits. The
+ * intuitive alternative, raising the statement bound so the write has more time to win the race, is
+ * wrong twice over: it lengthens exactly the unbounded hold the bound exists to delete, and it does
+ * not change the status the loser is handed.
+ *
+ * <p>What survives here is the <strong>explicit re-assert</strong> on the paths that take a lock on
+ * purpose. Belt-and-braces rather than duplication: {@link Propagation#MANDATORY} plus the
+ * assertion below fails loudly if one of those paths is ever moved outside a transaction, and this
+ * is where the reasoning about lock ordering lives for whoever writes the next locking path.
  *
  * <p><strong>Where it belongs, as a rule rather than a list.</strong> Every transaction that
  * takes a row lock — in <em>any</em> mode, {@code FOR UPDATE} and {@code FOR NO KEY UPDATE}

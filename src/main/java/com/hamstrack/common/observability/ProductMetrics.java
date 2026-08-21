@@ -257,6 +257,29 @@ public class ProductMetrics {
         registry.counter("hamstrack.role.scope_violation", "source", source.tag).increment();
     }
 
+    // --- persistence ---
+
+    /**
+     * {@code hamstrack.db.statement_budget_exceeded{method,route}} — a statement PostgreSQL
+     * cancelled at {@code app.persistence.statement-timeout-ms} (HD-151).
+     *
+     * <p>Exists because that refusal is a clean 422 rather than a 500, so it appears in no error
+     * rate and would otherwise be visible only to somebody reading WARN lines. It is the signal
+     * that a tenant has outgrown an index, or that a query has stopped using one, and the first
+     * thing an operator needs before deciding whether to raise the bound.
+     *
+     * <p>Cardinality guard: the <strong>mapped pattern</strong>
+     * ({@code /api/workspaces/{workspaceId}/…}), never the request URI. A URI carries workspace
+     * and project UUIDs, which would both explode the series count and put tenant ids in a
+     * metrics store. {@code route} is {@code unmapped} when no handler matched, which is a real
+     * case (an error dispatch) and not a placeholder.
+     */
+    public void statementBudgetExceeded(String method, String mappedPattern) {
+        registry.counter("hamstrack.db.statement_budget_exceeded",
+                "method", method == null ? "unknown" : method,
+                "route", mappedPattern == null ? "unmapped" : mappedPattern).increment();
+    }
+
     // --- attachments ---
 
     /** {@code hamstrack.attachments.uploaded} + {@code hamstrack.attachments.bytes}. */
