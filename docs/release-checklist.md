@@ -204,6 +204,63 @@ overflows `VARCHAR(255)` for a long address. And a detection query must be able 
 matching spellings by eye, whereas one that groups by the folded form and returns groups of
 more than one either finds the pair or proves there is none.
 
+## Constraints on a populated table, and why they are free right now
+
+Adding a constraint to a table that already holds rows makes PostgreSQL validate
+every one of them, under a lock. `ADD CONSTRAINT … FOREIGN KEY` takes
+`SHARE ROW EXCLUSIVE`; building a `UNIQUE` index takes `ACCESS EXCLUSIVE`. Both
+block writes to that table for the duration, and the duration is linear in the
+row count — measured on a 1M-row table: `ADD COLUMN` 2.9 ms, FK validation 64 ms,
+unique index ~55 MB and 1–3 s.
+
+**This costs nothing today, and the reason is the deploy shape, not the SQL.**
+Both deployment models run a single application container. `docker compose up -d`
+stops the old one before the new one starts, so migrations execute with no
+concurrent writer and the lock falls inside a window where nothing is serving.
+Decision recorded 2026-08-21 (HD-93): **rolling deploys are not planned.**
+
+**What changes the answer is a rolling deploy, and nothing else.** The moment the
+old instance keeps serving and writing while the new one migrates, every lock
+above becomes a stall on live traffic. Flyway's advisory lock keeps the migration
+itself safe; it does nothing for the writers waiting behind the table lock.
+
+### The inventory, so it is not re-derived
+
+If a rolling deploy is ever put on the table, these are the applied constraints
+that would have to be converted to `ADD CONSTRAINT … NOT VALID` followed by a
+separate `VALIDATE CONSTRAINT` — **in a new migration, never as a retrofit into an
+applied one**:
+
+| migration | constraint | on | lock |
+|---|---|---|---|
+| `V8__labels.sql` | `issues_id_workspace_id_key` UNIQUE `(id, workspace_id)` | `issues` | `ACCESS EXCLUSIVE` (index build) |
+| `V9__components.sql` | `issues_component_fk` | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | `issues_sprint_fk` | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | `issues_story_points_ck` CHECK | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | the `position` rescale | `issues` | rewrites every row |
+
+Two things that look like they belong on that list and do not, because the
+distinction is the whole point and is easy to get backwards:
+
+- **A constraint declared inside `CREATE TABLE`** validates an empty table. Free
+  at any size, forever. Most of what a migration adds is this.
+- **`ADD COLUMN … REFERENCES` in a single statement** is *not* the same as
+  `ADD COLUMN` followed by `ADD CONSTRAINT`. PostgreSQL knows the new column is
+  definitionally all-NULL and skips the scan. `V14__role_assignments.sql` adds five
+  such columns and pays nothing; `V9` splits them across two statements and pays a
+  full scan for a column that is equally all-NULL.
+
+`CREATE INDEX CONCURRENTLY` is **not** an escape hatch here: Flyway wraps each
+migration in a transaction, and `CONCURRENTLY` cannot run inside one.
+
+### The rule this implies
+
+While deploys stop the old container first, write the plain form — it is shorter,
+it is atomic, and the two-step form buys nothing. What must not happen is that the
+decision gets re-derived from scratch under time pressure: if the deploy shape
+changes, this section is the list, and the rule becomes *every constraint added to
+a populated table is two-step*, applied to new migrations and to the five above.
+
 ## Releases carrying a destructive migration
 
 Most releases need nothing here. A release whose migrations **drop or rename a
