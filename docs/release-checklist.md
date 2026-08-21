@@ -296,6 +296,39 @@ And the heap line:
 > Details:
 > [The heap is bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
 
+And the taxonomy foreign keys, which is the one line here that can stop a **startup** — so it
+carries the repair, not just the diagnosis. A DC operator whose data is clean never sees any of
+it; one whose data is not meets Flyway failing `V19` with no repair SQL anywhere they would
+think to look, and "a refusal must name an action its reader can perform" applies to a failed
+boot at least as much as to a `409`:
+
+> **`issues.type_id` and `issues.status_id` now have foreign keys.** The database enforces that
+> no issue can point at a status or issue type that does not exist. **If your database already
+> contains such a row, the upgrade will not start** — Flyway fails `V19__issues_taxonomy_fk.sql`
+> and the container exits. This is deliberate: those rows are already broken (the issue renders
+> as a blank board column and disappears from every status filter), and the fix needs a decision
+> only you can make. To check **before** upgrading, and to find any offenders afterwards:
+>
+> ```sql
+> SELECT i.id, i.workspace_id, i.project_id, i.number, i.type_id
+>   FROM issues i LEFT JOIN issue_types t ON t.id = i.type_id
+>  WHERE t.id IS NULL;
+>
+> SELECT i.id, i.workspace_id, i.project_id, i.number, i.status_id
+>   FROM issues i LEFT JOIN statuses s ON s.id = i.status_id
+>  WHERE s.id IS NULL;
+> ```
+>
+> Both must return **no rows**. If either does not, repoint those issues at a catalog row that
+> does exist — pick one your project already offers, e.g.
+> `UPDATE issues SET status_id = '<a real status id>' WHERE id = '<the issue id>';` — then
+> upgrade. Nothing else changes: a delete that would strand an issue was already refused by the
+> application, and remains so.
+>
+> **A delete the database refuses is a `409`, not a `500`.** Related: catalog deletes that
+> collide with a reference now answer `409` with
+> `errorType: REFERENCE_CONSTRAINT_VIOLATION` instead of a stack trace.
+
 ## Constraints on a populated table, and why they are free right now
 
 Adding a constraint to a table that already holds rows makes PostgreSQL validate
@@ -330,6 +363,14 @@ applied one**:
 | `V11__sprints.sql` | `issues_sprint_fk` | `issues` | `SHARE ROW EXCLUSIVE` |
 | `V11__sprints.sql` | `issues_story_points_ck` CHECK | `issues` | `SHARE ROW EXCLUSIVE` |
 | `V11__sprints.sql` | the `position` rescale | `issues` | rewrites every row |
+| `V19__issues_taxonomy_fk.sql` | `issues_type_id_fkey` | `issues` (+ `issue_types`) | `SHARE ROW EXCLUSIVE` |
+| `V19__issues_taxonomy_fk.sql` | `issues_status_id_fkey` | `issues` (+ `statuses`) | `SHARE ROW EXCLUSIVE` |
+
+`ADD CONSTRAINT … FOREIGN KEY` takes its lock on **both** tables, not only the one
+named in the `on` column — `SHARE ROW EXCLUSIVE` on the child *and* on the parent,
+so writes to the referenced table are blocked for the same window. The V19 rows
+say so explicitly; it was equally true of `V9` and `V11` and simply went unwritten,
+which is the kind of omission this section exists to stop repeating.
 
 Two things that look like they belong on that list and do not, because the
 distinction is the whole point and is easy to get backwards:

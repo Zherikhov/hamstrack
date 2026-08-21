@@ -183,6 +183,55 @@ messages; **Low** = latent / defense-in-depth.
     (no number) in Cloud.
   - **Cloud, system console:** operator-only per §5; global numbers acceptable if gated.
   - **DC:** unchanged.
+- **CORRECTION (HD-13, 2026-08-21) — for the three catalog delete guards, drop the NUMBER from
+  the message and KEEP the query unscoped.** The recommendation above says to filter the
+  issue/project counts to the caller's accessible projects. For
+  `AdminCatalogService.deleteStatus` / `deleteIssueType` / `deletePriority` that is now
+  **actively unsafe**, and the reason arrived after this audit was written:
+  `V19__issues_taxonomy_fk.sql` gave `issues.status_id` and `issues.type_id` real foreign keys
+  (`issues.priority_id` always had one). Those three methods count, then bulk-remap, then
+  `DELETE`, all in one transaction — and the count and the remap are the *same population*.
+  Narrowing the count lets a delete through that should have been refused; narrowing the remap
+  leaves rows outside the caller's scope still pointing at the row. Either way the `DELETE`
+  then raises `23503` and catalog deletion stops working for any entry used outside the
+  caller's own scope.
+
+  **The resolution is neither "scope the query" nor "drop the number" — it is to run two counts.**
+  The unscoped one decides; the scoped one (`countByStatusScoped` / `countByTypeScoped` /
+  `countByPriorityScoped`, all of which already existed for the usage popovers) is what the
+  message quotes. Nothing is stranded, and a delegated admin learns only their own number while a
+  system admin still sees the true total. The two return the same value today, because
+  `requireStatus`/`requireIssueType`/`requirePriority` resolve through `findByIdAtScope` and so
+  the guard is only reachable for an own-scope row, which only own-scope issues can reference —
+  writing both is what converts that coincidence from a paragraph into code, so that if the
+  construction is ever broken the decision stays correct while the message stops leaking, instead
+  of both failing together. Sealed by `CatalogDeleteGuardsStayUnscopedTest`, whose failure message
+  repeats this paragraph.
+- **`AdminFieldService.deleteField` had the same leak and takes the same fix (HD-13).** An earlier
+  draft of this correction listed it among the services that "guard bindings rather than a bulk
+  remap, and which already pass a scope". That was **false**: it guarded no binding and passed no
+  scope, so `valueRepository.countByField(f)` printed a count of `issue_field_values` across every
+  tenant. It now runs the same two-count pair.
+
+  A second draft scoped only that guard, reasoning that it protects no remap — `issue_field_values`
+  cascades via FK, so nothing it deletes can be stranded. True about stranding, and **silent about
+  consent**: `dropValues` is the caller agreeing to destroy data, and the cascade it authorises is
+  unscoped. In the degenerate state the pair exists to survive (scoped 0, unscoped > 0) the catalog
+  three *refuse* while a scoped `deleteField` would *proceed* and destroy another tenant's rows
+  with `dropValues` never asked for — strictly the worse failure, in the one place the pattern was
+  not applied.
+
+  **The rule, stated so it covers both rather than distinguishing them: the decision must cover the
+  population the delete affects — remapped or cascaded — and only the message may be narrower.**
+  Sealed for all four guards by `CatalogDeleteGuardsStayUnscopedTest`.
+- **Still unaudited, stated precisely rather than by service name.** The remaining services'
+  **delete** guards count *projects* through `ProjectCountService`, which takes a `ScopeContext`.
+  That is not true of every guard they contain: **`AdminWorkflowService.update`'s stranded-issue
+  check** (`countByStatusInWorkflowProjects`) takes no `ScopeContext`, spans every tenant, and
+  quotes the number *and the status name* to a delegated admin — the exact shape this section was
+  corrected for. Safe today by the same construction argument as the catalog three, and **not
+  re-audited by HD-13**. (`AdminProjectService` runs no count at all; its finding is §4.5, and
+  naming it here was inaccurate.)
 
 ### 4.5 Projects matrix — `AdminProjectService.list()` — **HIGH (system console)**
 

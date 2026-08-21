@@ -195,8 +195,13 @@ class V11StoryPointsMigrationTest {
     private UUID issue(Connection conn, UUID workspace, UUID project, UUID user, int number,
                        String title) throws SQLException {
         var id = UUID.randomUUID();
-        // type_id/status_id deliberately carry no FK (V1); priority_id does, so it is read
-        // from the globally seeded set.
+        // All three are read from the globally seeded catalog. That was already true, and
+        // from V19 it is also required: issues_type_id_fkey / issues_status_id_fkey now
+        // constrain type_id/status_id the way issues_priority_id_fkey always constrained
+        // priority_id. This fixture stops at V11 so it would survive a made-up UUID today,
+        // but the sentence that used to sit here ("type_id/status_id deliberately carry no
+        // FK") is no longer true of the schema and would mislead the next person who raises
+        // the target version.
         var priority = single(conn,
                 "SELECT id FROM priorities WHERE scope_workspace_id IS NULL LIMIT 1");
         var status = single(conn,

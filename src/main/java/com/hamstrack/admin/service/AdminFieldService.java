@@ -109,10 +109,28 @@ public class AdminFieldService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "System fields can only be archived, not deleted.");
         }
+        // TWO COUNTS, exactly as AdminCatalogService's three deletes do it. THE DECISION MUST
+        // COVER THE POPULATION THE DELETE AFFECTS — remapped or cascaded; only the MESSAGE may
+        // be narrower.
+        //
+        // An earlier draft of this fix scoped the decision too, on the reasoning that this guard
+        // protects no remap: `issue_field_values` cascades via FK, so nothing here can be
+        // stranded and no 23503 can follow. That is true about STRANDING and silent about
+        // CONSENT, which is the other thing this guard does. `dropValues` is the caller agreeing
+        // to destroy data, and the cascade it authorises is unscoped. Compare the degenerate
+        // state the pair exists to survive (scoped count 0, unscoped count > 0):
+        //
+        //   * catalog three — unscoped decides, so the delete is REFUSED. Nothing happens.
+        //   * deleteField, scoped — the delete PROCEEDS, and ON DELETE CASCADE removes another
+        //     tenant's issue_field_values rows silently, with dropValues never asked for.
+        //
+        // So the one place the pattern was not applied had the strictly worse degradation. And
+        // "unreachable today by construction" is the argument this ticket already refused as a
+        // reason to collapse the catalog counts into one; it cannot be accepted here.
         long values = valueRepository.countByField(f);
         if (values > 0 && !dropValues) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    values + " issues have a value for this field — pass dropValues=true to delete them, or archive instead");
+            long mine = valueRepository.countByFieldScoped(f, scope.workspaceId(), scope.projectId());
+            throw new ResponseStatusException(HttpStatus.CONFLICT, valuesInUse(mine));
         }
         // set memberships + values cascade via FK
         fieldDefRepository.delete(f);
@@ -285,5 +303,35 @@ public class AdminFieldService {
     private FieldSet requireSet(ScopeContext scope, UUID id) {
         return fieldSetRepository.findByIdAtScope(id, scope.workspaceId(), scope.projectId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Field set not found"));
+    }
+
+    /**
+     * The "values would be destroyed" refusal, built from the <strong>scoped</strong> count while
+     * a different, unscoped count made the decision — the same pair
+     * {@code AdminCatalogService.inUse} uses, and the same degradation.
+     *
+     * <p><strong>The zero-scoped branch quotes no number AND prescribes nothing</strong>, exactly
+     * as {@code AdminCatalogService.inUse} does, and for the same structural reason: in that
+     * state the caller can see none of the affected rows, so "pass {@code dropValues=true} to
+     * delete them" would be prescribing an <em>unscoped cascade over rows they cannot see</em>.
+     * Archiving is the only remedy that is safe without visibility, so it is the only one named.
+     *
+     * <p>Weaker here than in its twin, and neutralised anyway. {@code dropValues} is this
+     * endpoint's own consent flag, so a caller could pass it regardless — where
+     * {@code replaceWithId} additionally repointed foreign rows at a replacement drawn from the
+     * caller's scope — and the state is unreachable today. It is fixed because leaving one half
+     * of a matched pair alone is how the next reader concludes the two cases differ on purpose.
+     *
+     * <p>The {@code mine >= 1} branch stays prescriptive: there the caller has visible rows, the
+     * count is theirs, and this is the normal path.
+     */
+    private static String valuesInUse(long mine) {
+        if (mine == 0) {
+            return "This field is still in use — archive it instead";
+        }
+        return (mine == 1 ? "1 issue has a value for this field"
+                          : mine + " issues have a value for this field")
+               + " — pass dropValues=true to delete " + (mine == 1 ? "it" : "them")
+               + ", or archive instead";
     }
 }

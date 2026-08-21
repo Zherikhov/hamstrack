@@ -105,6 +105,38 @@ info:
     else is changing this right now* and retrying works, this one means *this
     took too long and will take too long again* and retrying does not.
 
+    **A write that conflicts with a related record is a `409`, not a crash.**
+    Where the database itself refuses a write because a reference cannot be
+    satisfied — in either direction: something still points at a row being
+    removed, or a row being written points at something that is no longer
+    there — the refusal reaches the caller as `409` with
+    `errorType: "REFERENCE_CONSTRAINT_VIOLATION"`, and nothing is
+    half-applied. **This is a property of the API rather than of a set of
+    endpoints** — it is what makes "no reference is ever left stranded" true
+    of every path, including one added later that forgets to check, which is
+    the entire reason it exists and why no operation below lists it. **A
+    caller should not normally meet it**: where an operation can foresee the
+    conflict it checks first and answers its own, more specific `409` naming
+    what is in the way and what to do about it, and that pre-check is the
+    refusal to code against. This one is the backstop under it, and it
+    **prescribes no remedy specific to either direction** — it cannot tell
+    which of the two it caught, and their remedies are opposite — so it offers
+    only the recovery that holds both ways: re-read, then retry. Whether that
+    recovery helps follows from the direction. Where the cause was somebody
+    else's commit — a referenced row deleted between the read that resolved it
+    and the write that landed, which is the likeliest way to meet this at all —
+    a retry genuinely can succeed, the exact opposite of the time-budget `422`
+    above; where something still points at what is being removed, it is still
+    there and a retry is refused identically. Re-read first and send what you
+    find rather than replaying the identical body.
+
+    **"In a moment" is literal.** A reload may still be served a briefly cached
+    copy of the project's catalog, so an entry that is already gone can keep
+    being offered for a little while. There is deliberately no `Retry-After` —
+    that header stays with the lock-contention `409`, where the wait has a
+    known bound — and nothing here is a schedule to key on. See
+    `ReferenceConstraintProblemDetail`.
+
     **`errorType` says which failure a body is**, wherever one status covers
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
@@ -112,7 +144,10 @@ info:
     refused over project administrators carries `STRANDED_PROJECTS`,
     `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`, and any request stopped
     for outrunning the server’s time budget carries
-    `STATEMENT_BUDGET_EXCEEDED`. Two rules for consuming
+    `STATEMENT_BUDGET_EXCEEDED`, and a write the database refuses because a
+    reference could not be satisfied carries
+    `REFERENCE_CONSTRAINT_VIOLATION`.
+    Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
     not read its **absence** as an unknown value — a response that needs no
@@ -2375,6 +2410,12 @@ paths:
         `/{id}/unarchive` (not listed individually) hide an entry from new
         use instead. The same delete/archive semantics apply to priorities
         and issue types.
+
+        `replaceWithId` is resolved **within the caller’s own scope** and
+        answers `404` — never `403` — when it names an entry that scope cannot
+        see, so an entry belonging to another tenant is indistinguishable from
+        one that does not exist. Here that scope is global: a workspace- or
+        project-scoped entry is not a valid replacement for a global one.
       operationId: adminDeleteStatus
       parameters:
         - $ref: '#/components/parameters/adminId'
@@ -2794,7 +2835,8 @@ paths:
         `?dropValues=`], GET `/{id}/usage`) and the sets `workflows`,
         `priority-sets`, `field-sets`, `issue-type-sets` (GET/POST, PATCH/DELETE
         `/{id}`). List responses carry `scope`; writes to inherited (global) rows
-        return 404.
+        return 404. A delete’s `?replaceWithId=` resolves within this scope’s
+        visible catalog too — an id it cannot see is 404, never 403.
       operationId: wsAdminListStatuses
       parameters: [ { $ref: '#/components/parameters/workspaceId' } ]
       responses:
@@ -2880,7 +2922,9 @@ paths:
         part of the workspace-wide curator set, so a workspace OWNER/ADMIN with
         no project membership row is refused. Rows scoped PROJECT are editable;
         global/workspace rows are inherited (read-only). This endpoint plus PATCH
-        set the four bindings.
+        set the four bindings. A catalog delete’s `?replaceWithId=` resolves only
+        within what this project can see (global ∪ workspace ∪ its own rows);
+        anything else is 404.
 
 
         **A workspace member who is not a project member now gets 403 here, not
@@ -7939,6 +7983,30 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/StatementBudgetProblemDetail' }
 
+    ReferenceConstraintViolation:
+      description: >-
+        The write was refused by the database because a reference could not be
+        satisfied: `409` with `errorType: "REFERENCE_CONSTRAINT_VIOLATION"`.
+        Both directions land here — something still points at a row being
+        removed, and a row being written points at something that is no longer
+        there — and the body asserts neither, because they cannot be told
+        apart without reading the message the database owns. Nothing is
+        half-applied.
+
+
+        **Deliberately referenced by no operation, and not the refusal a
+        caller normally meets.** Where an operation can foresee the conflict it
+        checks first and answers its own, more specific `409`; this one is the
+        guarantee underneath those checks — that no reference is ever left
+        stranded, on a path written later that forgets to check as much as on
+        the ones documented here. Attaching it to whichever paths look exposed
+        today would say the opposite of what it is. It carries no
+        `Retry-After`, and names nothing: not the entry, not a count, not the
+        constraint.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ReferenceConstraintProblemDetail' }
+
     ReportWindowRejected:
       description: >-
         `from` is after `to`; the window is wider than
@@ -8222,6 +8290,50 @@ components:
             errorType:
               type: string
               enum: [STATEMENT_BUDGET_EXCEEDED]
+
+    ReferenceConstraintProblemDetail:
+      description: >-
+        The `409` body of a write the database refused because a reference
+        could not be satisfied. It belongs to the API rather than to a list of
+        paths — it is what makes "no reference is ever left stranded" true of
+        every path, including one added later that forgets its own check — so
+        it is defined here and attached to no operation.
+
+
+        The refusal a caller normally meets is the endpoint's own pre-check
+        `409`, which knows what is in the way and can therefore prescribe a
+        remedy for it. This is the backstop under it and prescribes no
+        direction-specific remedy, because it cannot tell whether it caught a
+        row that is still pointed at or a write pointing at a row that is gone,
+        and those two want opposite actions. Never a `500`.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 409 }
+            detail:
+              type: string
+              description: >-
+                Direction-neutral, which is a constraint rather than a style:
+                the reachable case is an ordinary write racing a concurrent
+                delete, whose author can neither remap nor archive anything. So
+                it prescribes only the recovery that holds in both directions —
+                re-read, then retry — and names nothing: not the entry, not a
+                count, not the constraint. It says "in a moment" because a
+                reload can still be served a briefly cached copy of the project
+                catalog, so an entry already deleted may keep being offered for
+                a short while; the wording carries that limit rather than this
+                handler reaching into another feature's cache to hide it. No
+                `Retry-After` accompanies it and no schedule is implied. The
+                direction and the offending key go to the server log, which is
+                the operator's copy of this refusal.
+              example: >-
+                This change conflicts with a related record, so it was not
+                applied. Something else may have changed at the same time —
+                reload and try again in a moment.
+            errorType:
+              type: string
+              enum: [REFERENCE_CONSTRAINT_VIOLATION]
 
     HqlProblemDetail:
       description: >-

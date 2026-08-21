@@ -295,7 +295,21 @@ class SprintLifecycleTest extends SprintTestBase {
                 : "the goal sent with the start did not persist";
     }
 
-    /** Deleting the project takes its sprints with it (the cascade, §4.5). */
+    /**
+     * Deleting the project takes its sprints with it (the cascade, §4.5).
+     *
+     * <p>Nothing in the <em>application</em> deletes a project — both projects and workspaces
+     * are archived — so every project delete in the tree is a test fixture, and this is one of
+     * them ({@code V19IssuesTaxonomyFkTest} runs several more, deliberately). That makes each of
+     * them a place where the foreign keys {@code V19__issues_taxonomy_fk.sql} added can be met by
+     * a cascade. This one is
+     * unaffected, and measurably so rather than hopefully: AC-7 (`V19IssuesTaxonomyFkTest`)
+     * showed that a project delete cascades cleanly even when the project's own issues use its
+     * own project-scoped status, type and priority, and this fixture has neither
+     * project-scoped taxonomy nor any issue. The one shape that does abort with {@code 23503}
+     * is an issue <em>outside</em> the deleted project pointing at that project's scoped
+     * catalog row, which {@code newProject()} cannot produce.
+     */
     @Test
     void deletingAProjectCascadesItsSprints() throws Exception {
         var ctx = newProject();

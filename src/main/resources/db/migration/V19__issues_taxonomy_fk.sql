@@ -1,0 +1,179 @@
+-- ---------------------------------------------------------------------------
+-- HD-13 — restore FK integrity on issues.type_id / issues.status_id
+-- ---------------------------------------------------------------------------
+-- The V1 baseline shipped these two columns with NO foreign key: the originals
+-- were dropped by the pre-squash V6's `DROP TABLE statuses/issue_types CASCADE`
+-- and never recreated, and the single-baseline squash carried the gap forward.
+-- Every other reference on `issues` is constrained — project_id, workspace_id,
+-- assignee_id, reporter_id, parent_id, component_id, sprint_id and priority_id,
+-- the last of which is the direct precedent for the shape used here.
+--
+-- TWO NOTES IN APPLIED MIGRATIONS ARE SUPERSEDED BY THIS FILE and cannot be edited:
+-- Flyway checksums the whole script, comments included, so a text-only edit to an
+-- applied migration breaks startup on every existing installation. This header is
+-- the correction for both.
+--
+--   * V1__init_schema.sql:355 — "type_id/status_id intentionally carry NO foreign
+--     key ... Adding FKs back is a deliberate, separately-tested change (it would
+--     make admin delete-with-remap fail on dangling refs)." The premise held; the
+--     parenthesis did not. Delete-with-remap is FK-safe, and the reason is exact:
+--     AdminCatalogService issues the bulk remap (`remapStatus`/`remapType`, both
+--     UNSCOPED, all tenants) BEFORE `delete(...)` in the same transaction, so no
+--     row is left pointing at the deleted catalog entry by the time the DELETE
+--     reaches the wire. That ordering is load-bearing from this migration on.
+--
+--   * V9__components.sql:79 — "Deliberate contrast with issues.type_id/status_id,
+--     which carry NO FK: those are remapped in bulk by the admin console and an FK
+--     would break delete-with-remap." Same correction. The contrast that DOES
+--     survive is the one drawn below: component_id's FK is COMPOSITE and therefore
+--     carries tenancy, and these two cannot be.
+--
+-- WHAT THIS BUYS: a *stranded* reference becomes impossible. status_id/type_id can
+-- no longer name a row that does not exist, in any path — including paths written
+-- later, including a psql session, including a cascade. A catalog DELETE that would
+-- strand issues is now refused by the database rather than by a service method
+-- somebody remembered to write. A stranded issue renders as a blank board column,
+-- disappears from every status filter, and cannot be repaired through the UI,
+-- because no screen can name a status that is not there.
+--
+-- WHAT IT DOES NOT BUY: tenancy. Read this before assuming the constraints this
+-- file adds are equivalent to the ones they will sit next to in \d issues:
+--
+--   issues_component_fk    FOREIGN KEY (component_id, workspace_id) REFERENCES components(id, workspace_id)
+--   issues_sprint_fk       FOREIGN KEY (sprint_id,    workspace_id) REFERENCES sprints(id,    workspace_id)
+--   issues_status_id_fkey  FOREIGN KEY (status_id)                  REFERENCES statuses(id)
+--   issues_type_id_fkey    FOREIGN KEY (type_id)                    REFERENCES issue_types(id)
+--
+-- The first two make a cross-tenant reference impossible IN THE DATABASE. The last
+-- two do not, and cannot: `statuses`/`issue_types` have no workspace_id column at
+-- all, only a nullable scope_workspace_id that is NULL for a global row AND NULL
+-- for a project-scoped row, so a composite key would reject 99.8% of real
+-- references. The decisive obstacle is cardinality, not key shape: one global
+-- catalog row is referenced by issues in every workspace at once, and a key naming
+-- a workspace can be satisfied by exactly one workspace per parent row. PostgreSQL
+-- has no MATCH PARTIAL and no conditional foreign key. The tenancy half is enforced
+-- in the application, by ProjectConfigService.requireStatusOffered /
+-- requireTypeOffered / requirePriorityOffered plus the scope-checked binding chain
+-- behind them. (Those three were named requireStatusInWorkflow / requireTypeInSet /
+-- requirePriorityInSet until HD-13 renamed them in this same ticket — a comment in
+-- an applied migration cannot be corrected, so this file may not go out carrying a
+-- name that was already dead when it was written. That is the whole point of the
+-- two-item list at the top of this header.)
+-- See docs/design/issues-taxonomy-fk-proposal.md §3.
+--
+-- NO `ON DELETE` CLAUSE: NO ACTION, like issues_priority_id_fkey. CASCADE would
+-- delete issues when a status is deleted, which is the exact inversion of the
+-- point; SET NULL is impossible against a NOT NULL column; RESTRICT differs from
+-- the default only in that it cannot be deferred.
+--
+-- PLAIN `ADD CONSTRAINT`, deliberately NOT `NOT VALID` + `VALIDATE CONSTRAINT`.
+-- Deploys stop the old container before the new one starts (HD-93, 2026-08-21:
+-- rolling deploys are not planned), so migrations run with no concurrent writer and
+-- the SHARE ROW EXCLUSIVE lock on `issues` and on each parent falls in a window
+-- where nothing is serving. If that ever changes, docs/release-checklist.md →
+-- "Constraints on a populated table, and why they are free right now" is the
+-- inventory these two belong to, and the rule becomes the two-step form.
+--
+-- MIGRATION COST: one RI_Initial_Check scan per constraint (a LEFT JOIN of `issues`
+-- against the parent, no row locks in the plan). Measured on the live development
+-- database at 77,619 issues, 641 statuses and 79 issue types: zero nulls and zero
+-- dangling references on both columns, so both scans pass without touching data.
+-- (An earlier draft called the parents "a few dozen rows", which was a guess sitting
+-- among measurements — 641 is not a few dozen. It changes nothing here: the parent
+-- side is a hash of a few hundred rows either way.) The referencing columns are
+-- already indexed (idx_issues_type / idx_issues_status, V1), which is what keeps a
+-- future catalog DELETE's RI check off a sequential scan.
+--
+-- STEADY-STATE COST, which is what a reader two years from now is actually looking
+-- for: from this migration on, every issue INSERT and every status/type change takes
+-- a FOR KEY SHARE row lock on the parent catalog row for the rest of its transaction,
+-- so that the parent cannot be deleted underneath it. Global catalog rows are shared
+-- by every tenant on the instance, so those locks are instance-wide contention points
+-- rather than per-tenant ones. This is precedented, not new: issues_priority_id_fkey
+-- has done exactly this since V1, on a column every issue also carries — so V19
+-- triples an existing cost rather than introducing one. FOR KEY SHARE conflicts only
+-- with FOR UPDATE and with a DELETE of the parent, and nothing in the product takes
+-- FOR UPDATE on these tables, so the practical effect is that concurrent issue writes
+-- do not block each other and a catalog DELETE queues behind them. That is the
+-- intended behaviour.
+--
+-- DELETING A PROJECT — MEASURED, NOT PREDICTED (proposal AC-7). The concern was that
+-- `statuses.scope_project_id` / `issue_types.scope_project_id` cascade on project
+-- delete, and that the inner cascade DELETE's own immediate NO ACTION check might
+-- fire before the sibling `issues` cascade had removed the referencing rows,
+-- aborting the whole project delete with 23503. Executed against a scratch database
+-- built by replaying V1..V19 in order, so the constraint-creation order is the real
+-- one. The observed answer:
+--
+--   * Deleting a project whose OWN issues use its OWN project-scoped status, type
+--     and priority CASCADES CLEANLY — before and after this migration.
+--
+--     AND IT WAS MEASURED IN THE WORST POSSIBLE ORDER, which is what makes this a
+--     result rather than a lucky run. The RI triggers on `projects` fire in
+--     trigger-name order, and in the real schema all THREE taxonomy cascades come
+--     first: RI_ConstraintTrigger_a_327694 (statuses), _327715 (priorities),
+--     _327736 (issue_types), then _327961 (issues). That is exactly the order the
+--     original prediction said would abort — the catalog rows are deleted before
+--     the issues that reference them — and it still cascades cleanly.
+--
+--     THE MECHANISM, so nobody has to re-run it to trust it: an RI cascade action
+--     is executed through SPI with fire_triggers = false (EXEC_FLAG_SKIP_TRIGGERS),
+--     so the inner DELETE opens NO after-trigger query level of its own. Its
+--     NO ACTION check is therefore appended to the TAIL of the ENCLOSING statement's
+--     queue, behind the `issues` cascade that was queued when the outer DELETE ran.
+--     The check runs after the issues are already gone. Trigger-name/OID order
+--     cannot affect this, because the ordering that matters is queue position, not
+--     trigger position.
+--
+--     Corroborated by re-running with ON DELETE RESTRICT instead of NO ACTION: it
+--     also succeeds. That rules out the plausible-but-wrong reading that this is
+--     about deferrability — RESTRICT cannot be deferred, so if deferral were the
+--     explanation, RESTRICT would have aborted.
+--   * It aborts with 23503 in exactly one shape: when an issue OUTSIDE the deleted
+--     project references that project's project-scoped catalog row. That data shape
+--     is already reachable today via `priorities` (issues_priority_id_fkey has been
+--     in the schema since V1, and it raises the same abort with the same DETAIL),
+--     so this migration adds two more constraint names that can report the
+--     condition, not a new condition. Which one REPORTS it is decided by the
+--     cascade trigger OIDs above (statuses' 327694 is lowest, so statuses reports
+--     first) — and note those names sort as TEXT, so an OID digit-count rollover
+--     would silently reorder them. Nothing depends on which name appears; it is
+--     written down only so a reader who sees a different one is not misled into
+--     thinking the behaviour changed.
+--   * Deleting the offending issues first makes the project delete succeed.
+--
+-- WHO CAN REACH THIS, stated as a property rather than as a census — a sentence
+-- that counts ("nothing deletes a project", "the single path that could mint one")
+-- goes stale without containing any word a search for the new path would match.
+--
+--   * The abort needs a DELETE of a row that project-scoped taxonomy hangs off, i.e.
+--     a project or a workspace delete. ARCHIVING never reaches it; only a real
+--     DELETE does. At the time of writing the product archives and never deletes
+--     either, so the only deleters are tests and an operator at a psql prompt.
+--   * The aborting DATA needs a cross-scope reference: an issue pointing at a
+--     catalog row scoped to a project that is not its own. Any write that resolves
+--     a client-supplied catalog id WITHOUT scoping it can mint one. Three such
+--     writes existed — the `replaceWithId` lookups in AdminCatalogService's
+--     delete-with-remap methods — and all three are scoped as of this ticket; the
+--     issue-write resolvers were scoped alongside them. The property is the thing
+--     to preserve: scope every catalog id that arrives from a client.
+--
+-- The rule for whoever adds a project or workspace delete, and for an operator
+-- purging by hand: delete the referencing `issues` first, in the same transaction,
+-- before the parent row. Do NOT make these constraints DEFERRABLE INITIALLY
+-- DEFERRED to paper over it — priority_id would stay immediate, so the same purge
+-- would still fail, and genuine violations would move to commit time with less
+-- context.
+--
+-- The advisory pre-flight in the proposal's §6.3 finds any cross-scope rows that
+-- already exist; it returned zero.
+--
+-- Hibernate's SchemaValidator does NOT validate foreign keys (only tables, columns,
+-- column types and sequences), so `ddl-auto=validate` passing proves nothing about
+-- this migration either way. The real check queries pg_constraint directly.
+
+ALTER TABLE issues
+    ADD CONSTRAINT issues_type_id_fkey FOREIGN KEY (type_id) REFERENCES issue_types(id);
+
+ALTER TABLE issues
+    ADD CONSTRAINT issues_status_id_fkey FOREIGN KEY (status_id) REFERENCES statuses(id);

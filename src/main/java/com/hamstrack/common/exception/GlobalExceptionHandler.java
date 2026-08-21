@@ -16,6 +16,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.dao.QueryTimeoutException;
@@ -30,6 +31,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.HandlerMapping;
 
+import java.sql.SQLException;
 import java.time.DateTimeException;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -608,6 +610,272 @@ public class GlobalExceptionHandler {
         long seconds = Math.round(millis / 1000.0);
         return seconds <= 1 ? "1 second" : seconds + " seconds";
     }
+
+    /**
+     * The discriminator for a refusal that came from a foreign key, in the shape
+     * {@link #STATEMENT_BUDGET_ERROR_TYPE} and {@code handleHqlParse} already use. It names
+     * neither the constraint nor a direction, and both omissions are deliberate: a client may
+     * branch on this string, so it must not go stale when a constraint is renamed, and it must
+     * not assert something this handler cannot determine.
+     *
+     * <p>It read {@code REFERENCED_ROW_IN_USE} until review. That name is true of only one of the
+     * two directions a {@code 23503} arrives in, and the <em>other</em> one — a child write whose
+     * referenced row does not exist — is the reachable one, so the discriminator was asserting
+     * the less likely half. A client that branched on it would render "this row is still in use"
+     * over a failed issue create.
+     */
+    static final String REFERENCE_CONSTRAINT_ERROR_TYPE = "REFERENCE_CONSTRAINT_VIOLATION";
+
+    /** PostgreSQL {@code foreign_key_violation}. */
+    private static final String SQLSTATE_FOREIGN_KEY_VIOLATION = "23503";
+
+    /**
+     * <strong>A row the database refuses to orphan is a 409, not a crash</strong> (HD-13).
+     *
+     * <p>This is the <em>fourth</em> instance of one defect in one release, and the pattern is
+     * worth naming rather than re-discovering a fifth time: a database-level condition with a
+     * correct, documented outcome escaping as a <strong>500</strong> because nothing bound it.
+     * {@link #handleOptimisticLock}, {@link #handlePessimisticLock} and
+     * {@link #handleQueryTimeout} are the other three. {@code V19__issues_taxonomy_fk.sql} adds
+     * {@code issues_type_id_fkey} and {@code issues_status_id_fkey}, so it creates a new way to
+     * reach {@code 23503}; shipping the constraint without this handler would have shipped the
+     * fourth crash with it.
+     *
+     * <p><strong>Branch on SQLSTATE, never on the message.</strong>
+     * {@link DataIntegrityViolationException} is a wide family — {@code 23505} unique violations,
+     * {@code 23502} not-null violations and {@code 23514} check violations all arrive as the same
+     * Spring type, and each wants a different sentence. The message text is PostgreSQL's, is
+     * localisable, and names the constraint; matching on it would couple this class to strings the
+     * database owns. {@link #sqlStateOf} finds the state by walking the cause chain, so it does
+     * not matter how deeply the {@link java.sql.SQLException} that carries it is nested.
+     *
+     * <p><strong>Only {@code 23503} changes behaviour.</strong> Everything else keeps exactly
+     * today's outcome — logged at ERROR with the full throwable, answered {@code 500}. Folding
+     * {@code 23505} into a {@code 409} here would silently change the outcome of
+     * {@code issues_project_id_number_key} and several admin unique constraints at once, each of
+     * which wants its own message; that is a separate decision with a separate ticket. Note that
+     * a path that already <em>has</em> a sentence for its own unique violation catches the
+     * exception at its call site and never reaches here — that is the pattern to copy rather than
+     * to generalise from. (Written as a property because the list is longer than it looks and
+     * grows: naming three of them was already an undercount when it was written.)
+     *
+     * <p><strong>This is a backstop, not the message.</strong> The authoritative refusal stays the
+     * pre-check in {@code AdminCatalogService.deleteStatus}/{@code deleteIssueType}/
+     * {@code deletePriority}, which counts the affected issues and names the remedy before the
+     * database ever has to object. This handler exists so that the path nobody predicted — a
+     * future workspace purge, a demo-data teardown, a project delete — degrades to a sentence
+     * instead of a stack trace. Same doctrine as {@link #handleDateTime}.
+     *
+     * <h4>The sentence may not assume a direction it cannot determine</h4>
+     * {@code 23503} is raised in <strong>two opposite directions</strong>, and this handler can
+     * tell them apart only by reading PostgreSQL's message, which the rule above forbids:
+     * <ul>
+     *   <li><strong>Parent delete refused</strong> — {@code DETAIL: Key (id)=(…) is still
+     *       referenced from table "issues"}. Something exists that points at the row being
+     *       deleted. Remap or archive are real actions here.</li>
+     *   <li><strong>Child write refused</strong> — {@code DETAIL: Key (status_id)=(…) is not
+     *       present in table "statuses"}. The referenced row does <em>not</em> exist, nothing is
+     *       being deleted, and neither remap nor archive is anything the caller could do.</li>
+     * </ul>
+     * The <em>second</em> is the reachable one. The three catalog deletes all pre-check, so
+     * direction one needs a path that bypasses them; direction two needs only a TOCTOU on an
+     * ordinary issue write — {@code IssueService} resolves a status, a concurrent
+     * {@code deleteStatus} whose count legitimately saw zero commits its {@code DELETE}, and the
+     * first transaction then flushes against a row that is gone. An ordinary member doing
+     * {@code POST …/issues} would have been told to "delete it with a replacement, or archive it
+     * instead", and a client branching on the discriminator would have rendered a remap dialog
+     * over a failed issue create. (Before V19 that race existed on {@code priority_id} alone and
+     * produced a 500; the fix must not convert it into a confident, wrong 409.)
+     *
+     * <p>So both the sentence and {@link #REFERENCE_CONSTRAINT_ERROR_TYPE} are
+     * <strong>direction-neutral and non-prescriptive</strong>: they report that a reference could
+     * not be satisfied and say what to do next in a way that is true either way (re-read, then
+     * retry), and they leave remap/archive to the three pre-checks, which are the only place that
+     * knows the direction <em>and</em> the entry <em>and</em> the count. It also says a retry may
+     * work, unlike {@link #handleQueryTimeout}, because a 409 invites one and
+     * <em>where the cause was somebody else's commit — the reachable direction — it can
+     * succeed</em>. That qualification is not decoration: a retry does nothing for direction one,
+     * where the reference blocking the delete is still there, and a sentence claiming otherwise
+     * for the whole handler would be the same one-direction mistake this section exists to
+     * correct.
+     *
+     * <p>It says "in a moment" rather than "now" for a reason that lives in another file:
+     * {@code Issue}'s javadoc records that catalog membership is read through
+     * {@code ProjectConfigCache} (~60 s), so in the direction-two race the caller can reload,
+     * be handed the same stale picker still offering the deleted status, and meet the identical
+     * violation until the entry ages out. The remedy is honest in kind and was under-specified in
+     * time. <strong>Deliberately fixed in the wording rather than by evicting the cache here</strong>:
+     * a global exception handler reaching into a feature's cache to repair a race is a coupling
+     * that would outlive the reason for it, and would put a write into a path whose whole job is
+     * to describe a failure. There is also no {@code Retry-After} — that header is reserved for
+     * the lock-contention 409, where the wait has a known bound — so the sentence must not imply
+     * a schedule a client could key on.
+     *
+     * <p><strong>Nothing from the database reaches the wire.</strong> Not the constraint name, not
+     * the SQL, not the parameters, not the key values — PostgreSQL's {@code DETAIL} carries the
+     * offending key in both directions, and that is an id belonging to whichever tenant owns it.
+     * All of it goes in the log line with the request method and the mapped pattern, in the shape
+     * {@link #handlePessimisticLock} uses; the client gets a sentence.
+     *
+     * <h4>Two bindings, because Spring's DAO hierarchy only exists on translated paths</h4>
+     * The same trap {@link #handlePessimisticLock} and {@link #handleQueryTimeout} each fell into
+     * once, and the reason this handler does not have to fall into it a third time.
+     * {@link DataIntegrityViolationException} is Spring's translated type, so it arrives from
+     * anything that goes through translation — a Spring Data repository (which is how every
+     * catalog delete in the product runs), or a commit-time flush, which
+     * {@code JpaTransactionManager.doCommit} routes through {@code HibernateJpaDialect}.
+     * <strong>Nothing translates a call made on the {@code EntityManager} directly.</strong> The
+     * reachable spelling today is the explicit {@code entityManager.flush()} in
+     * {@code SprintScopeLedger.recordDepartureBeforeDelete}; stated as a category rather than as
+     * a list, because a sentence naming that one method goes stale the first time anybody adds
+     * another — <strong>any {@code EntityManager} write that can violate a constraint is
+     * exposed</strong>.
+     *
+     * <p><strong>What arrives there, read out of the source rather than inferred</strong>
+     * ({@code hibernate-core-7.4.1.Final}, the version Boot 4.1.0 pins). Two competent reviewers
+     * reached opposite conclusions about this, so it is written down with the line of reasoning
+     * that settles it. {@code ExceptionConverterImpl.convert(HibernateException, LockOptions)} is
+     * a chain of {@code instanceof} branches; {@code ConstraintViolationException} matches
+     * <em>none</em> of them and falls to the final {@code else}, which is
+     * {@code rollbackIfNecessary(exception); return exception;} — so it propagates
+     * <strong>unwrapped</strong>, and the second binding below matches it <em>directly</em>
+     * rather than by cause-fallback.
+     *
+     * <p>This paragraph previously said the converter wraps it in a bare
+     * {@code PersistenceException}. That is <strong>false for this exception and true for a
+     * different one</strong>: the {@code org.hibernate.QueryTimeoutException} branch really does
+     * wrap, when the transaction is marked for rollback, which is why
+     * {@link #handleQueryTimeout} needs three bindings. The sentence was carried across from a
+     * neighbour it was true of. There <em>is</em> a wrapping path here, and it is a different
+     * one: {@code convertCommitException} returns a {@code RollbackException} wrapping the
+     * converted cause, so a commit-time failure arrives nested — normally translated by
+     * {@code HibernateJpaDialect} into the DAO type before it reaches this class, but nested all
+     * the same.
+     *
+     * <h4>Why {@link #sqlStateOf} walks the cause chain instead of inspecting {@code ex}</h4>
+     * <strong>A handler that branches on the bound exception's type must not assume that type is
+     * the one it declared.</strong> Spring builds the candidate arguments as
+     * {@code [thrown, cause, cause.cause, …]} and
+     * {@code AnnotatedMethod.findProvidedArgument} binds the <em>first</em> one assignable to the
+     * declared parameter — so with a parameter of {@code Throwable}, {@code ex} is whatever was
+     * thrown, which may be a wrapper several levels above the exception that actually selected
+     * this method. {@link #handlePessimisticLock} and {@link #handleQueryTimeout} share the same
+     * shape and are unaffected only because they never inspect the argument; they log it. This is
+     * the first handler in the class whose control flow depends on the bound argument's runtime
+     * type, and walking the chain makes it correct for every nesting, including ones nobody has
+     * predicted — which is the whole job of a backstop.
+     *
+     * <p>Not on Boot's list, per the class note: {@code ResponseEntityExceptionHandler} declares
+     * nothing from {@code org.springframework.dao} and nothing from {@code org.hibernate}, so for
+     * {@code 23503} the only behaviour that changes is 500 to 409, and for everything else only
+     * the body shape.
+     */
+    @ExceptionHandler({DataIntegrityViolationException.class,
+            org.hibernate.exception.ConstraintViolationException.class})
+    public ResponseEntity<ProblemDetail> handleDataIntegrityViolation(Throwable ex,
+                                                                      HttpServletRequest request) {
+        var pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
+        Object route = pattern == null ? request.getRequestURI() : pattern;
+        String sqlState = sqlStateOf(ex);
+
+        if (!SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
+            // Unchanged outcome, deliberately: a 23505/23502/23514 that reaches here is a genuine
+            // fault with no sentence written for it yet, and inventing one would be worse than a
+            // 500. ERROR with the throwable, because unlike its lock neighbours this is not
+            // normal contention — it means a write the application believed was valid was not.
+            log.error("Unhandled data integrity violation on {} {} (SQLSTATE {}) — answering 500",
+                    request.getMethod(), route, sqlState, ex);
+            var problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Something went wrong");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(problem);
+        }
+
+        // WARN, not ERROR: a 23503 here is the database enforcing a rule correctly, and the
+        // request was refused rather than half-applied. It is still worth a line, for the reason
+        // handlePessimisticLock logs — turning the 500 into a clean 409 removes the only signal an
+        // operator had that a delete path is missing its pre-check. ex.toString() rather than the
+        // throwable: the message carries the constraint name and PostgreSQL's DETAIL, which is the
+        // whole of what an operator needs, and the frames are Hibernate's.
+        // The log line is where the DIRECTION lives, because the message the client must not see
+        // is exactly what distinguishes them: "is still referenced from table X" (a parent delete
+        // that bypassed its pre-check — a bug in that path) versus "is not present in table X" (a
+        // child write racing a concurrent delete — expected, and the caller should retry). An
+        // operator needs to know which; nobody else can be told without leaking the key.
+        log.warn("Foreign key violation on {} {}: {} — answering 409 {}. \"still referenced\" means "
+                 + "a delete path is missing its pre-check; \"is not present\" means a write raced "
+                 + "a concurrent delete and the retry will normally succeed.",
+                request.getMethod(), route, ex.toString(), REFERENCE_CONSTRAINT_ERROR_TYPE);
+        var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
+                "This change conflicts with a related record, so it was not applied. Something "
+                + "else may have changed at the same time — reload and try again in a moment.");
+        problem.setProperty("errorType", REFERENCE_CONSTRAINT_ERROR_TYPE);
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(problem);
+    }
+
+    /**
+     * The SQLSTATE, from whichever of the two spellings arrived — {@code null} if neither
+     * carries one, which routes to the unchanged 500 rather than guessing.
+     *
+     * <p><strong>It walks the chain rather than inspecting {@code ex}, and that is the whole
+     * point.</strong> The argument bound to a handler is not necessarily the exception that
+     * selected it: Spring offers {@code [thrown, cause, cause.cause, …]} and binds the first one
+     * assignable to the declared parameter, so a wrapper wins whenever one exists. Two shapes
+     * that both occur here make the distinction real — Spring's {@code DataIntegrityViolationException}
+     * carries the driver's {@link SQLException} some levels down, and Hibernate's untranslated
+     * {@link org.hibernate.JDBCException} exposes {@code getSQLState()} on itself. Walking finds
+     * the state in either, in any nesting, without the method having to know which arrived.
+     *
+     * <p><strong>Why not {@code NestedExceptionUtils.getMostSpecificCause}, correctly this
+     * time.</strong> An earlier version of this javadoc said that helper "would work for the
+     * first shape and not for the second". That is wrong: it is a static taking any throwable,
+     * and a {@code JDBCException} always keeps its {@code SQLException} as its cause, so it
+     * resolves both. The real objection is the opposite one — it goes to the <em>deepest</em>
+     * cause, so it walks straight <em>past</em> the SQLSTATE whenever the {@code SQLException}
+     * is itself wrapping something (a connection failure underneath a wrapped SQL error, say),
+     * and returns a throwable with no state at all. This walk takes the <strong>first</strong>
+     * carrier it meets. {@code ReferencedRowConflictContractTest} pins exactly that difference,
+     * because it is the only assertion in the suite the two implementations disagree on.
+     *
+     * <p>Both spellings are checked at every level because they are unrelated by type, and
+     * {@code getSQLState()} is null-guarded because a {@code JDBCException} constructed without a
+     * cause reports {@code null} — in which case the walk should keep going rather than conclude.
+     * A self-referential cause chain (rare, but a real shape when a framework re-wraps) is
+     * terminated explicitly, so this can never spin.
+     *
+     * <p><strong>Never parse the message.</strong> PostgreSQL's text is localisable, names the
+     * constraint, and belongs to the database rather than to us; a {@code contains("foreign key")}
+     * would couple this class to a string nobody here controls and would silently start matching
+     * the wrong things the first time a message is reworded. It is also what makes the two
+     * <em>directions</em> of a {@code 23503} indistinguishable here — see the handler's javadoc
+     * for why the refusal is worded not to guess.
+     *
+     * <p><strong>Not covered, deliberately and worth knowing:</strong>
+     * {@code jakarta.validation.ConstraintViolationException} shares a simple name with
+     * Hibernate's and is a completely unrelated type carrying no SQLSTATE. It would fall to the
+     * unchanged 500. No entity in the tree carries Bean Validation annotations today, so it is
+     * latent rather than live — but the two names differ only by import, so if a Bean Validation
+     * failure ever needs a status, give it its own handler rather than widening this one.
+     */
+    private static String sqlStateOf(Throwable ex) {
+        Throwable t = ex;
+        // Bounded, not merely self-reference-guarded. `t.getCause() == t` catches the one-step
+        // loop and nothing else: A -> B -> A spins forever, inside an exception handler, on a
+        // thread already handling a failure. The depth is far beyond any real chain (the deepest
+        // shape here is DataIntegrityViolationException -> ConstraintViolationException ->
+        // SQLException -> cause, and a commit adds one RollbackException on top).
+        for (int depth = 0; t != null && depth < MAX_CAUSE_DEPTH; t = t.getCause(), depth++) {
+            if (t instanceof SQLException se && se.getSQLState() != null) {
+                return se.getSQLState();
+            }
+            if (t instanceof org.hibernate.JDBCException je && je.getSQLState() != null) {
+                return je.getSQLState();
+            }
+        }
+        return null;
+    }
+
+    /** Generous enough that no real chain reaches it, small enough that a cycle cannot hang. */
+    private static final int MAX_CAUSE_DEPTH = 20;
 
     /**
      * How many failed fields a 400 renders, in {@code detail} and in {@code errors} alike.

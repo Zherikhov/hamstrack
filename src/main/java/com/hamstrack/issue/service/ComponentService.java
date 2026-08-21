@@ -463,8 +463,18 @@ public class ComponentService {
      * into a 409 "already exists" would hide a genuine 500-class bug behind a
      * plausible-looking conflict — the shape that makes an incident hard to diagnose.
      *
-     * <p>Only the constraint NAME is logged: no SQL, no exception message, no user
+     * <p>Only the constraint NAME is logged here: no SQL, no exception message, no user
      * input (the error-hygiene rule the HD-30 security review signed off on).
+     *
+     * <p><strong>One deliberate exception exists, and it is not a licence.</strong>
+     * {@code GlobalExceptionHandler.handleDataIntegrityViolation} — the backstop under every
+     * path like this one — logs {@code ex.toString()}. It has to: a {@code 23503} arrives in two
+     * opposite directions with opposite remedies ("still referenced from" versus "is not present
+     * in"), the two are indistinguishable from SQLSTATE alone, and the client is deliberately
+     * told neither, so that message is the only place an operator can learn which. It is safe for
+     * the reason this rule exists: every parameter is bound, so the statement logs with
+     * placeholders and no user input reaches the line. A call site with its OWN sentence — like
+     * this one — knows its direction already and needs none of that.
      */
     private static boolean isNameConflict(DataIntegrityViolationException e) {
         String constraint = constraintNameOf(e);
