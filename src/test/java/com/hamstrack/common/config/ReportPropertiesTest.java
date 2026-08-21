@@ -88,9 +88,11 @@ class ReportPropertiesTest {
      * transient heap worst case (~1.9 KB per shipped row, three copies alive at once — the
      * arithmetic is in {@link ReportProperties}), so an operator who stayed inside the documented
      * range could OOM the instance with a single request, and the throttle bounds request rate
-     * rather than concurrency. 50 000 is ~95 MB, against an ASSUMED 512 MB reference heap — no
-     * heap bound is configured anywhere (HD-152), so what an instance actually has follows host
-     * RAM. The default of 20 000 is unchanged and was never the problem.
+     * rather than concurrency. 50 000 is ~95 MB against a 512 MB reference heap, and since HD-152
+     * that heap is configured rather than assumed: the image runs {@code -XX:MaxRAMPercentage=50}
+     * and the bundled compose limits the app container to 1g. The heap tracks the container limit,
+     * so the ratio still moves with how an operator sizes the box. The default of 20 000 is
+     * unchanged and was never the problem.
      */
     @Test
     void upperBoundsAreInclusiveAndOneOverRefusesToStart() {

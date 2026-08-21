@@ -72,23 +72,32 @@ public record ReportProperties(
          * who stayed inside the documented range could OOM the instance with a single
          * request. At 50 000 it is ~95 MB.
          *
-         * The reference heap that ceiling is sized against is 512 MB, and that is an
-         * ASSUMPTION, not a property of this deployment. Nothing in the repository
-         * bounds the heap: the Dockerfile ends in a bare `java -jar` with no -Xmx and
-         * no -XX:MaxRAMPercentage, and docker-compose.prod.yml sets no memory limit —
-         * so the JVM takes ~25% of whatever HOST RAM it detects and the real budget
-         * floats with the machine. At the ~1 GB host docs/self-hosting.md tells
-         * operators to budget, that is a ~256 MB heap and 50 000 rows is a large
-         * fraction of it; on an 8 GB host the same ceiling is conservative by roughly
-         * 4x. HD-152 configures a heap bound and is what turns this assumption into a
-         * fact — treat it as a prerequisite of this rationale rather than as
-         * independent hardening, and until it lands, size maxRows against the heap you
-         * actually get rather than against the number written here.
+         * The reference heap that ceiling is sized against is 512 MB, and since HD-152
+         * that is a property of the deployment rather than an assumption about it: the
+         * Dockerfile runs the JVM with -XX:MaxRAMPercentage=50 and
+         * docker-compose.prod.yml limits the app container to 1g (APP_MEMORY_LIMIT), so
+         * a default install has exactly the heap this arithmetic is measured against.
+         * Read the pair as one setting — the flag alone sizes against HOST RAM, and the
+         * limit alone leaves the JVM guessing.
+         *
+         * What is still NOT fixed is the size of that heap, because it deliberately
+         * follows the container limit: an operator who gives the container 2g has a
+         * 1 GB heap and this ceiling becomes conservative, one who runs the image
+         * outside the bundled compose with no memory limit is back to a percentage of
+         * the host, and docs/self-hosting.md tells anyone at 4g or more to pin an explicit
+         * -Xmx instead (the 50% split is headroom sized for a SMALL container — most
+         * non-heap cost is constant, not proportional — so above that it over-reserves).
+         * That is the intended trade: one dial an operator can turn on the box they are
+         * sizing, rather than a number baked into the image. So do not read 512 MB as an
+         * invariant. What it is, is the figure the arithmetic above is stated against —
+         * and that arithmetic is what has to be re-read whenever either end moves, in
+         * EITHER direction.
          *
          * No claim is made about how many of these fit at once, because nothing bounds
          * concurrency: the throttle bounds request RATE per principal and imposes no
          * concurrency bound at all — N principals asking together is N of these live
-         * together, on whatever heap the host happens to give.
+         * together, out of the ONE bounded heap the container has. Bounding the heap makes
+         * that ceiling knowable; it does not turn it into a per-request budget.
          *
          * The default of 20 000 (~38 MB worst case, ~12 MB typical) is unchanged and
          * is not the footgun; the ceiling was.

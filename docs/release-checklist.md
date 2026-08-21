@@ -204,6 +204,54 @@ overflows `VARCHAR(255)` for a long address. And a detection query must be able 
 matching spellings by eye, whereas one that groups by the folded form and returns groups of
 more than one either finds the pair or proves there is none.
 
+## Releases that change a resource default
+
+A release that changes a **default the operator never set** — how much memory the container
+may have, how many connections the pool opens, how big an upload may be — lands on installs
+that took no decision to revisit. Nothing in their `.env` names the setting, so nothing in
+their `.env` will remind them. Unlike a derived-value change (previous section) there is no
+wrong row to find and no query that finds it: the instance is correct, merely differently
+sized, and the only symptom is that it behaves worse than it did yesterday with nothing
+tying that to the upgrade. The test for this class is not "did behaviour change" but
+**"would the change look like a fault to somebody who was not told"**.
+
+Watch for the shape where a default is *better* on the machine it was reasoned against and
+quietly *takes something away* from every larger one — those releases read as an
+improvement in the PR and as a regression on the box. 0.17.0's is the worked example:
+`HD-152` bounded the JVM heap, which raises it on a 1 GB host and halves it on a 4 GB one
+([The heap is bounded from 0.17.0](self-hosting.md#the-heap-is-bounded-from-0170)).
+
+Three steps, and **step 3 is the one that gets skipped**, because the first two feel like
+the work:
+
+1. **Write the operator section** in `docs/self-hosting.md` under `## Upgrading`, with a
+   `## Contents` entry. Say which direction the change moves *for which size of host*: a
+   default is not one change, it is one change per box it lands on. Give a break-even so a
+   reader can tell in a single line whether they are affected, and give the remedy as a
+   value they can type rather than a method they must apply — a worked table beats a
+   subtraction rule, and a rule that disagrees with its own worked numbers is worse than
+   no rule.
+2. **Route to it from where the reader already is.** The setting's row in the configuration
+   table, `## Requirements`, and — the one that is always forgotten — the `## Upgrading`
+   prose carrying the `docker compose pull` command, because that command is what an
+   upgrader copies *instead of* reading on.
+3. **Write the line into the GitHub Release body by hand.** `generate_release_notes: true`
+   lists merged PRs and says nothing about behaviour, and `docs/self-hosting.md` sends every
+   upgrader to the Releases page before a minor upgrade — so this is the only text that
+   reaches somebody who upgrades without opening a manual. Everything else in steps 1 and 2
+   is read by people who were already looking.
+
+0.17.0's line, ready to paste:
+
+> **The JVM heap is now bounded (`APP_MEMORY_LIMIT`, default `1g` → 512 MB heap).** Before
+> 0.17.0 the JVM claimed ~25% of *host* RAM, so on a host larger than 2 GB this is **less
+> heap than you had** — a 4 GB host drops from ~1 GB to 512 MB, an 8 GB host from ~2 GB.
+> There is no error; it shows up as reports and searches getting slower. Set
+> `APP_MEMORY_LIMIT` in `.env` to about half the host (4 GB → `2g`, 8 GB → `4g`) and
+> `docker compose up -d`. On a host of 2 GB or less you gain heap and need do nothing.
+> Details:
+> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
+
 ## Constraints on a populated table, and why they are free right now
 
 Adding a constraint to a table that already holds rows makes PostgreSQL validate
@@ -308,6 +356,10 @@ The rule for what belongs there: **every behaviour change that looks like a bug 
 met without warning** — a status code that moved, a response shape that grew, a value that
 is now rejected, a new mode. Additive endpoints do not need a line each; the API reference
 already has them.
+
+**A changed default belongs here too, and is the entry most easily missed** — nothing was
+added, nothing was rejected, and the diff reads as configuration. See "Releases that change
+a resource default" above, which carries 0.17.0's line ready to paste.
 
 Below is that text for the **roles & permissions** release (HD-123, V13–V16), which is also
 the worked example of the shape. See "Releases carrying a destructive migration" above for

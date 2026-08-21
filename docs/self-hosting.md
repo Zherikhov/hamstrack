@@ -25,6 +25,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Optional toggles](#optional-toggles)
 - [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
+  - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
@@ -37,9 +38,24 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - For a public instance: a domain and a TLS-terminating reverse proxy (Caddy,
   nginx, Traefik…). HTTP-only on `localhost` works for trying it out.
 - **Resources:** the app is a JVM service — budget ~1 GB RAM for it (2 GB is
-  comfortable) plus a little for PostgreSQL; a 2 vCPU / 2 GB host comfortably
-  runs a small team. Disk is dominated by attachments — size the
-  `attachments_data` volume (or your S3 bucket) for expected uploads.
+  comfortable, and on a **4 GB host or larger** `APP_MEMORY_LIMIT=2g` is what
+  actually hands it that second gigabyte — the default caps the container at 1 GB
+  however big the host is; on a 2 GB host leave it alone, because that box has no
+  second gigabyte to spare) plus a little for PostgreSQL; a 2 vCPU / 2 GB host
+  comfortably runs a small team. That ~1 GB is what the container is actually
+  limited to: the bundled compose sets `mem_limit: 1g` (`APP_MEMORY_LIMIT`) and the
+  image sizes the heap at 50% of the container limit, so the default is a
+  **512 MB heap** with the rest left for the JVM's non-heap memory. Give the
+  container more and the heap follows — nothing to rebuild, one variable, and see
+  [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170) for the sizing
+  table and for what changes if you are upgrading rather than installing fresh.
+  **If you write your own Compose file, set a memory limit on the app service**:
+  with no limit the JVM sizes its heap against *host* RAM. Add the
+  [observability stack](#observability-optional) and the arithmetic tightens
+  sharply — its services' own limits sum to ~1 GB, so app 1 GB + observability
+  ~1 GB + PostgreSQL + Caddy does not fit a 2 GB host; run it on 4 GB. Disk is
+  dominated by attachments — size the `attachments_data` volume (or your S3
+  bucket) for expected uploads.
 
 ## Quick start
 
@@ -66,6 +82,9 @@ services:
       MAIL_STARTTLS: "true"
     ports:
       - "8080:8080"
+    # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so
+    # without a limit here it sizes against host RAM. 1g → 512 MB heap.
+    mem_limit: 1g
     volumes:
       - attachments_data:/app/data/attachments
     healthcheck:
@@ -107,7 +126,7 @@ Browse your instance at its `APP_BASE_URL`, reached through the TLS proxy you pu
 in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Public self-registration
 is **closed by default** on self-hosted installs, so set `SEED_ADMIN_EMAIL` +
 `SEED_ADMIN_PASSWORD` to create your first administrator on startup (see
-[First user](#first-user)). The schema is created and migrated automatically on
+[First user](#first-user-the-administrator)). The schema is created and migrated automatically on
 startup (Flyway).
 
 > **Trying it out locally without a proxy?** Set `APP_BASE_URL=http://localhost:8080`
@@ -140,6 +159,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | Variable | Default | Purpose |
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
+| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
 | `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction that takes row locks (workspace member role change, workspace member removal, project member role change, project member removal, and a custom-role duplicate) may wait for one, in ms. Applied with `SET LOCAL` inside those transactions only — **not** a server-wide PostgreSQL `lock_timeout`, so Flyway migrations on the same pool are unaffected and still wait as long as they need. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default |
@@ -165,7 +185,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `REPORTS_MAX_WINDOW_DAYS` | `365` | Widest window one report may span, in days, counting **both** endpoints. A wider request is refused with `400` naming this cap — it is **never silently narrowed**, because a chart of a window nobody asked for is exactly how a reporting feature earns "these numbers don't match what I expected". Valid range 1–3650; at daily buckets the window length *is* the number of points in the response, which is what the upper bound guards. Identical in `dc` and `cloud`: reporting depth is a product feature, not a plan feature. A value **under 90** is safe and is not a trap: the endpoint's own default window is `min(90, this)`, so the parameterless request the reports page makes on load is always inside the cap — what is never done is clamping a window a caller explicitly asked for. An out-of-range value fails startup instead of being clamped. **Leave the line out to get the default — `REPORTS_MAX_WINDOW_DAYS=` is an empty value, not an absent one, and it stops the boot rather than restoring 365**; that matters more here than elsewhere, because this number is quoted back to API callers inside a 400 |
-| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against an **assumed reference heap of 512 MB**, which is the premise behind the number and **not** something the deployment enforces: the image runs `java -jar` with no heap flag and the sample compose sets no memory limit, so the JVM claims ~25% of the host's RAM and your real budget follows your host size. Size this against the heap you actually get — on the ~1 GB host in [Requirements](#requirements) that is only ~256 MB, so lower it there; on a larger host the ceiling is conservative. Setting an explicit heap bound is tracked as `HD-152`. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
+| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against a **reference heap of 512 MB**, and since `HD-152` that is the heap a default install actually gets rather than a premise it hopes for: the image runs the JVM at `-XX:MaxRAMPercentage=50` and the bundled compose limits the app container to `1g` (`APP_MEMORY_LIMIT`), which is 512 MB of heap exactly. So 50000 rows is ~95 MB of a 512 MB heap for one request — legal, large, and the reason the *default* is 20000 (~38 MB worst case) rather than the ceiling. The relationship still has to be maintained by whoever moves either number: the heap follows the container limit, so `APP_MEMORY_LIMIT=2g` doubles it to 1 GB and makes this ceiling correspondingly conservative, while a smaller limit — or your own Compose file with **no** `mem_limit`, where the percentage is taken against host RAM — moves it the other way. And nothing bounds *concurrency*: N users asking together is N of these alive together, so ~95 MB is a per-request figure and never a total. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
 | `REPORTS_REQUESTS_PER_MINUTE` | `60` | How many report requests **one user** may make per minute across the whole reports surface (every `…/projects/{id}/reports/**` endpoint, not per report) **plus `POST …/workspaces/*/search/insights`**, the Insights panel — a report that lives on the search path and is bound to this limiter explicitly rather than by prefix. For the six project-scoped reports this is the only bound on the **work** a report does: `REPORTS_MAX_WINDOW_DAYS` bounds the response array, the "open at window start" balance is O(project history) whatever window you ask for, and `Cache-Control: private` means no shared cache absorbs a repeat — so without a budget one authenticated member in a loop can saturate `DB_POOL_MAX_SIZE` with entirely legal 200s. Past it the answer is `429` + `Retry-After`; a report is never narrowed or approximated to fit a budget. Counted in-memory per instance. Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `REPORTS_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 60**. Insights is the one exception to "only bound": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `SEARCH_REQUESTS_PER_MINUTE` | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: `POST …/search`, `GET …/search/schema`, `GET …/search/suggest` and `POST …/search/insights` **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After`. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like — a query may carry up to 50 leaf predicates, a `text ~` leaf is two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Counted in-memory per instance, so N replicas allow up to N × the budget per user (it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer). Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. Note that the Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
@@ -180,10 +200,13 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required |
 
-Each variable is wired to a Spring property via a placeholder in
-`application.properties` (e.g. `DB_URL` → `spring.datasource.url`, `MAIL_HOST` →
-`spring.mail.host`, `APP_BASE_URL` → `app.base-url`). The names above are the
-supported configuration surface — prefer them over setting Spring properties directly.
+Every variable the **application** reads is wired to a Spring property via a
+placeholder in `application.properties` (e.g. `DB_URL` → `spring.datasource.url`,
+`MAIL_HOST` → `spring.mail.host`, `APP_BASE_URL` → `app.base-url`). A variable that
+sizes the **container** rather than the application is read by Docker Compose and
+never reaches the JVM (`APP_MEMORY_LIMIT`); its row says so, and it takes docker
+units rather than Spring ones. The names above are the supported configuration
+surface — prefer them over setting Spring properties directly.
 
 ## TLS & reverse proxy
 
@@ -584,6 +607,11 @@ Pin a version in your compose (e.g. `:0.4`), then upgrade with:
 docker compose pull && docker compose up -d
 ```
 
+**Coming from before 0.17.0 on a host larger than 2 GB, read
+[The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170) first** — that release
+caps the app container's memory, which on a big host is *less* heap than the JVM used to
+take, and the only symptom is that things get slower.
+
 Database migrations run automatically on startup (Flyway) — no manual step. See
 the [Releases](https://github.com/Zherikhov/easyTask/releases) page for notes
 before upgrading across a minor version.
@@ -596,6 +624,97 @@ each `docker compose pull`.
 release may change the schema in ways an older image can't read (`ddl-auto` is
 `validate`, so it will refuse to start rather than corrupt data). Always take a
 backup before a minor upgrade so you can roll back by restoring it.
+
+### The heap is bounded from 0.17.0
+
+**Read this if your host has more than 2 GB of RAM.** On a smaller host you *gain*
+heap and there is nothing to do. There is no error either way, which is the problem:
+the only symptom is that the instance behaves as though it has less memory than it
+used to, and nothing connects that to the upgrade.
+
+Before 0.17.0 the image ran `java -jar` with no heap flag and the bundled compose set
+no memory limit, so the JVM applied its own default — **~25% of whatever the host
+had**. Your heap was a property of the machine, and no setting in Hamstrack named it.
+From 0.17.0 the image runs `-XX:MaxRAMPercentage=50` and the bundled
+`docker-compose.prod.yml` limits the app container to `1g` (`APP_MEMORY_LIMIT`), so
+the heap is **half the container limit — 512 MB by default, on every host**. That is
+what makes `REPORTS_MAX_ROWS` and the other byte budgets mean something: they are
+costed against a 512 MB heap, which until now was an assumption about your machine
+rather than a fact about the deployment.
+
+**Break-even is a 2 GB host**, and it moves in both directions:
+
+| Your setup before | Heap before | Heap after (default `1g`) |
+|---|---|---|
+| 1 GB host, no container limit | ~256 MB | **512 MB** — you gain |
+| your own compose with `mem_limit: 1g` | ~256 MB | **512 MB** — you gain |
+| 2 GB host, no container limit | ~512 MB | 512 MB — unchanged |
+| 4 GB host, no container limit | ~1 GB | **512 MB** — you lose half |
+| 8 GB host, no container limit | ~2 GB | **512 MB** — you lose three quarters |
+
+On the losing rows the instance still works. It garbage-collects more often, large
+reports and searches get slower, and a report that used to fit may now report itself
+truncated or, at the extreme, fail. It reads as "0.17.0 made it slower".
+
+**What to do:** on a host of 4 GB or more, set `APP_MEMORY_LIMIT` to **about half the
+host** — never above **host RAM minus 2 GB**, less another 1 GB if you run the
+[observability stack](#observability-optional). Whichever of the two is smaller is your
+number, and the heap is half of it. On a 2 GB host or smaller, leave the default: the
+whole point of that box is the app, and `1g` already gives it what it had.
+
+| Host | Set in `.env` | Heap you get | Also worth setting |
+|---|---|---|---|
+| ≤ 2 GB | nothing — the default `1g` is right | 512 MB | — |
+| 4 GB | `APP_MEMORY_LIMIT=2g` | 1 GB | — |
+| 4 GB **with observability** | nothing — the default `1g` is right | 512 MB | — |
+| 8 GB | `APP_MEMORY_LIMIT=4g` | 2 GB | `JAVA_TOOL_OPTIONS=-Xmx3g` → 3 GB |
+| 8 GB **with observability** | `APP_MEMORY_LIMIT=4g` | 2 GB | `JAVA_TOOL_OPTIONS=-Xmx3g` → 3 GB |
+| 16 GB | `APP_MEMORY_LIMIT=8g` | 4 GB | `JAVA_TOOL_OPTIONS=-Xmx7g` → 7 GB |
+
+```bash
+# in .env, next to the other settings
+APP_MEMORY_LIMIT=2g     # 4 GB host running app + PostgreSQL + Caddy → 1 GB heap
+```
+
+Then `docker compose up -d` to recreate the container; a memory limit is not applied to a
+running one.
+
+**From `4g` up, also set an explicit heap** — the fourth column above. The 50% split is
+headroom sized for a *small* container and does not stay right as the limit grows, because
+most of what lives outside the heap — metaspace, the code cache, thread stacks — is roughly
+*constant* rather than proportional: at `4g` the default reserves ~1.5 GB nothing will use,
+where at `2g` it over-reserves by ~300 MB and is not worth a second setting. Claim the rest
+back with
+
+```bash
+JAVA_TOOL_OPTIONS=-Xmx3g    # with APP_MEMORY_LIMIT=4g: limit minus ~700 MB
+```
+
+> **Only the `-Xmx` form works.** Setting `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75`
+> — the natural thing to try, since that is the flag named above — changes nothing:
+> the image passes its own copy on the command line and that copy wins. The JVM still
+> logs `Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0` when it starts, and
+> that line means the variable was *read*, not that it was *applied*. So the evidence
+> you would look for is present and says the wrong thing. `-Xmx` is a different flag
+> and does override the percentage.
+
+**Check what you actually got.** The container's limit and the heap it produces:
+
+```bash
+docker stats --no-stream --format '{{.Name}}  {{.MemUsage}}'
+docker compose exec app java -XX:MaxRAMPercentage=50.0 -XX:+PrintFlagsFinal -version | grep -w MaxHeapSize
+```
+
+The first prints `used / limit` per container. The second prints the heap in bytes
+(`536870912` is 512 MB). Repeat the flag exactly as shown: `exec` starts a *fresh*
+JVM that does not inherit the image's startup arguments, so without it you would be
+reading the default rather than yours. If you set `JAVA_TOOL_OPTIONS`, that JVM picks
+it up the same way the app does, so the number stays honest.
+
+**Running your own compose file rather than the bundled one?** Then nothing has
+capped your container and the percentage is taken against host RAM — which at 50% is
+*more* heap than before, and closer to the host's ceiling than is safe. Add a
+`mem_limit:` to the app service; the [Quick start](#quick-start) file shows one.
 
 ### Duplicate accounts after an upgrade (locale-dependent email folding)
 
