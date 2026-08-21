@@ -25,6 +25,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Optional toggles](#optional-toggles)
 - [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
+  - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
 - [REST API](#rest-api)
@@ -164,7 +165,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `REPORTS_MAX_WINDOW_DAYS` | `365` | Widest window one report may span, in days, counting **both** endpoints. A wider request is refused with `400` naming this cap — it is **never silently narrowed**, because a chart of a window nobody asked for is exactly how a reporting feature earns "these numbers don't match what I expected". Valid range 1–3650; at daily buckets the window length *is* the number of points in the response, which is what the upper bound guards. Identical in `dc` and `cloud`: reporting depth is a product feature, not a plan feature. A value **under 90** is safe and is not a trap: the endpoint's own default window is `min(90, this)`, so the parameterless request the reports page makes on load is always inside the cap — what is never done is clamping a window a caller explicitly asked for. An out-of-range value fails startup instead of being clamped. **Leave the line out to get the default — `REPORTS_MAX_WINDOW_DAYS=` is an empty value, not an absent one, and it stops the boot rather than restoring 365**; that matters more here than elsewhere, because this number is quoted back to API callers inside a 400 |
-| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against an **assumed reference heap of 512 MB**, which is the premise behind the number and **not** something the deployment enforces: the image runs a bare `java -jar` with no heap flag and the sample compose sets no memory limit, so the JVM claims ~25% of the host's RAM and your real budget follows your host size. Size this against the heap you actually get — on the ~1 GB host in [Requirements](#requirements) that is only ~256 MB, so lower it there; on a larger host the ceiling is conservative. Setting an explicit heap bound is tracked as `HD-152`. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
+| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against an **assumed reference heap of 512 MB**, which is the premise behind the number and **not** something the deployment enforces: the image runs `java -jar` with no heap flag and the sample compose sets no memory limit, so the JVM claims ~25% of the host's RAM and your real budget follows your host size. Size this against the heap you actually get — on the ~1 GB host in [Requirements](#requirements) that is only ~256 MB, so lower it there; on a larger host the ceiling is conservative. Setting an explicit heap bound is tracked as `HD-152`. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
 | `REPORTS_REQUESTS_PER_MINUTE` | `60` | How many report requests **one user** may make per minute across the whole reports surface (every `…/projects/{id}/reports/**` endpoint, not per report) **plus `POST …/workspaces/*/search/insights`**, the Insights panel — a report that lives on the search path and is bound to this limiter explicitly rather than by prefix. For the six project-scoped reports this is the only bound on the **work** a report does: `REPORTS_MAX_WINDOW_DAYS` bounds the response array, the "open at window start" balance is O(project history) whatever window you ask for, and `Cache-Control: private` means no shared cache absorbs a repeat — so without a budget one authenticated member in a loop can saturate `DB_POOL_MAX_SIZE` with entirely legal 200s. Past it the answer is `429` + `Retry-After`; a report is never narrowed or approximated to fit a budget. Counted in-memory per instance. Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `REPORTS_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 60**. Insights is the one exception to "only bound": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `SEARCH_REQUESTS_PER_MINUTE` | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: `POST …/search`, `GET …/search/schema`, `GET …/search/suggest` and `POST …/search/insights` **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After`. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like — a query may carry up to 50 leaf predicates, a `text ~` leaf is two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Counted in-memory per instance, so N replicas allow up to N × the budget per user (it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer). Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. Note that the Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
@@ -299,9 +300,17 @@ SEED_ADMIN_DISPLAY_NAME=Admin          # optional, defaults to "Admin"
 
 **Both** email and password are required — a blank email skips seeding entirely.
 On boot the account is created (or an existing user with that email is promoted)
-to system admin; it's idempotent, so the variables are safe to leave set. Log in
-with those credentials — "System administration" appears in the top-bar user
-menu → `/admin`. The `/admin` console holds the global catalog (statuses,
+to system admin; it's idempotent, so the variables are safe to leave set.
+
+> **Upgrading from before 0.16.0 on a Turkish, Azeri or Lithuanian locale?** The
+> "or promoted" half of that sentence depends on the address matching, and 0.16.0
+> changed how addresses are folded — so the seeder can miss an existing admin and
+> create a *second* one. See
+> [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding).
+> A fresh install is unaffected.
+
+Log in with those credentials — "System administration" appears in the top-bar
+user menu → `/admin`. The `/admin` console holds the global catalog (statuses,
 priorities, issue types, custom fields, workflows and their project bindings)
 **and** the user directory.
 
@@ -587,6 +596,207 @@ each `docker compose pull`.
 release may change the schema in ways an older image can't read (`ddl-auto` is
 `validate`, so it will refuse to start rather than corrupt data). Always take a
 backup before a minor upgrade so you can roll back by restoring it.
+
+### Duplicate accounts after an upgrade (locale-dependent email folding)
+
+**Most instances can skip this.** It applies only if your Hamstrack container or host
+ever ran with a Turkish, Azeri or Lithuanian locale (`LANG=tr_TR.UTF-8`, `az_AZ…`,
+`lt_LT…`), and only to addresses containing an uppercase `I`. If `LANG` was never set
+— the default for the published image and the sample compose — nothing here applies.
+
+Before 0.16.0 the app lower-cased email addresses using the **JVM default locale**,
+which on Linux comes from `LANG`/`LC_ALL`. Those three locales fold `I` to a dotless
+`ı` (U+0131) rather than `i`, so an address entered as `IT-Admin@corp.com` was stored
+as `ıt-admin@corp.com`. From 0.16.0 the fold is locale-independent and the same
+address stores as `it-admin@corp.com` — meaning any row written under the old
+behaviour is one this version can no longer find.
+
+Two consequences, and the second is why this section exists:
+
+- **That account can no longer log in.** The address its owner types no longer
+  resolves to their row.
+- **`SEED_ADMIN_EMAIL` mints a *second* administrator.** The seeder looks its
+  configured address up and, on a miss, creates the account — so the first boot after
+  upgrading leaves you with a second ACTIVE system administrator holding
+  `SEED_ADMIN_PASSWORD`, while the original stays active and orphaned. Nothing logs
+  it: the seeder deliberately never prints the address.
+
+**This cannot recur on the published image.** 0.16.0 pins the JVM locale in the image
+itself (`-Duser.language=en -Duser.country=US`), identically for every deployment.
+That pin reaches the container and nothing else.
+
+If you run the JAR directly you need those flags on your own command line — but be
+clear about what that path is before you take it: **there is no published JAR asset
+and no documented bare-JAR install.** Releases ship the container image, and
+`docker compose` is the documented way to run Hamstrack. Building from source and
+launching the JAR yourself is reachable, and this paragraph exists for that case; it
+is not a second supported deployment model. If that is you:
+
+```bash
+java -Duser.language=en -Duser.country=US -jar target/hamstrack-<version>.jar
+```
+
+or `JAVA_TOOL_OPTIONS="-Duser.language=en -Duser.country=US"` in a systemd unit.
+
+The pin is `en`/`US` rather than a neutral root locale. For case folding the two are
+equivalent; `en-US` additionally fixes the default number and date formatting used by
+any code that formats without naming a locale. If your operators read the UI in
+another language that is unaffected — this sets a server-side default, not the
+interface language.
+
+**Exactly two characters can differ**, and it is worth knowing which, because the
+folding tables are full of near-misses that are *not* involved here. An uppercase `I`
+folds to `ı` (U+0131) under these locales and to plain `i` everywhere else; a dotted
+capital `İ` (U+0130) folds to plain `i` under these locales and to `i` followed by a
+combining dot above (U+0307) everywhere else. Those are the only two. Long s (`ſ`,
+U+017F) and the Kelvin sign (`K`, U+212A) look like they belong on this list and do
+not — both fold identically under every locale, so they can never be the difference
+between an old row and a new one.
+
+**Check before upgrading.** While the old rows are still the only rows:
+
+```sql
+SELECT id, email FROM users WHERE email ~ '[^\x00-\x7F]';
+```
+
+A hit here is a flag, not a verdict: internationalised addresses are perfectly legal
+and Hamstrack accepts them. What you are looking for is an otherwise-ASCII address
+containing `ı`. Note that this query cannot see the `İ` case, whose old spelling is
+pure ASCII — the pair query below catches both, so treat this one as an early warning
+rather than a clearance.
+
+**Check after upgrading.** Once the new build has booted, the duplicate exists and
+the query above returns only *one* row of each pair. Ask for the pairs instead:
+
+```sql
+SELECT translate(email, U&'\0131\0307', 'i')     AS folded_form,
+       count(*)                                  AS copies,
+       array_agg(id    ORDER BY created_at)      AS ids,
+       array_agg(email ORDER BY created_at)      AS addresses
+  FROM users
+ GROUP BY 1
+HAVING count(*) > 1;
+```
+
+`translate` here maps `ı` to `i` and **drops** the combining dot: its third argument
+is shorter than its second, and PostgreSQL removes any character with no counterpart.
+That collapses both spellings of a pair onto one key.
+
+**An empty result means no duplicate pairs.** `users.email` is `UNIQUE`, so two rows
+land in one group only by differing in exactly the characters that fold — so in
+practice there is nothing to sift here. The one way to get a group you should *not*
+act on is if somebody deliberately registered a genuinely different address that
+happens to differ only by a dotless `ı`; check the two addresses look like the same
+person before merging them. A non-empty result lists each pair with its ids and both
+spellings, **oldest first**.
+
+**It does not clear the lone-stale-row case.** If the old account existed but nothing
+has since re-created it — nobody re-registered, and it was not the seed admin — there
+is no pair, no group, and nothing above finds it. The symptom is a single person
+unable to log in. There is no duplicate to retire here, so fix the row directly — set
+it to what the current build folds their typed address to. For a dotless `ı` row that
+is `UPDATE users SET email = translate(email, U&'\0131', 'i') WHERE id = '<their id>';`
+and here `translate` *is* correct, because that case's lookup key and group key
+coincide.
+
+The `İ` variant of the lone-row case behaves differently again, and better than it
+looks. Two things are genuinely unavailable: you **cannot detect it proactively** —
+its stored spelling is ordinary ASCII, indistinguishable from a correct row, so no
+query finds it and it surfaces only as a login complaint — and you **cannot restore
+the dotted-capital spelling**, because the address that spelling now folds to carries
+an invisible combining dot. Neither matters, because you do not need either.
+
+That stored spelling being plain ASCII is exactly what rescues it: an ordinary ASCII
+`I` folds to a plain `i` under the current build too, so **the row is already
+reachable — by typing an ordinary `I` instead of `İ`**. Confirm it with the address
+they *meant*, spelled with ordinary ASCII capitals — which doubles as the way to find
+the row, since no query detects this case:
+
+```sql
+-- Type the address in lower case yourself. Do NOT wrap it in lower(): that folds
+-- under the DATABASE's collation, and on a tr_TR cluster it reproduces this very bug
+-- from the SQL side, returning nothing and sending you looking for a row that is there.
+SELECT id, email, display_name FROM users WHERE email = 'it-admin@corp.com';
+```
+
+If that returns their row, the spelling in the `email` column is their working
+address: pure ASCII, nothing invisible, and this was a **read** — no write, no retire,
+no lost history. Give it to them verbatim and they log in with it from now on.
+
+**Do not send them to "forgot password" first.** That flow folds the address exactly
+the way login does, so the dotted spelling misses the same row — and because the
+endpoint deliberately reports success for unknown addresses to prevent enumeration, it
+tells them a mail is on the way when none was sent. On DC, where SMTP is optional,
+it is weaker still. Nor should you delete the row and re-create the account:
+`issues.reporter_id`, `comments.author_id`, `invited_by` and the `created_by` columns
+are all `NOT NULL REFERENCES users(id)` with no `ON DELETE`, and a person with a stale
+row is by definition someone who has been using the instance — so the delete fails on
+a foreign key, and would destroy their history if it did not.
+
+**Fixing a pair.** Decide which row to keep first: it is the one with **history**
+(memberships, issues, comments — normally the older, listed first above), *not* the
+one the seeder has just minted. Move any work off the duplicate before you retire it;
+for a freshly created seed admin there will not be any.
+
+The survivor must end up holding **the duplicate's exact address** — that is by
+definition the spelling the current build produces, because the duplicate is the row
+the current build just wrote. Copy it across in SQL rather than retyping it: one of
+these spellings carries a combining dot (U+0307) that is **invisible in a terminal**,
+so a retyped address can look identical and still not match.
+
+**Run this block in one interactive session**, in the order printed:
+
+```bash
+docker compose exec -it postgres psql -U hamstrack hamstrack
+```
+
+then paste it there. The stash in statement 0 is a **temp table, which lives only for
+the connection that created it** — so running these as separate one-shot
+`psql -c "…"` calls, the way the commands elsewhere in this document are written,
+drops it between statements: statement 1 still retires the duplicate and tombstones
+its address, and statement 2 then fails with `relation "keep" does not exist`. That is
+the stop-you-halfway state the comment in statement 1 warns about, reached through a
+different door.
+
+```sql
+-- 0. Stash the duplicate's address before step 1 overwrites it. Doing this in SQL is
+--    what removes the transcription risk -- never retype the address by hand.
+CREATE TEMP TABLE keep AS
+SELECT email FROM users WHERE id = '<duplicate id>';
+
+-- 1. Retire the duplicate: disable it AND free its address, so the survivor can take
+--    it. Order matters -- correcting the survivor first, while the duplicate still
+--    holds the spelling it is moving to, violates the UNIQUE constraint on
+--    users.email and stops you half way. left(email, 200) keeps the tombstone inside
+--    VARCHAR(255); appending the id keeps it unique.
+UPDATE users
+   SET status = 'DISABLED',
+       email  = left(email, 200) || '.retired-' || id
+ WHERE id = '<duplicate id>';
+
+-- 2. Hand the stashed address to the survivor.
+--    Do NOT re-derive it with translate(): translate() produces the GROUP KEY, which
+--    is not the lookup key. For a dotted capital I the address the build looks up
+--    carries the combining dot that the group key deliberately drops -- and in that
+--    case the survivor is already plain ASCII, so a translate() here would change
+--    nothing, report "UPDATE 1", and leave the account locked out with the only
+--    matching row already retired.
+UPDATE users
+   SET email = (SELECT email FROM keep)
+ WHERE id = '<survivor id>';
+
+DROP TABLE keep;
+```
+
+**Then verify by logging in as that account.** This is the one step whose failure is
+silent — every statement above reports success whether or not the address it left
+behind is the one the application will look up — so a clean run is not evidence that
+access is restored. A login is.
+
+If the pair was your seed administrator, **rotate `SEED_ADMIN_PASSWORD`** afterwards:
+that password was set on a live administrator account that nobody asked to create.
+Both rows in that pair are usually administrators, which is why "keep the one with
+history" is the rule rather than "keep the active one".
 
 ## Backups
 

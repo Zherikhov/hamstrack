@@ -34,6 +34,7 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -533,9 +534,17 @@ public class HqlCompiler {
     }
 
     // ---- text match: LOWER(title) LIKE %term% OR LOWER(description) LIKE %term% ----
+    //
+    // Every case fold in this class passes Locale.ROOT, and the reason is a property of
+    // the operation, not of any one call site: a fold whose result is compared against
+    // something this JVM did not fold in the same breath - a database LOWER(), a stored
+    // string, another node's answer - must not read Locale.getDefault(). Turkish, Azeri and
+    // Lithuanian fold 'I' to a dotless i, Postgres does not, and the identical query over
+    // identical data then returns fewer rows on a container configured with one of those
+    // locales - no exception, no log line (HD-120).
 
     private Predicate textMatch(String rawTerm, Root<Issue> root, CriteriaBuilder cb) {
-        String escaped = escapeLike(rawTerm.toLowerCase());
+        String escaped = escapeLike(rawTerm.toLowerCase(Locale.ROOT));
         String pattern = "%" + escaped + "%";
         Predicate title = cb.like(cb.lower(root.get("title")), pattern, '\\');
         Predicate desc = cb.like(cb.lower(root.get("description")), pattern, '\\');
@@ -657,7 +666,7 @@ public class HqlCompiler {
                 yield switch (op) {
                     case EQ -> cb.equal(text, s);
                     case MATCH -> {
-                        String pattern = "%" + escapeLike(s.toLowerCase()) + "%";
+                        String pattern = "%" + escapeLike(s.toLowerCase(Locale.ROOT)) + "%";
                         yield cb.like(cb.lower(text), pattern, '\\');
                     }
                     default -> illegalOp(meta, op);

@@ -27,6 +27,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Locale;
 
 @Service
 @RequiredArgsConstructor
@@ -57,7 +58,14 @@ public class AuthService {
         if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {
             throw new TermsNotAcceptedException();
         }
-        var email = req.email().toLowerCase();
+        // Locale.ROOT, never the JVM default. This fold IS the account identity: users.email
+        // carries a byte-exact UNIQUE and every lookup is an exact match, so a fold that varies
+        // with the container locale varies which address a person owns - a Turkish JVM stores
+        // Ivan@x.com as a dotless-i address that exists nowhere, and the same typed address
+        // stops resolving to the same row the day the locale changes. The rule is the category,
+        // not this line: any fold whose result is stored, mailed, or used as a lookup key names
+        // its locale (HD-120).
+        var email = req.email().toLowerCase(Locale.ROOT);
         if (userRepository.existsByEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
@@ -99,7 +107,7 @@ public class AuthService {
 
     @Transactional
     public AuthResponse login(LoginRequest req, HttpServletResponse response) {
-        var email = req.email().toLowerCase();
+        var email = req.email().toLowerCase(Locale.ROOT);
         // Exponential backoff after consecutive failures — throws 429 while
         // blocked. Applied to unknown emails too, so the limiter itself can't
         // be used to probe which addresses are registered.
@@ -157,7 +165,7 @@ public class AuthService {
     @Transactional
     public void resendVerification(String email) {
         // Silently no-op for unknown or already-verified emails — no enumeration
-        userRepository.findByEmail(email.toLowerCase())
+        userRepository.findByEmail(email.toLowerCase(Locale.ROOT))
                 .filter(user -> user.getStatus() == UserStatus.PENDING)
                 .ifPresent(this::sendVerificationEmail);
     }
@@ -165,7 +173,7 @@ public class AuthService {
     @Transactional
     public void forgotPassword(ForgotPasswordRequest req) {
         // Always return success to prevent email enumeration
-        userRepository.findByEmail(req.email().toLowerCase()).ifPresent(user -> {
+        userRepository.findByEmail(req.email().toLowerCase(Locale.ROOT)).ifPresent(user -> {
             var raw = generateRawToken();
             var reset = new PasswordReset();
             reset.setUser(user);

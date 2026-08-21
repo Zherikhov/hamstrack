@@ -2,5 +2,7 @@ package com.hamstrack.auth.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 
-public record ResendVerificationRequest(@Email @NotBlank String email) {}
+/** {@code @Size(max = 255)}: see {@code EmailLengthBoundTest}. */
+public record ResendVerificationRequest(@Email @NotBlank @Size(max = 255) String email) {}

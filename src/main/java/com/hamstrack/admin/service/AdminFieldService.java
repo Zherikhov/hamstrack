@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -251,7 +252,7 @@ public class AdminFieldService {
     }
 
     private String slugify(String name) {
-        var slug = name.toLowerCase().replaceAll("[^a-z0-9]+", "_").replaceAll("^_|_$", "");
+        var slug = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "_").replaceAll("^_|_$", "");
         return slug.isBlank() ? "field" : slug.substring(0, Math.min(slug.length(), 50));
     }
 

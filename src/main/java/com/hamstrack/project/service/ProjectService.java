@@ -31,6 +31,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -88,7 +89,7 @@ public class ProjectService {
         // Normalize once and use the same value for the uniqueness check and the
         // insert — otherwise a future relaxed key pattern could 500 on the unique
         // constraint instead of returning a clean 409.
-        var key = req.key().toUpperCase();
+        var key = req.key().toUpperCase(Locale.ROOT);
         if (projectRepository.existsByWorkspaceAndKey(workspace, key)) {
             throw new ProjectKeyConflictException();
         }

@@ -135,6 +135,8 @@ Rules worth coding against:
 - A body that can't be parsed at all (malformed JSON, a wrong JSON type) is still a `400`, but carries **no** `errors` map: nothing was ever bound.
 - **Not every `400` is a validation failure.** A rule that spans fields and is enforced in the service rather than by a field constraint — sending `boardMode` and a disagreeing [`delivery.board`](#delivery-capabilities), for instance — answers a plain problem detail: `detail` explains it, and there is **no** `errors` map. Read `errors` defensively.
 
+**An email address is capped at 255 characters** wherever a request body carries one. The columns that store an address are `VARCHAR(255)` while the format check alone admits roughly 320, so an over-long but well-formed address used to reach the INSERT and come back a `500`; it is now an ordinary field-anchored `400` like any other constraint.
+
 Uploads have two size ceilings and the `413` wording tells them apart: the in-app per-file limit answers `"File exceeds the 20 MB limit"`, while the servlet multipart ceiling answers `"File is too large"`.
 
 **A lost row-lock race is a retryable `409`, not a `500`.** A few mutations take row locks so that an invariant holds under concurrency — membership changes are the main ones — and when two of them overlap the database resolves it by rolling one back (a deadlock or a lock timeout). Those transactions also **bound how long they will wait** for a lock (3 s by default), so a pile-up drains instead of hanging until a client gives up; exceeding the bound is this same `409`, never a `500`. Nothing is left half-applied, so the loser is told to try again rather than shown a fault: `409` with `detail: "Someone else is changing this right now — try again in a moment"` and a `Retry-After: 1` header, the same retry shape [rate limiting](#rate-limits) uses. This is app-wide, not a property of one endpoint, and it is the **only** `409` worth retrying automatically: an invariant conflict (a stale `version`, a name in use, the last owner) will answer identically until something changes. Retry the **identical** request after the header's seconds — change nothing about it.
@@ -728,6 +730,8 @@ Within a single request, permissions are resolved once and reused, so a role cha
 | `POST` | `/auth/reset-password` | — | Set a new password with the emailed token; revokes all sessions |
 | `GET` | `/auth/me` | ✔ | The current user (`id`, `email`, `displayName`, `avatarUrl`, `systemRole`, `needsOnboarding`) |
 
+Every body in this table that carries an email address caps it at 255 characters — see [validation failures](#validation-failures-400).
+
 `GET /auth/me` includes **`needsOnboarding`** — `true` until the user creates or joins their first team (or skips the welcome screen). Route new sign-ins to the [onboarding](#onboarding) flow while it's true.
 
 **Register** — `termsAccepted: true` is required on this instance:
@@ -768,7 +772,7 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 | `GET` | `/workspaces/{id}/members` | member | List members |
 | `PATCH` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Change a member's role (`{"roleId"}`, or the deprecated `{"role"}` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling on both the old and the new role). Returns the member |
 | `DELETE` | `/workspaces/{id}/members/{userId}?adoptStrandedProjects=` | `workspace.member.manage` | Remove a member from the workspace — not their account. `204`; `409` when it would leave a project without an administrator, cleared by repeating the call with `adoptStrandedProjects=true` |
-| `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "roleId"}`, or the deprecated `role` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling, never `OWNER`). `201` |
+| `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "roleId"}`, or the deprecated `role` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling, never `OWNER`). The address is capped at [255 characters](#validation-failures-400). `201` |
 | `GET` | `/workspaces/{id}/roles` | member | The workspace's roles — see [Custom roles](#custom-roles) |
 | `GET` | `/workspaces/{id}/project-access` | `workspace.edit` | The [project-access](#project-access) page in one request: mode, default project role, the roles you may set it to, and the current impact |
 | `POST` | `/workspaces/{id}/project-access/preview` | `workspace.edit` | What a change *would* do. Same body as the `PATCH`; **persists nothing** |

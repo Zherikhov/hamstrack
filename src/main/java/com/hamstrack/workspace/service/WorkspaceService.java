@@ -19,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 @Service
@@ -181,7 +182,7 @@ public class WorkspaceService {
         }
         memberService.requireWithinGrantCeiling(ctx, granted);
         // Check not already a member
-        userRepository.findByEmail(req.email().toLowerCase()).ifPresent(user -> {
+        userRepository.findByEmail(req.email().toLowerCase(Locale.ROOT)).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {
                 throw new AlreadyWorkspaceMemberException();
             }
@@ -190,7 +191,7 @@ public class WorkspaceService {
         var rawToken = TokenUtils.generateRawToken();
         var invite = new WorkspaceInvite();
         invite.setWorkspace(workspace);
-        invite.setEmail(req.email().toLowerCase());
+        invite.setEmail(req.email().toLowerCase(Locale.ROOT));
         invite.setRole(roleCatalog.reference(granted.id()));
         invite.setTokenHash(TokenUtils.sha256(rawToken));
         invite.setInvitedBy(actor);
@@ -249,7 +250,11 @@ public class WorkspaceService {
     public void declineInvite(User actor, UUID inviteId) {
         var invite = inviteRepository.findById(inviteId)
                 .orElseThrow(WorkspaceNotFoundException::new);
-        if (!invite.getEmail().equalsIgnoreCase(actor.getEmail())) {
+        // Exact equals for the reason spelled out on the accept path below: both sides are
+        // Locale.ROOT-folded on write, so an ignore-case compare would only widen this to
+        // Unicode confusables of somebody else's address. Declining is destructive - it
+        // deletes the invitation - so the wrong account must not reach it either (HD-120).
+        if (!invite.getEmail().equals(actor.getEmail())) {
             throw new WorkspaceNotFoundException();
         }
         inviteRepository.delete(invite);
@@ -261,8 +266,25 @@ public class WorkspaceService {
             throw new WorkspaceNotFoundException();
         }
         // The invite is bound to the invited address — a leaked/forwarded link must not
-        // let a different account join with the invite's role
-        if (!invite.getEmail().equalsIgnoreCase(actor.getEmail())) {
+        // let a different account join with the invite's role.
+        //
+        // Exact equals, and the exactness IS the binding. Both sides are already canonical
+        // when they are written: inviteMember folds the invited address with Locale.ROOT,
+        // and every site that creates a users row folds the same way. So a case-insensitive
+        // compare here can never rescue a legitimate invitee - it can only ADD matches, and
+        // what it adds is Unicode confusables. equalsIgnoreCase compares through
+        // Character.toUpperCase/toLowerCase, which collapse dotless i (U+0131), dotted
+        // capital I (U+0130), long s (U+017F) and the Kelvin sign (U+212A) onto ASCII
+        // i / s / k. Locale.ROOT folding does not, and neither does the UNIQUE on
+        // users.email, so each of those spells a genuinely DIFFERENT account: an invite
+        // addressed to <dotless-i>van@x.com was redeemable by ivan@x.com.
+        //
+        // So do not "restore" the case-insensitive form. Against a pair of values that are
+        // canonical on write, case-insensitivity is not tolerance for how someone typed
+        // their address - it is a second spelling of somebody else's. The general rule:
+        // fold once, at the boundary, and compare exactly ever after (HD-120).
+        // Pinned by InviteEmailBindingTest.
+        if (!invite.getEmail().equals(actor.getEmail())) {
             throw new WorkspaceNotFoundException();
         }
         var workspace = invite.getWorkspace();
@@ -317,7 +339,7 @@ public class WorkspaceService {
     }
 
     private String generateSlug(String name) {
-        var base = name.toLowerCase()
+        var base = name.toLowerCase(Locale.ROOT)
                 .replaceAll("[^a-z0-9]+", "-")
                 .replaceAll("^-|-$", "");
         if (base.isBlank()) base = "workspace";

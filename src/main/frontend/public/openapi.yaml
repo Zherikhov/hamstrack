@@ -449,7 +449,7 @@ paths:
               type: object
               required: [email]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
       responses:
         '200':
           description: OK
@@ -531,7 +531,7 @@ paths:
               type: object
               required: [email]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
       responses:
         '200':
           description: OK
@@ -2664,7 +2664,7 @@ paths:
               type: object
               required: [email, displayName]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
                 displayName: { type: string, maxLength: 100 }
                 systemRole: { type: string, enum: [ADMIN, USER], default: USER }
       responses:
@@ -8213,7 +8213,7 @@ components:
       type: object
       required: [email, password, displayName]
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         password: { type: string, minLength: 8, maxLength: 100 }
         displayName: { type: string, minLength: 2, maxLength: 100 }
         termsAccepted:
@@ -8230,7 +8230,7 @@ components:
       type: object
       required: [email, password]
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         password: { type: string }
 
     AuthResponse:
@@ -9437,7 +9437,7 @@ components:
         both are alike a `422`. See `roleId` for why both fields exist and why
         "both" is refused rather than resolved by precedence.
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         roleId:
           type: string
           format: uuid

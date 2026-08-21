@@ -12,6 +12,8 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
 
+import java.util.Locale;
+
 @Slf4j
 @Component
 @RequiredArgsConstructor
@@ -39,8 +41,22 @@ public class DataSeeder implements ApplicationRunner {
             log.warn("Admin seeding skipped — seed.admin.email is set but seed.admin.password is empty");
             return;
         }
-        // Lowercase to match login, which looks the email up lowercased
-        var email = adminEmail.toLowerCase();
+        // Lowercase to match login, which looks the email up lowercased. Locale.ROOT for the
+        // reason AuthService.register gives, and with a consequence unique to this class: the
+        // lookup below is what decides between "promote the existing admin" and "create one".
+        // A miss here does not fail - it MINTS a second ACTIVE SystemRole.ADMIN carrying
+        // seed.admin.password, while the original stays active and orphaned, and this class
+        // deliberately never logs the address, so the only trace is one extra users row. So a
+        // deployment that once folded differently (a tr_TR/az/lt JVM: IT-Admin@corp.com became
+        // <dotless-i>t-admin@corp.com) has a stale row this build can no longer find.
+        //
+        // Detection and remedy live in docs/self-hosting.md, "Duplicate accounts after an
+        // upgrade" - the DC operator manual, because the person who has to run those queries
+        // is an operator and not a maintainer. (It was first written into the release
+        // checklist, which is a runbook about tagging that no self-hoster opens; a remedy
+        // filed where its reader never looks is not a remedy.) The image pins the JVM locale
+        // from 0.16.0 on, so this cannot recur there; that doc covers the rest (HD-120).
+        var email = adminEmail.toLowerCase(Locale.ROOT);
         var existing = userRepository.findByEmail(email).orElse(null);
         if (existing != null) {
             // Accounts seeded before system roles existed must still get ADMIN

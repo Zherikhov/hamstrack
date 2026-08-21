@@ -16,6 +16,11 @@ import java.util.UUID;
  * must be independently deployable. {@code role} is marked deprecated in
  * {@code openapi.yaml} by S8; S6 moves the SPA to {@code roleId}; removal is its own ticket.
  *
+ * <p>{@code email} is bounded at 255 for the same reason {@code RegisterRequest} bounds
+ * its own: {@code workspace_invites.email} is {@code VARCHAR(255)} while {@code @Email}
+ * accepts roughly 320 characters, so the overflow would surface as a 500 rather than the
+ * 400 it is. See {@code EmailLengthBoundTest}.
+ *
  * @param roleId the assignable role's id — <strong>the only way to name a custom
  *               role</strong>, since {@code role} resolves built-ins only. Resolved through
  *               {@code RoleRepository.findAssignable(id, workspaceId, WORKSPACE)}, so a
@@ -39,7 +44,7 @@ import java.util.UUID;
  *               never have to rely on who can send it.
  */
 public record InviteMemberRequest(
-        @Email @NotBlank String email,
+        @Email @NotBlank @Size(max = 255) String email,
         UUID roleId,
         @Size(max = 40) String role
 ) {}
