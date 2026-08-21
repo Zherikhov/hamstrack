@@ -436,6 +436,34 @@ export interface BacklogView {
   bulkMoveCap?: number;
 }
 
+/**
+ * `GET …/backlog/sections/backlog` and `GET …/backlog/sections/{sprintId}`
+ * (HD-96) — ONE planning section, fetched on its own so a section can be made
+ * current in place without refetching the whole view.
+ *
+ * Field-identical to the aggregate's section records plus the two caps the view
+ * carries at its top level, so a refreshed section is patched into a cached
+ * `BacklogView` without translating anything. That identity is the point: the
+ * defect this endpoint fixes was a refreshed section answering under a different
+ * honesty protocol than the rendered one, so `truncated` here means exactly what
+ * it means on `BacklogView` — "this section holds more matching issues than
+ * `sectionCap`" — and never "more exist than the page you received".
+ *
+ * The request carries no page and no size (see `apiGetBacklogSection`), so this
+ * response is the only place any of these numbers come from.
+ */
+export interface BacklogSectionResponse extends BacklogSectionBase {
+  /** The section's sprint, or **null** for the ranked backlog section. */
+  sprint: Sprint | null;
+  /** `app.agile.section-max-issues` as this response was built — read, never sent back. */
+  sectionCap: number;
+  /**
+   * `app.agile.max-issues-per-bulk-move`. Required, unlike `BacklogView`'s: this
+   * endpoint is newer than the field, so a server that answers here always carries it.
+   */
+  bulkMoveCap: number;
+}
+
 /** `GET …/sprints/{id}/completion-preview` — the completion dialog's data source. */
 export interface SprintCompletionPreview {
   totalIssueCount: number;

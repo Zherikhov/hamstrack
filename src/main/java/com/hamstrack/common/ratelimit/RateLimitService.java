@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -79,7 +80,7 @@ public class RateLimitService {
     }
 
     private String key(String email) {
-        return email.toLowerCase();
+        return email.toLowerCase(Locale.ROOT);
     }
 
     // Both maps are keyed by attacker-controlled input — without eviction they

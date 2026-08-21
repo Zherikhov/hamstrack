@@ -91,8 +91,17 @@ vi.mock('../api', async importOriginal => ({
     sectionCap: 300,
   })),
   apiListIssues: vi.fn(async () => ({ issues: [ISSUE], truncated: false, totalAvailable: 1, cap: 100 })),
-  apiListIssuesPaged: vi.fn(async () => ({
-    content: [], page: 0, size: 300, totalElements: 0, totalPages: 0, hasNext: false,
+  // HD-96: refreshing one section is ONE request that answers with the WHOLE
+  // section — rows, header, `truncated`, `totalAvailable`, whole-section stats
+  // and both caps — and carries no page size at all. It replaced a pair of calls
+  // (`GET …/issues?size=sectionCap` + `GET /sprints/{id}`) whose size the server
+  // silently narrowed to 100 while answering 200.
+  apiGetBacklogSection: vi.fn(async () => ({
+    // This project has no sprints, so the backlog is its only refreshable section.
+    sprint: null,
+    issues: [ISSUE], truncated: false, totalAvailable: 1,
+    stats: { issueCount: 1, doneIssueCount: 0, points: 0, donePoints: 0, unestimatedCount: 1 },
+    sectionCap: 300,
   })),
   apiRankIssue: vi.fn(),
   sprintsApi: {

@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -155,7 +156,7 @@ public class ScopedProjectAdminService {
     /** 422 unless the set exists and is visible to the project (global / its ws / itself). */
     private <T extends Scoped> T requireBindable(T set, Project project, String label) {
         if (set == null) {
-            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown " + label.toLowerCase());
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown " + label.toLowerCase(Locale.ROOT));
         }
         boolean visible = (set.getScopeWorkspaceId() == null && set.getScopeProjectId() == null)
                 || project.getWorkspace().getId().equals(set.getScopeWorkspaceId())

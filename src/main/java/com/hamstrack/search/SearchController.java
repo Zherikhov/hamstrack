@@ -49,11 +49,13 @@ import java.util.UUID;
  *       again: a version whose project has releases off still resolves by name.</li>
  * </ul>
  *
- * <p>Retired HQL keys stay resolvable on {@code POST …/search}: {@code story_points}
- * falls back to the native {@code storyPoints} ({@link RetiredFieldAliases}, HD-107
- * §9.2) <em>after</em> the caller's own custom fields have been tried, so a tenant
- * field keyed {@code story_points} always wins. Aliases are compatibility, not
- * vocabulary — {@code /schema} never advertises them.
+ * <p>Retired HQL keys stay resolvable at every entry point that reads a field name, a
+ * query being only one of them: {@code story_points} falls back to the native
+ * {@code storyPoints} ({@link RetiredFieldAliases}, HD-107 §9.2) <em>after</em> the
+ * caller's own custom fields have been tried, so a tenant field keyed
+ * {@code story_points} always wins. The precedence is defined once, in
+ * {@link FieldResolver} (HD-114), so it cannot hold on one endpoint and not another.
+ * Aliases are compatibility, not vocabulary — {@code /schema} never advertises them.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/search")

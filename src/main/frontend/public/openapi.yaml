@@ -206,8 +206,11 @@ tags:
     description: >-
       A project's iterations — a time-box with a one-way lifecycle
       (`FUTURE` → `ACTIVE` → `COMPLETED`, no re-open, at most one active sprint
-      per project), plus the project's planning view (`GET …/backlog`). Sprints
-      are content, not bound taxonomy: they never appear in a project's config.
+      per project), plus the project's planning reads — the whole view
+      (`GET …/backlog`) and any one of its sections on its own
+      (`…/backlog/sections/…`), which answer identically for the same section.
+      Sprints are content, not bound taxonomy: they never appear in a project's
+      config.
       Reads are open to project members; the lifecycle (create/edit/start/
       complete/delete) needs `sprint.manage` (the built-in project MANAGER, or
       a workspace OWNER/ADMIN across their whole workspace), while putting
@@ -308,8 +311,8 @@ tags:
       assumption: a "download matching issues" button is a different feature,
       wired to a search-side export path that **does not exist yet** — there is no
       CSV or export endpoint under `/search`, and the handoff cannot be built by a
-      client either, because HQL has no `project` field to scope it with and no
-      `resolved`/`closed` field, so the flow report’s resolved half is not
+      client either: HQL can now scope a query to one project, but it still has
+      no `resolved`/`closed` field, so the flow report’s resolved half is not
       expressible as a query at all. It is tracked as its own ticket. Until it
       lands, do not read a report CSV as the issues behind the chart: it is the
       numbers that were drawn.
@@ -449,7 +452,7 @@ paths:
               type: object
               required: [email]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
       responses:
         '200':
           description: OK
@@ -531,7 +534,7 @@ paths:
               type: object
               required: [email]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
       responses:
         '200':
           description: OK
@@ -2389,6 +2392,21 @@ paths:
         type are immutable afterwards — stored values depend on them), PATCH
         `/{id}` updates name/config/description, POST `/{id}/archive` and
         `/{id}/unarchive` hide a field from forms without touching values.
+        POST also refuses (409) a `key` that the HQL search vocabulary has
+        claimed — any name a query resolves to a built-in field, its aliases
+        (`labels`, `points`, …) included, so the reserved set is slightly wider
+        than what `GET …/search/schema` advertises (that endpoint lists each
+        field once, under its canonical name, and is capability-narrowed).
+        A registered search name always outranks a custom field of the same key: such a
+        field would work everywhere in the product except search, where it
+        would be silently omitted from the vocabulary. The check runs **after**
+        the blank-`key` slugification, so a field merely *named* "Project" is
+        refused too. **Create only** — a key is immutable on update, so
+        enforcing it there would strand an existing field, and this guard is
+        never retroactive. The same refusal applies wherever a custom field is
+        created, including the delegated
+        `/workspaces/{workspaceId}/admin/fields` and
+        `/workspaces/{workspaceId}/projects/{projectId}/admin/fields` mirrors.
         DELETE `/{id}` refuses (409) while issues hold values for the field
         unless `?dropValues=true` is passed — the values are then dropped;
         there is no remap across arbitrary value shapes. DELETE also refuses
@@ -2421,7 +2439,12 @@ paths:
               schema: { $ref: '#/components/schemas/AdminField' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
-          description: Name or key already exists or is inherited from a wider scope
+          description: >-
+            Either the name or key already exists / is inherited from a wider
+            scope, or the key (after slugification) is one the HQL search
+            vocabulary has claimed — `detail` says which. A reserved key reads
+            `'project' is a reserved search field name — pick a different key
+            (a custom field with this key would not be searchable)`.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -2644,7 +2667,7 @@ paths:
               type: object
               required: [email, displayName]
               properties:
-                email: { type: string, format: email }
+                email: { type: string, format: email, maxLength: 255 }
                 displayName: { type: string, maxLength: 100 }
                 systemRole: { type: string, enum: [ADMIN, USER], default: USER }
       responses:
@@ -4988,52 +5011,26 @@ paths:
         from `sectionCap`. Chunk "move everything to…" actions at that number
         rather than hardcoding it or deriving it from `sectionCap`.
 
+        Each section can also be re-fetched **on its own** under
+        `…/backlog/sections/…`, which answers with that same section — same rows,
+        same `truncated`, same whole-section `totalAvailable` and `stats` — plus
+        these caps, and takes no page size either.
+
+
         Rows inside every section are in the shared rank order (`position`, then
         newest first), which is the same order the board uses.
       operationId: getBacklogView
       parameters:
         - $ref: '#/components/parameters/workspaceId'
         - $ref: '#/components/parameters/projectId'
-        - name: statusId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: assigneeId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: priorityId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: componentId
-          in: query
-          description: An id from another project matches nothing rather than erroring.
-          schema: { type: string, format: uuid }
-        - name: labelId
-          in: query
-          description: >-
-            Repeatable, combined per `labelMatch`. More than
-            `app.classification.max-labels-per-issue` (default 20) distinct
-            values is a `400`.
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string, format: uuid }
-        - name: labelMatch
-          in: query
-          description: '`any` = carries at least one, `all` = carries every one.'
-          schema: { type: string, enum: [any, all], default: any }
-        - name: fixVersionId
-          in: query
-          description: Matches the **fix** link role only.
-          schema: { type: string, format: uuid }
-        - name: includeDone
-          in: query
-          description: >-
-            Include DONE-category issues in the **backlog** section. Defaults to
-            `false` — a done, unranked issue is planning noise. Sprint sections
-            always include their DONE issues, because that is the sprint's
-            record of what it delivered, so this flag never affects them.
-          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+        - $ref: '#/components/parameters/planningIncludeDone'
       responses:
         '200':
           description: OK — sprint sections (ACTIVE first) plus the backlog section
@@ -5048,6 +5045,158 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/backlog:
+    get:
+      tags: [Sprints]
+      summary: One planning section — the backlog
+      description: >-
+        The backlog section of the planning view (`GET …/backlog`) on its own,
+        for a client refreshing a section it already rendered — after a rank
+        move, a sprint assignment or a manual refresh — without refetching every
+        other section with it.
+
+
+        **The answer is field-for-field the section the aggregate returns** for
+        the same project and the same filters: the same rows in the same rank
+        order, the same `truncated`, the same `totalAvailable` and every `stats`
+        field, plus the caps the view carries at its top level (`sectionCap`,
+        `bulkMoveCap`). A refreshed section can therefore be patched into a
+        cached view without translating anything, and a section obtained either
+        way carries the same guarantees. The response schema
+        (`BacklogSectionResponse`) is built from the aggregate's own section
+        shape rather than restating it.
+
+
+        **There is no `page` and no `size` parameter, and that absence is the
+        contract.** A section is bounded by `sectionCap`
+        (`app.agile.section-max-issues`) — a number the server owns and
+        publishes on every planning response, and one a client never sends back.
+        With no size on the wire there is nothing for a client to hold, nothing
+        to echo back and nothing to narrow, so the behaviour holds unchanged
+        when an operator retunes that cap in either direction: the refresh
+        simply carries the new value. Fetching a section through the paginated
+        issue list instead makes the answer depend on a page size and changes
+        what `truncated` describes — there it is measured against the page you
+        received, here against the section — which is why a planning read takes
+        no page size.
+
+
+        **`truncated` means the section holds more matching issues than
+        `sectionCap`**, and `totalAvailable` and every `stats` figure are
+        computed over the **whole** section, filters applied, never over the rows
+        returned. A truncated section still shows honest totals.
+
+
+        Every filter the aggregate accepts is accepted here, `includeDone`
+        included: a refresh that took a different set would answer a different
+        question than the render did.
+
+
+        **Throttle: none, as parity with the aggregate rather than as an
+        omission.** No planning read carries a per-principal budget — a budget
+        is earned by the work a handler does, not by where it is mounted, and
+        refusing a section fetch would only push the client onto the whole-view
+        refetch, which runs the same aggregation and ships every section's rows
+        with it.
+      operationId: getBacklogSection
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+        - $ref: '#/components/parameters/planningIncludeDone'
+      responses:
+        '200':
+          description: >-
+            OK — the backlog section, possibly empty, possibly truncated. An
+            empty section is a `200` with `issues: []`, `truncated: false`,
+            `totalAvailable: 0` and zeroed `stats`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacklogSectionResponse' }
+        '400':
+          description: >-
+            Unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/{sprintId}:
+    get:
+      tags: [Sprints]
+      summary: One planning section — a sprint
+      description: >-
+        One sprint's section of the planning view on its own, under the same
+        contract as the backlog section beside it: field-for-field what the
+        aggregate returns for that section, plus the view's two caps, the same
+        meaning of `truncated` (more matching issues in the section than
+        `sectionCap`), whole-section `totalAvailable` and `stats` — and **no
+        `page` and no `size`**, because a section is bounded by the server's
+        `sectionCap`, which travels on the response and is never sent back.
+
+
+        The sprint is resolved **through the project**, so a sprint id belonging
+        to a sibling project in the same workspace is a `404` rather than an
+        answer; a malformed one is a `400` at binding, before the handler runs.
+        The path segment is never ambiguous: `backlog` is a literal and a sprint
+        id is a UUID.
+
+
+        **A `COMPLETED` sprint answers `200`.** It drops out of the aggregate,
+        which lists open sprints, so the client's next full refetch removes the
+        section — but a refresh already in flight must not turn into a `404` or
+        a `409`: state does not change a status code here. A sprint deleted in
+        the meantime is a `404`, which a client should read as "this section is
+        gone" and recover from by refetching the view.
+
+
+        No `includeDone`: it applies to the backlog section only, here as in the
+        aggregate, because a sprint's DONE issues are its record of what it
+        delivered. Every other filter the aggregate accepts is accepted here.
+      operationId: getBacklogSprintSection
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+      responses:
+        '200':
+          description: >-
+            OK — the sprint's section, possibly empty, possibly truncated, with
+            `sprint` carrying the sprint and its filter-aware counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacklogSectionResponse' }
+        '400':
+          description: >-
+            Malformed `sprintId`, unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404':
+          description: >-
+            Not found — or not a member of the containing workspace. The
+            workspace, the project, the sprint and the caller's membership are
+            deliberately **indistinguishable** here: a sprint of another project
+            or of another tenant reads exactly like an unknown one.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/reports/flow:
     get:
@@ -6241,35 +6390,94 @@ paths:
         **HQL in brief** — a boolean expression of `field OP value` comparisons.
 
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
-          `priority`, `created`, `updated`, `due`, `parent`, `text`, `label`
-          (alias `labels`), `component` (alias `components`), `fixVersion`,
-          `affectsVersion`, `sprint` (alias `sprints`), `storyPoints` (alias
-          `points`), plus any **custom field** (M2) by its `key` (e.g.
-          `severity`). `GET /search/schema` advertises the fields autocomplete
-          should offer; that list is capability-aware and may be a **subset** of
-          what actually resolves (see below). Field names are matched
-          case-insensitively, so the all-lowercase `fixversion` /
+          `priority`, `project`, `created`, `updated`, `due`,
+          `closed` (alias `closedAt`), `parent`, `text`,
+          `label` (alias `labels`), `component` (alias `components`),
+          `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`),
+          `storyPoints` (alias `points`), plus any **custom field** (M2) by its
+          `key` (e.g. `severity`). `GET /search/schema` advertises the fields
+          autocomplete should offer; that list is capability-aware and may be a
+          **subset** of what actually resolves (see below). Field names are
+          matched case-insensitively, so the all-lowercase `fixversion` /
           `affectsversion` spellings work too (`/schema` always advertises the
-          camelCase name, exactly once per field). That list is exhaustive:
-          there is **no `project` field**, so a query cannot be narrowed to one
-          project — the scope is always the caller's visible projects, and each
-          result row names its owner (`projectId`/`projectKey`/`projectName`).
+          camelCase name, exactly once per field). Whatever the query says, the
+          scope stays the caller's visible projects: a `project` term can only
+          **narrow** it, never widen it, and every result row still names its
+          owner (`projectId`/`projectKey`/`projectName`).
         - **Operators:** `=` `!=` `IN` `~` `>` `<` `>=` `<=` (which operators a
           field accepts comes from `GET /search/schema`; `~` is text only,
-          ordered comparisons are for dates and `priority`).
+          ordered comparisons are for dates and `priority`). Negation is the
+          prefix keyword, for every field alike: write `NOT field IN (…)` — the
+          grammar has no `field NOT IN (…)` form for any field at all.
         - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
-          (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`,
-          `affectsVersion`, `sprint`, `storyPoints`, and every custom field
-          except CHECKBOX).
+          (`assignee`, `parent`, `due`, `closed`, `label`, `component`,
+          `fixVersion`, `affectsVersion`, `sprint`, `storyPoints`, and every
+          custom field except CHECKBOX). On a nullable field, `!=` **also
+          matches the rows holding no value at all**: SQL's three-valued logic
+          would drop them and the language deliberately does not, since "not
+          closed on the 1st" plainly includes "not closed" — the reading
+          `label != "x"` and `due != …` have always had.
         - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
-          last). Custom fields are **not sortable** (yet).
+          last). Custom fields are **not sortable** (yet). Rows with no value
+          for the sort key land where the database puts them for that direction
+          (last ascending, first descending), identically for **every** nullable
+          sort key — so no two of them disagree about which end the empty rows
+          sit at.
         - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
         - **Values:** status/type/priority by **name**; users by email,
           display name, `currentUser()`, or UUID fallback; dates as
           `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
           and description.
+        - **Dates:** a date-valued field takes ordered comparisons
+          (`= != > < >= <=`), **is sortable**, offers `now()` and
+          `startOfWeek()`, and does **not** accept `IN`. Its operand is a bare
+          `YYYY-MM-DD` date standing for the **whole UTC day**, inclusively:
+          `created = "2026-08-01"` matches anything stamped from `00:00Z` that
+          day up to — but not including — the next, `created <= "2026-08-01"`
+          runs to the end of that day, and `created > "2026-08-01"` starts at
+          the beginning of the following one. A time of day is never part of an
+          operand.
+        - **Closed date** (`closed`, alias `closedAt`) is when the issue was
+          last closed — the queryable form of the `closedAt` every
+          `IssueResponse` already carries, and a date field like the rest
+          (ordered comparisons, sortable, `now()`/`startOfWeek()`, no `IN`),
+          nullable. **`closed IS EMPTY` means the issue is open right now.** It
+          does not mean the issue was never finished: the stamp is written when
+          an issue enters a DONE-category status and **cleared** when it leaves
+          one, so a reopened issue is empty again and the date it used to carry
+          is gone — cleared, not archived. "Never closed" is therefore not a
+          question this field can answer. Per the nullable rule above,
+          `closed != "2026-08-01"` also matches the issues that are not closed
+          at all. The response spelling `closedAt` resolves too, as an alias,
+          but `closed` is the name to write: it is the one
+          `GET /search/schema` advertises, and this language names date fields
+          after the **event** rather than after the column (`created`,
+          `updated`), so spelling a single one of them after its column would
+          leave the vocabulary unguessable in both directions. Example:
+          `closed >= startOfWeek() AND assignee = currentUser()`.
+        - **Project** (`project`) is single-valued and never empty, and is
+          resolved by project **key** only — `project = "HD"`, matched
+          case-insensitively with surrounding whitespace ignored. Operators
+          `= != IN`, and it **is sortable** (`ORDER BY project` orders by key).
+          A project's **name** is deliberately not a resolution source: unlike a
+          key, a name carries no uniqueness constraint, so a name operand would
+          denote a *set* — the ambiguity this field exists to remove. The name
+          is published as a **label** beside the key it inserts, both in the
+          `/schema` `PROJECT` picklist and in `/suggest?field=project`
+          (`{"label": "Hamstrack (HD)", "value": "HD"}`), and an operand that
+          matches a visible project's name comes back with a hint naming that
+          project's key. Every issue has a project, so `project IS [NOT] EMPTY`
+          is a `422` rather than a statement that could never be true. An
+          operand naming no project the caller can search is the ordinary
+          field-anchored `422`, and the wording is **the same** whether the key
+          is unknown, belongs to a project outside the caller's reach, or
+          belongs to an archived project — the three are indistinguishable on
+          purpose, so this field cannot be used to probe which projects exist.
+          Because it narrows the row set rather than the resolution of other
+          fields, it is also what disambiguates the project-scoped catalogs:
+          `project = "HD" AND fixVersion = "2.4.0"` says which "2.4.0" is meant.
         - **Labels** (`label`, alias `labels`) are many-valued and given by
           **name** (`= != IN` and `IS [NOT] EMPTY`; not sortable). `label = "x"`
           means "carries x", `label != "x"` means "does not carry x" (issues
@@ -6414,7 +6622,14 @@ paths:
         `/search/suggest` fallback**: `?field=sprint` is intentionally not wired
         and returns the standard `422`, because a project's open sprints are
         bounded by `app.agile.max-open-sprints-per-project` and cannot overflow
-        the picklist in practice. `storyPoints` has no picklist at all (it is
+        the picklist in practice. A `PROJECT` picklist holds the caller's
+        visible (non-archived) projects, capped at 200 the same way, with
+        `/search/suggest?field=project` as its overflow; each entry is
+        `{label: "<name> (<KEY>)", value: "<KEY>"}`, because the key is the only
+        string the `project` field resolves. It is **not** capability-narrowed —
+        every project has a project — and it can only ever offer what a query
+        already reaches, being the same visible set the scope predicate
+        restricts every search to. `storyPoints` has no picklist at all (it is
         numeric). Field names are matched
         case-insensitively internally, but each field is advertised here exactly
         **once**, under its canonical camelCase name (aliases such as `sprints`
@@ -6432,10 +6647,8 @@ paths:
         listed. The `SPRINT` and `VERSION` picklists are additionally scoped to
         the visible projects **with the capability on** — so on a workspace whose
         only visible project is Kanban with releases and estimation off,
-        `fields` holds exactly `status`, `type`, `priority`, `assignee`,
-        `reporter`, `parent`, `text`, `created`, `updated`, `due`, `label`,
-        `component` (plus the caller's custom fields) and both picklists are
-        empty.
+        `fields` holds every system field except those four (plus the caller's
+        custom fields) and both picklists are empty.
 
 
         **An omitted field still resolves.** This endpoint is autocomplete
@@ -6476,13 +6689,13 @@ paths:
   /workspaces/{workspaceId}/search/suggest:
     get:
       tags: [Search]
-      summary: Typeahead for user-, label-, component- and version-valued fields
+      summary: Typeahead for fields whose values come from a bounded catalog
       description: >-
         Bounded server-side typeahead — the system `assignee`/`reporter` fields
         and any USER-typed **custom field** (M2, by its `key`), plus `label`
-        (alias `labels`), `component` (alias `components`) and
-        `fixVersion`/`affectsVersion` — so large workspaces never ship every
-        member, label, component or version. Returns at most 20 matches. For
+        (alias `labels`), `component` (alias `components`),
+        `fixVersion`/`affectsVersion` and `project` — so large workspaces never
+        ship a whole catalog to the client. Returns at most 20 matches. For
         `label`, `component` and the two version fields the match is a
         case-insensitive **substring** (over the workspace's non-archived label
         names, resp. the non-archived component/version names of the caller's
@@ -6498,14 +6711,25 @@ paths:
         the caller's visible projects **with `releases` on**. That is a
         suggestion narrowing only — a version whose project has releases off is
         still resolvable by name in a query, and no status code depends on a
-        capability. `label`, `component` and the user-valued fields are
-        unaffected.
+        capability. No other field served here is capability-narrowed.
+
+
+        `project` **prefix**-matches the caller's visible projects on **key**
+        and on **name** — someone typing `HD` and someone typing `Hams` are
+        after the same project — but the `value` offered is always the **key**,
+        because
+        that is the only string the field resolves; the name travels in the
+        `label`. Archived projects are never offered, here or in the `/schema`
+        `PROJECT` picklist this overflows: a value surface may only offer what
+        resolution accepts.
 
 
         **Not** served here: `sprint`. Its `/search/schema` `SPRINT` picklist is
         already bounded by `app.agile.max-open-sprints-per-project`, so no
-        typeahead fallback was wired — `?field=sprint` returns the same `422`
-        any other non-suggestable field returns.
+        typeahead fallback was wired — asking for it gets the `422` that any
+        resolvable field with no value picklist gets, which is worded
+        differently from the `422` a name that resolves to nothing gets (see
+        the `422` response below).
       operationId: searchSuggest
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -6514,9 +6738,12 @@ paths:
           required: true
           description: >-
             The HQL field to suggest values for — a user-valued field (e.g.
-            `assignee`), `label`/`labels`, `component`/`components`, or
-            `fixVersion`/`affectsVersion`. Anything else (including `sprint`) is
-            a `422`.
+            `assignee`), `label`/`labels`, `component`/`components`,
+            `fixVersion`/`affectsVersion`, or `project`. Any other name
+            (including `sprint`) is a `422`, in one of the two wordings
+            described under that
+            response: a name that resolves to nothing reads differently from a
+            name that resolves to a field with no value picklist.
           schema: { type: string }
         - name: q
           in: query
@@ -6533,8 +6760,19 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
-            `field` is unknown or is not a suggestable field — `sprint` is the
-            notable one: it has a `/search/schema` picklist but no typeahead.
+            Two different refusals, told apart by their `detail` — both carry
+            `errorType: SEMANTIC_ERROR` and the offending `field` exactly as
+            the caller spelled it. **A name that resolves to nothing** (not a
+            system field, not a custom field this caller can see, not a retired
+            key) is refused in the same words — and with the same "did you
+            mean …?" hint, when a near match exists — that every other HQL
+            surface gives an unknown name; a custom field the caller cannot see
+            is indistinguishable from a typo, so its existence is never leaked.
+            **A name that does resolve, to a field with no bounded value lookup
+            behind it** (a numeric, a date, or a picklist small enough for
+            `/search/schema` to carry whole) is refused as having no value
+            suggestions: that field exists, and it is the value question being
+            declined.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/HqlProblemDetail' }
@@ -6948,6 +7186,56 @@ components:
       in: query
       description: Page size (default 50, clamped server-side to a maximum of 100)
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+
+    planningStatusId:
+      name: statusId
+      in: query
+      schema: { type: string, format: uuid }
+    planningAssigneeId:
+      name: assigneeId
+      in: query
+      schema: { type: string, format: uuid }
+    planningPriorityId:
+      name: priorityId
+      in: query
+      schema: { type: string, format: uuid }
+    planningComponentId:
+      name: componentId
+      in: query
+      description: An id from another project matches nothing rather than erroring.
+      schema: { type: string, format: uuid }
+    planningLabelId:
+      name: labelId
+      in: query
+      description: >-
+        Repeatable, combined per `labelMatch`. More than
+        `app.classification.max-labels-per-issue` (default 20) distinct
+        values is a `400`.
+      style: form
+      explode: true
+      schema:
+        type: array
+        items: { type: string, format: uuid }
+    planningLabelMatch:
+      name: labelMatch
+      in: query
+      description: '`any` = carries at least one, `all` = carries every one.'
+      schema: { type: string, enum: [any, all], default: any }
+    planningFixVersionId:
+      name: fixVersionId
+      in: query
+      description: Matches the **fix** link role only.
+      schema: { type: string, format: uuid }
+    planningIncludeDone:
+      name: includeDone
+      in: query
+      description: >-
+        Include DONE-category issues in the **backlog** section. Defaults to
+        `false` — a done, unranked issue is planning noise. Sprint sections
+        always include their DONE issues, because that is the sprint's
+        record of what it delivered, so this flag never affects them — and a
+        mapping that returns only a sprint section does not accept it at all.
+      schema: { type: boolean, default: false }
 
     reportCsvFrom:
       name: from
@@ -8104,7 +8392,7 @@ components:
       type: object
       required: [email, password, displayName]
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         password: { type: string, minLength: 8, maxLength: 100 }
         displayName: { type: string, minLength: 2, maxLength: 100 }
         termsAccepted:
@@ -8121,7 +8409,7 @@ components:
       type: object
       required: [email, password]
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         password: { type: string }
 
     AuthResponse:
@@ -8880,7 +9168,11 @@ components:
           type: string
           pattern: '[a-z0-9_]*'
           maxLength: 50
-          description: Blank on create = derived from the name; immutable afterwards
+          description: >-
+            Blank on create = derived from the name; immutable afterwards. On
+            create it may not be a key the HQL search vocabulary has claimed
+            (409) — the check runs after that derivation, so naming a field
+            "Project" is refused just as spelling `key: project` is.
         type: { $ref: '#/components/schemas/FieldType' }
         config: { $ref: '#/components/schemas/FieldConfig' }
         description: { type: string, maxLength: 500, nullable: true, description: Shown as a hint in issue forms }
@@ -9324,7 +9616,7 @@ components:
         both are alike a `422`. See `roleId` for why both fields exist and why
         "both" is refused rather than resolved by precedence.
       properties:
-        email: { type: string, format: email }
+        email: { type: string, format: email, maxLength: 255 }
         roleId:
           type: string
           format: uuid
@@ -10303,7 +10595,11 @@ components:
             `releases` on**, capped at 200 — one picklist serves both
             `fixVersion` and `affectsVersion`), `SPRINT` (the open sprint names
             of those visible projects **that have `board: SCRUM`**, capped at
-            200, with no `/search/suggest` fallback) and a
+            200, with no `/search/suggest` fallback), `PROJECT` (those visible
+            projects themselves, capped at 200, overflowing to
+            `/search/suggest?field=project`; `label` is `"<name> (<KEY>)"` and
+            `value` is the `<KEY>`, the only string the `project` field
+            resolves) and a
             `CUSTOM:<key>` entry per SELECT/MULTI_SELECT custom field, whose
             options are `{label, value=optionId}` pairs. The capability scoping
             of `VERSION`/`SPRINT` narrows suggestions only: a name missing here
@@ -10372,9 +10668,12 @@ components:
 
         **`PROJECT` groups but never clicks through.** Issues carry a project and
         the search scope already restricts which are visible, so the bucket is
-        perfectly good — but HQL has no `project` field yet, so every project
-        bucket ships `hql: null` and the bar is not clickable. A known gap with
-        its own ticket, not a defect.
+        perfectly good. HQL now *has* a `project` field, but it resolves a
+        project **key** while this axis is grouped and labelled by **name** —
+        which resolves to nothing, names carrying no uniqueness — so every
+        project bucket still ships `hql: null` and the bar is not clickable.
+        Carrying the key down to the fragment is its own small slice; nothing
+        about the grouping itself is blocked meanwhile.
 
 
         **`ASSIGNEE` is offered here and refused by `/velocity`, and that is not
@@ -10730,7 +11029,8 @@ components:
           description: >-
             The value-source token
             (`STATUS`/`TYPE`/`PRIORITY`/`USER`/`LABEL`/`COMPONENT`/`VERSION`/
-            `SPRINT`/…), `CUSTOM:<key>` for a SELECT/MULTI_SELECT custom field,
+            `SPRINT`/`PROJECT`/…), `CUSTOM:<key>` for a SELECT/MULTI_SELECT
+            custom field,
             or null when there is no picklist (e.g. `storyPoints`).
           example: USER
         functions:
@@ -10744,15 +11044,15 @@ components:
       description: A picklist entry — a display label and an optional resolvable value
       properties:
         label: { type: string, example: In Progress }
-        value: { type: string, nullable: true, description: 'Resolvable value when applicable (e.g. email for USER); null for name-resolved picklists' }
+        value: { type: string, nullable: true, description: 'Resolvable value when applicable (e.g. the email for USER, the project key for PROJECT); null for name-resolved picklists' }
 
     SuggestResponse:
       type: object
       description: >-
         Typeahead result (`GET /search/suggest`) — for a user-valued field
         (`assignee`/`reporter` or a USER-typed custom field, M2), for
-        `label`/`labels`, `component`/`components`, or
-        `fixVersion`/`affectsVersion`.
+        `label`/`labels`, `component`/`components`,
+        `fixVersion`/`affectsVersion`, or `project`.
       properties:
         field: { type: string, description: 'The queried field, echoed back', example: assignee }
         suggestions:
@@ -10761,12 +11061,13 @@ components:
             Matching workspace members — or non-archived label names for
             `label`, component names for `component`, version names (from the
             visible projects with `releases` on) for
-            `fixVersion`/`affectsVersion` — capped at 20, most relevant first
+            `fixVersion`/`affectsVersion`, or the caller's visible non-archived
+            projects for `project` — capped at 20, most relevant first
           items:
             type: object
             properties:
               label: { type: string, description: 'Display name shown in the dropdown', example: Ada Lovelace }
-              value: { type: string, description: 'The resolvable value the client inserts — the member email, or the label/component name for `label`/`component`', example: ada@example.com }
+              value: { type: string, description: 'The resolvable value the client inserts — never necessarily the same string as the label: the member email, the label/component/version name, or the project KEY for `project` (whose label carries the human name)', example: ada@example.com }
 
     SavedFilterResponse:
       type: object
@@ -11226,37 +11527,40 @@ components:
         donePoints: { type: number, example: 21 }
         unestimatedCount: { type: integer, example: 2, description: '"We didn''t estimate it" is a different statement from "it''s free"' }
 
-    BacklogViewResponse:
+    BacklogSection:
       type: object
       description: >-
-        The whole planning view of one project in a single round trip. Sections
-        are independently truncatable at `sectionCap` and independently
-        refreshable — treat them as such, because if the payload ever gets too
-        large the fix is lazy per-section fetches behind this same shape.
+        One planning section's body — its rows plus the fields that say what was
+        withheld. **Every planning surface that returns a section returns this
+        shape**, so a section fetched on its own and the same section inside the
+        whole view cannot describe themselves differently.
+
+
+        `truncated` means *the section holds more matching issues than
+        `sectionCap`* — never "more exist than the rows you received" — and
+        `totalAvailable` and every `stats` figure are computed over the **whole**
+        section with the request's filters applied, never over the rows below
+        them. A truncated section still shows honest totals.
       properties:
-        sprints:
+        issues:
           type: array
-          description: 'The project''s OPEN sprint sections — ACTIVE first, then FUTURE by sequence. `[]` for a project with no open sprint.'
-          items:
-            type: object
-            properties:
-              sprint: { $ref: '#/components/schemas/SprintResponse' }
-              issues:
-                type: array
-                items: { $ref: '#/components/schemas/IssueResponse' }
-              truncated: { type: boolean, description: 'True when the section holds more than `sectionCap` matching issues' }
-              totalAvailable: { type: integer, format: int64, description: 'Full filtered count of the section (equals issues length when not truncated)' }
-              stats: { $ref: '#/components/schemas/SectionStats' }
-        backlog:
-          type: object
-          description: The ranked backlog — the same shape without a sprint header.
-          properties:
-            issues:
-              type: array
-              items: { $ref: '#/components/schemas/IssueResponse' }
-            truncated: { type: boolean }
-            totalAvailable: { type: integer, format: int64 }
-            stats: { $ref: '#/components/schemas/SectionStats' }
+          description: >-
+            The section's rows in the shared rank order (`position`, then newest
+            first) — the same order the board uses — capped at `sectionCap`.
+          items: { $ref: '#/components/schemas/IssueResponse' }
+        truncated: { type: boolean, description: 'True when the section holds more than `sectionCap` matching issues' }
+        totalAvailable: { type: integer, format: int64, description: 'Full filtered count of the whole section (equals the length of `issues` when not truncated)' }
+        stats: { $ref: '#/components/schemas/SectionStats' }
+
+    PlanningCaps:
+      type: object
+      description: >-
+        The caps every planning response carries at its top level, whether it
+        returns the whole view or a single section. They are **independent**
+        operator knobs with deliberately different defaults, and a client holds
+        neither: it reads them off whatever response it last received, so an
+        operator may retune either between a render and a refresh.
+      properties:
         sectionCap: { type: integer, example: 300, description: 'The per-section cap in force for this response (app.agile.section-max-issues)' }
         bulkMoveCap:
           type: integer
@@ -11269,6 +11573,64 @@ components:
             rendered section, so a client that derives one number from the other
             `400`s on every section above the bulk cap. Chunk bulk moves at this
             value instead of hardcoding it.
+
+    BacklogViewResponse:
+      description: >-
+        The whole planning view of one project in a single round trip. Sections
+        are independently truncatable at `sectionCap` and independently
+        refreshable — each one can be re-fetched on its own under
+        `…/backlog/sections/…`, which answers with that same section plus these
+        caps.
+      allOf:
+        - type: object
+          properties:
+            sprints:
+              type: array
+              description: 'The project''s OPEN sprint sections — ACTIVE first, then FUTURE by sequence. `[]` for a project with no open sprint.'
+              items:
+                allOf:
+                  - type: object
+                    properties:
+                      sprint: { $ref: '#/components/schemas/SprintResponse' }
+                  - $ref: '#/components/schemas/BacklogSection'
+            backlog:
+              allOf:
+                - $ref: '#/components/schemas/BacklogSection'
+              description: The ranked backlog — the same section without a sprint header.
+        - $ref: '#/components/schemas/PlanningCaps'
+
+    BacklogSectionResponse:
+      description: >-
+        ONE planning section, fetched on its own — the answer to
+        `GET …/backlog/sections/backlog` and `…/backlog/sections/{sprintId}`.
+
+
+        It is the aggregate's section (`BacklogSection`) with the section's
+        sprint header in front of it and the view's caps (`PlanningCaps`) behind
+        it — **by construction, not by restatement**, so a client patches a
+        refreshed section into a cached view without translating anything and
+        the two surfaces cannot drift into describing a section differently.
+        Both caps ride on a single-section response for that reason too: a view
+        whose sections have each been refreshed must still carry them, and must
+        adopt a newer value if an operator retuned in between.
+
+
+        The request carries **no page size** — a section is bounded by
+        `sectionCap`, which the server owns.
+      allOf:
+        - type: object
+          properties:
+            sprint:
+              allOf:
+                - $ref: '#/components/schemas/SprintResponse'
+              nullable: true
+              description: >-
+                The section's sprint, with its filter-aware counters — or `null`
+                for the BACKLOG section, which is the encoding this domain
+                already uses everywhere (an issue's `sprint` is `null` when it
+                sits in the backlog).
+        - $ref: '#/components/schemas/BacklogSection'
+        - $ref: '#/components/schemas/PlanningCaps'
 
     SprintCompletionPreview:
       type: object

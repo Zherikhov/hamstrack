@@ -16,6 +16,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -35,6 +36,8 @@ public class AdminFieldService {
     private final FieldSetItemRepository fieldSetItemRepository;
     private final IssueFieldValueRepository valueRepository;
     private final ProjectCountService projectCountService;
+    /** The HQL vocabulary, consulted only to refuse a key it has claimed — see requireUnreservedKey. */
+    private final com.hamstrack.search.FieldRegistry fieldRegistry;
 
     // ---------- field defs ----------
 
@@ -50,6 +53,7 @@ public class AdminFieldService {
     @Transactional
     public AdminFieldResponse createField(ScopeContext scope, UpsertFieldRequest req) {
         var key = req.key() == null || req.key().isBlank() ? slugify(req.name()) : req.key();
+        requireUnreservedKey(key);
         if (fieldDefRepository.existsVisibleToAndKey(scope.visibleWorkspaceId(), scope.visibleProjectId(), key)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "A field with key '" + key + "' already exists or is inherited — reuse it instead of duplicating");
@@ -248,8 +252,29 @@ public class AdminFieldService {
     }
 
     private String slugify(String name) {
-        var slug = name.toLowerCase().replaceAll("[^a-z0-9]+", "_").replaceAll("^_|_$", "");
+        var slug = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]+", "_").replaceAll("^_|_$", "");
         return slug.isBlank() ? "field" : slug.substring(0, Math.min(slug.length(), 50));
+    }
+
+    /**
+     * Refuse a key the HQL vocabulary has claimed (HD-101). A registered search field always
+     * outranks a custom field of the same key, so such a field would be born half-invisible: it
+     * would work everywhere in the product except search, where the name means the system field
+     * and {@code /schema} silently omits the tenant's — no error, no log line, no affordance.
+     *
+     * <p><strong>Checked after slugification, and on create only.</strong> After, because the key
+     * is derived from the display name when omitted, so a field a curator simply calls "Project"
+     * walks straight past a check placed before it — which is exactly how this collision arises
+     * without anybody choosing it. Create-only, because the key is immutable on update and
+     * because this must never reject or migrate a row that already exists: it stops recurrence,
+     * it is not retroactive.
+     */
+    private void requireUnreservedKey(String key) {
+        if (fieldRegistry.find(key).isPresent()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "'" + key + "' is a reserved search field name — pick a different key "
+                            + "(a custom field with this key would not be searchable)");
+        }
     }
 
     private FieldDef requireField(ScopeContext scope, UUID id) {

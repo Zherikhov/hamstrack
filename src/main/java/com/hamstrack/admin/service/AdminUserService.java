@@ -21,6 +21,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -50,7 +51,7 @@ public class AdminUserService {
 
     @Transactional
     public CreatedUserResponse create(CreateUserRequest req) {
-        var email = req.email().toLowerCase();
+        var email = req.email().toLowerCase(Locale.ROOT);
         if (userRepository.existsByEmail(email)) {
             throw new EmailAlreadyUsedException();
         }

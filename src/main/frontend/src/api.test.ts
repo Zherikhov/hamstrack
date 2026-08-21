@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import {
-  apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError, filenameFromDisposition, reportCsvPath,
+  apiGetBacklogSection, apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError,
+  filenameFromDisposition, reportCsvPath,
 } from './api'
 import type { RankIssuePayload, UpdateIssuePayload } from './api'
 import { useAuthStore } from './auth'
@@ -231,5 +232,74 @@ describe('report CSV', () => {
   it('falls back to the caller’s name when the header says nothing usable', () => {
     expect(filenameFromDisposition(null)).toBeNull()
     expect(filenameFromDisposition('attachment')).toBeNull()
+  })
+})
+
+/**
+ * HD-96 — the planning surface sends no page size, and that absence is the fix.
+ *
+ * The defect was a refresh asking `GET …/issues` for `size = sectionCap`: the
+ * server narrowed it to 100 and answered 200, so a section of 101–300 issues
+ * rendered whole and came back cut with no signal. Reading the cap off the
+ * server's own response was the right instinct and did not save it. These pin
+ * the property that replaces the instinct — there is no size on the wire to be
+ * wrong about — rather than any one of today's call sites.
+ */
+describe('backlog section fetch', () => {
+  const SECTION = {
+    sprint: null, issues: [], truncated: false, totalAvailable: 0,
+    stats: { issueCount: 0, doneIssueCount: 0, points: 0, donePoints: 0, unestimatedCount: 0 },
+    sectionCap: 300, bulkMoveCap: 100,
+  }
+  const urlOf = (fetchMock: { mock: { calls: unknown[][] } }) =>
+    new URL(String(fetchMock.mock.calls[0][0]), 'http://test.local')
+
+  it('carries no page and no size, whatever else the view is filtered by', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => jsonResponse(200, SECTION))
+    globalThis.fetch = fetchMock
+
+    await apiGetBacklogSection('w1', 'p1', null, {
+      statusId: 's1', priorityId: 'pr1', componentId: 'c1', fixVersionId: 'v1',
+      labelIds: ['l1', 'l2'], labelMatch: 'all', includeDone: true,
+    })
+
+    const url = urlOf(fetchMock)
+    expect(url.searchParams.get('size')).toBeNull()
+    expect(url.searchParams.get('page')).toBeNull()
+    // …and the filters the render used still travel, or the refresh would answer
+    // a different question than the view asked.
+    expect(url.searchParams.get('statusId')).toBe('s1')
+    expect(url.searchParams.getAll('labelId')).toEqual(['l1', 'l2'])
+    expect(url.searchParams.get('labelMatch')).toBe('all')
+  })
+
+  it('addresses the backlog by a literal segment and a sprint by its id', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => jsonResponse(200, SECTION))
+    globalThis.fetch = fetchMock
+
+    await apiGetBacklogSection('w1', 'p1', null)
+    expect(urlOf(fetchMock).pathname).toBe('/api/workspaces/w1/projects/p1/backlog/sections/backlog')
+
+    fetchMock.mockClear()
+    await apiGetBacklogSection('w1', 'p1', 'sp-7')
+    expect(urlOf(fetchMock).pathname).toBe('/api/workspaces/w1/projects/p1/backlog/sections/sp-7')
+    // The section is named by the PATH, so re-sending it as a list filter would
+    // be a second answer to a question the URL has already settled.
+    expect(urlOf(fetchMock).searchParams.get('sprintId')).toBeNull()
+    expect(urlOf(fetchMock).searchParams.get('noSprint')).toBeNull()
+  })
+
+  it('sends includeDone to the backlog section only', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => jsonResponse(200, SECTION))
+    globalThis.fetch = fetchMock
+
+    await apiGetBacklogSection('w1', 'p1', null, { includeDone: true })
+    expect(urlOf(fetchMock).searchParams.get('includeDone')).toBe('true')
+
+    fetchMock.mockClear()
+    // A sprint keeps its DONE issues unconditionally — they are its record of
+    // what it delivered, so the knob does not apply and is not sent.
+    await apiGetBacklogSection('w1', 'p1', 'sp-7', { includeDone: true })
+    expect(urlOf(fetchMock).searchParams.get('includeDone')).toBeNull()
   })
 })

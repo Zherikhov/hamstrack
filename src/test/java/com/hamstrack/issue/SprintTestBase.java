@@ -21,7 +21,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * surface (create / patch / board / backlog / history), {@code siblingProject},
  * {@code actorWith} for the role matrix and {@code markDone}/{@code doneStatusId} for
  * the done-vs-carried-over assertions. Only the sprint endpoints, the rank endpoint and
- * the planning-view reader live here.
+ * the planning-view readers live here.
  */
 public abstract class SprintTestBase extends VersionTestBase {
 
@@ -211,6 +211,29 @@ public abstract class SprintTestBase extends VersionTestBase {
 
     protected JsonNode backlogView(Ctx ctx) throws Exception {
         return backlogView(ctx, ctx.token(), null);
+    }
+
+    /**
+     * {@code GET …/backlog/sections/{ref}} — ONE section (HD-96). {@code ref} is the
+     * literal {@code backlog} or a sprint id.
+     *
+     * <p>There is deliberately no {@code size} parameter to pass: the whole point of the
+     * endpoint is that a section fetch carries no page size, so a helper offering one
+     * would be modelling a request no client can make.
+     */
+    protected ResultActions getSection(Ctx ctx, String token, String sectionRef, String query)
+            throws Exception {
+        var url = "/api/workspaces/" + ctx.wsId() + "/projects/" + ctx.projectId()
+                + "/backlog/sections/" + sectionRef + (query == null ? "" : query);
+        return mockMvc.perform(get(url).header("Authorization", "Bearer " + token));
+    }
+
+    /** One section read as the ctx owner, expecting 200. */
+    protected JsonNode sectionNode(Ctx ctx, String sectionRef, String query) throws Exception {
+        var body = getSection(ctx, ctx.token(), sectionRef, query)
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return json.readTree(body);
     }
 
     /** Issue keys of the planning view's BACKLOG section, in rank order. */

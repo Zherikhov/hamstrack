@@ -26,6 +26,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -184,14 +185,14 @@ public class CommentService {
 
     private List<User> parseMentions(String body, List<WorkspaceMember> members) {
         var result = new java.util.LinkedHashSet<User>();
-        var lowerBody = body.toLowerCase();
+        var lowerBody = body.toLowerCase(Locale.ROOT);
         for (int at = lowerBody.indexOf('@'); at >= 0; at = lowerBody.indexOf('@', at + 1)) {
             User best = null;
             int bestLen = 0;
             for (var member : members) {
                 var name = member.getUser().getDisplayName();
                 if (name == null || name.isBlank() || name.length() <= bestLen) continue;
-                var lowerName = name.toLowerCase();
+                var lowerName = name.toLowerCase(Locale.ROOT);
                 if (!lowerBody.startsWith(lowerName, at + 1)) continue;
                 // Require a non-alphanumeric boundary so "@JohnDoe2" doesn't mention "JohnDoe"
                 int end = at + 1 + lowerName.length();

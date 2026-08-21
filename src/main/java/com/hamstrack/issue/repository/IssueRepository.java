@@ -524,9 +524,56 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             Pageable pageable);
 
     /**
-     * <strong>ONE grouped stats query for the ENTIRE planning view</strong> (§4.6) —
-     * never one per section. Grouped by {@code i.sprint.id}, where the NULL group IS
-     * the backlog, and carrying the same filter predicate the sections do.
+     * A UUID no row can carry, bound as the {@code sprintIds} list when a planning read
+     * wants only the backlog: an empty {@code IN} list is invalid in JPQL, so "no sprints"
+     * has to be spelled as "a sprint id that cannot exist". Lives beside the query that
+     * needs it rather than in a caller, because a second copy of a magic value is a second
+     * thing to keep true.
+     */
+    List<UUID> NO_SPRINTS_SENTINEL = List.of(new UUID(0, 0));
+
+    /**
+     * <strong>ONE grouped stats query for a planning read</strong> (§4.6) — the whole view
+     * in one statement, never one per section. Grouped by {@code i.sprint.id}, where the
+     * NULL group IS the backlog, and carrying the same filter predicate the sections do.
+     *
+     * <p><strong>This is the <em>unconditional, cap-blind</em> term of a planning read, and
+     * {@code includeBacklogGroup} is what bounds it</strong> (HD-96 security review). It
+     * always reads and groups a whole section: every filter narrows what it counts, none
+     * narrows what it visits, and it never sees the cap — deliberately, because honest totals
+     * for a truncated section are the entire point of it. So a caller wanting ONE sprint's
+     * group must be able to say so. At {@code false} the {@code OR sprint IS NULL} disjunct
+     * disappears and the aggregation reads and groups that one group instead of the project's
+     * — measured on a 62k-row corpus, half the buffers and no {@code Sort} node, since one
+     * group needs no sort. Which index serves it is the planner's business and varies: the
+     * statement stays anchored on {@code i.project}, so a project index usually wins on
+     * selectivity and {@code idx_issues_sprint} is merely eligible. The saving is the row
+     * set, not the index — do not promise a plan here.
+     *
+     * <p><strong>What this is NOT: "the one term the response size does not bound".</strong>
+     * That sentence was written here and was false. {@link #findSectionIssues} is capped in
+     * OUTPUT, not in work — <em>a {@code LIMIT} bounds what comes back, never what is
+     * selected</em> — and the section's {@code ORDER BY} forces the whole filtered set to be
+     * ordered before the limit can apply. So {@code ?statusId=<something the section does not
+     * hold>} still visits and orders the entire section to return nothing at all; the
+     * correlated label and fix-version predicates are a per-row multiplier on top of that,
+     * not the cause of it. The true difference is narrower, and it is the one any budget
+     * argument has to be built from: this query is unconditional and cap-blind, while a row
+     * query is unbounded in work only as far as its filters happen to fall.
+     *
+     * <p>Passing {@code true} for a single-sprint fetch is not a wrong ANSWER — the group is
+     * picked by key either way — which is exactly why it survived a design review, and why
+     * {@link #sectionStats} derives both knobs from one nullable key instead of trusting the
+     * next caller to pair them correctly.
+     *
+     * <p><strong>On this javadoc's own history, because it is the failure mode of its own
+     * subject.</strong> Three claims stood here in succession — "a section fetch does no more
+     * work than the aggregate", "the stats query is the only unbounded term", "every other
+     * cost scales with what comes back". Each was a cleaner categorical sentence than the one
+     * before and each was slightly wider than the evidence, because the pull of a durable,
+     * category-shaped claim is toward the tidiest phrasing and the tidiest phrasing is the
+     * likeliest to overshoot. Prefer a claim about a mechanism you can point at in the SQL to
+     * a claim about which term is "the only" anything.
      *
      * <p>Rows: {@code (sprintId, count, doneCount, points, donePoints, unestimated,
      * unestimatedDone)}. Both the "done" and the "done-only" aggregates come back so
@@ -534,9 +581,11 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
      * subtraction instead of paying a second query — the totals stay honest even when
      * the section is truncated, because this query never sees the cap.
      *
-     * <p>{@code sprintIds} must be non-empty (an empty {@code IN} list is invalid in
-     * JPQL); the caller substitutes a sentinel UUID no row can carry, which leaves only
-     * the NULL/backlog group.
+     * <p>{@code sprintIds} must be non-empty ({@link #NO_SPRINTS_SENTINEL} is how "none" is
+     * said), and it pairs with {@code includeBacklogGroup}: three of the four combinations
+     * mean something and the fourth — the sentinel with the flag off — asks for nothing and
+     * would answer a section with zeros rather than an error, which is HD-96's own failure
+     * shape. {@link #sectionStats} exists so a single-section caller cannot write it.
      */
     @Query("SELECT i.sprint.id, count(i), " +
            "  sum(case when i.status.category = :done then 1 else 0 end), " +
@@ -546,7 +595,7 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
            "  sum(case when i.storyPoints is null and i.status.category = :done then 1 else 0 end) " +
            "FROM Issue i " +
            "WHERE i.project = :project " +
-           "AND (i.sprint IS NULL OR i.sprint.id IN :sprintIds) " +
+           "AND ((:includeBacklogGroup = true AND i.sprint IS NULL) OR i.sprint.id IN :sprintIds) " +
            "AND (:statusId IS NULL OR i.status.id = :statusId) " +
            "AND (:assigneeId IS NULL OR i.assignee.id = :assigneeId) " +
            "AND (:priorityId IS NULL OR i.priority.id = :priorityId) " +
@@ -560,6 +609,7 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
     List<Object[]> planningStats(
             @Param("project") Project project,
             @Param("sprintIds") Collection<UUID> sprintIds,
+            @Param("includeBacklogGroup") boolean includeBacklogGroup,
             @Param("statusId") UUID statusId,
             @Param("assigneeId") UUID assigneeId,
             @Param("priorityId") UUID priorityId,
@@ -570,6 +620,35 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
             @Param("fixVersionId") UUID fixVersionId,
             @Param("fixType") VersionLinkType fixType,
             @Param("done") StatusCategory done);
+
+    /**
+     * {@link #planningStats} for ONE section, keyed the way this domain already keys a
+     * section: {@code sectionKey == null} IS the backlog ({@code Issue.sprint} null is the
+     * backlog, the grouped query's NULL group is the backlog).
+     *
+     * <p><strong>Exists to make the wrong pairing unrepresentable rather than documented.</strong>
+     * The underlying query takes the id list and the backlog flag as two independent knobs,
+     * so a single-section caller could pass a combination that silently returns zeros — a
+     * section reporting empty totals with a 200, which is precisely the class of defect HD-96
+     * fixed. One nullable key cannot express it: the list and the flag are derived together,
+     * here, once. (The same move as {@code RoleRepository} declining to extend
+     * {@code JpaRepository} so a bare {@code findById} will not compile.)
+     *
+     * <p>The whole-view caller still uses {@link #planningStats} directly — it genuinely has
+     * many sprint ids AND the backlog, which is the one shape this signature cannot say.
+     */
+    default List<Object[]> sectionStats(Project project, UUID sectionKey,
+                                        UUID statusId, UUID assigneeId, UUID priorityId,
+                                        UUID componentId, Collection<UUID> labelIds,
+                                        int labelCount, long requiredMatches,
+                                        UUID fixVersionId, VersionLinkType fixType,
+                                        StatusCategory done) {
+        return planningStats(project,
+                sectionKey == null ? NO_SPRINTS_SENTINEL : List.of(sectionKey),
+                sectionKey == null,
+                statusId, assigneeId, priorityId, componentId,
+                labelIds, labelCount, requiredMatches, fixVersionId, fixType, done);
+    }
 
     /**
      * Unfiltered per-sprint roll-up for a batch of sprints in ONE grouped query — the

@@ -20,9 +20,13 @@ package com.hamstrack.search;
  *       filtered by {@code link_type}, because both roles are many-valued and share
  *       one join table (HD-32, §3.5);</li>
  *   <li>{@link #TEXT} — {@code text}; {@code ~} ILIKE over title/description;</li>
- *   <li>{@link #DATE} — a real {@code DATE} column ({@code due});</li>
- *   <li>{@link #TIMESTAMP} — created/updated; date literals use inclusive end-of-day
- *       boundaries (§6.3).</li>
+ *   <li>{@link #DATE} — a real {@code DATE} column, compared against the literal date itself;</li>
+ *   <li>{@link #TIMESTAMP} — an instant-bearing column. A date literal denotes the whole
+ *       inclusive UTC day, so the comparison is a {@code [day start, next day start)} window
+ *       (§6.3). The column's own temporal type is read off the mapped path rather than
+ *       assumed — these are not all the same Java type (see {@code HqlCompiler});</li>
+ *   <li>{@link #NUMBER} — a native numeric column, compared directly (the custom-field
+ *       numeric path instead compares inside a JSONB {@code EXISTS}).</li>
  * </ul>
  */
 public enum FieldDataType {

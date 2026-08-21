@@ -6,6 +6,7 @@ import type {
   ProjectBinding, BindingOptions, TransitionRule, UsageDetail, AdminUser, PendingInvite,
   SearchResultRow, SearchSchema, SavedFilter, Label, MergeLabelsResult, Component,
   Version, VersionUsage, BoardMode, ProjectDeliveryUpdate, Sprint, SprintState, BacklogView,
+  BacklogSectionResponse,
   SprintCompletionPreview, SprintCompletionResult, UnfinishedDisposition,
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
@@ -1528,9 +1529,8 @@ export interface BacklogViewOptions extends IssueListFilters {
 /**
  * The whole planning view in one aggregate: ACTIVE-first sprint sections plus
  * the ranked backlog, each with whole-section stats and HD-79 truncation
- * metadata. Sections are ALSO independently refreshable through
- * `apiListIssuesPaged({ sprintId })` / `({ noSprint: true })` — see
- * `useBacklogView` in `components/sprints.tsx`.
+ * metadata. Sections are ALSO independently refreshable, one at a time, through
+ * `apiGetBacklogSection` — see `useBacklogView` in `components/sprints.tsx`.
  */
 export async function apiGetBacklogView(
   wsId: string,
@@ -1542,6 +1542,47 @@ export async function apiGetBacklogView(
   appendIssueFilters(params, opts)
   const qs = params.toString()
   return request(`/workspaces/${wsId}/projects/${projectId}/backlog${qs ? `?${qs}` : ''}`)
+}
+
+/**
+ * ONE planning section, refreshed on its own (HD-96): `…/backlog/sections/backlog`
+ * for the ranked backlog, `…/backlog/sections/{sprintId}` for a sprint.
+ *
+ * **No page and no size travel with a planning request, and that absence is the
+ * fix.** The SPA used to refresh a section through `apiListIssuesPaged` asking for
+ * `size = sectionCap`; `Paging` narrowed that to 100 and still answered 200, so a
+ * section of 101–300 issues rendered whole and came back cut. Reading the cap off
+ * the server's response instead of hardcoding it was the right instinct and did not
+ * save it — a number the client holds is a number that can be wrong. With none on
+ * the wire there is nothing to echo, nothing to clamp, and nothing to drift when an
+ * operator retunes `app.agile.section-max-issues` in either direction.
+ *
+ * The response carries `sectionCap` / `bulkMoveCap` / `truncated` /
+ * `totalAvailable` and whole-section `stats` under the aggregate's own field
+ * names, so the caller patches it into a cached `BacklogView` verbatim.
+ *
+ * @param sprintId the sprint whose section to fetch, or `null` for the ranked backlog
+ */
+export async function apiGetBacklogSection(
+  wsId: string,
+  projectId: string,
+  sprintId: string | null,
+  opts?: BacklogViewOptions,
+): Promise<BacklogSectionResponse> {
+  const params = new URLSearchParams()
+  // `includeDone` is a BACKLOG-section knob here exactly as it is on the aggregate:
+  // a sprint's DONE issues are its record and always travel with it.
+  if (sprintId === null && opts?.includeDone) params.set('includeDone', 'true')
+  // Deliberately the aggregate's own filter helper, so the two surfaces can never
+  // ask different questions — a refresh that filtered differently than the render
+  // is this defect's own shape one layer up. The section is addressed by PATH, so
+  // the two section-selecting filters are stripped: sending `sprintId`/`noSprint`
+  // as well would be a second answer to a question the URL already settled.
+  appendIssueFilters(params, { ...opts, sprintId: undefined, noSprint: undefined })
+  const qs = params.toString()
+  const path = sprintId === null ? 'backlog' : sprintId
+  return request(
+    `/workspaces/${wsId}/projects/${projectId}/backlog/sections/${path}${qs ? `?${qs}` : ''}`)
 }
 
 /**

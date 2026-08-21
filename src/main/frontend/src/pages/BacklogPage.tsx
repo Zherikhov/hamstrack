@@ -353,11 +353,13 @@ export default function BacklogPage() {
    * "Move every issue to →" from a sprint section header.
    *
    * The list handed over is the RENDERED one, whose size is bounded by
-   * `sectionCap` (300 by default) — while a single bulk request may carry at most
-   * `bulkMoveCap` (100 by default). Those two caps are independent properties, so
-   * the payload is chunked by the one the server reports for THIS response; the
-   * mutations in `useSprintMutations` do the chunking (sequential POSTs for an
-   * add, bounded-concurrency DELETEs for a return to the backlog).
+   * `sectionCap` (300 by default) — and by that cap however the section was
+   * obtained, since HD-96 gave a refreshed section the same bound as a rendered
+   * one. A single bulk request may carry at most `bulkMoveCap` (100 by default).
+   * Those two caps are independent properties, so the payload is chunked by the
+   * one the server reports for THIS response; the mutations in
+   * `useSprintMutations` do the chunking (sequential POSTs for an add,
+   * bounded-concurrency DELETEs for a return to the backlog).
    *
    * A chunked run can stop half-way, so failure is never treated as "nothing
    * happened": the error carries how many issues actually moved and both touched
@@ -380,7 +382,10 @@ export default function BacklogPage() {
     }
     const onSuccess = (moved: number) => {
       // A truncated section hands over only what is on screen — say so instead of
-      // implying the whole section moved.
+      // implying the whole section moved. `truncated` is the SERVER's word for
+      // "this section holds more than `sectionCap`" and is never recomputed
+      // client-side, so this message describes a real over-cap section and not,
+      // as it once could, a narrowing the server never applied.
       if (section.truncated) {
         setNotice(`Moved the ${moved} loaded issue${moved === 1 ? '' : 's'}; `
           + 'the rest of the section was not on screen.')

@@ -26,9 +26,14 @@ import java.util.Set;
  *                      USER/DATE/…), or {@code null} when there is no picklist
  * @param functions     zero-arg functions offered for this field in autocomplete
  *                      (e.g. {@code currentUser()}, {@code now()})
- * @param available     false for a reserved-but-not-yet-live field ({@code label},
- *                      custom keys) — parses, but resolution 422s with a clear
- *                      "not yet queryable" message rather than "unknown field"
+ * @param available     false for a name this registry has RESERVED but not yet made
+ *                      queryable — it parses, and resolution 422s with a clear
+ *                      "not yet queryable" message rather than "unknown field".
+ *                      Registration is what reserves the name; availability only says
+ *                      WHEN it starts answering. So a reserved name outranks a tenant's
+ *                      own custom field of the same key even while unavailable — see
+ *                      {@link FieldResolver} — which is what stops the meaning of every
+ *                      stored filter using that key from flipping on the day it goes live
  */
 public record FieldDescriptor(
         String name,

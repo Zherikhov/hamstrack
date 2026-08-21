@@ -7,6 +7,7 @@ import com.hamstrack.issue.entity.IssueFieldValue;
 import com.hamstrack.issue.entity.IssueLabel;
 import com.hamstrack.issue.entity.IssueVersionLink;
 import com.hamstrack.issue.entity.VersionLinkType;
+import com.hamstrack.search.FieldResolver.Resolved;
 import com.hamstrack.search.parser.ast.ComparisonOp;
 import com.hamstrack.search.parser.ast.Expr;
 import com.hamstrack.search.parser.ast.OrderBy;
@@ -29,8 +30,11 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -59,11 +63,10 @@ import java.util.UUID;
 public class HqlCompiler {
 
     private final EntityManager em;
-    private final FieldRegistry registry;
+    private final FieldResolver fieldResolver;
     private final HqlValueResolver valueResolver;
     private final HqlParentResolver parentResolver;
     private final SearchScope searchScope;
-    private final RetiredFieldAliases retiredAliases;
 
     /**
      * Build the page query: scope-ANDed predicate + ToOne fetch joins + ORDER BY
@@ -187,56 +190,32 @@ public class HqlCompiler {
         };
     }
 
-    private FieldDescriptor field(String name, ResolutionContext ctx) {
-        // Validated already, but re-resolve defensively (never trust the raw string).
-        return registry.find(name)
-                .filter(FieldDescriptor::available)
-                .or(() -> retiredAlias(name, ctx))
-                .orElseThrow(() -> new HqlSemanticException("Unknown field '" + name + "'", name));
-    }
-
-    /**
-     * True when the name is a custom field (not a system field) — routes to the JSONB path.
-     *
-     * <p>The registry is checked FIRST and wins: a name it knows is never treated as a
-     * custom field. That precedence is why a retired key must NOT be a registry entry
-     * (HD-107 §9.2) — {@code story_points} in {@link FieldRegistry} would permanently
-     * shadow any tenant's own custom field with that key. The alias is applied only
-     * after this method has said "not custom" (see {@link #retiredAlias}).
-     */
-    private boolean isCustom(String name, ResolutionContext ctx) {
-        return registry.find(name).filter(FieldDescriptor::available).isEmpty()
-                && ctx.customField(name).isPresent();
-    }
-
-    /**
-     * Last-resort resolution of a <em>retired</em> field key to the system field that
-     * replaced it (HD-107 §9.2) — the step that keeps a saved filter written as
-     * {@code story_points = 5} running after V11 archived that custom field.
-     *
-     * <p>Consulted only when the registry missed, and it yields nothing when the caller
-     * CAN see a custom field with that key: system field → visible custom field →
-     * retired alias → "unknown field". The custom check is redundant on the paths that
-     * already ran {@link #isCustom}, and deliberately kept anyway — the ordering is a
-     * tenancy-safety property (a tenant's own {@code story_points} must resolve to
-     * itself, never to the native column) and must hold at every entry point,
-     * including ORDER BY.
-     */
-    private java.util.Optional<FieldDescriptor> retiredAlias(String name, ResolutionContext ctx) {
-        if (ctx.customField(name).isPresent()) return java.util.Optional.empty();
-        return retiredAliases.canonicalName(name)
-                .flatMap(registry::find)
-                .filter(FieldDescriptor::available);
-    }
+    // ---- name resolution ----
+    //
+    // Which field a name refers to is NOT decided in this class: every name — in a
+    // comparison, an IN list, IS EMPTY or ORDER BY — goes to FieldResolver, which owns
+    // the registry → visible custom field → retired-key alias precedence and the errors that
+    // end it (HD-114). Whatever checked this query beforehand asked that same component the
+    // same question, so a name it accepted cannot turn into an unknown field here — the
+    // "validated, then unknown" failure HD-107 §9.2 hit when the sequence was written down in
+    // more than one place.
+    // Resolution still runs here rather than being carried over from validation: the raw
+    // string is never trusted, and re-asking is free.
 
     // ---- comparison ----
 
     private Predicate comparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
                                  CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(c.field(), ctx)) {
-            return customComparison(c, outer, root, cb, ctx);
-        }
-        FieldDescriptor f = field(c.field(), ctx);
+        return switch (fieldResolver.resolve(c.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) ->
+                    customComparison(c, meta, outer, root, cb, ctx);
+            case Resolved.SystemField(FieldDescriptor f) ->
+                    systemComparison(c, f, outer, root, cb, ctx);
+        };
+    }
+
+    private Predicate systemComparison(Expr.Comparison c, FieldDescriptor f, CommonAbstractCriteria outer,
+                                       Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         ComparisonOp op = c.op();
 
         // text ~ term
@@ -315,6 +294,26 @@ public class HqlCompiler {
             };
         }
 
+        // project (HD-101): the id-set shape, minus the null disjunct. `issues.project_id` is
+        // NOT NULL, so `cb.isNull` below is dead here — and worse, it reads as if the field were
+        // nullable, one edit away from somebody concluding `project IS EMPTY` ought to work.
+        //
+        // `project != "HD"` is complemented INSIDE the scope predicate, which is what makes it
+        // mean "in a visible project other than HD" rather than "not in HD": SearchScope stays
+        // the outermost conjunction and no shape of a nested term can negate its enclosing AND.
+        // The one change that WOULD break that is not a Criteria shape at all — it is folding
+        // this term into SearchScope.visibleProjectIds (see the note on the registry entry).
+        if (f.name().equals("project")) {
+            var projects = resolveIdSet(f, c.value(), ctx);
+            Path<UUID> projectId = path(root, f.entityPath());
+            return switch (op) {
+                case EQ -> projectId.in(projects.ids());
+                case NEQ -> cb.not(projectId.in(projects.ids()));
+                default -> throw new HqlSemanticException(
+                        "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
+            };
+        }
+
         // id-set membership fields: status/type/priority(=,!=), assignee/reporter,
         // component, sprint, parent
         var resolved = resolveIdSet(f, c.value(), ctx);
@@ -340,10 +339,16 @@ public class HqlCompiler {
 
     private Predicate inList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
                              CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(in.field(), ctx)) {
-            return customInList(in, outer, root, cb, ctx);
-        }
-        FieldDescriptor f = field(in.field(), ctx);
+        return switch (fieldResolver.resolve(in.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) ->
+                    customInList(in, meta, outer, root, cb, ctx);
+            case Resolved.SystemField(FieldDescriptor f) ->
+                    systemInList(in, f, outer, root, cb, ctx);
+        };
+    }
+
+    private Predicate systemInList(Expr.InList in, FieldDescriptor f, CommonAbstractCriteria outer,
+                                   Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         // priority IN (...) always uses id equality (§5.3: >/< use position, IN uses id)
         var ids = new ArrayList<UUID>();
         for (Value v : in.values()) {
@@ -368,13 +373,18 @@ public class HqlCompiler {
 
     private Predicate isEmpty(Expr.IsEmpty e, CommonAbstractCriteria outer, Root<Issue> root,
                               CriteriaBuilder cb, ResolutionContext ctx) {
-        if (isCustom(e.field(), ctx)) {
-            // Empty = no issue_field_values row for this field at all (HD-52).
-            var meta = ctx.customField(e.field()).orElseThrow();
-            Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
-            return e.negated() ? anyRow : cb.not(anyRow);
-        }
-        FieldDescriptor f = field(e.field(), ctx);
+        return switch (fieldResolver.resolve(e.field(), ctx)) {
+            case Resolved.CustomField(CustomFieldMeta meta) -> {
+                // Empty = no issue_field_values row for this field at all (HD-52).
+                Predicate anyRow = cb.exists(fieldExists(outer, root, cb, meta.fieldId(), null));
+                yield e.negated() ? anyRow : cb.not(anyRow);
+            }
+            case Resolved.SystemField(FieldDescriptor f) -> systemIsEmpty(e, f, outer, root, cb);
+        };
+    }
+
+    private Predicate systemIsEmpty(Expr.IsEmpty e, FieldDescriptor f, CommonAbstractCriteria outer,
+                                    Root<Issue> root, CriteriaBuilder cb) {
         // label IS EMPTY = "carries no label at all" (no id filter on the subquery).
         if (f.dataType() == FieldDataType.LABEL_REF) {
             Predicate anyLabel = cb.exists(labelSubquery(outer, root, cb, null));
@@ -457,7 +467,7 @@ public class HqlCompiler {
                                      Root<Issue> root, CriteriaBuilder cb) {
         if (f.dataType() == FieldDataType.DATE) {
             // due: a real DATE column — direct comparison against the LocalDate.
-            Path<LocalDate> path = root.get(f.entityPath());
+            Path<LocalDate> path = path(root, f.entityPath());
             LocalDate d = b.date();
             return switch (op) {
                 case EQ -> cb.equal(path, d);
@@ -470,13 +480,50 @@ public class HqlCompiler {
                         "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
             };
         }
-        // created / updated: TIMESTAMP with inclusive end-of-day boundaries (§6.3).
-        Path<Instant> path = root.get(f.entityPath());
-        Instant lo = b.lowerInstant();
-        Instant hiEx = b.upperInstantExclusive();
+        // A TIMESTAMP field: the operand names a whole UTC day, so every operator is expressed
+        // against the half-open window [lo, hiEx) (§6.3).
+        //
+        // The timestamp COLUMNS behind these fields are not all one Java type — BaseEntity's
+        // audit stamps are Instant, Issue.closedAt is OffsetDateTime — so the bounds are bound
+        // in whatever type the mapped attribute declares, read off the path itself rather than
+        // from a list of field names. Binding the other type is not a compile error (the path
+        // is generically unchecked, so it takes whatever the assignment asks for), which is
+        // exactly why the question is put to the model instead of answered by hand per field.
+        //
+        // Resolved through path(), never root.get(): an entityPath() may be dotted (`status.id`
+        // and `project.key` already are), and root.get() throws IllegalArgumentException — a
+        // 500, not a clean error — on the first nested timestamp anyone registers. Nothing else
+        // in this class walks a path by hand; the date branch was the last place that did.
+        if (path(root, f.entityPath()).getJavaType() == OffsetDateTime.class) {
+            Path<OffsetDateTime> offsetPath = path(root, f.entityPath());
+            return timestampWindow(f, op, offsetPath,
+                    b.lowerInstant().atOffset(ZoneOffset.UTC),
+                    b.upperInstantExclusive().atOffset(ZoneOffset.UTC), cb);
+        }
+        Path<Instant> path = path(root, f.entityPath());
+        return timestampWindow(f, op, path, b.lowerInstant(), b.upperInstantExclusive(), cb);
+    }
+
+    /**
+     * The inclusive-day window predicate for a TIMESTAMP field, in whatever temporal type the
+     * mapped column carries. {@code T} is bound from the path, so a timestamp field added later
+     * brings its own type along and nothing here has to learn its name.
+     *
+     * <p><strong>{@code !=} on a NULLABLE timestamp also matches the rows carrying no value at
+     * all.</strong> SQL's three-valued logic would otherwise drop them silently, and "not closed
+     * on the 1st" plainly includes "never closed" — the reading {@code due !=},
+     * {@code storyPoints !=} and the id-set fields already use. On a NOT NULL field that
+     * disjunct would be dead, so it is asked of the descriptor rather than always emitted.
+     */
+    private <T extends Comparable<? super T>> Predicate timestampWindow(
+            FieldDescriptor f, ComparisonOp op, Path<T> path, T lo, T hiEx, CriteriaBuilder cb) {
         return switch (op) {
             case EQ -> cb.and(cb.greaterThanOrEqualTo(path, lo), cb.lessThan(path, hiEx));   // within that UTC day
-            case NEQ -> cb.or(cb.lessThan(path, lo), cb.greaterThanOrEqualTo(path, hiEx));
+            case NEQ -> {
+                Predicate outsideTheDay =
+                        cb.or(cb.lessThan(path, lo), cb.greaterThanOrEqualTo(path, hiEx));
+                yield f.nullable() ? cb.or(cb.isNull(path), outsideTheDay) : outsideTheDay;
+            }
             case GT -> cb.greaterThanOrEqualTo(path, hiEx);   // > day  → from the next day
             case GTE -> cb.greaterThanOrEqualTo(path, lo);    // >= day → from day start
             case LT -> cb.lessThan(path, lo);                 // < day  → before day start
@@ -487,9 +534,17 @@ public class HqlCompiler {
     }
 
     // ---- text match: LOWER(title) LIKE %term% OR LOWER(description) LIKE %term% ----
+    //
+    // Every case fold in this class passes Locale.ROOT, and the reason is a property of
+    // the operation, not of any one call site: a fold whose result is compared against
+    // something this JVM did not fold in the same breath - a database LOWER(), a stored
+    // string, another node's answer - must not read Locale.getDefault(). Turkish, Azeri and
+    // Lithuanian fold 'I' to a dotless i, Postgres does not, and the identical query over
+    // identical data then returns fewer rows on a container configured with one of those
+    // locales - no exception, no log line (HD-120).
 
     private Predicate textMatch(String rawTerm, Root<Issue> root, CriteriaBuilder cb) {
-        String escaped = escapeLike(rawTerm.toLowerCase());
+        String escaped = escapeLike(rawTerm.toLowerCase(Locale.ROOT));
         String pattern = "%" + escaped + "%";
         Predicate title = cb.like(cb.lower(root.get("title")), pattern, '\\');
         Predicate desc = cb.like(cb.lower(root.get("description")), pattern, '\\');
@@ -513,9 +568,8 @@ public class HqlCompiler {
     // field_id, so it can NEVER reach outside the workspace/visible-project boundary
     // (SearchScope stays outermost). JSONB access uses cb.function(...) exclusively.
 
-    private Predicate customComparison(Expr.Comparison c, CommonAbstractCriteria outer, Root<Issue> root,
-                                       CriteriaBuilder cb, ResolutionContext ctx) {
-        var meta = ctx.customField(c.field()).orElseThrow();
+    private Predicate customComparison(Expr.Comparison c, CustomFieldMeta meta, CommonAbstractCriteria outer,
+                                       Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         ComparisonOp op = c.op();
 
         // != on a scalar custom field: match issues whose field is absent OR differs.
@@ -530,9 +584,8 @@ public class HqlCompiler {
         return cb.exists(valueSubquery(outer, root, cb, meta, valuePred(meta, op, c.value(), ctx)));
     }
 
-    private Predicate customInList(Expr.InList in, CommonAbstractCriteria outer, Root<Issue> root,
-                                   CriteriaBuilder cb, ResolutionContext ctx) {
-        var meta = ctx.customField(in.field()).orElseThrow();
+    private Predicate customInList(Expr.InList in, CustomFieldMeta meta, CommonAbstractCriteria outer,
+                                   Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         // IN = "any of": one EXISTS whose value predicate is an OR of per-element preds.
         var perElement = new ArrayList<Predicate>();
         var sq = valueSubqueryOpen(outer, root, cb, meta);
@@ -613,7 +666,7 @@ public class HqlCompiler {
                 yield switch (op) {
                     case EQ -> cb.equal(text, s);
                     case MATCH -> {
-                        String pattern = "%" + escapeLike(s.toLowerCase()) + "%";
+                        String pattern = "%" + escapeLike(s.toLowerCase(Locale.ROOT)) + "%";
                         yield cb.like(cb.lower(text), pattern, '\\');
                     }
                     default -> illegalOp(meta, op);
@@ -797,16 +850,23 @@ public class HqlCompiler {
 
     // ---- ORDER BY ----
 
-    // `ctx` is threaded in for one reason: a sort key may be a RETIRED key
-    // (`ORDER BY story_points`, HD-107 §9.2), and resolving it needs the same
-    // system → custom → alias precedence the predicate paths use. Without it the
-    // validator would accept the key and the compiler would then throw "unknown
-    // field" on the very same query.
+    // `ctx` is threaded in for one reason: a sort key is a field name like any other, so
+    // it is resolved by the same component the predicate paths use (see sortField). A sort
+    // key that resolved by its own rules is how HD-107 §9.2 produced a query the validator
+    // accepted and the compiler then called an unknown field.
+    //
+    // NULL PLACEMENT is left to the database's default for the direction (PostgreSQL sorts
+    // nulls last ascending, first descending) — deliberately, because that makes it identical
+    // for EVERY nullable sort key, which is the property that matters. A per-field null
+    // precedence is how two nullable fields come to disagree, and "why do the open issues sit
+    // at the other end of ORDER BY closed than of ORDER BY due" is a bug report waiting to be
+    // filed. Changing it is one decision for all of them, taken here; ClosedDateSearchTest
+    // pins that two nullable date fields agree, and on what.
     private List<Order> orderBy(Query query, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         var orders = new ArrayList<Order>();
         if (query.orderBy().isPresent()) {
             for (OrderBy.SortKey key : query.orderBy().get().keys()) {
-                FieldDescriptor f = field(key.field(), ctx);
+                FieldDescriptor f = sortField(key.field(), ctx);
                 Path<?> path = sortPath(root, f);
                 boolean desc = key.direction() == OrderBy.Direction.DESC;
                 // priority rank is inverted vs its `position` column (lower position =
@@ -824,6 +884,25 @@ public class HqlCompiler {
         return orders;
     }
 
+    /**
+     * The system field a sort key names — resolved through {@link FieldResolver} like every
+     * other name, which is what makes {@code ORDER BY story_points} work (HD-107 §9.2: this
+     * was the entry point that had its own copy of the precedence and did not learn the alias
+     * step, so validation accepted the key and compilation then called it unknown).
+     *
+     * <p>A custom field is not sortable in MVP, so it is refused here in the words the
+     * validator uses. Validation rejects it first, so this is unreachable through search —
+     * kept because a sort key that resolved and then fell off the end of a switch would be a
+     * 500, and because "not sortable" is the true statement about it either way.
+     */
+    private FieldDescriptor sortField(String name, ResolutionContext ctx) {
+        return switch (fieldResolver.resolve(name, ctx)) {
+            case Resolved.SystemField(FieldDescriptor f) -> f;
+            case Resolved.CustomField(CustomFieldMeta meta) -> throw new HqlSemanticException(
+                    "Field '" + meta.key() + "' is not sortable", meta.key());
+        };
+    }
+
     private Path<?> sortPath(Root<Issue> root, FieldDescriptor f) {
         // ENUM_REF sorts by the referenced row's catalog position (join present);
         // everything else sorts by its own path.
@@ -834,11 +913,15 @@ public class HqlCompiler {
             case "assignee" -> root.get("assignee").get("displayName");
             case "reporter" -> root.get("reporter").get("displayName");
             case "parent" -> root.get("parent").get("id");
+            // HD-101: sort by the project's KEY — the identity an operand is written with, so
+            // the sort order matches the vocabulary. No join dance is needed (see below):
+            // `issues.project_id` is NOT NULL, so the implicit inner join drops no rows.
+            case "project" -> root.get("project").get("key");
             // HD-31: sort by the component's NAME, through an explicit LEFT join.
             // `root.get("component").get("name")` would imply an INNER join and
             // silently drop every component-less issue from `ORDER BY component`.
             case "component" -> componentJoin(root).get("name");
-            default -> root.get(f.entityPath());
+            default -> path(root, f.entityPath());
         };
     }
 

@@ -107,6 +107,103 @@ a suffix, Actions → Build → *Run workflow* on the tag fixes it in one click.
 `main` (the `workflow_dispatch` trigger, added with this change). No new commit,
 no new tag, no need for an existing run to re-run. The deploy chains off it.
 
+## Releases that register a new HQL field name
+
+A `FieldRegistry` entry **reserves** a name: from that release on it outranks any
+workspace's custom field of the same key (`FieldResolver`). For an affected
+tenant the loud half is that `key = "…"` stops resolving their stored values
+(422); the **silent** half is that `/schema` omits a registry-claimed key, so
+their field disappears from search vocabulary with no error, no log line and no
+UI affordance, while continuing to work everywhere else in the product.
+
+Nothing detects that after the fact, so run this **before** the release and
+record the answer in the release notes — once per name the release registers:
+
+```sql
+SELECT id, key, name, scope_workspace_id, scope_project_id
+  FROM field_defs
+ WHERE lower(key) = '<the new field name>' AND archived_at IS NULL;
+```
+
+Archived defs are already out of resolution and are harmless. A row with
+`scope_workspace_id IS NULL` is a **global** def: the blast radius is every
+workspace on the instance at once, not one tenant. Nobody's stored filter text
+is ever rewritten, and a field's key is immutable, so the honest remedy for an
+affected tenant is a new field under a different key.
+
+`AdminFieldService` refuses to *create* a field under a claimed key (409, checked
+after slugification — a field called "Project" auto-slugs to `project`). That is
+the whole of its reach: **it covers fields created through the admin service, and
+nothing that reaches `field_defs` by any other route** — not rows that already
+exist, and not a row written by a migration, a seeder, or any future path that
+inserts without going through the service. Our own migrations are such a route:
+`V3__system_fields.sql` seeds `labels`, `sprint` and `components`, all three of
+them registry-claimed names. They are harmless only because `V8`, `V11` and `V9`
+respectively archive each placeholder once the real feature superseded it, and
+archived defs are out of resolution — that is an outcome of those migrations, not
+something the create-time guard could have produced. So the query above is the
+check; the 409 narrows how often it finds anything.
+
+## Releases that change how a stored value is derived
+
+A release that changes the *function* producing a stored value — a case fold, a slug, a
+hash, any normalisation — has a failure mode that is not a crash and not an error log. The
+old build wrote rows through the old function; the new build looks them up through the new
+one, misses, and **creates a second row** instead. Both rows are valid, both are live, and
+nothing says there are now two. A destructive migration at least breaks loudly (next
+section); this does not break at all.
+
+**The operator-facing note does not belong in this file.** This is a maintainer runbook
+about tagging and rollback; nobody running a self-hosted instance reads it. The check
+queries, the remedy and the JVM flags go in **`docs/self-hosting.md` under `## Upgrading`**,
+which is the DC operator manual and states its audience in the first lines. 0.16.0's is
+[Duplicate accounts after an upgrade](self-hosting.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding);
+copy its shape.
+
+So for a release in this class, three things:
+
+1. **Write the operator section** in `docs/self-hosting.md`, with a `## Contents` entry and
+   a pointer from any other section the failure touches (0.16.0's also hangs off
+   `## First run & the admin account`, because a duplicated seed admin is a first-run
+   problem).
+2. **Verify it, three checks, five minutes** — not "confirm it shipped", which is the
+   sentence a reviewer skips. 0.16.0 passed a review with the anchor swallowed and the
+   remedy SQL wrong, so this item failed its own release:
+   1. **Open the rendered page** and click the `## Contents` entry and every pointer you
+      added. Watch the *callouts* especially: a `>` block whose last line runs into
+      unprefixed text is silently swallowed by lazy continuation, taking the next
+      paragraph into the quote with it — which is how a pointer aimed at upgraders ends
+      up eating the instructions everybody else needs.
+   2. **Try every remedy the section prescribes — including the ones written as
+      prose.** For SQL that means running each statement in the order printed against
+      a seeded fixture holding both a normal row and an affected one, including the
+      query you expect to return nothing, plus one run in the *wrong* order to confirm
+      the order warning is real; and checking whether the block assumes one session,
+      since a temp table does not survive the one-shot `psql -c` calls the rest of the
+      page demonstrates. But the ones to distrust most are the sentences that name no
+      SQL at all — "have them use forgot password", "delete it and re-create it",
+      "just re-register" — because they read as obviously fine and are therefore the
+      only remedies nobody ever executes. 0.16.0 shipped a paragraph offering two of
+      them: one was a silent no-op on precisely the account it was for, the other died
+      on a foreign key, and a correct one-line fix sat unnoticed behind both. Walk a
+      prose remedy against the real code and schema, or delete it.
+   3. **Confirm the account is usable afterwards** — log in as it. Not that each
+      statement succeeded: a normalisation remedy can report `UPDATE 1`, change nothing,
+      and leave the user locked out, because `UPDATE 1` counts rows matched and says
+      nothing about whether the value it wrote is the one the application looks up.
+3. **Say it in the release notes.** `docs/self-hosting.md` sends every upgrader to the
+   Releases page before a minor upgrade, so the Release body is what routes them to the
+   section. See "Release notes" below.
+
+**Two traps, both of which cost a review round on 0.16.0.** A remedy must be *performable
+by its reader*: check the SQL you prescribe actually runs, in the order you prescribe it —
+`users.email` is `NOT NULL UNIQUE`, so "rename the survivor" before "retire the duplicate"
+dies on a unique violation halfway through, and a tombstone built as `email || suffix`
+overflows `VARCHAR(255)` for a long address. And a detection query must be able to return
+**nothing** as a real all-clear: a query that finds one row of a pair leaves the operator
+matching spellings by eye, whereas one that groups by the folded form and returns groups of
+more than one either finds the pair or proves there is none.
+
 ## Releases carrying a destructive migration
 
 Most releases need nothing here. A release whose migrations **drop or rename a

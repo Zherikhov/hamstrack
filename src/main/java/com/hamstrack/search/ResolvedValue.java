@@ -46,9 +46,11 @@ public sealed interface ResolvedValue
     record PositionValue(short position) implements ResolvedValue {}
 
     /**
-     * A resolved date. For a {@code DATE} field ({@code due}) only {@link #date} is
-     * set. For a {@code TIMESTAMP} field ({@code created}/{@code updated}) the
-     * inclusive-day window is {@code [lowerInstant, upperInstantExclusive)} (§6.3).
+     * A resolved date. A {@code DATE} field uses {@link #date} alone; a {@code TIMESTAMP}
+     * field uses the inclusive-day UTC window {@code [lowerInstant, upperInstantExclusive)}
+     * (§6.3). The window is carried as {@link Instant} whatever temporal type the target
+     * column declares — the compiler converts at the point of binding, because that is where
+     * the column is known.
      */
     record DateBounds(java.time.LocalDate date, Instant lowerInstant, Instant upperInstantExclusive)
             implements ResolvedValue {}
