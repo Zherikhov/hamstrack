@@ -6261,7 +6261,8 @@ paths:
         **HQL in brief** — a boolean expression of `field OP value` comparisons.
 
         - **Queryable fields:** `status`, `assignee`, `reporter`, `type`,
-          `priority`, `project`, `created`, `updated`, `due`, `parent`, `text`,
+          `priority`, `project`, `created`, `updated`, `due`,
+          `closed` (alias `closedAt`), `parent`, `text`,
           `label` (alias `labels`), `component` (alias `components`),
           `fixVersion`, `affectsVersion`, `sprint` (alias `sprints`),
           `storyPoints` (alias `points`), plus any **custom field** (M2) by its
@@ -6282,16 +6283,51 @@ paths:
         - **Booleans:** `AND` `OR` `NOT` with `( )` grouping; precedence is
           `NOT` > `AND` > `OR`.
         - **Nullability:** `field IS [NOT] EMPTY` on nullable fields
-          (`assignee`, `parent`, `due`, `label`, `component`, `fixVersion`,
-          `affectsVersion`, `sprint`, `storyPoints`, and every custom field
-          except CHECKBOX).
+          (`assignee`, `parent`, `due`, `closed`, `label`, `component`,
+          `fixVersion`, `affectsVersion`, `sprint`, `storyPoints`, and every
+          custom field except CHECKBOX). On a nullable field, `!=` **also
+          matches the rows holding no value at all**: SQL's three-valued logic
+          would drop them and the language deliberately does not, since "not
+          closed on the 1st" plainly includes "not closed" — the reading
+          `label != "x"` and `due != …` have always had.
         - **Sorting:** a trailing `ORDER BY field [ASC|DESC], …` clause (must be
-          last). Custom fields are **not sortable** (yet).
+          last). Custom fields are **not sortable** (yet). Rows with no value
+          for the sort key land where the database puts them for that direction
+          (last ascending, first descending), identically for **every** nullable
+          sort key — so no two of them disagree about which end the empty rows
+          sit at.
         - **Functions:** `currentUser()`, `now()`, `startOfWeek()` (server UTC).
         - **Values:** status/type/priority by **name**; users by email,
           display name, `currentUser()`, or UUID fallback; dates as
           `YYYY-MM-DD`. `text` (`~`) is a case-insensitive substring over title
           and description.
+        - **Dates:** a date-valued field takes ordered comparisons
+          (`= != > < >= <=`), **is sortable**, offers `now()` and
+          `startOfWeek()`, and does **not** accept `IN`. Its operand is a bare
+          `YYYY-MM-DD` date standing for the **whole UTC day**, inclusively:
+          `created = "2026-08-01"` matches anything stamped from `00:00Z` that
+          day up to — but not including — the next, `created <= "2026-08-01"`
+          runs to the end of that day, and `created > "2026-08-01"` starts at
+          the beginning of the following one. A time of day is never part of an
+          operand.
+        - **Closed date** (`closed`, alias `closedAt`) is when the issue was
+          last closed — the queryable form of the `closedAt` every
+          `IssueResponse` already carries, and a date field like the rest
+          (ordered comparisons, sortable, `now()`/`startOfWeek()`, no `IN`),
+          nullable. **`closed IS EMPTY` means the issue is open right now.** It
+          does not mean the issue was never finished: the stamp is written when
+          an issue enters a DONE-category status and **cleared** when it leaves
+          one, so a reopened issue is empty again and the date it used to carry
+          is gone — cleared, not archived. "Never closed" is therefore not a
+          question this field can answer. Per the nullable rule above,
+          `closed != "2026-08-01"` also matches the issues that are not closed
+          at all. The response spelling `closedAt` resolves too, as an alias,
+          but `closed` is the name to write: it is the one
+          `GET /search/schema` advertises, and this language names date fields
+          after the **event** rather than after the column (`created`,
+          `updated`), so spelling a single one of them after its column would
+          leave the vocabulary unguessable in both directions. Example:
+          `closed >= startOfWeek() AND assignee = currentUser()`.
         - **Project** (`project`) is single-valued and never empty, and is
           resolved by project **key** only — `project = "HD"`, matched
           case-insensitively with surrounding whitespace ignored. Operators
@@ -6482,10 +6518,8 @@ paths:
         listed. The `SPRINT` and `VERSION` picklists are additionally scoped to
         the visible projects **with the capability on** — so on a workspace whose
         only visible project is Kanban with releases and estimation off,
-        `fields` holds exactly `status`, `type`, `priority`, `project`,
-        `assignee`, `reporter`, `parent`, `text`, `created`, `updated`, `due`,
-        `label`, `component` (plus the caller's custom fields) and both
-        picklists are empty.
+        `fields` holds every system field except those four (plus the caller's
+        custom fields) and both picklists are empty.
 
 
         **An omitted field still resolves.** This endpoint is autocomplete

@@ -140,6 +140,47 @@ public class FieldRegistry {
         register(new FieldDescriptor("due", FieldDataType.DATE, ORDERED,
                 false, true, true, "dueDate", "DATE", List.of("now()", "startOfWeek()"), true));
 
+        // ---- closed (HD-119) ----
+        // The close date, made queryable. `issues.closed_at` has been on the issue response
+        // since HD-57 and documented since HD-91, but the language had no name for it, so the
+        // most ordinary reporting question there is — "what did we close last week" — could not
+        // be written down even though the row already held the answer.
+        //
+        // CANONICAL NAME `closed`, not `closedAt`. The date fields name the EVENT rather than
+        // the column, and every one of them is spelled `…At` in the JSON payload too — so
+        // "an integrator types the name the payload showed them" does not distinguish this
+        // field from its siblings: it applies to all of them, and the language already answered
+        // it. A vocabulary that spelled one date field after its column and the rest after
+        // their events would be unguessable in both directions, so /schema advertises
+        // `closed`, and /schema is the list people copy from.
+        //
+        // The payload spelling still resolves, as an ALIAS — nobody should be punished for
+        // typing the name they just read in a response. It is compatibility, not vocabulary:
+        // availableFields() de-duplicates by descriptor, so /schema lists this field once,
+        // under `closed`. `createdAt`/`updatedAt` deliberately get no matching alias in this
+        // change: registering a name RESERVES it against every tenant's custom field of that
+        // key (FieldResolver; runbook + detection SQL in docs/release-checklist.md), so each
+        // name is a release-time decision carrying its own collision check — never a symmetry
+        // tidy-up done in passing.
+        //
+        // TIMESTAMP / ORDERED / sortable, on the inclusive-day UTC window every timestamp
+        // field uses (§6.3): `closed = "2026-08-01"` is that whole UTC day, `closed <=
+        // "2026-08-01"` runs to its end, and now()/startOfWeek() mean here what they mean
+        // everywhere else.
+        //
+        // nullable = TRUE, and this is the field's one real subtlety: `closed IS EMPTY` means
+        // CURRENTLY OPEN. It does not mean "was never finished". IssueService stamps closed_at
+        // when an issue enters a DONE-category status and CLEARS it when the issue leaves that
+        // category, so a reopened issue is empty again and the date it used to carry is gone —
+        // the column answers a question about the issue's current state. (`issues.started_at`
+        // beside it is never cleared, for exactly the opposite reason.) A reader who takes
+        // `IS EMPTY` for "never closed" gets a different answer on precisely the issues that
+        // were reopened, so the property is stated here rather than left to be discovered.
+        var closed = new FieldDescriptor("closed", FieldDataType.TIMESTAMP, ORDERED,
+                false, true, true, "closedAt", "DATE", List.of("now()", "startOfWeek()"), true);
+        register(closed);
+        register("closedAt", closed);   // the response-payload spelling, same descriptor
+
         // ---- LABEL_REF (HD-30) ----
         // Many-valued, so it has no entityPath: the compiler emits a correlated
         // EXISTS over IssueLabel instead (§3.5). Nullable (IS [NOT] EMPTY = "has no

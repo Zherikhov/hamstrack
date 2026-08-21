@@ -30,6 +30,8 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -464,7 +466,7 @@ public class HqlCompiler {
                                      Root<Issue> root, CriteriaBuilder cb) {
         if (f.dataType() == FieldDataType.DATE) {
             // due: a real DATE column — direct comparison against the LocalDate.
-            Path<LocalDate> path = root.get(f.entityPath());
+            Path<LocalDate> path = path(root, f.entityPath());
             LocalDate d = b.date();
             return switch (op) {
                 case EQ -> cb.equal(path, d);
@@ -477,13 +479,50 @@ public class HqlCompiler {
                         "Operator '" + op.symbol() + "' is not allowed on field '" + f.name() + "'", f.name());
             };
         }
-        // created / updated: TIMESTAMP with inclusive end-of-day boundaries (§6.3).
-        Path<Instant> path = root.get(f.entityPath());
-        Instant lo = b.lowerInstant();
-        Instant hiEx = b.upperInstantExclusive();
+        // A TIMESTAMP field: the operand names a whole UTC day, so every operator is expressed
+        // against the half-open window [lo, hiEx) (§6.3).
+        //
+        // The timestamp COLUMNS behind these fields are not all one Java type — BaseEntity's
+        // audit stamps are Instant, Issue.closedAt is OffsetDateTime — so the bounds are bound
+        // in whatever type the mapped attribute declares, read off the path itself rather than
+        // from a list of field names. Binding the other type is not a compile error (the path
+        // is generically unchecked, so it takes whatever the assignment asks for), which is
+        // exactly why the question is put to the model instead of answered by hand per field.
+        //
+        // Resolved through path(), never root.get(): an entityPath() may be dotted (`status.id`
+        // and `project.key` already are), and root.get() throws IllegalArgumentException — a
+        // 500, not a clean error — on the first nested timestamp anyone registers. Nothing else
+        // in this class walks a path by hand; the date branch was the last place that did.
+        if (path(root, f.entityPath()).getJavaType() == OffsetDateTime.class) {
+            Path<OffsetDateTime> offsetPath = path(root, f.entityPath());
+            return timestampWindow(f, op, offsetPath,
+                    b.lowerInstant().atOffset(ZoneOffset.UTC),
+                    b.upperInstantExclusive().atOffset(ZoneOffset.UTC), cb);
+        }
+        Path<Instant> path = path(root, f.entityPath());
+        return timestampWindow(f, op, path, b.lowerInstant(), b.upperInstantExclusive(), cb);
+    }
+
+    /**
+     * The inclusive-day window predicate for a TIMESTAMP field, in whatever temporal type the
+     * mapped column carries. {@code T} is bound from the path, so a timestamp field added later
+     * brings its own type along and nothing here has to learn its name.
+     *
+     * <p><strong>{@code !=} on a NULLABLE timestamp also matches the rows carrying no value at
+     * all.</strong> SQL's three-valued logic would otherwise drop them silently, and "not closed
+     * on the 1st" plainly includes "never closed" — the reading {@code due !=},
+     * {@code storyPoints !=} and the id-set fields already use. On a NOT NULL field that
+     * disjunct would be dead, so it is asked of the descriptor rather than always emitted.
+     */
+    private <T extends Comparable<? super T>> Predicate timestampWindow(
+            FieldDescriptor f, ComparisonOp op, Path<T> path, T lo, T hiEx, CriteriaBuilder cb) {
         return switch (op) {
             case EQ -> cb.and(cb.greaterThanOrEqualTo(path, lo), cb.lessThan(path, hiEx));   // within that UTC day
-            case NEQ -> cb.or(cb.lessThan(path, lo), cb.greaterThanOrEqualTo(path, hiEx));
+            case NEQ -> {
+                Predicate outsideTheDay =
+                        cb.or(cb.lessThan(path, lo), cb.greaterThanOrEqualTo(path, hiEx));
+                yield f.nullable() ? cb.or(cb.isNull(path), outsideTheDay) : outsideTheDay;
+            }
             case GT -> cb.greaterThanOrEqualTo(path, hiEx);   // > day  → from the next day
             case GTE -> cb.greaterThanOrEqualTo(path, lo);    // >= day → from day start
             case LT -> cb.lessThan(path, lo);                 // < day  → before day start
@@ -806,6 +845,14 @@ public class HqlCompiler {
     // it is resolved by the same component the predicate paths use (see sortField). A sort
     // key that resolved by its own rules is how HD-107 §9.2 produced a query the validator
     // accepted and the compiler then called an unknown field.
+    //
+    // NULL PLACEMENT is left to the database's default for the direction (PostgreSQL sorts
+    // nulls last ascending, first descending) — deliberately, because that makes it identical
+    // for EVERY nullable sort key, which is the property that matters. A per-field null
+    // precedence is how two nullable fields come to disagree, and "why do the open issues sit
+    // at the other end of ORDER BY closed than of ORDER BY due" is a bug report waiting to be
+    // filed. Changing it is one decision for all of them, taken here; ClosedDateSearchTest
+    // pins that two nullable date fields agree, and on what.
     private List<Order> orderBy(Query query, Root<Issue> root, CriteriaBuilder cb, ResolutionContext ctx) {
         var orders = new ArrayList<Order>();
         if (query.orderBy().isPresent()) {
@@ -865,7 +912,7 @@ public class HqlCompiler {
             // `root.get("component").get("name")` would imply an INNER join and
             // silently drop every component-less issue from `ORDER BY component`.
             case "component" -> componentJoin(root).get("name");
-            default -> root.get(f.entityPath());
+            default -> path(root, f.entityPath());
         };
     }
 
