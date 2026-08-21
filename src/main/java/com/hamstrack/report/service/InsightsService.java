@@ -475,8 +475,10 @@ public class InsightsService {
         }
         if (label == null || label.isBlank()) {
             // SearchNames folds a blank name to the empty key, which addresses (and merges) every
-            // blank-named row in scope. Both existing readers of those maps refuse a blank key; so
-            // does this one. It is a guard, not an optimisation.
+            // blank-named row in scope. Every reader of one of those maps refuses a blank key
+            // before it looks anything up -- see SearchNames' javadoc for the rule and the two
+            // shapes it takes. It is a guard, not an optimisation, and it is the reader's job
+            // rather than the data's: nothing stops such a row existing.
             return null;
         }
         var byName = namesMap(dimension, ctx).get(SearchNames.key(label));
