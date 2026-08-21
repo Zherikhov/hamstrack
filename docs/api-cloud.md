@@ -1778,7 +1778,7 @@ A **sprint** is one project's iteration — a time-box with a goal, a start and 
 
 **Story points** are a native issue attribute (`storyPoints` on every issue), not a custom field: `0`–`999` with at most 2 decimals, where `null` means **unestimated** — deliberately not the same as `0`, which is why the section totals report `unestimatedCount` separately.
 
-**Permissions.** Reads (sprint list/detail, completion preview, the backlog view) need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs [`sprint.manage`](#permissions): a project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint and taking them out is a **separate** permission, `sprint.assign`, held by every ordinary contributor — planning is teamwork, and requiring the lifecycle permission to drag would make the backlog read-only for most of the team. Dragging within a section is `issue.rank`. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the permission, and [names it](#what-a-403-says).
+**Permissions.** Reads — the sprint list and detail, the completion preview, and every planning read, whole view or single section — need project membership. The **lifecycle** — create, rename/re-plan, start, complete, delete — needs [`sprint.manage`](#permissions): a project `MANAGER`, **or** an `OWNER`/`ADMIN` of the enclosing workspace (who need not be a project member). Putting issues *into* a sprint and taking them out is a **separate** permission, `sprint.assign`, held by every ordinary contributor — planning is teamwork, and requiring the lifecycle permission to drag would make the backlog read-only for most of the team. Dragging within a section is `issue.rank`. A missing workspace, a missing project or a non-member all give `404`, never `403`; `403` is reserved for a member without the permission, and [names it](#what-a-403-says).
 
 **`sprint.assign` guards every door.** The sprint endpoints are not the only way to move an issue between sections: `PATCH …/issues/{number}` with `sprintId`/`clearSprint` and `POST …/issues/{number}/rank` with a sprint change are checked against the same permission, so it cannot be bypassed with a different request shape.
 
@@ -1797,6 +1797,8 @@ A **sprint** is one project's iteration — a time-box with a goal, a start and 
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}/issues/{issueId}` | `sprint.assign` | Take one issue out. `204` (idempotent); `422` for a completed sprint |
 | `DELETE` | `/workspaces/{wsId}/projects/{pId}/sprints/{sprintId}?force=false` | `sprint.manage` | Delete. `204` |
 | `GET` | `/workspaces/{wsId}/projects/{pId}/backlog?…&includeDone=false` | member | The whole planning view in one request |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/backlog/sections/backlog?…&includeDone=false` | member | One section of that view — the backlog |
+| `GET` | `/workspaces/{wsId}/projects/{pId}/backlog/sections/{sprintId}` | member | One section of that view — a sprint |
 | `POST` | `/workspaces/{wsId}/projects/{pId}/issues/{number}/rank` | `issue.rank` | Move an issue in the shared rank (`sprint.assign` too when it changes sprint) |
 
 **List** — always paginated (the [envelope](#conventions), default size 50): open sprints are capped, but completed ones accumulate for years. The order is `ACTIVE` first, then `FUTURE` by `sequence` ascending, then `COMPLETED` newest-first. `state` is a **repeatable** filter (`?state=ACTIVE&state=FUTURE`); omitting it returns every state. The counters are always filled — they cost one grouped query for the whole page, so there is nothing to opt out of:
@@ -1916,9 +1918,41 @@ This call is a **removal** path too: an issue joining the sprint leaves whicheve
 }
 ```
 
-Each section is capped independently at `sectionCap` (300) and reports `truncated` / `totalAvailable` — but its `stats` are computed over the **whole** section, so a truncated section still shows honest totals. Treat sections as independently refreshable.
+Each section is capped independently at `sectionCap` (300) and reports `truncated` / `totalAvailable` — but its `stats` are computed over the **whole** section, so a truncated section still shows honest totals. Treat sections as independently refreshable — [each one can be re-fetched on its own](#refreshing-one-section), and answers identically there.
 
 `bulkMoveCap` (100) is the limit on **one** `POST …/sprints/{sprintId}/issues` call, and it is a *different* number from `sectionCap` on purpose. A "move everything to sprint X" action is driven by the section you rendered, so a client that assumes one cap from the other would `400` on every section larger than the bulk limit. Chunk bulk moves at `bulkMoveCap` instead of hardcoding a value.
+
+### Refreshing one section
+
+`GET …/backlog/sections/backlog` and `GET …/backlog/sections/{sprintId}` each return **one** section of that same view — what a client needs after a rank move, a sprint assignment or a manual refresh, without refetching every other section along with it.
+
+The answer is **field-for-field the section the whole view returns** for the same project and the same filters: the same issues in the same rank order, the same `truncated`, the same `totalAvailable` and every `stats` figure — plus the caps the view carries at its top level, so a refreshed section can be patched into a cached view without translating anything.
+
+```json
+{
+  "sprint": { "id": "0198f7d4-…", "name": "Sprint 7", "state": "ACTIVE", … },
+  "issues": [ { "id": "…", "key": "DEMO-18", … } ],
+  "truncated": false, "totalAvailable": 12,
+  "stats": { "issueCount": 12, "doneIssueCount": 7,
+             "points": 34.5, "donePoints": 21, "unestimatedCount": 2 },
+  "sectionCap": 300,
+  "bulkMoveCap": 100
+}
+```
+
+`sprint` carries the section's sprint with its filter-aware counters, and is **`null` for the backlog section** — the encoding an issue in no sprint already uses. Both caps ride on a single-section response for the same reason they ride on the view: a view whose sections have each been refreshed must still carry them, and must adopt a newer value if an operator retuned in between.
+
+**There is no `page` and no `size` parameter, and that absence is the contract rather than an omission.** A section is bounded by `sectionCap` (300), a number the server owns and publishes on every planning response and that a client never sends back: with no size on the wire there is nothing for a client to hold, nothing to echo back and nothing to narrow, so the behaviour holds when an operator retunes that cap in either direction — the next refresh simply carries the new value. Fetching a section through the paginated [issue list](#issues) instead asks a different question under a different protocol: there `truncated` is measured against the page you received, here against the section.
+
+`truncated` therefore means one thing on every planning response — **the section holds more matching issues than `sectionCap`** — and `totalAvailable` and every `stats` figure are computed over the **whole** section with your filters applied, never over the rows you got back. A truncated section still reports honest totals.
+
+**Filters** are exactly the view's (`statusId`, `assigneeId`, `priorityId`, `componentId`, `labelId` + `labelMatch`, `fixVersionId`), and the backlog mapping takes `includeDone` as well: a refresh that accepted a different set would answer a different question than the render did. A sprint section takes no `includeDone`, here as in the view, because a sprint always includes its DONE issues — that is its record of what it delivered.
+
+**Status codes.** `200` for a section, empty or truncated (an empty one is `issues: []`, `truncated: false`, `totalAvailable: 0` and zeroed `stats`). `400` for an unknown `labelMatch`, more than 20 distinct `labelId` values, or a malformed `{sprintId}`. `404` for **every** tenancy failure, all indistinguishable from one another: unknown workspace, unknown project, a project of another workspace, a caller who is not a member, an unknown sprint, and a sprint belonging to another project or another tenant. There is no `403` — beyond membership no permission gates a planning read.
+
+**A `COMPLETED` sprint answers `200`.** It drops out of the whole view, which lists open sprints, so a client's next full refetch removes the section — but a refresh already in flight must not turn into a `404` or a `409`: state does not change a status code here. A sprint deleted in the meantime *is* a `404`, which a client should read as "this section is gone" and recover from by refetching the view rather than by showing an error.
+
+**No per-principal budget**, and that is parity with the whole view rather than an oversight — [no planning read has one](#rate-limits). A budget is earned by the work a handler does, not by where it is mounted, and refusing a section fetch alone would only push the client onto the whole-view refetch, which runs the same aggregation and ships every section's rows with it.
 
 ### Ranking an issue
 

@@ -2,8 +2,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Flag } from 'lucide-react'
 import {
-  ApiResponseError, apiGetBacklogView, apiGetProject,
-  apiListIssuesPaged, sprintsApi,
+  ApiResponseError, apiGetBacklogSection, apiGetBacklogView, apiGetProject, sprintsApi,
 } from '../api'
 import type { BacklogViewOptions, CreateSprintPayload, StartSprintPayload, UpdateSprintPayload } from '../api'
 import {
@@ -14,8 +13,9 @@ import { Button, Input, Select, Textarea } from './ui'
 import { ReversibleNotice, useEnableCapability } from './delivery'
 import { Modal } from '../pages/admin/common'
 import type {
-  BacklogSectionBase, BacklogView, Issue, SectionStats, Sprint, SprintCompletionPreview,
-  SprintCompletionResult, SprintRef, SprintState, UnfinishedDisposition,
+  BacklogSectionBase, BacklogSectionResponse, BacklogView, SectionStats, Sprint,
+  SprintCompletionPreview, SprintCompletionResult, SprintRef, SprintState,
+  UnfinishedDisposition,
 } from '../types'
 
 /**
@@ -236,55 +236,26 @@ export function useProjectEntry(wsId: string | undefined, projectId: string | un
 }
 
 /**
- * Whole-section totals recomputed from a freshly-fetched page.
- *
- * Only used for a section the server can't re-stat on its own (the backlog) and
- * only when that section is NOT truncated — over a truncated page the numbers
- * would be a lie, so the previous server-computed stats are kept instead.
- * `points === null` (the story-points fallback design) stays null.
- */
-export function statsFromIssues(issues: Issue[], previous: SectionStats): SectionStats {
-  const pointsDisabled = previous.points === null
-  let points = 0
-  let donePoints = 0
-  let unestimated = 0
-  let done = 0
-  for (const i of issues) {
-    const isDone = i.status.category === 'DONE'
-    if (isDone) done += 1
-    const p = i.storyPoints
-    if (p === null || p === undefined) unestimated += 1
-    else {
-      points += p
-      if (isDone) donePoints += p
-    }
-  }
-  return {
-    issueCount: issues.length,
-    doneIssueCount: done,
-    points: pointsDisabled ? null : points,
-    donePoints: pointsDisabled ? null : donePoints,
-    unestimatedCount: unestimated,
-  }
-}
-
-/**
  * The planning aggregate plus PER-SECTION refresh (HD-23 / §9 risk 5).
  *
  * The view arrives as one `GET …/backlog` response, but a section must never
  * need a whole-view refetch to become current — a 21-section × 300-issue
  * response is several MB, and a planning meeting re-ranks constantly. So every
- * section can be refreshed on its own out of endpoints that already exist:
- *   • a sprint section → `GET /sprints/{id}` (its counters ARE the section
- *     stats) + `GET /issues?sprintId=…`;
- *   • the backlog section → `GET /issues?noSprint=true`.
- * The result is patched into the cached `BacklogView` with `setQueryData`, so
- * only that section re-renders and nothing else refetches.
+ * section is refreshed on its own out of `GET …/backlog/sections/{backlog|id}`
+ * (HD-96), which answers with field-for-field the same section the aggregate
+ * would have returned — rows, header, `truncated`, `totalAvailable` and
+ * whole-section `stats`, all from ONE read transaction. The result is patched
+ * into the cached `BacklogView` with `setQueryData`, so only that section
+ * re-renders and nothing else refetches.
  *
- * Caveat, deliberately explicit: a sprint's own counters are unfiltered, so they
- * are only adopted as section stats when NO issue filter is active. Under a
- * filter the stats are recomputed from the refetched page when the section is
- * complete, and left at their last server value when it is truncated.
+ * Two things this hook deliberately no longer does. It does not derive a
+ * section's stats from the rows it received: the server computes them over the
+ * whole section, filtered or not, truncated or not, and a client recomputing
+ * them from what is on screen would be describing a page as if it were a
+ * section. And it does not decide `truncated` — that word means "this section
+ * holds more matching issues than `sectionCap`", it means that on both planning
+ * surfaces, and the SPA's only job is to carry the server's answer through
+ * unchanged. Those two derivations were HD-96 in miniature.
  */
 export function useBacklogView(
   wsId: string | undefined,
@@ -304,65 +275,58 @@ export function useBacklogView(
     enabled: !!wsId && !!projectId,
   })
 
-  // A filter narrows a section, so the sprint's own (unfiltered) counters stop
-  // describing it. Serialized rather than deep-compared — it is one short string.
-  const filtered = !!(filters.statusId || filters.priorityId || filters.componentId
-    || filters.fixVersionId || (filters.labelIds?.length ?? 0) > 0)
-
   const refreshSection = useCallback(async (sectionId: string) => {
     if (!wsId || !projectId) return
     setRefreshingSection(sectionId)
     setSectionError('')
     try {
-      // The section cap is the SERVER's number and travels on the view. When it
-      // is unknown (no cached view yet) `size` is omitted entirely and the server
-      // applies its own cap — never a copy of the default baked in here, which
-      // would silently drift the moment an operator retunes the property.
-      const cap = qc.getQueryData<BacklogView>(key)?.sectionCap
-      const listOpts = {
-        statusId: filters.statusId,
-        priorityId: filters.priorityId,
-        componentId: filters.componentId,
-        fixVersionId: filters.fixVersionId,
-        labelIds: filters.labelIds,
-        labelMatch: filters.labelMatch,
-        page: 0,
-        ...(cap ? { size: cap } : {}),
-      }
-
-      if (sectionId === BACKLOG_SECTION) {
-        // The backlog hides DONE issues unless the view asked for them; sprint
-        // sections always keep theirs (that is the sprint's record).
-        const page = await apiListIssuesPaged(wsId, projectId, {
-          ...listOpts, noSprint: true, excludeDone: !filters.includeDone,
-        })
-        qc.setQueryData<BacklogView>(key, old => old && {
-          ...old,
-          backlog: patchSection(old.backlog, page.content, page.totalElements, null, false),
-        })
-        return
-      }
-
-      const [sprint, page] = await Promise.all([
-        sprintsApi.get(wsId, projectId, sectionId),
-        apiListIssuesPaged(wsId, projectId, { ...listOpts, sprintId: sectionId }),
-      ])
-      qc.setQueryData<BacklogView>(key, old => old && {
-        ...old,
-        sprints: old.sprints.map(s => s.sprint.id !== sectionId ? s : {
-          ...patchSection(s, page.content, page.totalElements, sprint, filtered),
-          sprint,
-        }),
+      // NO page size is sent, here or anywhere else on the planning surface, and
+      // that absence is the fix (HD-96): the cap is the server's number, it rides
+      // on the response, and a request that names no size has none for this
+      // client to hold, to echo back, or to be wrong about when an operator
+      // retunes `app.agile.section-max-issues`. The previous shape asked the
+      // general issue list for `size = sectionCap`, which was silently narrowed
+      // to 100 and answered 200 — a careful client, a legitimate question and a
+      // truncated answer with no signal. Do not reintroduce a size here.
+      const fresh = await apiGetBacklogSection(
+        wsId, projectId, sectionId === BACKLOG_SECTION ? null : sectionId, filters)
+      qc.setQueryData<BacklogView>(key, old => {
+        if (!old) return old
+        // Both caps are ADOPTED from the response rather than kept: they are
+        // independent operator knobs and either may have been retuned between
+        // the render and this refresh.
+        const view = { ...old, sectionCap: fresh.sectionCap, bulkMoveCap: fresh.bulkMoveCap }
+        if (sectionId === BACKLOG_SECTION) {
+          return { ...view, backlog: patchSection(old.backlog, fresh) }
+        }
+        return {
+          ...view,
+          sprints: old.sprints.map(s => s.sprint.id !== sectionId ? s : {
+            ...patchSection(s, fresh),
+            // The header travels WITH its rows in one read transaction, so the
+            // two can no longer describe different instants; they used to be two
+            // concurrent responses. `sprint` is non-null on every sprint-section
+            // response — the fallback is for the impossible, not for a case.
+            sprint: fresh.sprint ?? s.sprint,
+          }),
+        }
       })
     } catch (e) {
-      setSectionError(apiErrorText(e, 'Could not refresh this section'))
+      // A 404 is not a failure worth reporting: the section is gone (its sprint
+      // was deleted under us), so drop it by refetching the view instead of
+      // telling the planner that something went wrong.
+      if (!(e instanceof ApiResponseError && e.status === 404)) {
+        setSectionError(apiErrorText(e, 'Could not refresh this section'))
+      }
       // A section that can't be patched must not stay silently stale.
       qc.invalidateQueries({ queryKey: key })
     } finally {
       setRefreshingSection(null)
     }
-  }, [qc, wsId, projectId, key, filters.statusId, filters.priorityId, filters.componentId,
-      filters.fixVersionId, filters.labelIds, filters.labelMatch, filters.includeDone, filtered])
+    // `filters` is the object the caller memoizes into `key`; depending on it
+    // whole keeps this callback honest if the filter set ever grows, which a
+    // hand-listed subset would not.
+  }, [qc, wsId, projectId, key, filters])
 
   /** Refresh the (at most two) sections a move touched — never the whole view. */
   const refreshSections = useCallback(async (sectionIds: (string | null | undefined)[]) => {
@@ -381,26 +345,20 @@ export function useBacklogView(
   }
 }
 
-function patchSection<T extends BacklogSectionBase>(
-  section: T,
-  issues: Issue[],
-  totalAvailable: number,
-  sprint: Sprint | null,
-  filtered: boolean,
-): T {
-  const truncated = totalAvailable > issues.length
-  const stats: SectionStats = sprint && !filtered
-    // The sprint row carries exactly the five section counters, computed over the
-    // WHOLE sprint — better than anything derivable from a capped page.
-    ? {
-        issueCount: sprint.issueCount,
-        doneIssueCount: sprint.doneIssueCount,
-        points: sprint.points,
-        donePoints: sprint.donePoints,
-        unestimatedCount: sprint.unestimatedCount,
-      }
-    : truncated ? section.stats : statsFromIssues(issues, section.stats)
-  return { ...section, issues, truncated, totalAvailable, stats }
+/**
+ * Copy a freshly-fetched section over the cached one. Every field describing the
+ * section is taken from the response verbatim; nothing here recomputes or
+ * reinterprets any of it. That is the point — the numbers a section reports must
+ * come from the surface that can see the whole section.
+ */
+function patchSection<T extends BacklogSectionBase>(section: T, fresh: BacklogSectionResponse): T {
+  return {
+    ...section,
+    issues: fresh.issues,
+    truncated: fresh.truncated,
+    totalAvailable: fresh.totalAvailable,
+    stats: fresh.stats,
+  }
 }
 
 // ── Lifecycle mutations ───────────────────────────────────────────────────────

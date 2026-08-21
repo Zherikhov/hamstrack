@@ -206,8 +206,11 @@ tags:
     description: >-
       A project's iterations — a time-box with a one-way lifecycle
       (`FUTURE` → `ACTIVE` → `COMPLETED`, no re-open, at most one active sprint
-      per project), plus the project's planning view (`GET …/backlog`). Sprints
-      are content, not bound taxonomy: they never appear in a project's config.
+      per project), plus the project's planning reads — the whole view
+      (`GET …/backlog`) and any one of its sections on its own
+      (`…/backlog/sections/…`), which answer identically for the same section.
+      Sprints are content, not bound taxonomy: they never appear in a project's
+      config.
       Reads are open to project members; the lifecycle (create/edit/start/
       complete/delete) needs `sprint.manage` (the built-in project MANAGER, or
       a workspace OWNER/ADMIN across their whole workspace), while putting
@@ -5008,52 +5011,26 @@ paths:
         from `sectionCap`. Chunk "move everything to…" actions at that number
         rather than hardcoding it or deriving it from `sectionCap`.
 
+        Each section can also be re-fetched **on its own** under
+        `…/backlog/sections/…`, which answers with that same section — same rows,
+        same `truncated`, same whole-section `totalAvailable` and `stats` — plus
+        these caps, and takes no page size either.
+
+
         Rows inside every section are in the shared rank order (`position`, then
         newest first), which is the same order the board uses.
       operationId: getBacklogView
       parameters:
         - $ref: '#/components/parameters/workspaceId'
         - $ref: '#/components/parameters/projectId'
-        - name: statusId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: assigneeId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: priorityId
-          in: query
-          schema: { type: string, format: uuid }
-        - name: componentId
-          in: query
-          description: An id from another project matches nothing rather than erroring.
-          schema: { type: string, format: uuid }
-        - name: labelId
-          in: query
-          description: >-
-            Repeatable, combined per `labelMatch`. More than
-            `app.classification.max-labels-per-issue` (default 20) distinct
-            values is a `400`.
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string, format: uuid }
-        - name: labelMatch
-          in: query
-          description: '`any` = carries at least one, `all` = carries every one.'
-          schema: { type: string, enum: [any, all], default: any }
-        - name: fixVersionId
-          in: query
-          description: Matches the **fix** link role only.
-          schema: { type: string, format: uuid }
-        - name: includeDone
-          in: query
-          description: >-
-            Include DONE-category issues in the **backlog** section. Defaults to
-            `false` — a done, unranked issue is planning noise. Sprint sections
-            always include their DONE issues, because that is the sprint's
-            record of what it delivered, so this flag never affects them.
-          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+        - $ref: '#/components/parameters/planningIncludeDone'
       responses:
         '200':
           description: OK — sprint sections (ACTIVE first) plus the backlog section
@@ -5068,6 +5045,158 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/backlog:
+    get:
+      tags: [Sprints]
+      summary: One planning section — the backlog
+      description: >-
+        The backlog section of the planning view (`GET …/backlog`) on its own,
+        for a client refreshing a section it already rendered — after a rank
+        move, a sprint assignment or a manual refresh — without refetching every
+        other section with it.
+
+
+        **The answer is field-for-field the section the aggregate returns** for
+        the same project and the same filters: the same rows in the same rank
+        order, the same `truncated`, the same `totalAvailable` and every `stats`
+        field, plus the caps the view carries at its top level (`sectionCap`,
+        `bulkMoveCap`). A refreshed section can therefore be patched into a
+        cached view without translating anything, and a section obtained either
+        way carries the same guarantees. The response schema
+        (`BacklogSectionResponse`) is built from the aggregate's own section
+        shape rather than restating it.
+
+
+        **There is no `page` and no `size` parameter, and that absence is the
+        contract.** A section is bounded by `sectionCap`
+        (`app.agile.section-max-issues`) — a number the server owns and
+        publishes on every planning response, and one a client never sends back.
+        With no size on the wire there is nothing for a client to hold, nothing
+        to echo back and nothing to narrow, so the behaviour holds unchanged
+        when an operator retunes that cap in either direction: the refresh
+        simply carries the new value. Fetching a section through the paginated
+        issue list instead makes the answer depend on a page size and changes
+        what `truncated` describes — there it is measured against the page you
+        received, here against the section — which is why a planning read takes
+        no page size.
+
+
+        **`truncated` means the section holds more matching issues than
+        `sectionCap`**, and `totalAvailable` and every `stats` figure are
+        computed over the **whole** section, filters applied, never over the rows
+        returned. A truncated section still shows honest totals.
+
+
+        Every filter the aggregate accepts is accepted here, `includeDone`
+        included: a refresh that took a different set would answer a different
+        question than the render did.
+
+
+        **Throttle: none, as parity with the aggregate rather than as an
+        omission.** No planning read carries a per-principal budget — a budget
+        is earned by the work a handler does, not by where it is mounted, and
+        refusing a section fetch would only push the client onto the whole-view
+        refetch, which runs the same aggregation and ships every section's rows
+        with it.
+      operationId: getBacklogSection
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+        - $ref: '#/components/parameters/planningIncludeDone'
+      responses:
+        '200':
+          description: >-
+            OK — the backlog section, possibly empty, possibly truncated. An
+            empty section is a `200` with `issues: []`, `truncated: false`,
+            `totalAvailable: 0` and zeroed `stats`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacklogSectionResponse' }
+        '400':
+          description: >-
+            Unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/{sprintId}:
+    get:
+      tags: [Sprints]
+      summary: One planning section — a sprint
+      description: >-
+        One sprint's section of the planning view on its own, under the same
+        contract as the backlog section beside it: field-for-field what the
+        aggregate returns for that section, plus the view's two caps, the same
+        meaning of `truncated` (more matching issues in the section than
+        `sectionCap`), whole-section `totalAvailable` and `stats` — and **no
+        `page` and no `size`**, because a section is bounded by the server's
+        `sectionCap`, which travels on the response and is never sent back.
+
+
+        The sprint is resolved **through the project**, so a sprint id belonging
+        to a sibling project in the same workspace is a `404` rather than an
+        answer; a malformed one is a `400` at binding, before the handler runs.
+        The path segment is never ambiguous: `backlog` is a literal and a sprint
+        id is a UUID.
+
+
+        **A `COMPLETED` sprint answers `200`.** It drops out of the aggregate,
+        which lists open sprints, so the client's next full refetch removes the
+        section — but a refresh already in flight must not turn into a `404` or
+        a `409`: state does not change a status code here. A sprint deleted in
+        the meantime is a `404`, which a client should read as "this section is
+        gone" and recover from by refetching the view.
+
+
+        No `includeDone`: it applies to the backlog section only, here as in the
+        aggregate, because a sprint's DONE issues are its record of what it
+        delivered. Every other filter the aggregate accepts is accepted here.
+      operationId: getBacklogSprintSection
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/projectId'
+        - $ref: '#/components/parameters/sprintId'
+        - $ref: '#/components/parameters/planningStatusId'
+        - $ref: '#/components/parameters/planningAssigneeId'
+        - $ref: '#/components/parameters/planningPriorityId'
+        - $ref: '#/components/parameters/planningComponentId'
+        - $ref: '#/components/parameters/planningLabelId'
+        - $ref: '#/components/parameters/planningLabelMatch'
+        - $ref: '#/components/parameters/planningFixVersionId'
+      responses:
+        '200':
+          description: >-
+            OK — the sprint's section, possibly empty, possibly truncated, with
+            `sprint` carrying the sprint and its filter-aware counters.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BacklogSectionResponse' }
+        '400':
+          description: >-
+            Malformed `sprintId`, unknown `labelMatch` value, or more than
+            `app.classification.max-labels-per-issue` distinct `labelId` values.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '404':
+          description: >-
+            Not found — or not a member of the containing workspace. The
+            workspace, the project, the sprint and the caller's membership are
+            deliberately **indistinguishable** here: a sprint of another project
+            or of another tenant reads exactly like an unknown one.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/projects/{projectId}/reports/flow:
     get:
@@ -7057,6 +7186,56 @@ components:
       in: query
       description: Page size (default 50, clamped server-side to a maximum of 100)
       schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+
+    planningStatusId:
+      name: statusId
+      in: query
+      schema: { type: string, format: uuid }
+    planningAssigneeId:
+      name: assigneeId
+      in: query
+      schema: { type: string, format: uuid }
+    planningPriorityId:
+      name: priorityId
+      in: query
+      schema: { type: string, format: uuid }
+    planningComponentId:
+      name: componentId
+      in: query
+      description: An id from another project matches nothing rather than erroring.
+      schema: { type: string, format: uuid }
+    planningLabelId:
+      name: labelId
+      in: query
+      description: >-
+        Repeatable, combined per `labelMatch`. More than
+        `app.classification.max-labels-per-issue` (default 20) distinct
+        values is a `400`.
+      style: form
+      explode: true
+      schema:
+        type: array
+        items: { type: string, format: uuid }
+    planningLabelMatch:
+      name: labelMatch
+      in: query
+      description: '`any` = carries at least one, `all` = carries every one.'
+      schema: { type: string, enum: [any, all], default: any }
+    planningFixVersionId:
+      name: fixVersionId
+      in: query
+      description: Matches the **fix** link role only.
+      schema: { type: string, format: uuid }
+    planningIncludeDone:
+      name: includeDone
+      in: query
+      description: >-
+        Include DONE-category issues in the **backlog** section. Defaults to
+        `false` — a done, unranked issue is planning noise. Sprint sections
+        always include their DONE issues, because that is the sprint's
+        record of what it delivered, so this flag never affects them — and a
+        mapping that returns only a sprint section does not accept it at all.
+      schema: { type: boolean, default: false }
 
     reportCsvFrom:
       name: from
@@ -11348,37 +11527,40 @@ components:
         donePoints: { type: number, example: 21 }
         unestimatedCount: { type: integer, example: 2, description: '"We didn''t estimate it" is a different statement from "it''s free"' }
 
-    BacklogViewResponse:
+    BacklogSection:
       type: object
       description: >-
-        The whole planning view of one project in a single round trip. Sections
-        are independently truncatable at `sectionCap` and independently
-        refreshable — treat them as such, because if the payload ever gets too
-        large the fix is lazy per-section fetches behind this same shape.
+        One planning section's body — its rows plus the fields that say what was
+        withheld. **Every planning surface that returns a section returns this
+        shape**, so a section fetched on its own and the same section inside the
+        whole view cannot describe themselves differently.
+
+
+        `truncated` means *the section holds more matching issues than
+        `sectionCap`* — never "more exist than the rows you received" — and
+        `totalAvailable` and every `stats` figure are computed over the **whole**
+        section with the request's filters applied, never over the rows below
+        them. A truncated section still shows honest totals.
       properties:
-        sprints:
+        issues:
           type: array
-          description: 'The project''s OPEN sprint sections — ACTIVE first, then FUTURE by sequence. `[]` for a project with no open sprint.'
-          items:
-            type: object
-            properties:
-              sprint: { $ref: '#/components/schemas/SprintResponse' }
-              issues:
-                type: array
-                items: { $ref: '#/components/schemas/IssueResponse' }
-              truncated: { type: boolean, description: 'True when the section holds more than `sectionCap` matching issues' }
-              totalAvailable: { type: integer, format: int64, description: 'Full filtered count of the section (equals issues length when not truncated)' }
-              stats: { $ref: '#/components/schemas/SectionStats' }
-        backlog:
-          type: object
-          description: The ranked backlog — the same shape without a sprint header.
-          properties:
-            issues:
-              type: array
-              items: { $ref: '#/components/schemas/IssueResponse' }
-            truncated: { type: boolean }
-            totalAvailable: { type: integer, format: int64 }
-            stats: { $ref: '#/components/schemas/SectionStats' }
+          description: >-
+            The section's rows in the shared rank order (`position`, then newest
+            first) — the same order the board uses — capped at `sectionCap`.
+          items: { $ref: '#/components/schemas/IssueResponse' }
+        truncated: { type: boolean, description: 'True when the section holds more than `sectionCap` matching issues' }
+        totalAvailable: { type: integer, format: int64, description: 'Full filtered count of the whole section (equals the length of `issues` when not truncated)' }
+        stats: { $ref: '#/components/schemas/SectionStats' }
+
+    PlanningCaps:
+      type: object
+      description: >-
+        The caps every planning response carries at its top level, whether it
+        returns the whole view or a single section. They are **independent**
+        operator knobs with deliberately different defaults, and a client holds
+        neither: it reads them off whatever response it last received, so an
+        operator may retune either between a render and a refresh.
+      properties:
         sectionCap: { type: integer, example: 300, description: 'The per-section cap in force for this response (app.agile.section-max-issues)' }
         bulkMoveCap:
           type: integer
@@ -11391,6 +11573,64 @@ components:
             rendered section, so a client that derives one number from the other
             `400`s on every section above the bulk cap. Chunk bulk moves at this
             value instead of hardcoding it.
+
+    BacklogViewResponse:
+      description: >-
+        The whole planning view of one project in a single round trip. Sections
+        are independently truncatable at `sectionCap` and independently
+        refreshable — each one can be re-fetched on its own under
+        `…/backlog/sections/…`, which answers with that same section plus these
+        caps.
+      allOf:
+        - type: object
+          properties:
+            sprints:
+              type: array
+              description: 'The project''s OPEN sprint sections — ACTIVE first, then FUTURE by sequence. `[]` for a project with no open sprint.'
+              items:
+                allOf:
+                  - type: object
+                    properties:
+                      sprint: { $ref: '#/components/schemas/SprintResponse' }
+                  - $ref: '#/components/schemas/BacklogSection'
+            backlog:
+              allOf:
+                - $ref: '#/components/schemas/BacklogSection'
+              description: The ranked backlog — the same section without a sprint header.
+        - $ref: '#/components/schemas/PlanningCaps'
+
+    BacklogSectionResponse:
+      description: >-
+        ONE planning section, fetched on its own — the answer to
+        `GET …/backlog/sections/backlog` and `…/backlog/sections/{sprintId}`.
+
+
+        It is the aggregate's section (`BacklogSection`) with the section's
+        sprint header in front of it and the view's caps (`PlanningCaps`) behind
+        it — **by construction, not by restatement**, so a client patches a
+        refreshed section into a cached view without translating anything and
+        the two surfaces cannot drift into describing a section differently.
+        Both caps ride on a single-section response for that reason too: a view
+        whose sections have each been refreshed must still carry them, and must
+        adopt a newer value if an operator retuned in between.
+
+
+        The request carries **no page size** — a section is bounded by
+        `sectionCap`, which the server owns.
+      allOf:
+        - type: object
+          properties:
+            sprint:
+              allOf:
+                - $ref: '#/components/schemas/SprintResponse'
+              nullable: true
+              description: >-
+                The section's sprint, with its filter-aware counters — or `null`
+                for the BACKLOG section, which is the encoding this domain
+                already uses everywhere (an issue's `sprint` is `null` when it
+                sits in the backlog).
+        - $ref: '#/components/schemas/BacklogSection'
+        - $ref: '#/components/schemas/PlanningCaps'
 
     SprintCompletionPreview:
       type: object
