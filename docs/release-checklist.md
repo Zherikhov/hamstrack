@@ -9,6 +9,12 @@ guarded against.
 ## The sequence
 
 ```bash
+# 0. Pre-flight, if this release carries a migration that DELETES ROWS. 0.17.0 does
+#    (V20, HD-135), and it is blocking: the number it prints is knowable only
+#    BEFORE the deploy. See "Releases carrying a destructive migration" below for
+#    the query, what a non-zero answer means, and which non-zero answers still
+#    release the block.
+
 # 1. Merge — locally or via the PR button, whichever you prefer
 git checkout main
 git pull
@@ -396,10 +402,25 @@ a populated table is two-step*, applied to new migrations and to the five above.
 
 ## Releases carrying a destructive migration
 
-Most releases need nothing here. A release whose migrations **drop or rename a
-column the previous image still reads** needs two extra things, and the roles
-release (**V13–V15**, HD-123) is the first one that does: `V15` drops
-`workspace_members.role`, `workspace_invites.role` and `project_members.role`.
+Most releases need nothing here. A release needs this section when one of its
+migrations **destroys something the deploy cannot put back** — and there are two
+independent ways to be in that category, so read both before deciding you are in
+neither:
+
+- **destructive to the schema** — a column or table the previous image still reads
+  is dropped or renamed. Costs a snapshot and a stop-the-world deploy (below). The
+  roles release (**V13–V15**, HD-123) is the first: `V15` drops
+  `workspace_members.role`, `workspace_invites.role` and `project_members.role`.
+- **destructive to the data** — rows are deleted, or a value is overwritten with
+  one the old value cannot be derived from, while every column stays exactly where
+  it was. Costs a **pre-flight run against production before the deploy**, because
+  the number involved stops being knowable the moment the migration commits. The
+  0.17.0 notification release (**V20**, HD-135) is the first, and it drops nothing
+  at all — which is precisely why it needs saying here.
+
+A release can be in both categories, one, or neither. The two costs are separate.
+
+**For a schema-destructive release, two extra things:**
 
 1. **Snapshot the database first.** Once `V15` has run, rollback is a *restore*,
    not a re-deploy — the old image cannot read the new schema, and `latest` only
@@ -417,6 +438,100 @@ release (**V13–V15**, HD-123) is the first one that does: `V15` drops
 
 A migration that only **adds** tables or columns (`V13`, `V14`) is rolling-safe
 and needs neither.
+
+### A migration that deletes rows needs its count read *before* the deploy — 0.17.0 / `V20`
+
+A migration can be destructive to **data** without dropping anything: `V20` (HD-135) adds
+`notifications.workspace_id NOT NULL`, fills it by reading the workspace id out of each
+row's `link`, and **removes any row it cannot fill**, because such a row is unshowable
+under the new rule and nothing in the schema records the workspace it belonged to. So the
+number of rows it removes is knowable in advance and is *best* knowable in advance —
+afterwards, Flyway's `RAISE NOTICE` is buried in container logs nobody reads.
+
+`V20` does copy those rows into `notifications_unresolvable_v20` before deleting them (and
+creates that table **only** if there are any), so a missed pre-flight is recoverable rather
+than final. That is a backstop for the backstop; it is not a reason to skip the step, and
+the table is yours to `DROP` once you have read it.
+
+**Blocking, and the owner is the only person who can do it.** Production is EC2 with
+SSM-only access, so run this against production before the deploy:
+
+```bash
+aws ssm start-session --target <INSTANCE_ID>
+cd /opt/hamstrack
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS unresolvable
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL;
+SQL
+```
+
+(The container reads its own `POSTGRES_USER`/`POSTGRES_DB` rather than being handed a
+literal, because `docker-compose.prod.yml` takes `POSTGRES_USER` from the operator's `.env`
+and a hardcoded `-U hamstrack` fails with `role "hamstrack" does not exist` on any instance
+that set `DB_USERNAME` to something else — at the exact moment they are clearing a blocker.)
+
+**`0` releases the block.** A non-zero answer does **not** automatically hold it: the query
+above tests two things at once — that `link` *parses*, and that the workspace it names
+*still exists* — and those come apart into two causes wanting opposite actions. Split them:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT n.link IS NULL
+       OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL
+         AS link_did_not_parse,
+       count(*)
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL
+ GROUP BY 1;
+SQL
+```
+
+- **`link_did_not_parse = false`** — the link parsed and the workspace it names is gone.
+  This is the ordinary way to get a non-zero number and it is **not** evidence of an unknown
+  producer: before `V20` there was no foreign key on this table, so rows orphaned by a
+  workspace removed with operator SQL, by a partial restore, or by a dump-and-reload
+  accumulated silently. Those rows were already unrenderable. **Deploy** — the deletion is
+  the correct outcome and the block is released.
+- **`link_did_not_parse = true`** — `link` is absent or is not the shape `V20` reads, which
+  means some producer wrote a row this migration does not know how to interpret. Deploy is
+  still fine (the rows are quarantined), but **file the count and this split on HD-135**: it
+  is the one answer no environment the authors could reach was able to give.
+
+The single-producer premise was checked against the whole of git history — one commit, one
+link literal — so the second bullet is not expected. It is written down because "not
+expected" is exactly the state the first version of this section mistook for "impossible",
+and it prescribed an action (reopen the design question) that no DC operator can perform.
+
+`docs/self-hosting.md` carries the same queries, an export statement and the user-facing
+wording for DC operators.
+
+**A zero from an empty table is not evidence.** The development database held **no
+notification rows at all** when `V20` was written, so its pre-flight returned `0` for the
+same reason it would have returned `0` for any predicate whatsoever. That number says
+nothing about production and must not be quoted as if it did — the honest sentence is
+"the backfill has not been exercised by data anywhere we can observe", which is precisely
+why the production run is a release blocker and why
+`V20NotificationsWorkspaceScopeTest` replays a link produced by the real code path through
+the real migration instead.
+
+**The general rule this leaves behind.** A migration whose `DELETE` is a backstop for a
+condition expected never to occur is untested by construction in every environment where
+the condition does not occur. It needs three things before it ships: a pre-flight the
+operator can run on their own data, a test that manufactures the condition, and somewhere
+for the rows to go — a conditional side table costs a clean install nothing and is the
+difference between "the answer expired when you missed the window" and "the answer is
+still there". A comment saying "expected to be zero" is none of the three.
+
+And whatever the pre-flight prints, **the instruction attached to a non-zero answer has to
+name an action its reader can perform**. This section's first version said "reopen the
+design question", which is not something a DC operator can do; it also attributed the
+number to the one cause that had already been ruled out, and stopped a deploy that should
+have gone ahead.
 
 **Editing a migration in place.** Allowed only while *both* are true: its branch
 is unmerged, and the only database that has ever run it is the author's local

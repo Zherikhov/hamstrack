@@ -2829,20 +2829,29 @@ When boards/reports start consuming filters, each entry will be `{ "type": "BOAR
 
 ## Notifications
 
-The signed-in user's notification feed across all their workspaces (assignments, mentions, …).
+The signed-in user's notification feed, spanning the workspaces they are **currently** a member of. These paths name no workspace — the feed is cross-workspace by design — but every one of them filters on live membership, so a notification from a workspace you have since left is not listed, not counted, not cleared and not markable.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `GET` | `/notifications` | ✔ | List, newest first |
-| `GET` | `/notifications/unread-count` | ✔ | `{"count": 3}` |
-| `POST` | `/notifications/{id}/read` | ✔ | Mark one as read |
+| `GET` | `/notifications` | ✔ | List, newest first (capped at 30) |
+| `GET` | `/notifications/unread-count` | ✔ | `{"count": 3}` — the same filter, uncapped |
+| `POST` | `/notifications/{id}/read` | ✔ | Mark one as read; returns the notification |
 | `POST` | `/notifications/read-all` | ✔ | Mark all as read. `204` |
 
 ```json
-{ "id": "…", "type": "ISSUE_ASSIGNED", "title": "You were assigned DEMO-18",
-  "body": "Rate-limit authentication endpoints", "link": "/w/…/p/…?issue=18",
-  "read": false, "createdAt": "…" }
+{ "id": "…", "workspaceId": "…", "type": "MENTIONED",
+  "title": "Jane Doe mentioned you",
+  "body": "Can you take a look at the rate limiter before Friday?",
+  "link": "/w/…/p/…?issue=18", "read": false, "createdAt": "…" }
 ```
+
+`workspaceId` names the workspace the notification came from — every notification belongs to exactly one, and you only receive one while you are a member of it. Read the tenant from this field rather than parsing it out of `link`: that string's shape is a rendering detail of whichever producer raised the notification, and a producer whose link is shaped differently, or absent, would silently yield "no workspace" to a parsing client.
+
+`type` says what kind of event raised the notification. Values are added as producers are added, so a client must tolerate one it does not recognise — render `title`/`body` and follow `link`. `MENTIONED` (someone `@`-mentioned you in an issue comment) is one such value. `body` is a denormalised excerpt of the source content captured at delivery time (for `MENTIONED`, the first 120 characters of the comment) — a copy, not a live view.
+
+**Leaving a workspace hides its notifications; it does not delete them.** They stop appearing in the list, in the unread count and in the live stream, and `read-all` leaves them **unread** rather than silently clearing them — hiding a row must not quietly mutate it. Rejoin the workspace and the inbox comes back with its read state intact.
+
+`POST /notifications/{id}/read` answers **`404`** for any notification the caller cannot see. An unknown id, one addressed to another user, and one in a workspace the caller has left are deliberately a single indistinguishable answer, never a `403` — a success here returns the whole notification, excerpt included, so a lookup that told the cases apart would disclose the content it exists to withhold.
 
 ## Real-time events (SSE)
 

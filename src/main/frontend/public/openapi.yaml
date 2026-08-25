@@ -6386,7 +6386,15 @@ paths:
     get:
       tags: [Notifications]
       summary: List my notifications
-      description: Across all workspaces, newest first.
+      description: >-
+        Newest first, capped at 30, across the workspaces you are
+        **currently** a member of. These paths name no workspace — the feed is
+        cross-workspace by design — but every one of them filters on live
+        membership, so a notification from a workspace you have since left is
+        not listed here, not counted by `/notifications/unread-count`, not
+        touched by `/notifications/read-all`, and `404`s on
+        `/notifications/{id}/read`. It is hidden, not deleted: rejoin the
+        workspace and it comes back with its read state intact.
       operationId: listNotifications
       responses:
         '200':
@@ -6402,6 +6410,10 @@ paths:
     get:
       tags: [Notifications]
       summary: Unread counter
+      description: >-
+        Counts exactly the notifications `GET /notifications` would return —
+        the caller's own, in the workspaces they are currently a member of —
+        with no 30-row cap.
       operationId: unreadCount
       responses:
         '200':
@@ -6430,12 +6442,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationResponse' }
-        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: >-
+            Not found — a notification this caller cannot see. An unknown id,
+            one addressed to another user, and one belonging to a workspace the
+            caller is no longer a member of are deliberately a **single
+            indistinguishable answer**, never a `403`: a success here returns
+            the whole notification, excerpt included, so a lookup that told the
+            cases apart would disclose the content it exists to withhold.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /notifications/read-all:
     post:
       tags: [Notifications]
       summary: Mark all as read
+      description: >-
+        Marks everything the caller can currently see. A notification in a
+        workspace the caller has left stays **unread** — hiding a row must not
+        quietly mutate it — so a member who is re-added finds that inbox in the
+        state they left it.
       operationId: markAllNotificationsRead
       responses:
         '204': { description: Done }
@@ -13518,9 +13546,36 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        type: { type: string, example: ISSUE_ASSIGNED }
-        title: { type: string, example: You were assigned DEMO-18 }
-        body: { type: string, nullable: true }
+        workspaceId:
+          type: string
+          format: uuid
+          description: >-
+            The workspace this notification came from. Always present: every
+            notification belongs to exactly one workspace, and you only receive
+            one while you are a member of it. Read the tenant from here rather
+            than parsing it out of `link` — that string's shape is a rendering
+            detail of whichever producer raised the notification, and a producer
+            whose link is shaped differently, or absent, would silently yield
+            "no workspace" to a parsing client.
+        type:
+          type: string
+          example: MENTIONED
+          description: >-
+            What kind of event raised this notification. Values are added as
+            producers are added, so a client must tolerate one it does not
+            recognise — render `title`/`body` and follow `link`.
+            `MENTIONED` (someone `@`-mentioned you in an issue comment) is
+            one such value.
+        title: { type: string, example: Jane Doe mentioned you }
+        body:
+          type: string
+          nullable: true
+          description: >-
+            A denormalised excerpt of the source content, captured at delivery
+            time — for `MENTIONED`, the first 120 characters of the comment.
+            It is a copy, not a live view: editing the source does not rewrite
+            it.
+          example: Can you take a look at the rate limiter before Friday?
         link: { type: string, nullable: true, example: /w/…/p/…?issue=18 }
         read: { type: boolean }
         createdAt: { type: string, format: date-time }

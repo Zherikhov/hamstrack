@@ -13,10 +13,18 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * The current user's in-app notifications (assignments, mentions, …):
- * listing, unread counter and read receipts. Not workspace-scoped — the feed
- * spans all workspaces the user belongs to. Real-time delivery happens over
- * the workspace SSE stream; these endpoints back the notification bell.
+ * The current user's in-app notifications (mentions today, whatever a later producer
+ * raises tomorrow): listing, unread counter and read receipts. The path names no
+ * workspace — the feed spans every workspace the caller belongs to — so tenancy here is a
+ * predicate rather than a path resolution, and it lives in {@code NotificationRepository}'s
+ * queries: a row is returned, counted and markable only while its recipient is a member of
+ * the workspace it came from (HD-135). A row in a workspace the caller has left is
+ * invisible, and on {@code /{id}/read} that is a <strong>404</strong> — the same answer as
+ * an unknown id and as another user's id, and never a 403.
+ *
+ * <p>Real-time delivery happens over the workspace SSE stream, which is separately
+ * membership-gated at subscribe time and closed on removal; these endpoints back the
+ * notification bell.
  */
 @RestController
 @RequestMapping("/api/notifications")

@@ -412,9 +412,19 @@ public class SprintScopeLedger {
      * and that is not a style choice. Two of the doors run after a {@code @Modifying}
      * with {@code clearAutomatically} ({@code markActive}, {@code markCompleted}), which
      * detaches every entity the request had loaded AND unhooks their lazy proxies from
-     * the session; {@code sprint.getWorkspace()} would then be an uninitialisable proxy
-     * (Hibernate cannot promise to serve even an identifier without initialising when the
-     * entity uses field access). The caller always has the id anyway — it is the path
+     * the session. What that leaves is a proxy which answers {@code getId()} and nothing
+     * else: Hibernate 7 resolves an identifier <em>getter method</em> even for an entity
+     * mapped by field access and short-circuits it inside the proxy, so the id survives
+     * both laziness and detachment — measured for the same mapping shape in
+     * {@code NotificationProxyQueryCountTest} — while every other accessor raises
+     * {@code LazyInitializationException: no session}.
+     *
+     * <p>So {@code sprint.getWorkspace().getId()} would in fact work here, and that is
+     * the argument for not writing it rather than against. It is the one accessor on that
+     * object that still works after the clear; nothing in the code marks that boundary,
+     * and the first reader who needs a second field off the same expression gets a 500 in
+     * a door that has already applied its bulk update. The caller always has the id anyway
+     * — it is the path
      * variable {@code WorkspaceAccessService.resolveProject} has already proved
      * membership of, and the sprint was resolved inside that same project, so passing it
      * invents no scope: it re-states the one the request was authorised against.

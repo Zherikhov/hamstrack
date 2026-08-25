@@ -27,6 +27,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Upgrading](#upgrading)
   - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
   - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
+  - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
@@ -624,6 +625,12 @@ never configured, and none of the resulting failures names the upgrade:
   did not move — its reach did. See its row in [Configuration](#configuration), and the
   `409` entry in [Troubleshooting](#troubleshooting).
 
+**Also new in 0.17.0, and this one wants a check before you pull rather than after:**
+[Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
+The upgrade attributes every existing notification to a workspace and deletes any it cannot
+attribute; one query tells you whether that number is zero on your instance, and it is
+expected to be.
+
 Database migrations run automatically on startup (Flyway) — no manual step. See
 the [Releases](https://github.com/Zherikhov/easyTask/releases) page for notes
 before upgrading across a minor version.
@@ -636,6 +643,93 @@ each `docker compose pull`.
 release may change the schema in ways an older image can't read (`ddl-auto` is
 `validate`, so it will refuse to start rather than corrupt data). Always take a
 backup before a minor upgrade so you can roll back by restoring it.
+
+### Notifications are scoped to a workspace from 0.17.0
+
+**Two changes, and one of them wants five minutes *before* you pull the image.**
+
+**What your users will see.** A notification now belongs to the workspace whose comment it
+quotes, and an inbox shows only the notifications from workspaces that person is currently
+a member of. Remove somebody from a workspace and that workspace's notifications stop
+appearing for them — in the bell, in the unread count and in the live stream. The rows are
+**hidden, not deleted**: add the person back and their notifications return, with the same
+read and unread state they had when they left. Before 0.17.0 they kept a readable inbox of
+that workspace's comment text indefinitely, which is why this is worth the upgrade.
+
+**What to check first.** The upgrade gives every existing notification a workspace by
+reading it out of the row's `link`, which is where the product has always recorded which
+issue a mention points at. A row whose workspace cannot be read back that way is **removed
+from your inbox** — it could never be shown again under the new rule, and nothing anywhere
+else records which workspace it belonged to, so there is nothing to repair it from. It is
+copied aside rather than destroyed (see below), but it does not come back. Every
+notification the product has ever written carries a usable link, so the expected answer
+below is `0`; run it anyway, because the only instance that can tell you about your data is
+yours:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS unresolvable
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL;
+SQL
+```
+
+`0` means the upgrade deletes nothing — pull the image and carry on.
+
+**Any other number is not a reason to stop.** It is that many notifications the upgrade will
+move out of your inbox table, and there are two quite different reasons a row can be in that
+count. This tells you which:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT n.link IS NULL
+       OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL
+         AS link_did_not_parse,
+       count(*)
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL
+ GROUP BY 1;
+SQL
+```
+
+- **`link_did_not_parse` is `false`** — the link is fine, but the workspace it points at no
+  longer exists on your instance. These are leftovers from a workspace deleted outside the
+  application, a partial restore, or a dump reloaded without its parent rows; before 0.17.0
+  nothing in the database noticed them. They could never be displayed again. **Upgrade** —
+  removing them is the point.
+- **`link_did_not_parse` is `true`** — some notification on your instance was written in a
+  shape this release does not recognise. Upgrading is still safe (see the next paragraph),
+  but please post the numbers on the
+  [issue tracker](https://github.com/Zherikhov/easyTask/issues): every notification the
+  product is known to write carries a readable link, so yours would be new information.
+
+**The upgrade keeps a copy either way.** If it removes anything at all, it first copies those
+rows — in full, content included — into a table called `notifications_unresolvable_v20`, so
+you can still look at them afterwards. That table is created **only** when there is something
+to put in it, so on a clean upgrade it never appears. Nothing in Hamstrack reads it; it is
+there for you. Once you have your answer, drop it:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT * FROM notifications_unresolvable_v20;
+DROP TABLE notifications_unresolvable_v20;
+SQL
+```
+
+If you would rather have the rows as a file before you upgrade, export them first:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' > unresolvable-notifications.csv <<'SQL'
+\copy (SELECT n.* FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL) TO STDOUT WITH CSV HEADER
+SQL
+```
+
+A backup taken as [Backups](#backups) describes covers you either way, and is the general
+answer for a minor upgrade.
 
 ### Statements are bounded from 0.17.0
 
@@ -989,13 +1083,13 @@ so a retyped address can look identical and still not match.
 **Run this block in one interactive session**, in the order printed:
 
 ```bash
-docker compose exec -it postgres psql -U hamstrack hamstrack
+docker compose exec -it postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 ```
 
 then paste it there. The stash in statement 0 is a **temp table, which lives only for
 the connection that created it** — so running these as separate one-shot
-`psql -c "…"` calls, the way the commands elsewhere in this document are written,
-drops it between statements: statement 1 still retires the duplicate and tombstones
+`psql -c "…"` invocations, one command per shell line, drops it between statements:
+statement 1 still retires the duplicate and tombstones
 its address, and statement 2 then fails with `relation "keep" does not exist`. That is
 the stop-you-halfway state the comment in statement 1 warns about, reached through a
 different door.
@@ -1048,13 +1142,13 @@ reference each other, so capture them together and restore to a consistent point
 **Database** — logical dump:
 
 ```bash
-docker compose exec postgres pg_dump -U hamstrack hamstrack > hamstrack-$(date +%F).sql
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > hamstrack-$(date +%F).sql
 ```
 
 Restore into a running (empty) database:
 
 ```bash
-docker compose exec -T postgres psql -U hamstrack hamstrack < hamstrack-YYYY-MM-DD.sql
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' < hamstrack-YYYY-MM-DD.sql
 ```
 
 (Or snapshot the `postgres_data` volume while the container is stopped.)
