@@ -335,6 +335,38 @@ boot at least as much as to a `409`:
 > collide with a reference now answer `409` with
 > `errorType: REFERENCE_CONSTRAINT_VIOLATION` instead of a stack trace.
 
+And the notification inbox, which belongs here for a reason none of the lines above share:
+its migration is the only one in this release that **removes rows**. Everything else either
+changes a default or refuses to start; this one succeeds quietly and leaves less data behind
+than it found. That is exactly the shape somebody who upgrades without opening a manual must
+not be left to discover:
+
+> **Notifications are scoped to a workspace.** The in-app inbox filtered by user alone, so
+> somebody removed from a workspace kept reading its issue titles and comment excerpts
+> indefinitely — that text is stored in the notification row itself, so no permission check
+> could hide it after the fact. From 0.17.0 the list, the unread count and the live stream all
+> filter by current workspace membership. Rows are **hidden, not deleted**: re-add the person
+> and their inbox returns with its read state intact.
+>
+> **The upgrade adds a `NOT NULL workspace_id` and fills it by reading each notification's
+> link.** A row whose link cannot be read is copied to `notifications_unresolvable_v20` and
+> removed from the inbox — that table is created only if there is something to put in it, and
+> is yours to `DROP` once you have looked at it. The count is knowable **only before** the
+> upgrade, so if you want it, take it first:
+>
+> ```sql
+> SELECT count(*) FROM notifications n
+>   LEFT JOIN workspaces w
+>     ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+>  WHERE w.id IS NULL;
+> ```
+>
+> A non-zero answer is almost always rows whose workspace was removed outside the application:
+> until this release there was no foreign key here, so those accumulated silently and were
+> already unshowable. Removing them is the correct outcome and is not a reason to hold the
+> upgrade. Details:
+> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
+
 ## Constraints on a populated table, and why they are free right now
 
 Adding a constraint to a table that already holds rows makes PostgreSQL validate
