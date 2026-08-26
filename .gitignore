@@ -60,3 +60,4 @@ application-local.properties
 
 ###
 qa/
+docs/adr

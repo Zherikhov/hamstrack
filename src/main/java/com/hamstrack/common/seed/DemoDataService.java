@@ -1,6 +1,7 @@
 package com.hamstrack.common.seed;
 
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.persistence.StatementTimeout;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.issue.dto.AddIssuesToSprintRequest;
 import com.hamstrack.issue.dto.CreateComponentRequest;
@@ -43,7 +44,9 @@ import com.hamstrack.workspace.service.WorkspaceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.NoTransactionException;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -252,40 +255,73 @@ public class DemoDataService {
         // Best-effort (as the javadoc promises): a field-value hiccup (e.g. seeded
         // option ids diverging from the sample values) must not roll back the whole
         // demo seed and its claim, or first-login seeding would retry-and-fail forever
-        try {
-            seedDemoFieldValues(projectId);
-        } catch (RuntimeException e) {
-            log.warn("Demo field-value seeding skipped for project {}: {}", projectId, e.toString());
-        }
+        bestEffort("field-value", projectId, () -> seedDemoFieldValues(projectId));
         // Same best-effort contract for the starter labels (HD-30 §3.9).
-        try {
-            seedDemoLabels(user, wsId, projectId);
-        } catch (RuntimeException e) {
-            log.warn("Demo label seeding skipped for workspace {}: {}", wsId, e.toString());
-        }
+        bestEffort("label", wsId, () -> seedDemoLabels(user, wsId, projectId));
         // …and for the starter components (HD-31 §3.9).
-        try {
-            seedDemoComponents(user, wsId, projectId);
-        } catch (RuntimeException e) {
-            log.warn("Demo component seeding skipped for project {}: {}", projectId, e.toString());
-        }
+        bestEffort("component", projectId, () -> seedDemoComponents(user, wsId, projectId));
         // …and for the agile showcase (HD-22 §4.8): a running sprint, a planned one and
         // story points, so 0.13.0's headline feature is visible on first login instead
         // of an empty Backlog page.
-        try {
-            seedDemoSprints(user, wsId, projectId);
-        } catch (RuntimeException e) {
-            log.warn("Demo sprint seeding skipped for project {}: {}", projectId, e.toString());
-        }
+        bestEffort("sprint", projectId, () -> seedDemoSprints(user, wsId, projectId));
         // …and for the starter versions (HD-32 §3.9). Deliberately LAST — see
         // seedDemoVersions: releasing one of them clears the persistence context.
-        try {
-            seedDemoVersions(user, wsId, projectId);
-        } catch (RuntimeException e) {
-            log.warn("Demo version seeding skipped for project {}: {}", projectId, e.toString());
-        }
+        bestEffort("version", projectId, () -> seedDemoVersions(user, wsId, projectId));
 
         log.info("Demo data seeded for user {}: workspace {}, project {}", userId, wsId, projectId);
+    }
+
+    /**
+     * Runs one optional showcase step, absorbing a failure in it — <strong>unless the failure
+     * killed the transaction, in which case carrying on is worse than stopping</strong>.
+     *
+     * <p>The absorbing half is the older half and is deliberate: a misconfigured sample (an
+     * option id that diverged from the values below, a name that collides) must not roll back the
+     * whole demo seed <em>and its claim</em>, because {@code claimDemoSeed} rolls back with it and
+     * the next authentication would seed-and-fail all over again.
+     *
+     * <p>The guard is HD-151. This method is called five times inside one transaction, so a
+     * {@code catch (RuntimeException)} here is exactly the shape
+     * {@code BoundedJpaTransactionManager} warns about: after a statement is cancelled the
+     * transaction is aborted, and every following statement on it fails with
+     * {@code 25P02 in_failed_sql_transaction}. Swallowed five times over, the operator gets five
+     * misleading "seeding skipped" warnings, not one of which names the budget, and then a commit
+     * failure with no explanation. So a dead transaction is re-thrown and reaches the advice that
+     * knows what it is.
+     *
+     * <p>Two tests, because they fail differently: the exception is asked whether it is a
+     * cancellation ({@link StatementTimeout#isStatementCancellation}, which walks the cause chain
+     * because the direct-{@code EntityManager} path only ever exposes it as a cause), and the
+     * <em>transaction</em> is asked whether it is still usable. The second is the general form —
+     * it holds for any future condition that aborts a transaction, cancellation or not — and the
+     * first is the reliable one, since it does not depend on rollback-only being observable
+     * through this particular manager. Keeping both means neither has to be right alone.
+     */
+    private void bestEffort(String what, UUID scope, Runnable step) {
+        try {
+            step.run();
+        } catch (RuntimeException e) {
+            if (StatementTimeout.isStatementCancellation(e) || transactionIsDead()) {
+                throw e;
+            }
+            log.warn("Demo {} seeding skipped for {}: {}", what, scope, e.toString());
+        }
+    }
+
+    /** Whether the current transaction has already been marked rollback-only. */
+    private static boolean transactionIsDead() {
+        try {
+            return TransactionAspectSupport.currentTransactionStatus().isRollbackOnly();
+        } catch (NoTransactionException | IllegalStateException e) {
+            // Seeding always runs in one, but a caller outside a transaction has no transaction to
+            // have killed — treat the step as ordinarily failed rather than throwing from a guard
+            // whose whole job is to improve a failure. IllegalStateException is the second spelling
+            // of the same non-answer: Hibernate's TransactionImpl.getRollbackOnly() throws it when
+            // the transaction is no longer active. Unreachable from here (the transaction is marked,
+            // not completed) and caught anyway, because if it ever fired it would replace the
+            // original exception with a less useful one from inside the guard.
+            return false;
+        }
     }
 
     /**

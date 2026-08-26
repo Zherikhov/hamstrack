@@ -711,6 +711,12 @@ export interface AdminUser {
 
 export interface Notification {
   id: string;
+  /**
+   * The workspace this notification belongs to. Always present: the row is
+   * tenanted, and `link` is a rendering detail whose shape (or absence) varies
+   * by the service that raised it — never parse the tenant out of it.
+   */
+  workspaceId: string;
   type: string;
   title: string;
   body?: string;

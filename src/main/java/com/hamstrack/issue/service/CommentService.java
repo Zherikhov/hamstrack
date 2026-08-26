@@ -63,7 +63,7 @@ public class CommentService {
         commentRepository.save(comment);
 
         // Notify @mentioned members (none previously mentioned on a new comment)
-        applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, Set.of());
+        applyMentions(comment, req.body(), actor, projectId, issueNumber, Set.of());
 
         eventPublisher.publishEvent(new CommentAdded(workspaceId, projectId, issueNumber));
         return CommentResponse.of(comment);
@@ -103,7 +103,7 @@ public class CommentService {
         // already mentioned so an edit can't re-notify the same person)
         var already = mentionRepository.findAllByComment(comment).stream()
                 .map(m -> m.getUser().getId()).collect(Collectors.toSet());
-        applyMentions(comment, req.body(), actor, workspaceId, projectId, issueNumber, already);
+        applyMentions(comment, req.body(), actor, projectId, issueNumber, already);
 
         eventPublisher.publishEvent(new CommentUpdated(workspaceId, projectId, issueNumber));
         return CommentResponse.of(comment);
@@ -162,9 +162,13 @@ public class CommentService {
      * (already-set = existing mentions, so an edit only notifies the newly added).
      */
     private void applyMentions(IssueComment comment, String body, User actor,
-                               UUID workspaceId, UUID projectId, long issueNumber,
+                               UUID projectId, long issueNumber,
                                Set<UUID> alreadyMentioned) {
-        var members = workspaceMemberRepository.findAllByWorkspaceWithUser(comment.getIssue().getWorkspace());
+        // The workspace comes from the resolved issue, and it is what both the row and the
+        // link are built from (HD-135 §4.7): a producer that re-derives the tenant from a
+        // path variable is a producer whose two copies can one day disagree.
+        var workspace = comment.getIssue().getWorkspace();
+        var members = workspaceMemberRepository.findAllByWorkspaceWithUser(workspace);
         for (var mentioned : parseMentions(body, members)) {
             if (mentioned.getId().equals(actor.getId()) || alreadyMentioned.contains(mentioned.getId())) {
                 continue;
@@ -174,9 +178,12 @@ public class CommentService {
             m.setUser(mentioned);
             mentionRepository.save(m);
 
-            String link = "/w/" + workspaceId + "/p/" + projectId + "?issue=" + issueNumber;
+            // V20's backfill parses the workspace id back out of this string, so the shape
+            // is load-bearing across a language boundary that no compiler checks.
+            // V20NotificationsWorkspaceScopeTest is what relates the two.
+            String link = "/w/" + workspace.getId() + "/p/" + projectId + "?issue=" + issueNumber;
             notificationService.create(
-                    mentioned, workspaceId, "MENTIONED",
+                    mentioned, workspace, "MENTIONED",
                     actor.getDisplayName() + " mentioned you",
                     body.length() > 120 ? body.substring(0, 120) + "…" : body,
                     link);

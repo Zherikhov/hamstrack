@@ -18,6 +18,36 @@ services:
       # so the rightmost XFF entry is the real peer — trust it for per-IP rate-limit
       # keying. Set explicitly (not from .env) so this security posture always wins.
       RATE_LIMIT_TRUST_FORWARDED_FOR: "true"
+    # Memory ceiling for the app container (HD-152). This is the other half of the
+    # image's -XX:MaxRAMPercentage=50: the JVM sizes its heap against the CONTAINER
+    # limit, so without this line the percentage is taken against HOST RAM and the
+    # heap floats with whatever machine you deploy on. With it, 1g here means a
+    # 512 MB heap — the reference heap app.reports.max-rows is costed against — and
+    # ~512 MB left for metaspace, thread stacks, code cache and direct buffers,
+    # which live outside the heap and are what an OOM kill is usually made of.
+    #
+    # RAISE THIS ON A BIGGER BOX. On a host over ~2 GB the default is LESS heap than
+    # a pre-0.17.0 install had (the JVM used to take ~25% of host RAM), which is why
+    # docs/self-hosting.md carries an upgrade note about it. From 4g up the 50/50
+    # split also over-reserves — the non-heap need is largely constant — so pair a
+    # bigger limit with JAVA_TOOL_OPTIONS=-Xmx… (≈ limit − 700 MB) in .env; setting
+    # -XX:MaxRAMPercentage there instead does nothing, the image's copy wins.
+    #
+    # `mem_limit`, NOT `deploy.resources.limits.memory`: both are honoured by the
+    # Compose v2 CLI that deploy.yml runs (`docker compose up -d`) — verified by
+    # inspecting HostConfig.Memory on containers started from each — but mem_limit
+    # is the non-swarm key, it is what every service in
+    # docker-compose.observability.yml already uses, and it cannot become a no-op by
+    # being read in the wrong mode.
+    #
+    # This bounds the app ALONE. postgres and caddy below are deliberately unbounded
+    # (Postgres sizes itself from shared_buffers/work_mem, not from a container cap,
+    # and capping it turns a tuning problem into a kill), so the observability file's
+    # "every service has a mem_limit, so the stack can't OOM the box" is an invariant
+    # of THAT file and not of this deployment. Under host memory pressure the kernel
+    # still chooses a victim, and the app — now the one process with a declared
+    # ceiling — is not thereby protected from being it.
+    mem_limit: ${APP_MEMORY_LIMIT:-1g}
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local
     healthcheck:

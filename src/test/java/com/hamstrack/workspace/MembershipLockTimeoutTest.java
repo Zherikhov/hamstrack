@@ -30,6 +30,9 @@ import org.springframework.test.web.servlet.RequestBuilder;
 import org.springframework.transaction.IllegalTransactionStateException;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -96,6 +99,10 @@ class MembershipLockTimeoutTest {
     private static final int POOL_SWEEP = 40;
 
     @Autowired MockMvc mockMvc;
+    // The pool itself, so the leak assertion can look at a connection OUTSIDE any transaction —
+    // the only vantage point from which a leaked SET is still distinguishable from the bound
+    // BoundedJpaTransactionManager applies to every transaction.
+    @Autowired DataSource dataSource;
     @Autowired UserRepository userRepository;
     @Autowired WorkspaceRepository workspaceRepository;
     @Autowired WorkspaceMemberRepository workspaceMemberRepository;
@@ -251,46 +258,62 @@ class MembershipLockTimeoutTest {
      *
      * <p><strong>The pooled connection has to be pinned, or the test proves nothing</strong>
      * (review round 7). A leak is a property of a <em>server connection</em>: only the
-     * backend that ran the {@code SET} can still be carrying the bound. The first version of
+     * backend that ran the {@code SET} can still be carrying the bound. An earlier version of
      * this test opened a second transaction and asserted {@code SHOW lock_timeout = 0} — but
      * with {@code minimum-idle=5} that transaction is free to check out a different
      * connection, one that never had the bound set on it, where the assertion is vacuously
      * true no matter how the bound was applied. So the backend pid is captured on both sides
-     * and at least one later transaction must be proved to have landed on the <em>same</em>
+     * and at least one later checkout must be proved to have landed on the <em>same</em>
      * backend; if the sweep never does, the test fails loudly instead of passing empty.
+     *
+     * <p><strong>The sweep reads RAW POOLED CONNECTIONS rather than transactions, and that is
+     * now the whole test</strong> (HD-151). {@code BoundedJpaTransactionManager} sets
+     * {@code lock_timeout} at {@code doBegin} on every transaction, so a follow-up
+     * <em>transaction</em> reports the configured bound whether or not anything leaked — the
+     * control group stopped being a control. Flipping the expected literal to
+     * {@code "250ms"} would have left this test green under a genuine leak, which is the one
+     * outcome it exists to prevent. Reading the connection outside any transaction restores an
+     * observation that can still fail: {@code SET LOCAL} reverts at COMMIT, so the session value
+     * must be PostgreSQL's default, and a plain {@code SET} — the actual bug shape — shows up
+     * here as a non-zero value that survives the checkout.
      */
     @Test
-    void theBoundIsScopedToItsOwnTransactionAndNeverLeaksIntoThePool() {
+    void theBoundIsScopedToItsOwnTransactionAndNeverLeaksIntoThePool() throws Exception {
+        assertThat(sessionLockTimeoutOnAPooledConnection())
+                .as("a pooled connection outside a transaction must carry no bound at all — that "
+                    + "is PostgreSQL's default, and the state this feature bounds only WITHIN a "
+                    + "transaction")
+                .isEqualTo(UNBOUNDED);
+
         var boundedBackend = new AtomicReference<Integer>();
         txTemplate.executeWithoutResult(s -> {
-            assertThat(lockTimeoutGuc())
-                    .as("PostgreSQL's default is no bound at all — that is the problem")
-                    .isEqualTo("0");
             lockTimeout.applyToCurrentTransaction();
-            assertThat(lockTimeoutGuc()).isEqualTo(TIMEOUT_MS + "ms");
+            assertThat(lockTimeoutGuc())
+                    .as("the bound has to actually reach the transaction, or the sweep below is "
+                        + "looking for the aftermath of something that never happened")
+                    .isEqualTo(TIMEOUT_MS + "ms");
             boundedBackend.set(backendPid());
         });
 
-        // More transactions than the pool can hold, so the connection the bound was set on
-        // must come round again; every one of them is checked, and the one that matters is
-        // the one that lands back on that backend.
+        // More checkouts than the pool can hold, so the connection the bound was set on must
+        // come round again; every one is inspected, and the one that matters is the one that
+        // lands back on that backend.
         var revisited = false;
         for (var attempt = 0; attempt < POOL_SWEEP; attempt++) {
-            revisited |= Boolean.TRUE.equals(txTemplate.execute(s -> {
-                var pid = backendPid();
-                assertThat(lockTimeoutGuc())
-                        .as("backend %d still carries a bound after the commit that set it: "
-                            + "that bound is on the CONNECTION, and would follow it into "
-                            + "whatever ran next — Flyway included", pid)
-                        .isEqualTo("0");
-                return pid.equals(boundedBackend.get());
-            }));
+            try (var connection = dataSource.getConnection()) {
+                var pid = backendPidOf(connection);
+                assertThat(sessionLockTimeoutOf(connection))
+                        .as("backend %d still carries a bound after the commit that set it: that "
+                            + "bound is on the CONNECTION, and would follow it into whatever ran "
+                            + "next — Flyway included", pid)
+                        .isEqualTo(UNBOUNDED);
+                revisited |= pid.equals(boundedBackend.get());
+            }
         }
         assertThat(revisited)
-                .as("none of the %d follow-up transactions was served by backend %d — the "
-                    + "assertion above then only ever looked at connections the bound was "
-                    + "never set on, and could not have seen a leak", POOL_SWEEP,
-                    boundedBackend.get())
+                .as("none of the %d follow-up checkouts was served by backend %d — the assertion "
+                    + "above then only ever looked at connections the bound was never set on, and "
+                    + "could not have seen a leak", POOL_SWEEP, boundedBackend.get())
                 .isTrue();
     }
 
@@ -358,8 +381,32 @@ class MembershipLockTimeoutTest {
         assertThat(failure.get()).isNull();
     }
 
+    /** What PostgreSQL reports when there is no bound at all. */
+    private static final String UNBOUNDED = "0";
+
     private String lockTimeoutGuc() {
         return (String) entityManager.createNativeQuery("SHOW lock_timeout").getSingleResult();
+    }
+
+    /** The session-level bound on one pooled connection, read outside any transaction. */
+    private String sessionLockTimeoutOnAPooledConnection() throws SQLException {
+        try (var connection = dataSource.getConnection()) {
+            return sessionLockTimeoutOf(connection);
+        }
+    }
+
+    private static String sessionLockTimeoutOf(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement();
+             var rows = statement.executeQuery("SHOW lock_timeout")) {
+            return rows.next() ? rows.getString(1) : null;
+        }
+    }
+
+    private static Integer backendPidOf(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement();
+             var rows = statement.executeQuery("SELECT pg_backend_pid()")) {
+            return rows.next() ? rows.getInt(1) : null;
+        }
     }
 
     /**

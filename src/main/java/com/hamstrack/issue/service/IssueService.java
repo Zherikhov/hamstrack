@@ -181,12 +181,12 @@ public class IssueService {
         var project = ctx.project();
         requireNotArchived(project);
 
-        var type = projectConfigService.requireTypeInSet(project, resolveType(req.typeId()));
-        var status = projectConfigService.requireStatusInWorkflow(project, resolveStatus(req.statusId()));
+        var type = resolveType(req.typeId(), project);
+        var status = resolveStatus(req.statusId(), project);
         var priority = req.priorityId() != null
-                ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
+                ? resolvePriority(req.priorityId(), project)
                 // re-resolve the default id to a managed entity (the config cache hands back detached ones)
-                : resolvePriority(projectConfigService.defaultPriorityId(project));
+                : resolvePriority(projectConfigService.defaultPriorityId(project), project);
         // HD-30: resolve labels BEFORE the issue is built/saved — a foreign, unknown
         // or over-cap id must 422 before anything is written (and resolving after a
         // mutation is the documented @Version double-bump trap).
@@ -431,15 +431,9 @@ public class IssueService {
         }
 
         // All reads first (avoid Hibernate auto-flush double-write — see CLAUDE.md gotchas)
-        var newType = req.typeId() != null
-                ? projectConfigService.requireTypeInSet(project, resolveType(req.typeId()))
-                : null;
-        var newStatus = req.statusId() != null
-                ? projectConfigService.requireStatusInWorkflow(project, resolveStatus(req.statusId()))
-                : null;
-        var newPriority = req.priorityId() != null
-                ? projectConfigService.requirePriorityInSet(project, resolvePriority(req.priorityId()))
-                : null;
+        var newType = req.typeId() != null ? resolveType(req.typeId(), project) : null;
+        var newStatus = req.statusId() != null ? resolveStatus(req.statusId(), project) : null;
+        var newPriority = req.priorityId() != null ? resolvePriority(req.priorityId(), project) : null;
         // The assignee is deliberately NOT resolved here (HD-125 review, L4). Resolving it
         // with the other reads put its 422 ("Unknown assignee" = not a member of this
         // workspace) BEFORE the actor's own 403, which let someone without `issue.assign`
@@ -1042,27 +1036,42 @@ public class IssueService {
     }
 
     // ---- catalog resolution ----
-    // Find by id across ALL scopes (global / workspace / project-private); the
-    // real gate is ProjectConfigService.requireXInSet/Workflow at every call
-    // site, which rejects anything not in this project's effective config —
-    // so a foreign or wrong-scope id can never attach to an issue.
+    //
+    // CHECK MEMBERSHIP FIRST, THEN LOAD. The order is the whole of it, and it used to be the
+    // other way round: these three did a bare findById across ALL scopes and handed the entity
+    // to ProjectConfigService, whose refusal quoted its NAME. A member of workspace A passing
+    // workspace B's private status id was told that the id exists, is unarchived, and what it is
+    // called. Nothing cross-tenant was ever persisted — the guard did refuse the write — but the
+    // refusal was itself the disclosure, and these were the only resolvers in create() that took
+    // no project (resolveParent, and the component/label/version/sprint resolvers, all scope).
+    //
+    // Now the id is validated against the project's own effective config before anything is
+    // loaded, so "unknown", "archived" and "belongs to another tenant" collapse into one answer
+    // that names nothing. The load that follows cannot leak, because only an id already proven to
+    // be offered here reaches it.
+    //
+    // The load is still a repository call rather than the cached instance: ProjectConfigCache
+    // hands back DETACHED entities, and these are assigned straight onto the Issue.
 
-    private IssueType resolveType(UUID id) {
+    private IssueType resolveType(UUID id, Project project) {
+        projectConfigService.requireTypeOffered(project, id);
         return issueTypeRepository.findById(id)
-                .filter(t -> t.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown issue type"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                        "That issue type is not offered by this project"));
     }
 
-    private Status resolveStatus(UUID id) {
+    private Status resolveStatus(UUID id, Project project) {
+        projectConfigService.requireStatusOffered(project, id);
         return statusRepository.findById(id)
-                .filter(s -> s.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown status"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                        "That status is not part of this project's workflow"));
     }
 
-    private Priority resolvePriority(UUID id) {
+    private Priority resolvePriority(UUID id, Project project) {
+        projectConfigService.requirePriorityOffered(project, id);
         return priorityRepository.findById(id)
-                .filter(p -> p.getArchivedAt() == null)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT, "Unknown priority"));
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                        "That priority is not offered by this project"));
     }
 
     // ---- hierarchy helpers ----

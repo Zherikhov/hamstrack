@@ -1168,8 +1168,13 @@ public class SprintService {
      * hide a genuine 500-class bug behind a plausible-looking conflict — the shape that
      * makes an incident hard to diagnose.
      *
-     * <p>Only the constraint NAME is logged: no SQL, no exception message, no user input
-     * (the error-hygiene rule the HD-30 security review signed off on).
+     * <p>Only the constraint NAME is logged here: no SQL, no exception message, no user input
+     * (the error-hygiene rule the HD-30 security review signed off on). The one deliberate
+     * exception is {@code GlobalExceptionHandler.handleDataIntegrityViolation}, the backstop
+     * under paths like this one, which logs the message because the two directions of a
+     * {@code 23503} are indistinguishable from SQLSTATE and the client is told neither — see the
+     * note on {@code ComponentService.isNameConflict}. Safe because every parameter is bound; not
+     * a licence, because a call site with its own sentence already knows its direction.
      */
     private static boolean isConstraint(DataIntegrityViolationException e, String expected) {
         String constraint = constraintNameOf(e);

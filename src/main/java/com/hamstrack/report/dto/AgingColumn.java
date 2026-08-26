@@ -17,7 +17,7 @@ import java.util.UUID;
  *
  * <p>The reverse disagreement is the interesting one. An issue can sit in a status that is
  * <em>not</em> in the project's current workflow — the workflow was swapped, or the status was
- * removed from it — and the codebase deliberately permits that ({@code requireStatusInWorkflow}
+ * removed from it — and the codebase deliberately permits that ({@code requireStatusOffered}
  * gates <em>transitions</em>, not existing rows). Such issues are gathered into a single trailing
  * column with {@link #statusId} and {@link #category} {@code null} and the name
  * {@code "Not on this board"}. They are emphatically not dropped: an aging report exists to name

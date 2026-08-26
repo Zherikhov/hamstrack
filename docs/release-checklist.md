@@ -9,6 +9,12 @@ guarded against.
 ## The sequence
 
 ```bash
+# 0. Pre-flight, if this release carries a migration that DELETES ROWS. 0.17.0 does
+#    (V20, HD-135), and it is blocking: the number it prints is knowable only
+#    BEFORE the deploy. See "Releases carrying a destructive migration" below for
+#    the query, what a non-zero answer means, and which non-zero answers still
+#    release the block.
+
 # 1. Merge — locally or via the PR button, whichever you prefer
 git checkout main
 git pull
@@ -204,12 +210,249 @@ overflows `VARCHAR(255)` for a long address. And a detection query must be able 
 matching spellings by eye, whereas one that groups by the folded form and returns groups of
 more than one either finds the pair or proves there is none.
 
+## Releases that change a resource default
+
+A release that changes a **default the operator never set** — how much memory the container
+may have, how many connections the pool opens, how big an upload may be — lands on installs
+that took no decision to revisit. Nothing in their `.env` names the setting, so nothing in
+their `.env` will remind them. Unlike a derived-value change (previous section) there is no
+wrong row to find and no query that finds it: the instance is correct, merely differently
+sized, and the only symptom is that it behaves worse than it did yesterday with nothing
+tying that to the upgrade. The test for this class is not "did behaviour change" but
+**"would the change look like a fault to somebody who was not told"**.
+
+Watch for the shape where a default is *better* on the machine it was reasoned against and
+quietly *takes something away* from every larger one — those releases read as an
+improvement in the PR and as a regression on the box. 0.17.0 is the worked example several
+times over, and its changes compound: `HD-152` bounded the JVM heap, which raises it on a 1 GB host and halves it on
+a 4 GB one ([The heap is bounded from 0.17.0](self-hosting.md#the-heap-is-bounded-from-0170));
+`HD-151` bounded how long a statement may run, which is invisible on a small install and turns
+a slow report into a `422` on a large one
+([Statements are bounded from 0.17.0](self-hosting.md#statements-are-bounded-from-0170)); and
+the same ticket widened `DB_LOCK_TIMEOUT_MS` from the handful of transactions that locked
+deliberately to **every** transaction, so a contended write that used to wait indefinitely now
+answers a retryable `409` — a changed default whose *value* never moved, which is why it is the
+easiest of the three to leave out of a list —
+*and the heap cut makes the statement bound easier to hit*, so one release produced two causes
+for one symptom. This sentence said "0.17.0's is the worked example", singular, for the day
+between the first two landing, then "two worked examples" until the lock bound made that wrong
+as well: a count goes stale one entry before its list does, in the paragraph that says so.
+
+Three steps, and **step 3 is the one that gets skipped**, because the first two feel like
+the work:
+
+1. **Write the operator section** in `docs/self-hosting.md` under `## Upgrading`, with a
+   `## Contents` entry. Say which direction the change moves *for which size of host*: a
+   default is not one change, it is one change per box it lands on. Give a break-even so a
+   reader can tell in a single line whether they are affected, and give the remedy as a
+   value they can type rather than a method they must apply — a worked table beats a
+   subtraction rule, and a rule that disagrees with its own worked numbers is worse than
+   no rule.
+2. **Route to it from where the reader already is.** The setting's row in the configuration
+   table, `## Requirements`, and — the one that is always forgotten — the `## Upgrading`
+   prose carrying the `docker compose pull` command, because that command is what an
+   upgrader copies *instead of* reading on.
+3. **Write the line into the GitHub Release body by hand.** `generate_release_notes: true`
+   lists merged PRs and says nothing about behaviour, and `docs/self-hosting.md` sends every
+   upgrader to the Releases page before a minor upgrade — so this is the only text that
+   reaches somebody who upgrades without opening a manual. Everything else in steps 1 and 2
+   is read by people who were already looking.
+
+0.17.0 ships **several** changes in this class — one line each, below. (Note the shape, which
+this section has now got wrong twice about itself: it first said "0.17.0's line", singular, and
+was corrected to "two lines" on the day the second landed, which was stale again by the third.
+Each time the number was written by somebody looking straight at the list. Count nothing you
+are about to enumerate.
+
+**And a positional reference is a count in a costume.** `.env.prod.example` said a setting was
+"four lines above" another; the release grew the block between them to thirty-six, silently,
+because a release is precisely the thing that makes a file longer. It goes stale the same way a
+number does and is worse in one respect: no grep anybody would think to run for a stale count —
+"two", "three", "the only" — matches "four lines above". Point at names, never at distances.)
+
+Ready to paste:
+
+> **Every database statement is now bounded (`DB_STATEMENT_TIMEOUT_MS`, default 10 s).**
+> Before 0.17.0 a single query could run for ever while holding one of the ten pooled
+> connections; ten of them stopped the instance. From now on a statement still running after
+> 10 seconds is cancelled and the request answers **`422`** with
+> `errorType: STATEMENT_BUDGET_EXCEEDED` and no `Retry-After` — an identical retry costs
+> identical time. **On a large install this can turn a slow report, search or member removal
+> into an error**; a report can be narrowed, a member removal cannot. If it happens, raise
+> `DB_STATEMENT_TIMEOUT_MS` in `.env` (minimum twice `DB_LOCK_TIMEOUT_MS`, so ≥ 6000) and
+> `docker compose up -d`. Database migrations are deliberately not bounded.
+>
+> **Lock waits are bounded with it, and this half is a status-code change.** A write that
+> collides with a long-running change — most often removing a member with a lot of assigned
+> work — used to wait indefinitely and eventually succeed. It now gives up after
+> `DB_LOCK_TIMEOUT_MS` (3 s) with **`409` + `Retry-After`**, which is retryable and which clients
+> should retry. The two bounds ship together on purpose: `statement_timeout` counts lock-wait
+> time, so bounding statements alone would have answered that same collision with the
+> non-retryable `422` above. Details:
+> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
+
+And the heap line:
+
+> **The JVM heap is now bounded (`APP_MEMORY_LIMIT`, default `1g` → 512 MB heap).** Before
+> 0.17.0 the JVM claimed ~25% of *host* RAM, so on a host larger than 2 GB this is **less
+> heap than you had** — a 4 GB host drops from ~1 GB to 512 MB, an 8 GB host from ~2 GB.
+> There is no error; it shows up as reports and searches getting slower. Set
+> `APP_MEMORY_LIMIT` in `.env` to about half the host (4 GB → `2g`, 8 GB → `4g`) and
+> `docker compose up -d`. On a host of 2 GB or less you gain heap and need do nothing.
+> Details:
+> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
+
+And the taxonomy foreign keys, which is the one line here that can stop a **startup** — so it
+carries the repair, not just the diagnosis. A DC operator whose data is clean never sees any of
+it; one whose data is not meets Flyway failing `V19` with no repair SQL anywhere they would
+think to look, and "a refusal must name an action its reader can perform" applies to a failed
+boot at least as much as to a `409`:
+
+> **`issues.type_id` and `issues.status_id` now have foreign keys.** The database enforces that
+> no issue can point at a status or issue type that does not exist. **If your database already
+> contains such a row, the upgrade will not start** — Flyway fails `V19__issues_taxonomy_fk.sql`
+> and the container exits. This is deliberate: those rows are already broken (the issue renders
+> as a blank board column and disappears from every status filter), and the fix needs a decision
+> only you can make. To check **before** upgrading, and to find any offenders afterwards:
+>
+> ```sql
+> SELECT i.id, i.workspace_id, i.project_id, i.number, i.type_id
+>   FROM issues i LEFT JOIN issue_types t ON t.id = i.type_id
+>  WHERE t.id IS NULL;
+>
+> SELECT i.id, i.workspace_id, i.project_id, i.number, i.status_id
+>   FROM issues i LEFT JOIN statuses s ON s.id = i.status_id
+>  WHERE s.id IS NULL;
+> ```
+>
+> Both must return **no rows**. If either does not, repoint those issues at a catalog row that
+> does exist — pick one your project already offers, e.g.
+> `UPDATE issues SET status_id = '<a real status id>' WHERE id = '<the issue id>';` — then
+> upgrade. Nothing else changes: a delete that would strand an issue was already refused by the
+> application, and remains so.
+>
+> **A delete the database refuses is a `409`, not a `500`.** Related: catalog deletes that
+> collide with a reference now answer `409` with
+> `errorType: REFERENCE_CONSTRAINT_VIOLATION` instead of a stack trace.
+
+And the notification inbox, which belongs here for a reason none of the lines above share:
+its migration is the only one in this release that **removes rows**. Everything else either
+changes a default or refuses to start; this one succeeds quietly and leaves less data behind
+than it found. That is exactly the shape somebody who upgrades without opening a manual must
+not be left to discover:
+
+> **Notifications are scoped to a workspace.** The in-app inbox filtered by user alone, so
+> somebody removed from a workspace kept reading its issue titles and comment excerpts
+> indefinitely — that text is stored in the notification row itself, so no permission check
+> could hide it after the fact. From 0.17.0 the list, the unread count and the live stream all
+> filter by current workspace membership. Rows are **hidden, not deleted**: re-add the person
+> and their inbox returns with its read state intact.
+>
+> **The upgrade adds a `NOT NULL workspace_id` and fills it by reading each notification's
+> link.** A row whose link cannot be read is copied to `notifications_unresolvable_v20` and
+> removed from the inbox — that table is created only if there is something to put in it, and
+> is yours to `DROP` once you have looked at it. The count is knowable **only before** the
+> upgrade, so if you want it, take it first:
+>
+> ```sql
+> SELECT count(*) FROM notifications n
+>   LEFT JOIN workspaces w
+>     ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+>  WHERE w.id IS NULL;
+> ```
+>
+> A non-zero answer is almost always rows whose workspace was removed outside the application:
+> until this release there was no foreign key here, so those accumulated silently and were
+> already unshowable. Removing them is the correct outcome and is not a reason to hold the
+> upgrade. Details:
+> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
+
+## Constraints on a populated table, and why they are free right now
+
+Adding a constraint to a table that already holds rows makes PostgreSQL validate
+every one of them, under a lock. `ADD CONSTRAINT … FOREIGN KEY` takes
+`SHARE ROW EXCLUSIVE`; building a `UNIQUE` index takes `ACCESS EXCLUSIVE`. Both
+block writes to that table for the duration, and the duration is linear in the
+row count — measured on a 1M-row table: `ADD COLUMN` 2.9 ms, FK validation 64 ms,
+unique index ~55 MB and 1–3 s.
+
+**This costs nothing today, and the reason is the deploy shape, not the SQL.**
+Both deployment models run a single application container. `docker compose up -d`
+stops the old one before the new one starts, so migrations execute with no
+concurrent writer and the lock falls inside a window where nothing is serving.
+Decision recorded 2026-08-21 (HD-93): **rolling deploys are not planned.**
+
+**What changes the answer is a rolling deploy, and nothing else.** The moment the
+old instance keeps serving and writing while the new one migrates, every lock
+above becomes a stall on live traffic. Flyway's advisory lock keeps the migration
+itself safe; it does nothing for the writers waiting behind the table lock.
+
+### The inventory, so it is not re-derived
+
+If a rolling deploy is ever put on the table, these are the applied constraints
+that would have to be converted to `ADD CONSTRAINT … NOT VALID` followed by a
+separate `VALIDATE CONSTRAINT` — **in a new migration, never as a retrofit into an
+applied one**:
+
+| migration | constraint | on | lock |
+|---|---|---|---|
+| `V8__labels.sql` | `issues_id_workspace_id_key` UNIQUE `(id, workspace_id)` | `issues` | `ACCESS EXCLUSIVE` (index build) |
+| `V9__components.sql` | `issues_component_fk` | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | `issues_sprint_fk` | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | `issues_story_points_ck` CHECK | `issues` | `SHARE ROW EXCLUSIVE` |
+| `V11__sprints.sql` | the `position` rescale | `issues` | rewrites every row |
+| `V19__issues_taxonomy_fk.sql` | `issues_type_id_fkey` | `issues` (+ `issue_types`) | `SHARE ROW EXCLUSIVE` |
+| `V19__issues_taxonomy_fk.sql` | `issues_status_id_fkey` | `issues` (+ `statuses`) | `SHARE ROW EXCLUSIVE` |
+
+`ADD CONSTRAINT … FOREIGN KEY` takes its lock on **both** tables, not only the one
+named in the `on` column — `SHARE ROW EXCLUSIVE` on the child *and* on the parent,
+so writes to the referenced table are blocked for the same window. The V19 rows
+say so explicitly; it was equally true of `V9` and `V11` and simply went unwritten,
+which is the kind of omission this section exists to stop repeating.
+
+Two things that look like they belong on that list and do not, because the
+distinction is the whole point and is easy to get backwards:
+
+- **A constraint declared inside `CREATE TABLE`** validates an empty table. Free
+  at any size, forever. Most of what a migration adds is this.
+- **`ADD COLUMN … REFERENCES` in a single statement** is *not* the same as
+  `ADD COLUMN` followed by `ADD CONSTRAINT`. PostgreSQL knows the new column is
+  definitionally all-NULL and skips the scan. `V14__role_assignments.sql` adds five
+  such columns and pays nothing; `V9` splits them across two statements and pays a
+  full scan for a column that is equally all-NULL.
+
+`CREATE INDEX CONCURRENTLY` is **not** an escape hatch here: Flyway wraps each
+migration in a transaction, and `CONCURRENTLY` cannot run inside one.
+
+### The rule this implies
+
+While deploys stop the old container first, write the plain form — it is shorter,
+it is atomic, and the two-step form buys nothing. What must not happen is that the
+decision gets re-derived from scratch under time pressure: if the deploy shape
+changes, this section is the list, and the rule becomes *every constraint added to
+a populated table is two-step*, applied to new migrations and to the five above.
+
 ## Releases carrying a destructive migration
 
-Most releases need nothing here. A release whose migrations **drop or rename a
-column the previous image still reads** needs two extra things, and the roles
-release (**V13–V15**, HD-123) is the first one that does: `V15` drops
-`workspace_members.role`, `workspace_invites.role` and `project_members.role`.
+Most releases need nothing here. A release needs this section when one of its
+migrations **destroys something the deploy cannot put back** — and there are two
+independent ways to be in that category, so read both before deciding you are in
+neither:
+
+- **destructive to the schema** — a column or table the previous image still reads
+  is dropped or renamed. Costs a snapshot and a stop-the-world deploy (below). The
+  roles release (**V13–V15**, HD-123) is the first: `V15` drops
+  `workspace_members.role`, `workspace_invites.role` and `project_members.role`.
+- **destructive to the data** — rows are deleted, or a value is overwritten with
+  one the old value cannot be derived from, while every column stays exactly where
+  it was. Costs a **pre-flight run against production before the deploy**, because
+  the number involved stops being knowable the moment the migration commits. The
+  0.17.0 notification release (**V20**, HD-135) is the first, and it drops nothing
+  at all — which is precisely why it needs saying here.
+
+A release can be in both categories, one, or neither. The two costs are separate.
+
+**For a schema-destructive release, two extra things:**
 
 1. **Snapshot the database first.** Once `V15` has run, rollback is a *restore*,
    not a re-deploy — the old image cannot read the new schema, and `latest` only
@@ -227,6 +470,125 @@ release (**V13–V15**, HD-123) is the first one that does: `V15` drops
 
 A migration that only **adds** tables or columns (`V13`, `V14`) is rolling-safe
 and needs neither.
+
+### A migration that deletes rows needs its count read *before* the deploy — 0.17.0 / `V20`
+
+A migration can be destructive to **data** without dropping anything: `V20` (HD-135) adds
+`notifications.workspace_id NOT NULL`, fills it by reading the workspace id out of each
+row's `link`, and **removes any row it cannot fill**, because such a row is unshowable
+under the new rule and nothing in the schema records the workspace it belonged to. So the
+number of rows it removes is knowable in advance and is *best* knowable in advance —
+afterwards, Flyway's `RAISE NOTICE` is buried in container logs nobody reads.
+
+`V20` does copy those rows into `notifications_unresolvable_v20` before deleting them (and
+creates that table **only** if there are any), so a missed pre-flight is recoverable rather
+than final. That is a backstop for the backstop; it is not a reason to skip the step, and
+the table is yours to `DROP` once you have read it.
+
+**Blocking, and the owner is the only person who can do it.** Production is EC2 with
+SSM-only access, so run this against production before the deploy:
+
+```bash
+aws ssm start-session --target <INSTANCE_ID>
+docker exec -it hamstrack-postgres-1 psql -U hamstrack hamstrack
+```
+
+Then paste the query at the `hamstrack=#` prompt — **on one line**, and leave with `\q`:
+
+```sql
+SELECT count(*) AS unresolvable FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL;
+```
+
+Three things in that recipe are deliberate, and each one is a way the earlier version of
+this section failed when it was first run against the real box on 2026-08-26:
+
+- **`docker exec` on the container, not `docker compose exec` on the service.** Bare
+  `docker compose` looks for `compose.yaml` / `docker-compose.yml` and prod keeps its file
+  under another name, so the documented command answered `no configuration file provided:
+  not found` — from inside the right directory. `docker exec` depends on neither the
+  filename nor the working directory. If the container is not named
+  `hamstrack-postgres-1`, `docker ps --format '{{.Names}}'` gives the real name; note that
+  `hamstrack-postgres-exporter-1` is the Prometheus exporter and has no `psql` in it.
+- **A psql prompt rather than a heredoc.** `<<'SQL'` needs a line containing exactly `SQL`
+  to terminate, and the SSM web console mangles a pasted multi-line block — the shell then
+  sits at a `>` prompt looking like it hung. Ctrl+C is the way out.
+- **The query on one line.** Same reason: multi-line SQL survives the paste no better than
+  the heredoc did.
+
+Substitute the real role name for `-U hamstrack` if `DB_USERNAME` in `.env` says otherwise;
+the database is always `hamstrack`.
+
+**Run the query even if you believe the table is empty, and read the total alongside it.**
+A count over an empty table returns `0` for every predicate, including a false one, so a
+bare `0` does not distinguish "nothing to delete" from "nothing there at all". Both release
+the block — but only one of them is evidence, and the ticket deserves to know which it got:
+
+```sql
+SELECT count(*) AS total, count(*) FILTER (WHERE substring(link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NOT NULL) AS parses FROM notifications;
+```
+
+**`0` releases the block.** A non-zero answer does **not** automatically hold it: the query
+above tests two things at once — that `link` *parses*, and that the workspace it names
+*still exists* — and those come apart into two causes wanting opposite actions. Split them,
+at the same psql prompt and again on one line:
+
+```sql
+SELECT n.link IS NULL OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL AS link_did_not_parse, count(*) FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL GROUP BY 1;
+```
+
+- **`link_did_not_parse = false`** — the link parsed and the workspace it names is gone.
+  This is the ordinary way to get a non-zero number and it is **not** evidence of an unknown
+  producer: before `V20` there was no foreign key on this table, so rows orphaned by a
+  workspace removed with operator SQL, by a partial restore, or by a dump-and-reload
+  accumulated silently. Those rows were already unrenderable. **Deploy** — the deletion is
+  the correct outcome and the block is released.
+- **`link_did_not_parse = true`** — `link` is absent or is not the shape `V20` reads, which
+  means some producer wrote a row this migration does not know how to interpret. Deploy is
+  still fine (the rows are quarantined), but **file the count and this split on HD-135**: it
+  is the one answer no environment the authors could reach was able to give.
+
+The single-producer premise was checked against the whole of git history — one commit, one
+link literal — so the second bullet is not expected. It is written down because "not
+expected" is exactly the state the first version of this section mistook for "impossible",
+and it prescribed an action (reopen the design question) that no DC operator can perform.
+
+`docs/self-hosting.md` carries the same queries, an export statement and the user-facing
+wording for DC operators.
+
+**A zero from an empty table is not evidence.** The development database held **no
+notification rows at all** when `V20` was written, so its pre-flight returned `0` for the
+same reason it would have returned `0` for any predicate whatsoever. That number says
+nothing about production and must not be quoted as if it did — the honest sentence is
+"the backfill has not been exercised by data anywhere we can observe", which is precisely
+why the production run is a release blocker and why
+`V20NotificationsWorkspaceScopeTest` replays a link produced by the real code path through
+the real migration instead.
+
+**What the 0.17.0 run actually returned, recorded because the shape recurs.** Production
+answered `unresolvable = 0` over `count(*) = 0` — the same empty-set zero, so it released
+the block without being evidence of anything. The instance was single-user at the time, and
+a self-mention is skipped by design, so the only producer had never fired. Writing one
+comment that mentioned somebody else changed that: the pre-flight then ran over a real row
+and `parses` came back `1`. That version of the number is worth more than either zero,
+because the row was written by the **image already deployed** — which is the one thing the
+development rows could not test, since those were written by the build that ships the
+regex. If a future release finds this table empty again, the cheap way to earn the same
+evidence is to make one row and re-run, rather than to accept a zero the emptiness
+guaranteed.
+
+**The general rule this leaves behind.** A migration whose `DELETE` is a backstop for a
+condition expected never to occur is untested by construction in every environment where
+the condition does not occur. It needs three things before it ships: a pre-flight the
+operator can run on their own data, a test that manufactures the condition, and somewhere
+for the rows to go — a conditional side table costs a clean install nothing and is the
+difference between "the answer expired when you missed the window" and "the answer is
+still there". A comment saying "expected to be zero" is none of the three.
+
+And whatever the pre-flight prints, **the instruction attached to a non-zero answer has to
+name an action its reader can perform**. This section's first version said "reopen the
+design question", which is not something a DC operator can do; it also attributed the
+number to the one cause that had already been ruled out, and stopped a deploy that should
+have gone ahead.
 
 **Editing a migration in place.** Allowed only while *both* are true: its branch
 is unmerged, and the only database that has ever run it is the author's local
@@ -251,6 +613,10 @@ The rule for what belongs there: **every behaviour change that looks like a bug 
 met without warning** — a status code that moved, a response shape that grew, a value that
 is now rejected, a new mode. Additive endpoints do not need a line each; the API reference
 already has them.
+
+**A changed default belongs here too, and is the entry most easily missed** — nothing was
+added, nothing was rejected, and the diff reads as configuration. See "Releases that change
+a resource default" above, which carries this release's lines ready to paste.
 
 Below is that text for the **roles & permissions** release (HD-123, V13–V16), which is also
 the worked example of the shape. See "Releases carrying a destructive migration" above for

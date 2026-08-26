@@ -25,6 +25,9 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Optional toggles](#optional-toggles)
 - [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
+  - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
+  - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
+  - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
 - [Troubleshooting](#troubleshooting)
@@ -37,9 +40,24 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - For a public instance: a domain and a TLS-terminating reverse proxy (Caddy,
   nginx, Traefik…). HTTP-only on `localhost` works for trying it out.
 - **Resources:** the app is a JVM service — budget ~1 GB RAM for it (2 GB is
-  comfortable) plus a little for PostgreSQL; a 2 vCPU / 2 GB host comfortably
-  runs a small team. Disk is dominated by attachments — size the
-  `attachments_data` volume (or your S3 bucket) for expected uploads.
+  comfortable, and on a **4 GB host or larger** `APP_MEMORY_LIMIT=2g` is what
+  actually hands it that second gigabyte — the default caps the container at 1 GB
+  however big the host is; on a 2 GB host leave it alone, because that box has no
+  second gigabyte to spare) plus a little for PostgreSQL; a 2 vCPU / 2 GB host
+  comfortably runs a small team. That ~1 GB is what the container is actually
+  limited to: the bundled compose sets `mem_limit: 1g` (`APP_MEMORY_LIMIT`) and the
+  image sizes the heap at 50% of the container limit, so the default is a
+  **512 MB heap** with the rest left for the JVM's non-heap memory. Give the
+  container more and the heap follows — nothing to rebuild, one variable, and see
+  [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170) for the sizing
+  table and for what changes if you are upgrading rather than installing fresh.
+  **If you write your own Compose file, set a memory limit on the app service**:
+  with no limit the JVM sizes its heap against *host* RAM. Add the
+  [observability stack](#observability-optional) and the arithmetic tightens
+  sharply — its services' own limits sum to ~1 GB, so app 1 GB + observability
+  ~1 GB + PostgreSQL + Caddy does not fit a 2 GB host; run it on 4 GB. Disk is
+  dominated by attachments — size the `attachments_data` volume (or your S3
+  bucket) for expected uploads.
 
 ## Quick start
 
@@ -66,6 +84,9 @@ services:
       MAIL_STARTTLS: "true"
     ports:
       - "8080:8080"
+    # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so
+    # without a limit here it sizes against host RAM. 1g → 512 MB heap.
+    mem_limit: 1g
     volumes:
       - attachments_data:/app/data/attachments
     healthcheck:
@@ -107,7 +128,7 @@ Browse your instance at its `APP_BASE_URL`, reached through the TLS proxy you pu
 in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Public self-registration
 is **closed by default** on self-hosted installs, so set `SEED_ADMIN_EMAIL` +
 `SEED_ADMIN_PASSWORD` to create your first administrator on startup (see
-[First user](#first-user)). The schema is created and migrated automatically on
+[First user](#first-user-the-administrator)). The schema is created and migrated automatically on
 startup (Flyway).
 
 > **Trying it out locally without a proxy?** Set `APP_BASE_URL=http://localhost:8080`
@@ -140,9 +161,11 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | Variable | Default | Purpose |
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
+| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
-| `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction that takes row locks (workspace member role change, workspace member removal, project member role change, project member removal, and a custom-role duplicate) may wait for one, in ms. Applied with `SET LOCAL` inside those transactions only — **not** a server-wide PostgreSQL `lock_timeout`, so Flyway migrations on the same pool are unaffected and still wait as long as they need. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default |
+| `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction may wait for a row lock before giving up, in ms. **From 0.17.0 this applies to every transaction the app opens, not only to the few that lock deliberately** — so an ordinary edit queued behind a long-running change (removing a member with a lot of assigned work is the usual one) now fails after 3 s with a retryable `409` instead of waiting indefinitely. That is the point: it is issued together with `DB_STATEMENT_TIMEOUT_MS` below, because `statement_timeout` counts lock-wait time, and without it a contended write would be cancelled by *that* bound and answered `422` — a refusal that tells the caller not to retry when retrying is exactly what works. Raise it if legitimate edits collide often enough to be noticed. (This row used to name the handful of endpoints that locked on purpose; that list was wrong within one release and is now wrong by design.) Applied with `SET LOCAL` inside each transaction the app opens — **not** as a server-wide PostgreSQL `lock_timeout`, which is why Flyway migrations on the same pool are unaffected and still wait as long as they need: Flyway runs its own transactions and never goes through the app's transaction manager. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default. **From 0.17.0 the usable top of that range is lower than 60000**: `DB_STATEMENT_TIMEOUT_MS` must stay at least twice this value, so at its default of `10000` this one may not exceed **5000**. Raising it past that stops the boot naming both properties — raise the statement bound in the same edit |
+| `DB_STATEMENT_TIMEOUT_MS` | `10000` | How long **any one statement** of an application transaction may run before PostgreSQL cancels it, in ms. Applied with `SET LOCAL` to every transaction the app opens — there is no list of covered endpoints, because the cost of a statement is a property of how much data you have and not of which feature issued it. **Flyway is deliberately not covered**: migrations run their own transactions, and an index build or a table rewrite on a large install legitimately takes minutes. Exceeding it answers `422` with `errorType: STATEMENT_BUDGET_EXCEEDED` and **no** `Retry-After` — an identical retry costs identical time — and logs a WARN naming this variable. It does **not** bound how long a *connection* is held: a transaction of many statements, or one that spends its time assembling a response in Java, can outlive this number. **New in 0.17.0, and on a large install it can turn a slow report, search or member removal into an error** — see [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170) for a size-to-value table. Must be at least **2x `DB_LOCK_TIMEOUT_MS`** or the app refuses to start: `statement_timeout` counts lock-wait time too, so a smaller value would fire first and replace the retryable `409` above with a `422` that is not retryable. Valid range 1000-600000 — but the `2x` rule is the binding one in practice: **with the default `DB_LOCK_TIMEOUT_MS` of 3000 the smallest value that boots is 6000**, and `1000` is only reachable if you also lower the lock bound to 500 or less. `0` means "no bound" to PostgreSQL and is refused, and **blank** stops the boot exactly as `DB_LOCK_TIMEOUT_MS` does. **Raising this is not free:** every second you add is a second one request may hold one of your `DB_POOL_MAX_SIZE` connections, so the same pool serves fewer concurrent slow requests — past ~30 s, raise the pool with it. Identical in `dc` and `cloud` |
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
@@ -165,7 +188,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_DEFAULT_SPRINT_LENGTH_DAYS` | `14` | Default iteration length — the end date a sprint start assumes when the request carries none. Valid range 1–90; an out-of-range value fails startup instead of being clamped |
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `REPORTS_MAX_WINDOW_DAYS` | `365` | Widest window one report may span, in days, counting **both** endpoints. A wider request is refused with `400` naming this cap — it is **never silently narrowed**, because a chart of a window nobody asked for is exactly how a reporting feature earns "these numbers don't match what I expected". Valid range 1–3650; at daily buckets the window length *is* the number of points in the response, which is what the upper bound guards. Identical in `dc` and `cloud`: reporting depth is a product feature, not a plan feature. A value **under 90** is safe and is not a trap: the endpoint's own default window is `min(90, this)`, so the parameterless request the reports page makes on load is always inside the cap — what is never done is clamping a window a caller explicitly asked for. An out-of-range value fails startup instead of being clamped. **Leave the line out to get the default — `REPORTS_MAX_WINDOW_DAYS=` is an empty value, not an absent one, and it stops the boot rather than restoring 365**; that matters more here than elsewhere, because this number is quoted back to API callers inside a 400 |
-| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against an **assumed reference heap of 512 MB**, which is the premise behind the number and **not** something the deployment enforces: the image runs `java -jar` with no heap flag and the sample compose sets no memory limit, so the JVM claims ~25% of the host's RAM and your real budget follows your host size. Size this against the heap you actually get — on the ~1 GB host in [Requirements](#requirements) that is only ~256 MB, so lower it there; on a larger host the ceiling is conservative. Setting an explicit heap bound is tracked as `HD-152`. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
+| `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against a **reference heap of 512 MB**, and since `HD-152` that is the heap a default install actually gets rather than a premise it hopes for: the image runs the JVM at `-XX:MaxRAMPercentage=50` and the bundled compose limits the app container to `1g` (`APP_MEMORY_LIMIT`), which is 512 MB of heap exactly. So 50000 rows is ~95 MB of a 512 MB heap for one request — legal, large, and the reason the *default* is 20000 (~38 MB worst case) rather than the ceiling. The relationship still has to be maintained by whoever moves either number: the heap follows the container limit, so `APP_MEMORY_LIMIT=2g` doubles it to 1 GB and makes this ceiling correspondingly conservative, while a smaller limit — or your own Compose file with **no** `mem_limit`, where the percentage is taken against host RAM — moves it the other way. And nothing bounds *concurrency*: N users asking together is N of these alive together, so ~95 MB is a per-request figure and never a total. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
 | `REPORTS_REQUESTS_PER_MINUTE` | `60` | How many report requests **one user** may make per minute across the whole reports surface (every `…/projects/{id}/reports/**` endpoint, not per report) **plus `POST …/workspaces/*/search/insights`**, the Insights panel — a report that lives on the search path and is bound to this limiter explicitly rather than by prefix. For the six project-scoped reports this is the only bound on the **work** a report does: `REPORTS_MAX_WINDOW_DAYS` bounds the response array, the "open at window start" balance is O(project history) whatever window you ask for, and `Cache-Control: private` means no shared cache absorbs a repeat — so without a budget one authenticated member in a loop can saturate `DB_POOL_MAX_SIZE` with entirely legal 200s. Past it the answer is `429` + `Retry-After`; a report is never narrowed or approximated to fit a budget. Counted in-memory per instance. Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `REPORTS_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 60**. Insights is the one exception to "only bound": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `SEARCH_REQUESTS_PER_MINUTE` | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: `POST …/search`, `GET …/search/schema`, `GET …/search/suggest` and `POST …/search/insights` **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After`. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like — a query may carry up to 50 leaf predicates, a `text ~` leaf is two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Counted in-memory per instance, so N replicas allow up to N × the budget per user (it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer). Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. Note that the Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
@@ -180,10 +203,13 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required |
 
-Each variable is wired to a Spring property via a placeholder in
-`application.properties` (e.g. `DB_URL` → `spring.datasource.url`, `MAIL_HOST` →
-`spring.mail.host`, `APP_BASE_URL` → `app.base-url`). The names above are the
-supported configuration surface — prefer them over setting Spring properties directly.
+Every variable the **application** reads is wired to a Spring property via a
+placeholder in `application.properties` (e.g. `DB_URL` → `spring.datasource.url`,
+`MAIL_HOST` → `spring.mail.host`, `APP_BASE_URL` → `app.base-url`). A variable that
+sizes the **container** rather than the application is read by Docker Compose and
+never reaches the JVM (`APP_MEMORY_LIMIT`); its row says so, and it takes docker
+units rather than Spring ones. The names above are the supported configuration
+surface — prefer them over setting Spring properties directly.
 
 ## TLS & reverse proxy
 
@@ -584,6 +610,27 @@ Pin a version in your compose (e.g. `:0.4`), then upgrade with:
 docker compose pull && docker compose up -d
 ```
 
+**Coming from before 0.17.0, read these first.** That release puts bounds on resources you
+never configured, and none of the resulting failures names the upgrade:
+
+- **[The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170).** On a host larger
+  than 2 GB the app now gets *less* heap than the JVM used to take. There is no error; the
+  only symptom is that things get slower.
+- **[Statements are bounded from 0.17.0](#statements-are-bounded-from-0170).** Any single
+  database statement is cancelled after 10 seconds, so on a large install a report, a search
+  or a member removal that used to be merely slow now fails outright with a `422`.
+- **Lock waits are bounded with them.** `DB_LOCK_TIMEOUT_MS` (3 s) now applies to *every*
+  transaction rather than to the handful that lock deliberately, so a write queued behind a
+  long-running change answers a retryable `409` instead of waiting indefinitely. The default
+  did not move — its reach did. See its row in [Configuration](#configuration), and the
+  `409` entry in [Troubleshooting](#troubleshooting).
+
+**Also new in 0.17.0, and this one wants a check before you pull rather than after:**
+[Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
+The upgrade attributes every existing notification to a workspace and deletes any it cannot
+attribute; one query tells you whether that number is zero on your instance, and it is
+expected to be.
+
 Database migrations run automatically on startup (Flyway) — no manual step. See
 the [Releases](https://github.com/Zherikhov/easyTask/releases) page for notes
 before upgrading across a minor version.
@@ -596,6 +643,295 @@ each `docker compose pull`.
 release may change the schema in ways an older image can't read (`ddl-auto` is
 `validate`, so it will refuse to start rather than corrupt data). Always take a
 backup before a minor upgrade so you can roll back by restoring it.
+
+### Notifications are scoped to a workspace from 0.17.0
+
+**Two changes, and one of them wants five minutes *before* you pull the image.**
+
+**What your users will see.** A notification now belongs to the workspace whose comment it
+quotes, and an inbox shows only the notifications from workspaces that person is currently
+a member of. Remove somebody from a workspace and that workspace's notifications stop
+appearing for them — in the bell, in the unread count and in the live stream. The rows are
+**hidden, not deleted**: add the person back and their notifications return, with the same
+read and unread state they had when they left. Before 0.17.0 they kept a readable inbox of
+that workspace's comment text indefinitely, which is why this is worth the upgrade.
+
+**What to check first.** The upgrade gives every existing notification a workspace by
+reading it out of the row's `link`, which is where the product has always recorded which
+issue a mention points at. A row whose workspace cannot be read back that way is **removed
+from your inbox** — it could never be shown again under the new rule, and nothing anywhere
+else records which workspace it belonged to, so there is nothing to repair it from. It is
+copied aside rather than destroyed (see below), but it does not come back. Every
+notification the product has ever written carries a usable link, so the expected answer
+below is `0`; run it anyway, because the only instance that can tell you about your data is
+yours:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) AS unresolvable
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL;
+SQL
+```
+
+`0` means the upgrade deletes nothing — pull the image and carry on.
+
+**Any other number is not a reason to stop.** It is that many notifications the upgrade will
+move out of your inbox table, and there are two quite different reasons a row can be in that
+count. This tells you which:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT n.link IS NULL
+       OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL
+         AS link_did_not_parse,
+       count(*)
+  FROM notifications n
+  LEFT JOIN workspaces w
+    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
+ WHERE w.id IS NULL
+ GROUP BY 1;
+SQL
+```
+
+- **`link_did_not_parse` is `false`** — the link is fine, but the workspace it points at no
+  longer exists on your instance. These are leftovers from a workspace deleted outside the
+  application, a partial restore, or a dump reloaded without its parent rows; before 0.17.0
+  nothing in the database noticed them. They could never be displayed again. **Upgrade** —
+  removing them is the point.
+- **`link_did_not_parse` is `true`** — some notification on your instance was written in a
+  shape this release does not recognise. Upgrading is still safe (see the next paragraph),
+  but please post the numbers on the
+  [issue tracker](https://github.com/Zherikhov/easyTask/issues): every notification the
+  product is known to write carries a readable link, so yours would be new information.
+
+**The upgrade keeps a copy either way.** If it removes anything at all, it first copies those
+rows — in full, content included — into a table called `notifications_unresolvable_v20`, so
+you can still look at them afterwards. That table is created **only** when there is something
+to put in it, so on a clean upgrade it never appears. Nothing in Hamstrack reads it; it is
+there for you. Once you have your answer, drop it:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT * FROM notifications_unresolvable_v20;
+DROP TABLE notifications_unresolvable_v20;
+SQL
+```
+
+If you would rather have the rows as a file before you upgrade, export them first:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' > unresolvable-notifications.csv <<'SQL'
+\copy (SELECT n.* FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL) TO STDOUT WITH CSV HEADER
+SQL
+```
+
+A backup taken as [Backups](#backups) describes covers you either way, and is the general
+answer for a minor upgrade.
+
+### Statements are bounded from 0.17.0
+
+**Read this if your instance holds a lot of history** — a workspace with hundreds of
+thousands of issues, years of activity, or one very large project. On a small or ordinary
+install nothing changes and there is nothing to do: the bound is roughly a hundred times a
+normal request.
+
+Before 0.17.0, a single database statement could run **for ever**. Nothing shortened it: a
+browser that gives up does not stop the query on the server, and the connection pool's own
+timeout governs *waiting for* a connection, never one already in use. Ten slow queries were
+the whole pool (`DB_POOL_MAX_SIZE`, default 10) and everything else on the instance began
+failing to get a connection. From 0.17.0 every statement the application runs is cancelled
+after **10 seconds** (`DB_STATEMENT_TIMEOUT_MS`), and the request that asked for it answers
+`422` with `errorType: STATEMENT_BUDGET_EXCEEDED`.
+
+**Database migrations are deliberately not bounded.** Flyway runs its own transactions, so
+an index build or a table rewrite on a large install still takes as long as it takes.
+
+> **0.17.0 changed a second default, and on a big host the two compound.**
+> [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170) cuts the JVM heap on any
+> host larger than 2 GB — a 4 GB host drops from ~1 GB to 512 MB. Less heap means more garbage
+> collection inside the same query, which makes queries *slower*, which pushes borderline ones
+> over this bound. **The causal direction is one-way:** the heap change can produce a `422`
+> here, but nothing here affects the heap. So if reports started failing after upgrading on a
+> host of 4 GB or more, set `APP_MEMORY_LIMIT` **first** and see whether the `422` goes away,
+> before raising `DB_STATEMENT_TIMEOUT_MS`. Raising the bound hides a heap problem by letting
+> the slower query run longer, on a connection it holds the whole time.
+
+**What changes for you, if anything:**
+
+| Your install | Before | After |
+|---|---|---|
+| Ordinary size — no request takes more than a second or two | nothing was near the bound | unchanged |
+| Large, with one query that took ~5 s | a slow report | still works, ~5 s |
+| Large, with a report or search that took 30 s | very slow, and it pinned a connection the whole time | **`422`**, in 10 s |
+| Very large, where removing a busy member took 30 s | slow, and it held locks throughout | **`422`**, and the caller has nothing to narrow |
+
+The last row is the one worth knowing about: a report or a search can be made cheaper by
+asking for less — a shorter date range, fewer sprints, a narrower filter — but **removing a
+workspace member cannot**, because the expensive part is a single update over every issue
+that person was assigned. If that is where you meet this, raise the value.
+
+**What to do.** Nothing, unless something that worked yesterday starts answering `422`
+today. When it does, the app has already written the reason to the log:
+
+```
+Statement budget exceeded on GET /api/workspaces/{workspaceId}/projects/{projectId}/reports/flow
+after 10000ms — answering 422 (SQLSTATE 57014). Raise app.persistence.statement-timeout-ms
+(DB_STATEMENT_TIMEOUT_MS) if this request is legitimate, or narrow the query.
+```
+
+Then pick a value and restart:
+
+| Situation | Set in `.env` | Why |
+|---|---|---|
+| Default, and nothing is failing | nothing | 10 s is far past any healthy request |
+| A report or a report CSV download on a large tenant fails | `DB_STATEMENT_TIMEOUT_MS=30000` | 30 s, i.e. **at** the pool's own 30 s acquisition timeout, not under it. **Startup logs a sizing WARN at any value above 15000 and nothing silences it — expected here, not a misconfiguration.** Raise `DB_POOL_MAX_SIZE` with it, which is what that WARN itself advises: a longer bound means one request holds one connection for longer |
+| A member removal or another write fails | `DB_STATEMENT_TIMEOUT_MS=60000` | the caller cannot narrow a write; give it a minute. **Startup logs the same sizing WARN — unavoidable above 15000, and correct to ignore if this was deliberate.** Raise `DB_POOL_MAX_SIZE` with it: one such request now holds a connection for up to a minute |
+| You are diagnosing and want the old behaviour | **not available on purpose** | `0` means "no bound" to PostgreSQL and is refused at startup — that is the state this release exists to remove. Use a large value like `300000` instead, and expect the sizing WARN on every boot: at twenty times the threshold it is certain, and it is the app telling you this is a diagnostic setting rather than a resting one |
+
+```bash
+# in .env, next to DB_LOCK_TIMEOUT_MS
+DB_STATEMENT_TIMEOUT_MS=30000
+```
+
+Then `docker compose up -d`.
+
+**The floor is twice `DB_LOCK_TIMEOUT_MS` (default 3000), so the smallest accepted value is
+6000** — and if you go below it the app **refuses to start** and says so. That is friendly
+rather than hostile: PostgreSQL counts time spent waiting for a lock as part of the
+statement, so a statement bound at or under the lock bound would fire first, and every
+"someone else is editing this, try again in a moment" `409` in the product would silently
+become a `422` that no retry can fix.
+
+> **Above 15000 the app logs a sizing WARN at every boot, and no setting turns it off.** It
+> compares the statement bound against half of the pool's 30 s acquisition timeout and nothing
+> else — raising `DB_POOL_MAX_SIZE` is the right response to it but does not suppress it, and
+> the WARN says so itself while firing. Any value in the table above trips it; that is the
+> intended state for a deliberately long bound, and the log line is the record of the decision.
+>
+> **Raising it is not free, and these three numbers are really one setting.** Every second you
+> add is a second one request can hold one of your `DB_POOL_MAX_SIZE` connections, so the
+> relation to keep in view is
+>
+> ```
+> requests-per-minute x statement-timeout-seconds  <=  pool-size x 60 x (that surface's share)
+> ```
+>
+> **The left side is a floor, not the demand.** The bound is per *statement*, so a request made
+> of several statements holds a connection for longer than the number on the left — and one that
+> assembles its response in Java while the transaction is open (a report CSV) holds it for time
+> the bound does not govern at all. Solve it for `DB_POOL_MAX_SIZE` and you will under-provision
+> by roughly the statements-per-request factor.
+>
+> At the defaults one user is entitled to 180 expensive requests a minute (120 search + 60
+> reports) while one replica has 600 connection-seconds a minute to spend — so the entitlement
+> already exceeds the supply even at the floor. Bounding the hold is what makes that arithmetic
+> possible to do at all, and it does not by itself close the gap (tracked as HD-182).
+> Practically: if you raise
+> `DB_STATEMENT_TIMEOUT_MS` near or above 30 s, raise `DB_POOL_MAX_SIZE` with it, or lower
+> `REPORTS_REQUESTS_PER_MINUTE` / `SEARCH_REQUESTS_PER_MINUTE` — otherwise a handful of slow
+> requests can still take the pool, more slowly than before, which is all this setting promises.
+
+### The heap is bounded from 0.17.0
+
+**Read this if your host has more than 2 GB of RAM.** On a smaller host you *gain*
+heap and there is nothing to do. There is no error either way, which is the problem:
+the only symptom is that the instance behaves as though it has less memory than it
+used to, and nothing connects that to the upgrade.
+
+Before 0.17.0 the image ran `java -jar` with no heap flag and the bundled compose set
+no memory limit, so the JVM applied its own default — **~25% of whatever the host
+had**. Your heap was a property of the machine, and no setting in Hamstrack named it.
+From 0.17.0 the image runs `-XX:MaxRAMPercentage=50` and the bundled
+`docker-compose.prod.yml` limits the app container to `1g` (`APP_MEMORY_LIMIT`), so
+the heap is **half the container limit — 512 MB by default, on every host**. That is
+what makes `REPORTS_MAX_ROWS` and the other byte budgets mean something: they are
+costed against a 512 MB heap, which until now was an assumption about your machine
+rather than a fact about the deployment.
+
+**Break-even is a 2 GB host**, and it moves in both directions:
+
+| Your setup before | Heap before | Heap after (default `1g`) |
+|---|---|---|
+| 1 GB host, no container limit | ~256 MB | **512 MB** — you gain |
+| your own compose with `mem_limit: 1g` | ~256 MB | **512 MB** — you gain |
+| 2 GB host, no container limit | ~512 MB | 512 MB — unchanged |
+| 4 GB host, no container limit | ~1 GB | **512 MB** — you lose half |
+| 8 GB host, no container limit | ~2 GB | **512 MB** — you lose three quarters |
+
+On the losing rows the instance still works. It garbage-collects more often, large
+reports and searches get slower, and a report that used to fit may now report itself
+truncated or, at the extreme, fail. It reads as "0.17.0 made it slower".
+
+**"Fail" has a specific spelling now, and it is the other half of this release.**
+0.17.0 also cancels any single database statement after 10 seconds
+([Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)), so a query the
+smaller heap has slowed past that answers **`422` `STATEMENT_BUDGET_EXCEEDED`** rather than
+finishing late. Two changed defaults, one symptom, and this one is the cause: on a host of
+4 GB or more, fix the heap here first — raising the statement bound instead buys the slower
+query more time on a connection it is already holding too long.
+
+**What to do:** on a host of 4 GB or more, set `APP_MEMORY_LIMIT` to **about half the
+host** — never above **host RAM minus 2 GB**, less another 1 GB if you run the
+[observability stack](#observability-optional). Whichever of the two is smaller is your
+number, and the heap is half of it. On a 2 GB host or smaller, leave the default: the
+whole point of that box is the app, and `1g` already gives it what it had.
+
+| Host | Set in `.env` | Heap you get | Also worth setting |
+|---|---|---|---|
+| ≤ 2 GB | nothing — the default `1g` is right | 512 MB | — |
+| 4 GB | `APP_MEMORY_LIMIT=2g` | 1 GB | — |
+| 4 GB **with observability** | nothing — the default `1g` is right | 512 MB | — |
+| 8 GB | `APP_MEMORY_LIMIT=4g` | 2 GB | `JAVA_TOOL_OPTIONS=-Xmx3g` → 3 GB |
+| 8 GB **with observability** | `APP_MEMORY_LIMIT=4g` | 2 GB | `JAVA_TOOL_OPTIONS=-Xmx3g` → 3 GB |
+| 16 GB | `APP_MEMORY_LIMIT=8g` | 4 GB | `JAVA_TOOL_OPTIONS=-Xmx7g` → 7 GB |
+
+```bash
+# in .env, next to the other settings
+APP_MEMORY_LIMIT=2g     # 4 GB host running app + PostgreSQL + Caddy → 1 GB heap
+```
+
+Then `docker compose up -d` to recreate the container; a memory limit is not applied to a
+running one.
+
+**From `4g` up, also set an explicit heap** — the fourth column above. The 50% split is
+headroom sized for a *small* container and does not stay right as the limit grows, because
+most of what lives outside the heap — metaspace, the code cache, thread stacks — is roughly
+*constant* rather than proportional: at `4g` the default reserves ~1.5 GB nothing will use,
+where at `2g` it over-reserves by ~300 MB and is not worth a second setting. Claim the rest
+back with
+
+```bash
+JAVA_TOOL_OPTIONS=-Xmx3g    # with APP_MEMORY_LIMIT=4g: limit minus ~700 MB
+```
+
+> **Only the `-Xmx` form works.** Setting `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75`
+> — the natural thing to try, since that is the flag named above — changes nothing:
+> the image passes its own copy on the command line and that copy wins. The JVM still
+> logs `Picked up JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75.0` when it starts, and
+> that line means the variable was *read*, not that it was *applied*. So the evidence
+> you would look for is present and says the wrong thing. `-Xmx` is a different flag
+> and does override the percentage.
+
+**Check what you actually got.** The container's limit and the heap it produces:
+
+```bash
+docker stats --no-stream --format '{{.Name}}  {{.MemUsage}}'
+docker compose exec app java -XX:MaxRAMPercentage=50.0 -XX:+PrintFlagsFinal -version | grep -w MaxHeapSize
+```
+
+The first prints `used / limit` per container. The second prints the heap in bytes
+(`536870912` is 512 MB). Repeat the flag exactly as shown: `exec` starts a *fresh*
+JVM that does not inherit the image's startup arguments, so without it you would be
+reading the default rather than yours. If you set `JAVA_TOOL_OPTIONS`, that JVM picks
+it up the same way the app does, so the number stays honest.
+
+**Running your own compose file rather than the bundled one?** Then nothing has
+capped your container and the percentage is taken against host RAM — which at 50% is
+*more* heap than before, and closer to the host's ceiling than is safe. Add a
+`mem_limit:` to the app service; the [Quick start](#quick-start) file shows one.
 
 ### Duplicate accounts after an upgrade (locale-dependent email folding)
 
@@ -747,13 +1083,13 @@ so a retyped address can look identical and still not match.
 **Run this block in one interactive session**, in the order printed:
 
 ```bash
-docker compose exec -it postgres psql -U hamstrack hamstrack
+docker compose exec -it postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"'
 ```
 
 then paste it there. The stash in statement 0 is a **temp table, which lives only for
 the connection that created it** — so running these as separate one-shot
-`psql -c "…"` calls, the way the commands elsewhere in this document are written,
-drops it between statements: statement 1 still retires the duplicate and tombstones
+`psql -c "…"` invocations, one command per shell line, drops it between statements:
+statement 1 still retires the duplicate and tombstones
 its address, and statement 2 then fails with `relation "keep" does not exist`. That is
 the stop-you-halfway state the comment in statement 1 warns about, reached through a
 different door.
@@ -806,13 +1142,13 @@ reference each other, so capture them together and restore to a consistent point
 **Database** — logical dump:
 
 ```bash
-docker compose exec postgres pg_dump -U hamstrack hamstrack > hamstrack-$(date +%F).sql
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > hamstrack-$(date +%F).sql
 ```
 
 Restore into a running (empty) database:
 
 ```bash
-docker compose exec -T postgres psql -U hamstrack hamstrack < hamstrack-YYYY-MM-DD.sql
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' < hamstrack-YYYY-MM-DD.sql
 ```
 
 (Or snapshot the `postgres_data` volume while the container is stopped.)
@@ -832,7 +1168,10 @@ versioning/backup. Take a backup **before every minor upgrade**.
 | Attachment upload returns `500` | `STORAGE_TYPE=s3` without a valid bucket/region/credentials, or the local dir isn't writable. |
 | Upload rejected (`413` / too large) | Over `ATTACHMENT_MAX_FILE_SIZE` (app limit) or `ATTACHMENT_MAX_UPLOAD_SIZE` (servlet ceiling); raise both, and the proxy body-size limit to match. |
 | Upload rejected (`415` / type not allowed) | The file extension isn't in `ATTACHMENT_ALLOWED_EXTENSIONS` — add it (comma-separated, case-insensitive). |
+| A report, search or report CSV download that worked now returns `422` (`STATEMENT_BUDGET_EXCEEDED`) | One database statement ran past `DB_STATEMENT_TIMEOUT_MS` (default 10 s, **new in 0.17.0**) and PostgreSQL cancelled it. An identical retry fails identically. Narrow the request (shorter date range, fewer sprints, tighter filter) or raise the value — [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170) has a size-to-value table. A **write** that does this (removing a member with a lot of assigned work) cannot be narrowed, so raise it. On a host of 4 GB or more also check the [heap](#the-heap-is-bounded-from-0170): 0.17.0 cut that too, and less heap makes the same query slower, so one symptom here can have either cause — or both. |
+| An edit or save that used to work now returns `409` "Someone else is changing this right now" | **New in 0.17.0, and unlike the `422` above it announces nothing** — the status, the message and the `Retry-After` header all existed before, so there is no new string to search for. `DB_LOCK_TIMEOUT_MS` (3 s) now bounds *every* transaction rather than only the few that lock deliberately, so a write queued behind a long-running change gives up instead of waiting indefinitely. **It is retryable and the header says when**, so a client should retry rather than surface it. If legitimate edits collide often enough to be noticed, raise `DB_LOCK_TIMEOUT_MS` — but it may not exceed half `DB_STATEMENT_TIMEOUT_MS` (default `10000`, so `5000` is today's maximum) and the app refuses to start above that, so raise both together. The usual cause is removing a member with a lot of assigned work. |
 | Everyone shares one IP / false `429`s | Behind a proxy/CDN that doesn't pass `X-Forwarded-For` (or passes an untrusted one). Ensure the proxy sets it; the app trusts the right-most entry. |
+| Startup fails naming `app.persistence.statement-timeout-ms` and `app.locking.lock-timeout-ms` | The statement bound is under **2x** the lock bound. PostgreSQL counts lock-wait time inside the statement, so the smaller bound always fires first, and a statement bound at or under the lock bound would make the lock bound dead configuration — every retryable `409` in the product would quietly become a `422` no retry can fix. The message prints both values, the computed minimum and both knobs. **It can fire from the side you did not touch:** raising `DB_LOCK_TIMEOUT_MS` above 5000 while `DB_STATEMENT_TIMEOUT_MS` is at its default 10000 stops the boot. |
 | Startup fails with a schema validation error after changing the image | You moved to an **older** image than the DB was migrated to. Use the newer image, or restore a pre-upgrade backup. |
 
 ## REST API

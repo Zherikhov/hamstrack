@@ -55,14 +55,16 @@ info:
     body that cannot be parsed at all is still a `400` but carries no `errors`
     map, because nothing was bound.
 
-    **Lock contention is a retryable `409`, never a `500`.** A few mutations
-    take row locks so an invariant holds under concurrency — membership changes
-    are the main ones — and when two of them overlap the database resolves it by
-    rolling one back (deadlock or lock timeout). Those transactions also bound
-    how long they will wait for a lock (3 s by default), so a pile-up drains
-    rather than hanging until a client gives up. Nothing is left half-applied,
-    so the loser is told to try again rather than shown a fault: `409` with
-    `detail: "Someone else is changing this right now — try again in a moment"`
+    **Lock contention is a retryable `409`, never a `500`.** From 0.17.0 **every
+    transaction this API opens bounds how long it will wait for a row lock**
+    (3 s by default), so any write that collides with a longer-running change
+    gives up and is told to retry rather than hanging until a client does — and
+    so does the other way a race ends, the database rolling one of two
+    overlapping writes back (deadlock or lock timeout). Writes that take row
+    locks deliberately — membership changes are the main ones — are simply the
+    likeliest to meet it: the bound is the API’s, not theirs. Nothing is left
+    half-applied, so the loser is told to try again rather than shown a fault:
+    `409` with `detail: "Someone else is changing this right now — try again in a moment"`
     and `Retry-After: 1`, the same retry shape `429` uses. This is app-wide
     rather than a property of any one endpoint, and it is the only `409` worth
     retrying automatically — an invariant conflict (stale `version`, name in
@@ -71,12 +73,81 @@ info:
     apart by the `Retry-After` header, not by the wording of `detail` — this
     variant deliberately carries no `errorType`.
 
+    **A request that outruns the server’s time budget is a `422`, and it is
+    not retryable.** Every transaction this API opens is bounded: a database
+    statement that runs longer than the instance’s budget
+    (`app.persistence.statement-timeout-ms`, 10 s by default) is cancelled, and
+    the request answers `422` with `errorType: "STATEMENT_BUDGET_EXCEEDED"` and
+    a `detail` naming that budget in human units. **This is a property of the
+    API rather than of a set of endpoints** — the bound is applied where
+    transactions begin, not at individual handlers, because how long a request
+    takes follows from how much a workspace has accumulated and not from which
+    feature was called. So any operation in this document that reads or writes
+    may answer it, whatever its own `responses` list enumerates, and it is
+    deliberately attached to no path: such a list could not be kept true. The
+    budget also bounds any *one* statement, so a request may spend longer than
+    it overall before being stopped. See `StatementBudgetProblemDetail`.
+
+    **There is deliberately no `Retry-After`, because an identical retry fails
+    identically.** The same request over the same data costs the same time, so
+    a retry — immediate, backed off, or automatic inside an SDK — spends the
+    whole budget again and is refused again. Never retry it. What clears it is
+    a *smaller* request (a narrower date range, a tighter filter, fewer rows)
+    or an operator raising the budget; `detail` offers the narrowing only where
+    narrowing is possible, since some requests take no parameter that could
+    narrow anything, and where nothing can be narrowed it closes the loop
+    rather than trailing off: it says the request is larger than this instance
+    is configured to answer. The sentence always ends somewhere, but it
+    deliberately prescribes no action there — it describes the situation rather
+    than dispatching the reader, because the setting behind the budget is not
+    one every reader’s administrator owns. This is the exact opposite of the
+    lock-contention `409` above, which it resembles: that one means *someone
+    else is changing this right now* and retrying works, this one means *this
+    took too long and will take too long again* and retrying does not.
+
+    **A write that conflicts with a related record is a `409`, not a crash.**
+    Where the database itself refuses a write because a reference cannot be
+    satisfied — in either direction: something still points at a row being
+    removed, or a row being written points at something that is no longer
+    there — the refusal reaches the caller as `409` with
+    `errorType: "REFERENCE_CONSTRAINT_VIOLATION"`, and nothing is
+    half-applied. **This is a property of the API rather than of a set of
+    endpoints** — it is what makes "no reference is ever left stranded" true
+    of every path, including one added later that forgets to check, which is
+    the entire reason it exists and why no operation below lists it. **A
+    caller should not normally meet it**: where an operation can foresee the
+    conflict it checks first and answers its own, more specific `409` naming
+    what is in the way and what to do about it, and that pre-check is the
+    refusal to code against. This one is the backstop under it, and it
+    **prescribes no remedy specific to either direction** — it cannot tell
+    which of the two it caught, and their remedies are opposite — so it offers
+    only the recovery that holds both ways: re-read, then retry. Whether that
+    recovery helps follows from the direction. Where the cause was somebody
+    else's commit — a referenced row deleted between the read that resolved it
+    and the write that landed, which is the likeliest way to meet this at all —
+    a retry genuinely can succeed, the exact opposite of the time-budget `422`
+    above; where something still points at what is being removed, it is still
+    there and a retry is refused identically. Re-read first and send what you
+    find rather than replaying the identical body.
+
+    **"In a moment" is literal.** A reload may still be served a briefly cached
+    copy of the project's catalog, so an entry that is already gone can keep
+    being offered for a little while. There is deliberately no `Retry-After` —
+    that header stays with the lock-contention `409`, where the wait has a
+    known bound — and nothing here is a schedule to key on. See
+    `ReferenceConstraintProblemDetail`.
+
     **`errorType` says which failure a body is**, wherever one status covers
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
-    query carries `PARSE_ERROR` or `SEMANTIC_ERROR`, and a member removal
+    query carries `PARSE_ERROR` or `SEMANTIC_ERROR`, a member removal
     refused over project administrators carries `STRANDED_PROJECTS`,
-    `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`. Two rules for consuming
+    `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`, and any request stopped
+    for outrunning the server’s time budget carries
+    `STATEMENT_BUDGET_EXCEEDED`, and a write the database refuses because a
+    reference could not be satisfied carries
+    `REFERENCE_CONSTRAINT_VIOLATION`.
+    Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
     not read its **absence** as an unknown value — a response that needs no
@@ -84,7 +155,8 @@ info:
     exactly that case, and is told apart by `Retry-After` instead).
 
 
-    It is not a `409`-only member. One `403` carries it as well —
+    It is not a `409`-only member. The time-budget `422` above carries it,
+    and one `403` carries it as well —
     `REACTIVATED_DEFAULT_ABOVE_CEILING`, when restoring open project access
     would make a *per-project* declared default live that the caller may not
     set — and the same two endpoints answer the plain grant-ceiling `403` with
@@ -1625,11 +1697,12 @@ paths:
 
 
         **The cap is exact, not advisory.** The count is taken under a row lock
-        on the workspace, so concurrent duplicates cannot overshoot it. That
-        lock is also the reason this is the one role endpoint that can answer a
-        retryable `409` with `Retry-After`: how long it waits is the same
-        deployment-wide lock timeout the membership mutations use, and a lost
-        race means nothing was created — just retry.
+        on the workspace, so concurrent duplicates cannot overshoot it. Taking
+        that lock deliberately makes this the **likeliest** role write to answer
+        a retryable `409` with `Retry-After`, but not the only one: from 0.17.0
+        the wait bound (3 s by default) belongs to every transaction the API
+        opens rather than to this endpoint. A lost race means nothing was
+        created — just retry.
       operationId: duplicateRole
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2066,9 +2139,10 @@ paths:
         this same guard exactly when it would orphan the project.
 
         Setting the role a member already holds is an accepted no-op. Like the
-        removal, this takes row locks on the project's administrators and bounds
-        how long it waits, so a lost race is a retryable `409` carrying
-        `Retry-After` rather than a hang.
+        removal, this takes row locks on the project's administrators, which
+        makes it likelier than most writes to meet the wait bound every
+        transaction this API opens carries, so a lost race is a retryable `409`
+        carrying `Retry-After` rather than a hang.
       operationId: updateProjectMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -2118,8 +2192,9 @@ paths:
         rows for every project at once and answers a `409` naming each affected
         project.
 
-        This removal takes row locks on the project's administrators and bounds
-        how long it will wait for one (3 s by default), so two overlapping
+        This removal takes row locks on the project's administrators, which
+        makes it likelier than most writes to meet the wait bound every
+        transaction this API opens carries (3 s by default), so two overlapping
         removals answer a retryable `409` with `Retry-After` instead of one of
         them hanging — see **Errors** in the introduction.
       operationId: removeProjectMember
@@ -2335,6 +2410,12 @@ paths:
         `/{id}/unarchive` (not listed individually) hide an entry from new
         use instead. The same delete/archive semantics apply to priorities
         and issue types.
+
+        `replaceWithId` is resolved **within the caller’s own scope** and
+        answers `404` — never `403` — when it names an entry that scope cannot
+        see, so an entry belonging to another tenant is indistinguishable from
+        one that does not exist. Here that scope is global: a workspace- or
+        project-scoped entry is not a valid replacement for a global one.
       operationId: adminDeleteStatus
       parameters:
         - $ref: '#/components/parameters/adminId'
@@ -2754,7 +2835,8 @@ paths:
         `?dropValues=`], GET `/{id}/usage`) and the sets `workflows`,
         `priority-sets`, `field-sets`, `issue-type-sets` (GET/POST, PATCH/DELETE
         `/{id}`). List responses carry `scope`; writes to inherited (global) rows
-        return 404.
+        return 404. A delete’s `?replaceWithId=` resolves within this scope’s
+        visible catalog too — an id it cannot see is 404, never 403.
       operationId: wsAdminListStatuses
       parameters: [ { $ref: '#/components/parameters/workspaceId' } ]
       responses:
@@ -2840,7 +2922,9 @@ paths:
         part of the workspace-wide curator set, so a workspace OWNER/ADMIN with
         no project membership row is refused. Rows scoped PROJECT are editable;
         global/workspace rows are inherited (read-only). This endpoint plus PATCH
-        set the four bindings.
+        set the four bindings. A catalog delete’s `?replaceWithId=` resolves only
+        within what this project can see (global ∪ workspace ∪ its own rows);
+        anything else is 404.
 
 
         **A workspace member who is not a project member now gets 403 here, not
@@ -6302,7 +6386,15 @@ paths:
     get:
       tags: [Notifications]
       summary: List my notifications
-      description: Across all workspaces, newest first.
+      description: >-
+        Newest first, capped at 30, across the workspaces you are
+        **currently** a member of. These paths name no workspace — the feed is
+        cross-workspace by design — but every one of them filters on live
+        membership, so a notification from a workspace you have since left is
+        not listed here, not counted by `/notifications/unread-count`, not
+        touched by `/notifications/read-all`, and `404`s on
+        `/notifications/{id}/read`. It is hidden, not deleted: rejoin the
+        workspace and it comes back with its read state intact.
       operationId: listNotifications
       responses:
         '200':
@@ -6318,6 +6410,10 @@ paths:
     get:
       tags: [Notifications]
       summary: Unread counter
+      description: >-
+        Counts exactly the notifications `GET /notifications` would return —
+        the caller's own, in the workspaces they are currently a member of —
+        with no 30-row cap.
       operationId: unreadCount
       responses:
         '200':
@@ -6346,12 +6442,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/NotificationResponse' }
-        '404': { $ref: '#/components/responses/NotFound' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: >-
+            Not found — a notification this caller cannot see. An unknown id,
+            one addressed to another user, and one belonging to a workspace the
+            caller is no longer a member of are deliberately a **single
+            indistinguishable answer**, never a `403`: a success here returns
+            the whole notification, excerpt included, so a lookup that told the
+            cases apart would disclose the content it exists to withhold.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /notifications/read-all:
     post:
       tags: [Notifications]
       summary: Mark all as read
+      description: >-
+        Marks everything the caller can currently see. A notification in a
+        workspace the caller has left stays **unread** — hiding a row must not
+        quietly mutate it — so a member who is re-added finds that inbox in the
+        state they left it.
       operationId: markAllNotificationsRead
       responses:
         '204': { description: Done }
@@ -6915,7 +7027,7 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
-            Four refusals, all field-anchored, all `422` — never `400`:
+            The field-anchored refusals, all `422` — never `400`:
 
             * an **unparseable HQL query** — `errorType: "PARSE_ERROR"` with a
               highlight span (`position`, `length`, nullable `token`);
@@ -7646,12 +7758,12 @@ components:
 
         The other `409` here is app-wide rather than specific to these
         endpoints: both the removal and the role change take row locks on the
-        project's administrators and bound how
-        long they wait for one, so a lost race answers lock contention — a plain
-        `ProblemDetail` carrying `Retry-After`, worth retrying **unchanged**
-        (see **Errors** in the introduction). The invariant above carries no such
-        header, because retrying it unchanged cannot help. Neither variant
-        carries an `errorType`.
+        project's administrators, which makes them likelier than most writes to
+        meet the wait bound every transaction carries, so a lost race answers
+        lock contention — a plain `ProblemDetail` carrying `Retry-After`, worth
+        retrying **unchanged** (see **Errors** in the introduction). The
+        invariant above carries no such header, because retrying it unchanged
+        cannot help. Neither variant carries an `errorType`.
       headers:
         Retry-After:
           description: >-
@@ -7750,7 +7862,7 @@ components:
               - $ref: '#/components/schemas/StrandedProjectsProblemDetail'
     RolePermissionUnprocessable:
       description: >-
-        A permission entry cannot be honoured. Four cases, all `422` and all
+        A permission entry cannot be honoured. Each case below is a `422` and is
         about a *value* rather than the shape of the request — the body is
         well-formed JSON and every field validates on its own:
 
@@ -7780,8 +7892,8 @@ components:
         two entries could disagree about `ownOnly`, and one would win invisibly.
 
 
-        `POST /workspaces/{workspaceId}/roles/preview` produces exactly these
-        same four, which is the point of the endpoint.
+        `POST /workspaces/{workspaceId}/roles/preview` produces exactly the
+        same refusals, which is the point of the endpoint.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -7879,6 +7991,49 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    StatementBudgetExceeded:
+      description: >-
+        The request was stopped for outrunning the server’s time budget:
+        `422` with `errorType: "STATEMENT_BUDGET_EXCEEDED"` and, deliberately,
+        no `Retry-After` — an identical retry costs identical time and is
+        refused identically.
+
+
+        **Deliberately referenced by no operation.** Every application
+        transaction is bounded, so this answer belongs to the API as a whole
+        rather than to a list of paths — and that list could not be kept true,
+        because whether a request outruns the budget follows from how much data
+        a workspace holds and not from which endpoint was called. It is defined
+        here so the shape has one home; do not "complete" the spec by attaching
+        it to whichever endpoints look expensive today.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/StatementBudgetProblemDetail' }
+
+    ReferenceConstraintViolation:
+      description: >-
+        The write was refused by the database because a reference could not be
+        satisfied: `409` with `errorType: "REFERENCE_CONSTRAINT_VIOLATION"`.
+        Both directions land here — something still points at a row being
+        removed, and a row being written points at something that is no longer
+        there — and the body asserts neither, because they cannot be told
+        apart without reading the message the database owns. Nothing is
+        half-applied.
+
+
+        **Deliberately referenced by no operation, and not the refusal a
+        caller normally meets.** Where an operation can foresee the conflict it
+        checks first and answers its own, more specific `409`; this one is the
+        guarantee underneath those checks — that no reference is ever left
+        stranded, on a path written later that forgets to check as much as on
+        the ones documented here. Attaching it to whichever paths look exposed
+        today would say the opposite of what it is. It carries no
+        `Retry-After`, and names nothing: not the entry, not a count, not the
+        constraint.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ReferenceConstraintProblemDetail' }
 
     ReportWindowRejected:
       description: >-
@@ -8118,6 +8273,95 @@ components:
               example:
                 key: Key must be uppercase letters and digits only
                 name: must not be blank
+
+    StatementBudgetProblemDetail:
+      description: >-
+        The `422` body of a request the server stopped for outrunning its time
+        budget. Any operation that touches the database can answer it — the
+        bound is applied to every application transaction rather than to a
+        chosen set of handlers — so it is documented as a property of the API
+        and deliberately listed under no individual path.
+
+
+        It carries **no `Retry-After`**, and that absence is the contract: the
+        same request over the same data costs the same time, so an identical
+        retry is refused identically. What clears it is a smaller request (a
+        shorter date range, a tighter filter, fewer rows) or an operator raising
+        the budget — not an administrator the caller can necessarily reach, which
+        is why `detail` never prescribes one.
+        Contrast the lock-contention `409`, which does carry `Retry-After` and
+        *is* worth retrying unchanged.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 422 }
+            detail:
+              type: string
+              description: >-
+                Names the budget in human units, and offers narrowing only where
+                narrowing is possible — some bounded requests take no parameter
+                that could narrow anything — so where nothing can be narrowed
+                the sentence closes the loop rather than trailing off: it says
+                the request is larger than this instance is configured to
+                answer. That ending describes the situation rather than
+                prescribing an action, since the reader may have none. It never
+                names the property, the environment variable or the database
+                setting behind the budget: those are the operator’s, and the
+                operator’s copy of this refusal is a log line.
+              example: >-
+                This request was stopped after 10 seconds — it is too expensive
+                to complete on this instance. If it takes a date range or
+                filters, narrow them; otherwise this request is larger than this
+                instance is configured to answer. Retrying it unchanged will take
+                just as long.
+            errorType:
+              type: string
+              enum: [STATEMENT_BUDGET_EXCEEDED]
+
+    ReferenceConstraintProblemDetail:
+      description: >-
+        The `409` body of a write the database refused because a reference
+        could not be satisfied. It belongs to the API rather than to a list of
+        paths — it is what makes "no reference is ever left stranded" true of
+        every path, including one added later that forgets its own check — so
+        it is defined here and attached to no operation.
+
+
+        The refusal a caller normally meets is the endpoint's own pre-check
+        `409`, which knows what is in the way and can therefore prescribe a
+        remedy for it. This is the backstop under it and prescribes no
+        direction-specific remedy, because it cannot tell whether it caught a
+        row that is still pointed at or a write pointing at a row that is gone,
+        and those two want opposite actions. Never a `500`.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 409 }
+            detail:
+              type: string
+              description: >-
+                Direction-neutral, which is a constraint rather than a style:
+                the reachable case is an ordinary write racing a concurrent
+                delete, whose author can neither remap nor archive anything. So
+                it prescribes only the recovery that holds in both directions —
+                re-read, then retry — and names nothing: not the entry, not a
+                count, not the constraint. It says "in a moment" because a
+                reload can still be served a briefly cached copy of the project
+                catalog, so an entry already deleted may keep being offered for
+                a short while; the wording carries that limit rather than this
+                handler reaching into another feature's cache to hide it. No
+                `Retry-After` accompanies it and no schedule is implied. The
+                direction and the offending key go to the server log, which is
+                the operator's copy of this refusal.
+              example: >-
+                This change conflicts with a related record, so it was not
+                applied. Something else may have changed at the same time —
+                reload and try again in a moment.
+            errorType:
+              type: string
+              enum: [REFERENCE_CONSTRAINT_VIOLATION]
 
     HqlProblemDetail:
       description: >-
@@ -13302,9 +13546,36 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        type: { type: string, example: ISSUE_ASSIGNED }
-        title: { type: string, example: You were assigned DEMO-18 }
-        body: { type: string, nullable: true }
+        workspaceId:
+          type: string
+          format: uuid
+          description: >-
+            The workspace this notification came from. Always present: every
+            notification belongs to exactly one workspace, and you only receive
+            one while you are a member of it. Read the tenant from here rather
+            than parsing it out of `link` — that string's shape is a rendering
+            detail of whichever producer raised the notification, and a producer
+            whose link is shaped differently, or absent, would silently yield
+            "no workspace" to a parsing client.
+        type:
+          type: string
+          example: MENTIONED
+          description: >-
+            What kind of event raised this notification. Values are added as
+            producers are added, so a client must tolerate one it does not
+            recognise — render `title`/`body` and follow `link`.
+            `MENTIONED` (someone `@`-mentioned you in an issue comment) is
+            one such value.
+        title: { type: string, example: Jane Doe mentioned you }
+        body:
+          type: string
+          nullable: true
+          description: >-
+            A denormalised excerpt of the source content, captured at delivery
+            time — for `MENTIONED`, the first 120 characters of the comment.
+            It is a copy, not a live view: editing the source does not rewrite
+            it.
+          example: Can you take a look at the rate limiter before Friday?
         link: { type: string, nullable: true, example: /w/…/p/…?issue=18 }
         read: { type: boolean }
         createdAt: { type: string, format: date-time }

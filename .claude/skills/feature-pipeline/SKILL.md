@@ -69,6 +69,13 @@ project-native mandatory reviewer. Environmental test failures (DB down) → fix
 All required gates `pass`/`n/a` ⇒ the hook allows stop. Summarize what shipped + changed files + any deferred
 open questions. **Do not offer to commit** (the user commits themselves).
 
+**ADR self-check (soft — no gate, judgment call).** Ask: *did this task settle a significant, hard-to-reverse
+architectural fork* — a new data-model / tenancy / auth / DC-Cloud / storage pattern, or a choice a future
+contributor would ask "why?" about? If **yes**: ensure `docs/adr/` records it — flip the `systems-analyst`'s
+drafted `Proposed` ADR to `Accepted`, or (if none was drafted) write one now following the format of the existing
+files there and add its row to `docs/adr/README.md`. If **no** (routine feature mechanics), do nothing — most
+tasks are not ADR-worthy. Record only verified reasoning; never invent a decision date (use the record date).
+
 ## `run.json` schema
 ```jsonc
 {

@@ -135,6 +135,7 @@ The subagents run as a **dev team on autopilot**: the main session is the **orch
 
 - **`docs/project-state.md`** — feature changelog (Phases 2/3/4A, admin M1–M3, user accounts/onboarding), subsystem internals (taxonomy, custom fields, rate limiting, demo data, schema squash), **post-squash features (V2–V6): HQL search, saved filters, delegated/scoped admin, issue hierarchy, system fields & `closed_at`, issue-detail surfaces**, the Phase 3 API surface map, **CI/CD & deployment**, and the full imported-subagent catalog.
 - **`docs/api-cloud.md`** / **`docs/api-dc.md`** + `src/main/frontend/public/openapi.yaml` — user-facing REST reference. Update all three on any API change (`api-docs-sync` does this).
+- **`docs/adr/`** — Architecture Decision Records: one file per significant decision (what/why/alternatives/trade-offs). Read to understand *why* a fork was chosen; add a new numbered ADR when making a significant, hard-to-reverse decision. Index in `docs/adr/README.md`.
 - **`docs/design/dev-team-pipeline.md`** — full dev-pipeline spec (orchestration, gates, enforcement, curation).
 - **`PLAN.md`** — roadmap & stack decisions. **`DESIGN.md`** — the visual system; read before any UI work.
 - Other `docs/`: `docs/ops-prod-hardening.md` (prod hardening/SSM), `docs/design/` (feature specs).
