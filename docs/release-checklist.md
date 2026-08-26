@@ -289,7 +289,7 @@ Ready to paste:
 > should retry. The two bounds ship together on purpose: `statement_timeout` counts lock-wait
 > time, so bounding statements alone would have answered that same collision with the
 > non-retryable `422` above. Details:
-> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
+> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
 
 And the heap line:
 
@@ -300,7 +300,7 @@ And the heap line:
 > `APP_MEMORY_LIMIT` in `.env` to about half the host (4 GB → `2g`, 8 GB → `4g`) and
 > `docker compose up -d`. On a host of 2 GB or less you gain heap and need do nothing.
 > Details:
-> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
+> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
 
 And the taxonomy foreign keys, which is the one line here that can stop a **startup** — so it
 carries the repair, not just the diagnosis. A DC operator whose data is clean never sees any of
@@ -365,7 +365,7 @@ not be left to discover:
 > until this release there was no foreign key here, so those accumulated silently and were
 > already unshowable. Removing them is the correct outcome and is not a reason to hold the
 > upgrade. Details:
-> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
+> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
 
 ## Constraints on a populated table, and why they are free right now
 

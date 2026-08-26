@@ -632,7 +632,7 @@ attribute; one query tells you whether that number is zero on your instance, and
 expected to be.
 
 Database migrations run automatically on startup (Flyway) — no manual step. See
-the [Releases](https://github.com/Zherikhov/easyTask/releases) page for notes
+the [Releases](https://github.com/Zherikhov/hamstrack/releases) page for notes
 before upgrading across a minor version.
 
 **Pin an exact patch** (`:0.4.3`) for maximum reproducibility — you then upgrade
@@ -704,7 +704,7 @@ SQL
 - **`link_did_not_parse` is `true`** — some notification on your instance was written in a
   shape this release does not recognise. Upgrading is still safe (see the next paragraph),
   but please post the numbers on the
-  [issue tracker](https://github.com/Zherikhov/easyTask/issues): every notification the
+  [issue tracker](https://github.com/Zherikhov/hamstrack/issues): every notification the
   product is known to write carries a readable link, so yours would be new information.
 
 **The upgrade keeps a copy either way.** If it removes anything at all, it first copies those

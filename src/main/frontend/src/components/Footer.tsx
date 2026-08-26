@@ -28,7 +28,7 @@ export default function Footer() {
             Docs
           </Link>
           <a
-            href="https://github.com/Zherikhov/easyTask"
+            href="https://github.com/Zherikhov/hamstrack"
             target="_blank"
             rel="noreferrer"
             className="hover:underline"

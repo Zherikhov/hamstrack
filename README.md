@@ -1,6 +1,6 @@
 # Hamstrack
 
-[![Build](https://github.com/Zherikhov/easyTask/actions/workflows/build.yml/badge.svg)](https://github.com/Zherikhov/easyTask/actions/workflows/build.yml)
+[![Build](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml/badge.svg)](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 **Hamstrack** is an open-source task tracker for software teams: workspaces, projects, kanban boards, backlog, workflows, comments, attachments and real-time updates — in a single deployable JAR.

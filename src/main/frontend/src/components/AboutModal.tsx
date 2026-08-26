@@ -2,7 +2,7 @@ import { Link } from 'react-router'
 import { X, BookOpen, Github, ExternalLink } from 'lucide-react'
 import { useConfigStore } from '../config'
 
-const REPO_URL = 'https://github.com/Zherikhov/easyTask'
+const REPO_URL = 'https://github.com/Zherikhov/hamstrack'
 
 interface Props {
   onClose: () => void

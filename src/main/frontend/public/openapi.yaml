@@ -191,7 +191,7 @@ info:
     **both** budgets — see the `Reports` tag.
   contact:
     name: Hamstrack
-    url: https://github.com/Zherikhov/easyTask
+    url: https://github.com/Zherikhov/hamstrack
   license:
     name: Apache 2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

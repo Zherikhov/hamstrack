@@ -683,7 +683,7 @@ that gets skipped**:
 > slow report, search or bulk member removal into an error.** If that happens, raise
 > `DB_STATEMENT_TIMEOUT_MS` in `.env` (it must stay above `DB_LOCK_TIMEOUT_MS`) and
 > `docker compose up -d`. Database migrations are deliberately not bounded. Details:
-> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/easyTask/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
+> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
 
 ---
 
