@@ -458,37 +458,50 @@ SSM-only access, so run this against production before the deploy:
 
 ```bash
 aws ssm start-session --target <INSTANCE_ID>
-cd /opt/hamstrack
-docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
-SELECT count(*) AS unresolvable
-  FROM notifications n
-  LEFT JOIN workspaces w
-    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
- WHERE w.id IS NULL;
-SQL
+docker exec -it hamstrack-postgres-1 psql -U hamstrack hamstrack
 ```
 
-(The container reads its own `POSTGRES_USER`/`POSTGRES_DB` rather than being handed a
-literal, because `docker-compose.prod.yml` takes `POSTGRES_USER` from the operator's `.env`
-and a hardcoded `-U hamstrack` fails with `role "hamstrack" does not exist` on any instance
-that set `DB_USERNAME` to something else — at the exact moment they are clearing a blocker.)
+Then paste the query at the `hamstrack=#` prompt — **on one line**, and leave with `\q`:
+
+```sql
+SELECT count(*) AS unresolvable FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL;
+```
+
+Three things in that recipe are deliberate, and each one is a way the earlier version of
+this section failed when it was first run against the real box on 2026-08-26:
+
+- **`docker exec` on the container, not `docker compose exec` on the service.** Bare
+  `docker compose` looks for `compose.yaml` / `docker-compose.yml` and prod keeps its file
+  under another name, so the documented command answered `no configuration file provided:
+  not found` — from inside the right directory. `docker exec` depends on neither the
+  filename nor the working directory. If the container is not named
+  `hamstrack-postgres-1`, `docker ps --format '{{.Names}}'` gives the real name; note that
+  `hamstrack-postgres-exporter-1` is the Prometheus exporter and has no `psql` in it.
+- **A psql prompt rather than a heredoc.** `<<'SQL'` needs a line containing exactly `SQL`
+  to terminate, and the SSM web console mangles a pasted multi-line block — the shell then
+  sits at a `>` prompt looking like it hung. Ctrl+C is the way out.
+- **The query on one line.** Same reason: multi-line SQL survives the paste no better than
+  the heredoc did.
+
+Substitute the real role name for `-U hamstrack` if `DB_USERNAME` in `.env` says otherwise;
+the database is always `hamstrack`.
+
+**Run the query even if you believe the table is empty, and read the total alongside it.**
+A count over an empty table returns `0` for every predicate, including a false one, so a
+bare `0` does not distinguish "nothing to delete" from "nothing there at all". Both release
+the block — but only one of them is evidence, and the ticket deserves to know which it got:
+
+```sql
+SELECT count(*) AS total, count(*) FILTER (WHERE substring(link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NOT NULL) AS parses FROM notifications;
+```
 
 **`0` releases the block.** A non-zero answer does **not** automatically hold it: the query
 above tests two things at once — that `link` *parses*, and that the workspace it names
-*still exists* — and those come apart into two causes wanting opposite actions. Split them:
+*still exists* — and those come apart into two causes wanting opposite actions. Split them,
+at the same psql prompt and again on one line:
 
-```bash
-docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
-SELECT n.link IS NULL
-       OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL
-         AS link_did_not_parse,
-       count(*)
-  FROM notifications n
-  LEFT JOIN workspaces w
-    ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid
- WHERE w.id IS NULL
- GROUP BY 1;
-SQL
+```sql
+SELECT n.link IS NULL OR substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/') IS NULL AS link_did_not_parse, count(*) FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL GROUP BY 1;
 ```
 
 - **`link_did_not_parse = false`** — the link parsed and the workspace it names is gone.
@@ -518,6 +531,18 @@ nothing about production and must not be quoted as if it did — the honest sent
 why the production run is a release blocker and why
 `V20NotificationsWorkspaceScopeTest` replays a link produced by the real code path through
 the real migration instead.
+
+**What the 0.17.0 run actually returned, recorded because the shape recurs.** Production
+answered `unresolvable = 0` over `count(*) = 0` — the same empty-set zero, so it released
+the block without being evidence of anything. The instance was single-user at the time, and
+a self-mention is skipped by design, so the only producer had never fired. Writing one
+comment that mentioned somebody else changed that: the pre-flight then ran over a real row
+and `parses` came back `1`. That version of the number is worth more than either zero,
+because the row was written by the **image already deployed** — which is the one thing the
+development rows could not test, since those were written by the build that ships the
+regex. If a future release finds this table empty again, the cheap way to earn the same
+evidence is to make one row and re-run, rather than to accept a zero the emptiness
+guaranteed.
 
 **The general rule this leaves behind.** A migration whose `DELETE` is a backstop for a
 condition expected never to occur is untested by construction in every environment where
