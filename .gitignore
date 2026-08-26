@@ -60,4 +60,12 @@ application-local.properties
 
 ###
 qa/
+
+### TEMPORARY — the ADRs are written in Russian and this repository's docs are English.
+### They stay local until they are translated; delete this line when they are, and they
+### become normal tracked documentation. Nothing else needs to change: the practice is
+### already wired in (systems-analyst drafts one per architectural fork, feature-pipeline
+### Phase 7 flips it to Accepted), and CLAUDE.md already points readers at the directory.
+### If you are here because that pointer names a directory you cannot see in a clone —
+### this line is why, and it is meant to go.
 docs/adr
