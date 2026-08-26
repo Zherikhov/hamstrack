@@ -288,3 +288,46 @@ The Loki datasource and the **Logs** dashboard are auto-provisioned; use
 To debug Loki/Prometheus directly, forward their ports the same way (they don't
 bind a host port, so use `AWS-StartPortForwardingSessionToRemoteHost` targeting the
 container, or query them from inside Grafana).
+
+## 5. Memory: what the box has, and what the app is allowed
+
+Recorded 2026-08-26, when 0.17.0 made the app container's memory limit a real
+setting for the first time (HD-152). Instance `i-019fe684b25ad831f`, `eu-north-1`.
+
+```
+$ free -m
+               total        used        free      shared  buff/cache   available
+Mem:            1909        1395          71          22         442         335
+Swap:              0           0           0
+```
+
+**`APP_MEMORY_LIMIT=1g` is written explicitly in `/opt/hamstrack/.env`** — the same
+value Compose would have defaulted to, and written down anyway. An absent line is not
+a chosen value: it silently stays `1g` the day this instance is resized, while whoever
+resized it believes they gave the application more memory. The line is what makes the
+next person's change take effect.
+
+Two facts to carry into any decision here:
+
+- **The 0.17.0 default was not a reduction on this box.** `-XX:MaxRAMPercentage=50`
+  arrives in that same release, so production before it ran on default JVM ergonomics —
+  a quarter of host RAM, about 477 MB — and moves to 512 MB. The "the new default halves
+  your heap" warning in the release notes applies to hosts **above 2 GB**; this one is
+  below. What is new here is a hard 1024 MB ceiling where there was none.
+- **There is no swap, and the app is the only container with a limit.** Exceeding the
+  limit is a kernel OOM kill (exit `137`, no stack trace), not an `OutOfMemoryError`
+  anybody can read in a log. `postgres`, `caddy` and the observability containers are
+  deliberately unbounded, so a declared ceiling on the app does not protect it from being
+  the kernel's chosen victim under host pressure — it only makes the app the predictable
+  one. HD-180 is the ticket for that asymmetry.
+
+**When to revisit:** on any instance resize. Above 2 GB the guidance is roughly half the
+host (`4g` host → `APP_MEMORY_LIMIT=2g`), and from a `4g` limit upward pair it with an
+explicit `JAVA_TOOL_OPTIONS=-Xmx…` — the 50% split over-reserves at a large limit,
+because most non-heap cost is constant rather than proportional. The worked table lives
+in `docs/self-hosting.md` under the `APP_MEMORY_LIMIT` row; do not re-derive it here.
+
+**What has never been measured:** whether 1 GB is enough for this workload. Nothing has
+ever put the instance under load, so every number above is a capacity that was *declared*
+rather than *observed*. HD-186 is the ticket that would replace the declaration with a
+measurement, and until it runs, "1 GB is fine" is a belief.
