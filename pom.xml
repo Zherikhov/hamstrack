@@ -17,7 +17,11 @@
     <description>Hamstrack — open-source task tracker with AI agent support</description>
     <url/>
     <licenses>
-        <license/>
+        <license>
+            <name>Elastic License 2.0</name>
+            <url>https://www.elastic.co/licensing/elastic-license</url>
+            <distribution>repo</distribution>
+        </license>
     </licenses>
     <developers>
         <developer/>

@@ -1,7 +1,7 @@
 # Hamstrack
 
 [![Build](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml/badge.svg)](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Elastic%202.0-blue.svg)](LICENSE)
 
 **Hamstrack** is an open-source task tracker for software teams: workspaces, projects, kanban boards, backlog, workflows, comments, attachments and real-time updates — in a single deployable JAR.
 
@@ -77,4 +77,9 @@ Issues and pull requests are welcome. CI runs the full test suite on every PR; d
 
 ## License
 
-[Apache 2.0](LICENSE)
+[Elastic License 2.0](LICENSE) (ELv2).
+
+You may freely use, copy, modify, and self-host Hamstrack — including for
+commercial purposes. You may **not** provide it to third parties as a hosted or
+managed service, circumvent its license-key functionality, or remove its
+licensing/copyright notices. See [`LICENSE`](LICENSE) for the full terms.

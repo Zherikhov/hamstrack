@@ -193,8 +193,8 @@ info:
     name: Hamstrack
     url: https://github.com/Zherikhov/hamstrack
   license:
-    name: Apache 2.0
-    url: https://www.apache.org/licenses/LICENSE-2.0
+    name: Elastic License 2.0
+    url: https://www.elastic.co/licensing/elastic-license
 
 servers:
   - url: /api
