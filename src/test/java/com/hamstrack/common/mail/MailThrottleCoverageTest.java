@@ -140,7 +140,7 @@ class MailThrottleCoverageTest {
     @Autowired RecipientMailThrottle recipientMailThrottle;
     @Autowired AppProperties appProperties;
     @Autowired MailAsyncProperties mailAsyncProperties;
-    @Autowired FailedEmailRepository failedEmailRepository;
+    @Autowired FailedEmailWriter failedEmailWriter;
 
     /**
      * The seal itself. Polarity is coverage-by-default, like {@code ThrottleCoverageTest}: a new
@@ -220,7 +220,7 @@ class MailThrottleCoverageTest {
         var probe = new MailService(stubSender(), appProperties, metrics,
                 new MailAsyncProperties(mailAsyncProperties.async(),
                         new MailAsyncProperties.Critical(1, 0L)),
-                failedEmailRepository);
+                failedEmailWriter);
 
         var mailers = Arrays.stream(MailService.class.getDeclaredMethods())
                 .filter(m -> Modifier.isPublic(m.getModifiers()))

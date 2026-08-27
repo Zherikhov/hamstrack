@@ -3,12 +3,14 @@ package com.hamstrack.workspace.service;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.config.WorkspaceProperties;
+import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
 import com.hamstrack.common.ratelimit.InviteThrottle;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.tx.AfterCommit;
 import com.hamstrack.common.util.TokenUtils;
 import com.hamstrack.workspace.dto.*;
 import com.hamstrack.workspace.entity.*;
@@ -267,16 +269,17 @@ public class WorkspaceService {
         // count is not. HD-190's own ordering follows the same rule and is why every tenancy, role
         // and already-a-member check is above.
         //
-        // AND THE INVERSE IS THE SHARPER HALF OF THE SAME ROLLBACK, because the send at the end of
-        // this method is @Async and is therefore NOT ordered after the commit. A rollback taken
-        // after the throttle passed leaves all three of: MAIL SENT, CEILING NOT SPENT, and a join
-        // link whose workspace_invites row never existed. Repeated, that is the mail-bomb these
-        // ceilings exist to stop, delivered free of charge, plus a recipient whose link answers 404.
-        // Not reachable today — token_hash is the only UNIQUE on workspace_invites and it is 32
-        // random bytes, so nothing below here throws on a duplicate. HD-133's
-        // UNIQUE(workspace_id, email) is exactly what makes it reachable: a re-invite that clears a
-        // short cooldown and then collides at flush has this shape precisely. Moving the duplicate
-        // check above this line closes both halves at once.
+        // AND THE INVERSE IS THE SHARPER HALF OF THE SAME ROLLBACK: a rollback taken after the
+        // throttle passed used to leave all three of MAIL SENT, CEILING NOT SPENT, and a join link
+        // whose workspace_invites row never existed. Repeated, that is the mail-bomb these ceilings
+        // exist to stop, delivered free of charge, plus a recipient whose link answers 404.
+        // HD-181 CLOSED THE MAIL HALF ONLY: the send at the end of this method is now registered on
+        // AfterCommit, so no rollback can deliver it. The other two are unchanged and still argue
+        // for the ordering rule above — a rollback still unwrites the mail_send_events row while
+        // the refusal that caused it was observed, which is the free probe. HD-133's
+        // UNIQUE(workspace_id, email) is what makes that reachable: a re-invite that clears a short
+        // cooldown and then collides at flush has exactly this shape. Moving the duplicate check
+        // above this line is still the fix, and is now the whole of what is left.
         //
         // (V21's header carries the rule too — the probe half of it; that migration is applied and
         // must not be edited, so this comment is the fuller copy. Both exist because whoever adds
@@ -286,9 +289,18 @@ public class WorkspaceService {
         // AND NOTHING SLOW GOES BETWEEN THIS LINE AND THE COMMIT. The throttle takes
         // pg_advisory_xact_lock on the RECIPIENT KEY and holds it to commit, and a recipient address
         // is something two tenants legitimately share — so any wait added below is a wait one tenant
-        // can impose on another by inviting the same person. That is why the mail send at the end of
-        // this method is @Async and must stay @Async, and why a synchronous SMTP round trip here
-        // would become a cross-tenant lock without changing a line in RecipientMailThrottle.
+        // can impose on another by inviting the same person.
+        //
+        // WHAT KEEPS SMTP OUT OF THAT LOCK CHANGED IN HD-181, and the old reason was weaker than it
+        // read. It used to be "the send is @Async", but @Async is a hand-off to a BOUNDED pool whose
+        // rejection policy is CallerRunsPolicy: with the queue full — i.e. under exactly the load
+        // where this matters — the dispatch runs the send INLINE on this thread, which put a whole
+        // SMTP round trip (plus, for critical mail, its retries) inside this lock. The send is now
+        // registered on AfterCommit, so it is ordered after the commit that releases the advisory
+        // lock, and a caller-runs send costs the caller latency rather than costing every tenant
+        // sharing this recipient key a lock hold. @Async still belongs on the mailer for latency;
+        // it is no longer what makes this section safe. What is still true, and is the rule to keep:
+        // nothing slow may be ADDED between this line and the commit.
         inviteThrottle.require(actor.getId(), email, workspace.getId(),
                 () -> inviteRepository.existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(
                         workspace, email, Instant.now())
@@ -317,7 +329,22 @@ public class WorkspaceService {
         // which collapses U+212A KELVIN SIGN onto plain k, so without that constraint this line
         // would hand a workspace name and a live join token to whoever owns the ASCII spelling. Any
         // widening of what the DTO accepts has to be re-argued HERE, at the send.
-        mailService.sendWorkspaceInviteEmail(email, workspace.getName(), rawToken);
+        //
+        // HD-181 — registered ON the commit, not dispatched from inside it, so a rollback taken
+        // anywhere above delivers nothing. The workspace name is read into a local first (the id is
+        // read eagerly by the concatenation below, before any deferral):
+        // the lambda must not touch the EntityManager at all, which is a stronger rule than "no
+        // lazy association" and is the one AfterCommit now states (a read there fails loudly; a
+        // write joins an already-committed transaction and is discarded in silence).
+        //
+        // DOMAIN ONLY in the description, never the address — the same rule RecipientMailThrottle
+        // applies to its own send line, and this description is written verbatim into a shipped log.
+        // The address is not lost: workspace_invites holds it, and the workspace id below is what
+        // takes an operator to the row.
+        var workspaceName = workspace.getName();
+        AfterCommit.run("workspace-invite email to a " + MailAddresses.domainOf(email)
+                        + " address for workspace " + workspace.getId(),
+                () -> mailService.sendWorkspaceInviteEmail(email, workspaceName, rawToken));
     }
 
     // Accept via the emailed token link.

@@ -37,9 +37,11 @@ import java.util.function.Supplier;
  * The recipient half writes its {@code mail_send_events} row here, in this transaction; anything
  * that rolls the transaction back afterwards — a constraint violation, a late 409, a new validation
  * — unwrites that row and hands callers a free way to observe the ceilings without ever spending
- * them. The inverse is worse and travels with it: the invitation mail is dispatched
- * {@code @Async} and is not ordered after the commit, so the same rollback can leave the message
- * SENT with its ceiling UNSPENT and its invite row absent. HD-133's
+ * them. The inverse used to travel with it and was worse — the invitation mail was dispatched
+ * {@code @Async} from inside the transaction, so the same rollback could leave the message SENT
+ * with its ceiling UNSPENT and its invite row absent. HD-181 removed that half: the send is
+ * registered on {@code AfterCommit} and a rollback delivers nothing. The free probe above is
+ * untouched and is still the reason for the ordering rule. HD-133's
  * {@code UNIQUE(workspace_id, email)} is the concrete instance waiting to happen, and the note is
  * repeated at the call site, in fuller form, because that is the file it will edit.
  *

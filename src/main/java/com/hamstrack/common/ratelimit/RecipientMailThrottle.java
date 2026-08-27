@@ -98,10 +98,14 @@ import java.util.function.Supplier;
  * INSERT → commit. Nothing slow and nothing caller-controlled may ever be added between
  * {@code require...} and the commit that follows it.</strong> The key is a recipient address, and an
  * address is something two tenants legitimately share — so any wait held inside this section is a
- * wait one tenant can impose on another. Sending the mail itself is safely outside only because
- * {@code MailService.sendWorkspaceInviteEmail} is {@code @Async}: making invite mail synchronous
- * would turn a per-address lock into an SMTP round trip held across tenants, and would do it without
- * changing a line in this file.
+ * wait one tenant can impose on another. Sending the mail itself is outside this section because
+ * the call site registers it on {@code AfterCommit} (HD-181) — after the commit that releases this
+ * lock. It is <strong>not</strong> {@code @Async} that keeps it out, as this paragraph used to say:
+ * {@code mailExecutor} is bounded with {@code CallerRunsPolicy}, so a full queue turns the dispatch
+ * into an inline send, and it does that under exactly the load where an SMTP round trip held across
+ * tenants would hurt most. Either way the hazard is real and can be reintroduced without changing a
+ * line in this file: what must not appear between {@code require...} and the commit is anything
+ * slow, however it is spelled.
  *
  * <p>These ceilings are consequently <strong>cluster-wide and exact</strong> — the first limiter in
  * this product that does not divide by the replica count, because its state is in PostgreSQL. The

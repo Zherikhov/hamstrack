@@ -6,6 +6,7 @@ import com.hamstrack.auth.exception.*;
 import com.hamstrack.auth.repository.*;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.config.JwtProperties;
+import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
@@ -14,6 +15,7 @@ import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.seed.DataSeeder;
 import com.hamstrack.common.security.JwtService;
+import com.hamstrack.common.tx.AfterCommit;
 import com.hamstrack.common.util.TokenUtils;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
@@ -183,7 +185,20 @@ public class AuthService {
             reset.setExpiresAt(Instant.now().plusSeconds(3600)); // 1 hour
             passwordResetRepository.save(reset);
             metrics.passwordReset(PasswordResetPhase.REQUESTED);
-            mailService.sendPasswordResetEmail(user.getEmail(), raw);
+            // HD-181 — a link is promised only once the row it resolves to is durable. The send is
+            // @Async, but @Async leaves this transaction OPEN behind it: the executor can be
+            // holding the message while the transaction can still roll back, and the recipient then
+            // has a reset link whose password_resets row never existed. Deferring costs nothing —
+            // it is still a hand-off to the executor, made a few microseconds later. The address is
+            // read into a local because the lambda must not touch the EntityManager at all — the
+            // context is closing and, worse, still claims to be transactional (see AfterCommit).
+            //
+            // The DESCRIPTION carries the domain only, never the address: it is written verbatim
+            // into a shipped log, and that is the rule RecipientMailThrottle already applies to its
+            // own send line. Nothing is lost — a user who never gets a reset mail re-requests one.
+            var recipient = user.getEmail();
+            AfterCommit.run("password-reset email to a " + MailAddresses.domainOf(recipient) + " address",
+                    () -> mailService.sendPasswordResetEmail(recipient, raw));
         });
     }
 
@@ -256,7 +271,15 @@ public class AuthService {
         verification.setTokenHash(sha256(raw));
         verification.setExpiresAt(Instant.now().plusSeconds(86400)); // 24 hours
         emailVerificationRepository.save(verification);
-        mailService.sendVerificationEmail(user.getEmail(), raw);
+        // HD-181, same reasoning as forgotPassword. Both callers — register and
+        // resendVerification — are @Transactional, and being the last statement in register is not
+        // protection: the INSERTs are still unflushed here, so a concurrent signup losing the race
+        // on the users.email unique index fails at the commit that follows, after the confirmation
+        // link has already left for the executor.
+        // Domain only in the description, for the reason given in forgotPassword.
+        var recipient = user.getEmail();
+        AfterCommit.run("verification email to a " + MailAddresses.domainOf(recipient) + " address",
+                () -> mailService.sendVerificationEmail(recipient, raw));
     }
 
     private String extractRefreshCookie(HttpServletRequest request) {
