@@ -19,9 +19,12 @@ import com.hamstrack.workspace.exception.*;
 import com.hamstrack.workspace.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.hibernate.exception.ConstraintViolationException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
@@ -184,25 +187,42 @@ public class WorkspaceService {
      * {@code WorkspaceMemberService} so the invite path and the member-administration
      * paths cannot drift apart. Same predicate, one copy.
      *
-     * <p><strong>Check order is the contract</strong> (HD-190 §4.2): workspace resolved
-     * (<strong>404</strong> for a non-member and an unknown workspace alike) → {@code
+     * <p><strong>Check order is the contract</strong> (HD-190 §4.2, HD-133 §4.1): workspace
+     * resolved (<strong>404</strong> for a non-member and an unknown workspace alike) → {@code
      * workspace.member.manage} (403) → role assignable / OWNER-not-grantable / grant ceiling
-     * (422, 403) → already a member (409) → <strong>the invitation ceilings (429)</strong> →
-     * write the invite and send the mail. Nothing above the ceilings sends mail, so a refusal
-     * there costs neither the caller's own budget nor a stranger's recipient cap; and the 429 is
-     * spent after tenancy, so — unlike every other 429 in this API — it is only ever seen by a
+     * (422, 403) → already a member (409) → <strong>the caller's own invitation volume (429)</strong>
+     * → <strong>a pending invitation to this address (409 {@code DUPLICATE_INVITE})</strong> →
+     * <strong>the recipient's ceilings (429)</strong> → write the invite and send the mail. Nothing
+     * above sends mail, so a refusal costs a stranger's recipient cap nothing; and every 429 here
+     * is spent after tenancy, so — unlike every other 429 in this API — it is only ever seen by a
      * proven member.
+     *
+     * <p><strong>The two ceilings are split around the duplicate check on purpose, and putting
+     * them back together is the mistake to avoid</strong> (HD-133 round 2). The recipient half
+     * <em>records</em> a {@code mail_send_events} row inside this transaction, so everything that
+     * can refuse must sit above it — otherwise a rollback unwrites the record while the caller has
+     * already observed the refusal, which is a free probe of a stranger's ceilings. The sender half
+     * is an in-memory counter no rollback returns, so it carries none of that hazard and is spent
+     * <em>first</em>, which is what keeps a refused request from being free: with both halves
+     * below the duplicate check, a repeat POST to a pending address cost the caller nothing on an
+     * endpoint that has no principal throttle interceptor. Both call sites carry the full
+     * statement; a new check placed below the recipient half reopens the hole no matter what the
+     * check is for, and a new check placed below the sender half is one more free refusal.
      *
      * <p><strong>Seam for a per-workspace cap on outstanding invitations</strong> (HD-190 §6.4,
      * open question Q1 — deliberately not built here). If it is ever wanted it belongs
-     * <em>between</em> the already-a-member check and {@code inviteThrottle.require}, counting
-     * {@code workspace_invites} rows with {@code acceptedAt IS NULL AND expiresAt > now()}, and it
+     * <em>between</em> the duplicate check and {@code inviteThrottle.requireRecipientCeilings},
+     * counting
+     * {@code workspace_invites} rows with {@code acceptedAt IS NULL}, and it
      * is a <strong>409 stock cap</strong> in the shape of {@code app.roles.max-custom-per-workspace}
      * — not a 429, and <em>not</em> under {@code app.rate-limit.enabled}, because that switch turns
      * off brute-force protection and an operator turning that off has not asked to remove an
-     * unrelated stock cap. Its prerequisite is a pending-invite list plus a revoke endpoint:
-     * neither exists today, so its refusal ("revoke some") would prescribe an action its reader
-     * cannot perform. Nothing below is arranged around its absence.
+     * unrelated stock cap. Its prerequisite — a pending-invite list plus a revoke endpoint, so that
+     * its refusal ("withdraw some") prescribes an action its reader can perform — is satisfied
+     * since HD-158, which is a change from what this paragraph used to say. It is still not built,
+     * and nothing below is arranged around its absence. If it is, count {@code acceptedAt IS NULL}
+     * and nothing narrower: that is the predicate of both the index and the list, and a cap that
+     * ignored expired rows would refuse to admit the very rows an administrator must clear.
      */
     @Transactional
     public void inviteMember(User actor, UUID workspaceId, InviteMemberRequest req) {
@@ -238,38 +258,117 @@ public class WorkspaceService {
             }
         });
 
-        // HD-190 — the invitation ceilings, and this is the ONLY place they may be spent.
+        // HD-190's SENDER half, and it is spent HERE — above the duplicate refusal — while the
+        // RECIPIENT half stays below it. The two used to be one call (InviteThrottle.require);
+        // they are two methods now, and this is the split.
+        //
+        // WHY THEY SPLIT, because a reader who does not know will put them back together. The
+        // ordering rule stated at length below is about TRANSACTIONAL state: the recipient half
+        // WRITES a mail_send_events row in this transaction, so a refusal raised after it rolls
+        // that row back while the caller has already OBSERVED the refusal — the ceiling reported,
+        // the slot unspent, which is a free probe of a stranger's ceilings. None of that applies
+        // to this line. The sender budget is an in-memory
+        // hourly/daily counter keyed on the caller (ADR-0015); no rollback returns it, so there is
+        // nothing here for a refusal below to unwrite, and spending it above one is safe.
+        //
+        // AND NOT MERELY SAFE — REQUIRED, or the rule below eats itself. Every new refusal on this
+        // path lands ABOVE the recipient half by that rule, so while both halves travelled
+        // together each check added made one more refusal FREE. That is not hypothetical: with the
+        // duplicate check above the combined call, a repeat POST to a pending address spent NO
+        // budget of either kind, and this endpoint has no PrincipalThrottleInterceptor to charge
+        // the caller instead (those cover reports/insights/search/filters only) — so an account
+        // holding workspace.member.manage could loop cheap 409s indefinitely. Spending the sender
+        // half first restores "every refusal costs the caller something" without moving the
+        // recorded event above anything.
+        //
+        // The consequence to know: a caller who is BOTH over their hourly volume AND re-inviting a
+        // pending address now sees the 429 rather than the 409. Correct in that order — the volume
+        // ceiling is a statement about the caller and holds whatever the address turns out to be,
+        // and answering it first also declines to say whether that address is already invited.
+        inviteThrottle.requireSenderVolume(actor.getId());
+
+        // HD-133 — ONE STANDING OFFER PER ADDRESS PER WORKSPACE, and this is the sentence rather
+        // than the enforcement. The enforcement is workspace_invites_pending_email_uk (V22): two
+        // concurrent requests both find nothing here and both insert, and the index arbitrates.
+        // What this buys is that the ordinary case gets a message naming a remedy instead of a
+        // constraint violation — and, far more importantly, the ORDER below.
+        //
+        // *** THIS CHECK IS ABOVE inviteThrottle.requireRecipientCeilings, AND THAT IS THE WHOLE
+        // POINT. *** The long comment underneath states the rule and names this ticket: that half
+        // RECORDS its mail_send_events row in this transaction, so a refusal that rolls back
+        // afterwards unwrites the record while the caller has already seen the refusal — invite a
+        // victim's address, catch the 409, pay nothing, and repeat to map a stranger's ceilings.
+        // Do not move it down, and do not add a cheaper-looking check below.
+        //
+        // AND IT IS BELOW inviteThrottle.requireSenderVolume, WHICH IS THE OTHER HALF OF THE SAME
+        // FIX. "Pay nothing" was true of this refusal too for one review round, when both halves
+        // of the throttle sat below here: the 409 was free. The sender half is now spent above,
+        // for the reasons given at that line.
+        //
+        // AND THE QUERY FOLDS IN SQL, NOT IN JAVA, for a reason that is exactly this hazard in
+        // miniature: `email` above is already toLowerCase(Locale.ROOT), so an equals() against it
+        // looks equivalent and is not. Locale.ROOT's fold and PostgreSQL's lower() are different
+        // functions, and InviteMemberRequest constrains only the LOCAL PART to ASCII — the domain
+        // may be internationalised. On a character where they disagree, Java says "free", the
+        // index says "taken", and the result is a violation at flush, a rollback, and the free
+        // ceiling probe the ordering rule exists to prevent. Ask the database the question the
+        // index answers; the partial index is the access path, so it costs one indexed lookup.
+        //
+        // BELOW the already-a-member check, deliberately: a person can be both a member and the
+        // addressee of a leftover unaccepted row (member removal deletes those, joining does not),
+        // and "they are already in this workspace" is the more useful answer to the more important
+        // question. Only one 409 is emitted and the membership one wins.
+        //
+        // AN EXPIRED ROW BLOCKS. That is PostgreSQL's answer, not a product choice — a partial
+        // index predicate must be IMMUTABLE and now() is STABLE, so `accepted_at IS NULL` is the
+        // only enforceable form. Hence two wordings off the same errorType, and hence the refusal
+        // must name the withdrawal: HD-158 shipped it, it works on expired rows, it needs the
+        // permission this caller just proved, and findUnacceptedForWorkspace puts the blocking row
+        // on the same screen as the form. If a retention sweep ever removes lapsed rows, the
+        // lapsed wording goes quiet on its own and the index still cannot change.
+        inviteRepository.findPendingByWorkspaceAndFoldedEmail(workspace.getId(), email)
+                .ifPresent(existing -> {
+                    throw existing.isExpired()
+                            ? DuplicateInviteException.lapsed(email)
+                            : DuplicateInviteException.live(email);
+                });
+
+        // HD-190 — the RECIPIENT ceilings, and this is the ONLY place they may be spent. The
+        // sender half was spent further up, above the duplicate refusal; the comment there says
+        // why the two are not one call.
         //
         // Everything above refuses without sending mail, so a caller can exhaust neither their own
         // budget nor a stranger's recipient cap by probing invalid roles or workspaces they cannot
         // see.
         //
-        // That is a claim about everything ABOVE this line, and NOT about this line. The two halves
-        // inside are spent in order, so a request refused by the RECIPIENT ceilings has already
-        // spent one unit of the caller's own hourly and daily SENDER budget: that budget is an
-        // in-memory counter incremented inside its own compute, so nothing here gives it back, not
-        // even a rollback. Accepted, and worth stating rather than implying otherwise — the cost is
-        // self-inflicted, keyed on the caller, and ages out with the caller's own window. The
-        // direction that would matter is the reverse, and it does not happen: a sender-budget
-        // refusal never spends a victim's recipient cap, which is why the sender half runs first.
+        // That is a claim about everything ABOVE this line, and NOT about this line. The sender
+        // half runs first, so a request refused HERE has already spent one unit of the caller's own
+        // hourly and daily volume: that budget is an in-memory counter incremented inside its own
+        // compute, so nothing here gives it back, not even a rollback. Accepted, and worth stating
+        // rather than implying otherwise — the cost is self-inflicted, keyed on the caller, and
+        // ages out with the caller's own window. The direction that would matter is the reverse,
+        // and it does not happen: a sender-budget refusal never spends a victim's recipient cap,
+        // which is why the sender half runs first.
         //
         // And everything above has already answered the tenancy question: a 429 from here is
         // only ever seen by a proven member, which is exactly why these ceilings are NOT an
         // interceptor — a recipient-keyed refusal spent before the workspace is resolved would
         // answer a cross-tenant question to a non-member, where this project requires a 404.
         //
-        // The supplier is evaluated only if the cooldown fires: it decides whether the refusal may
-        // claim the earlier invitation is still waiting in the invitee's inbox. Removing a member
-        // deletes their unaccepted invites (HD-132), so that claim goes stale in exactly the
-        // workflow — remove, realise the mistake, re-invite — that lands inside the cooldown.
-        //
-        // Scoped to THIS workspace, not to the actor: the cooldown ignores workspaces, so it can
-        // fire on a send from one the actor has since been removed from, and their own sent invites
-        // survive that removal. An actor-scoped check would then report the live state of a row they
-        // can no longer reach. They may see this row: membership and member.manage were proven a few
-        // lines up.
-        // FOR HD-133 (UNIQUE(workspace_id, email) on workspace_invites), AND FOR ANY OTHER CHECK
-        // THAT CAN REFUSE THIS REQUEST: it goes ABOVE this line, never below it. The throttle
+        // NO COOLDOWN ADDENDUM IS PASSED, AND THE CONDITION UNDER WHICH ONE WOULD WANT REVIVING IS
+        // NAMED HERE RATHER THAN THE TICKET THAT REMOVED IT. HD-190 gave the cooldown an optional
+        // sentence — "that invitation is still valid — ask them to check their inbox" — emitted
+        // only when a live unaccepted row to this exact address existed in this workspace. The
+        // duplicate refusal above matches a strict SUPERSET of that (same workspace, same address
+        // folded, unaccepted, expiry irrelevant) and sits one step earlier, so no request can reach
+        // the cooldown with such a row still standing: the sentence was unreachable the moment the
+        // pre-check landed, and an unreachable sentence is a claim a future reader will trust. Its
+        // finder went with it. If the duplicate refusal is ever NARROWED — scoped tighter than the
+        // whole workspace, or made to ignore some class of unaccepted row — an addendum becomes
+        // reachable again and the claim would have to be re-checked against the row before being
+        // printed, which is why the Supplier parameter survives on InviteThrottle.
+        // FOR ANY CHECK THAT CAN REFUSE THIS REQUEST: it goes ABOVE this line, never below it.
+        // HD-133's duplicate check is above, which is what that ticket was mostly about. The throttle
         // RECORDS its mail_send_event here, in this transaction, before the insert further down.
         // Anything that rolls the transaction back afterwards — a constraint violation, a late 409,
         // an exception from a new validation — unwrites that row, which hands callers a free way to
@@ -284,10 +383,18 @@ public class WorkspaceService {
         // HD-181 CLOSED THE MAIL HALF ONLY: the send at the end of this method is now registered on
         // AfterCommit, so no rollback can deliver it. The other two are unchanged and still argue
         // for the ordering rule above — a rollback still unwrites the mail_send_events row while
-        // the refusal that caused it was observed, which is the free probe. HD-133's
-        // UNIQUE(workspace_id, email) is what makes that reachable: a re-invite that clears a short
-        // cooldown and then collides at flush has exactly this shape. Moving the duplicate check
-        // above this line is still the fix, and is now the whole of what is left.
+        // the refusal that caused it was observed, which is the free probe. HD-133's partial unique
+        // index is what made that reachable: a re-invite that clears a short cooldown and then
+        // collides at flush has exactly this shape. The duplicate check above this line is that
+        // fix. What remains is the residue the pre-check cannot cover — a genuine concurrent
+        // insert, translated at the saveAndFlush below. Three routes, and only one of them is
+        // honest residue: CLOSED by the cooldown when one sender repeats; NOT CLOSED for two
+        // different senders, because the cooldown is keyed per (sender, recipient) so the second
+        // sender's count is zero and their rollback unwrites their own event — one bit learned,
+        // a concurrent winner required; and HARMLESS with rate limiting off, where there is no
+        // ceiling left to probe. An earlier revision of this sentence said the residue was
+        // reachable ONLY with rate limiting off, and pointed at the catch below — which states
+        // the opposite. The catch is right.
         //
         // (V21's header carries the rule too — the probe half of it; that migration is applied and
         // must not be edited, so this comment is the fuller copy. Both exist because whoever adds
@@ -309,12 +416,7 @@ public class WorkspaceService {
         // sharing this recipient key a lock hold. @Async still belongs on the mailer for latency;
         // it is no longer what makes this section safe. What is still true, and is the rule to keep:
         // nothing slow may be ADDED between this line and the commit.
-        inviteThrottle.require(actor.getId(), email, workspace.getId(),
-                () -> inviteRepository.existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(
-                        workspace, email, Instant.now())
-                        ? "That invitation is still valid — ask them to check their inbox, "
-                          + "including spam."
-                        : null);
+        inviteThrottle.requireRecipientCeilings(actor.getId(), email, workspace.getId());
 
         var rawToken = TokenUtils.generateRawToken();
         var invite = new WorkspaceInvite();
@@ -324,7 +426,95 @@ public class WorkspaceService {
         invite.setTokenHash(TokenUtils.sha256(rawToken));
         invite.setInvitedBy(actor);
         invite.setExpiresAt(Instant.now().plusSeconds(7 * 24 * 3600)); // 7 days
-        inviteRepository.save(invite);
+        // saveAndFlush, so that the race the pre-check above CANNOT close surfaces here — as a
+        // translated DataIntegrityViolationException — instead of at commit, where it would escape
+        // as a 500 after the controller had already built a 201. The pre-check is the sentence;
+        // workspace_invites_pending_email_uk is the invariant, and two requests that both found the
+        // address free both arrive at this line.
+        //
+        // WHEN THAT IS ACTUALLY REACHABLE, AND WHAT THE ROLLBACK COSTS ON EACH ROUTE. Two
+        // requests reach this line together, and the throttle's behaviour between them depends on
+        // WHO SENT THEM — which is the distinction an earlier draft of this comment flattened.
+        //
+        // SAME SENDER, twice: closed, and closed by the cooldown rather than by luck.
+        // RecipientMailThrottle takes pg_advisory_xact_lock on the recipient key and holds it to
+        // commit, and two addresses that collide in this index share a throttle key wherever the
+        // two folds agree — which is every address this endpoint accepts. Not "necessarily": the
+        // throttle keys off the JAVA fold and the index off PostgreSQL's lower(), which this file
+        // insists elsewhere are different functions, so "strictly coarser" would be composing two
+        // things it has just said do not compose. The conclusion is unchanged, because
+        // InviteMemberRequest constrains the local part to ASCII and the two folds cannot disagree
+        // there; widen what the DTO accepts and this sentence is one of the places to re-check.
+        // The second transaction waits,
+        // then counts the first's now-committed event, then is refused by the cooldown — which is
+        // keyed on the (sender, recipient) PAIR and therefore sees it. A 429, not a collision.
+        //
+        // TWO DIFFERENT SENDERS, both holding workspace.member.manage here: NOT closed, and this
+        // is the honest statement of the residue. The advisory lock still serialises them, but
+        // samePair() is 0 for the second sender, so no cooldown fires; if the recipient's daily
+        // cap is not yet reached either, that sender records its event, collides at the flush
+        // below, and the rollback unwrites the event it just wrote. It has then learned one bit —
+        // "this recipient's daily cap had room" — without spending a slot for it.
+        //
+        // ACCEPTED, WITH THE REASONS, BECAUSE THE STRUCTURAL FIX COSTS MORE THAN THE BIT. Every
+        // round of this needs a concurrent WINNER who does spend a recipient slot and does send
+        // real mail; the loser still burns a unit of its own in-memory sender volume; and the
+        // unwritten row corresponds to no delivery, since the send is registered AfterCommit. The
+        // close would be @Transactional(REQUIRES_NEW) on RecipientMailThrottle.record, so the
+        // append outlives the rollback — and it is REJECTED HERE FOR TWO REASONS, both worse than
+        // the leak. (1) It takes a SECOND POOLED CONNECTION while this transaction holds the
+        // recipient advisory lock, which puts a wait for the connection pool inside the one lock
+        // this method's own rule says nothing slow may sit inside — and that lock is shared with
+        // every other tenant inviting the same person. (2) It makes EVERY rollback on this path
+        // permanently spend a recipient slot for mail that was never sent, so a lock timeout or a
+        // statement budget would silently consume a stranger's daily allowance. A second advisory
+        // lock keyed on (workspace, address) is the wrong fix for the same reason it always was: a
+        // lock-ordering obligation bought to improve a status code.
+        //
+        // WITH RATE LIMITING OFF, no lock is taken at all, the inserts race outright, and the
+        // loser lands in the catch below — and there the rollback costs nothing, because with the
+        // master switch off there are no ceilings left to probe, only the forensic row.
+        //
+        // The rule that survives all three routes, stated as a property because a list of
+        // configurations goes stale one profile before it does: THE ROLLBACK BELOW CAN UNWRITE A
+        // MAIL_SEND_EVENTS ROW WHOSE REFUSAL THE CALLER HAS ALREADY SEEN, AND NOTHING ON THIS PATH
+        // PREVENTS THAT — the pre-check above only makes it rare. So no check that can refuse this
+        // request may be added between the throttle and the commit.
+        //
+        // Do NOT close this with a second advisory lock keyed on (workspace, address). It would add
+        // a lock-ordering obligation against the recipient lock, on a path whose design rule is
+        // that nothing slow may sit between the throttle and the commit, to improve a status code
+        // in a configuration that has already switched its own protections off.
+        try {
+            inviteRepository.saveAndFlush(invite);
+        } catch (DataIntegrityViolationException e) {
+            // ONLY the pending-email index means "somebody else won the race". Anything else is a
+            // genuine fault and must keep its 500 rather than masquerade as a plausible conflict —
+            // the shape that makes an incident hard to diagnose. THIS CLASS logs only the
+            // constraint NAME: no SQL, no exception message, no user input. That is a claim about
+            // these two log lines and NOT about the request — Hibernate's SqlExceptionHelper logs
+            // the PSQLException at ERROR before this catch is even entered, which is why
+            // logServerErrorDetail=false is set on the datasource (see application.properties).
+            // Without it PostgreSQL's DETAIL puts a third party's full address in the log:
+            // `Key (workspace_id, lower(email))=(…, victim@example.com) already exists`.
+            //
+            // AND THE CATCH TYPE IS PART OF THE CONTRACT, not an incidental choice. It catches
+            // Spring's DataIntegrityViolationException, which is what a REPOSITORY call produces:
+            // saveAndFlush goes through the persistence-exception translator, so Hibernate's own
+            // org.hibernate.exception.ConstraintViolationException always arrives wrapped. A future
+            // writer of this table who inserts through an EntityManager instead gets the
+            // UNwrapped exception, this catch does not see it, and a 23505 that means "somebody
+            // else won the race" leaves as a 500. It fails safe — no wrong 409, no leak — and it
+            // is unreachable from this method today, which is why nothing here catches the wider
+            // type speculatively. It is written down because the interface javadoc on
+            // WorkspaceInviteRepository explicitly invites such a writer.
+            if (!isDuplicateInvite(e)) throw e;
+            // The winner's row is live by construction (it was inserted moments ago with a
+            // seven-day TTL), so the lapsed wording cannot apply and the row is not re-read to
+            // find that out — this transaction is already doomed and a read here would fail on the
+            // broken session rather than answer.
+            throw DuplicateInviteException.live(email);
+        }
         metrics.inviteSent();
 
         // The folded value, not req.email(): the throttle counted it, workspace_invites stores it and
@@ -433,15 +623,25 @@ public class WorkspaceService {
      * time: sends, cooldowns, daily ceilings. <strong>Deleting the record of an offer does not
      * delete the record of a delivery.</strong></blockquote>
      *
-     * <p>What it <em>does</em> free is stock, and it does so with no code: HD-133's future
-     * uniqueness slot, because the row is gone and the index has nothing to collide with. One more
-     * behaviour is inherited rather than written — after a withdrawal the cooldown's optional
-     * addendum (<em>"that invitation is still valid — ask them to check their inbox"</em>)
-     * suppresses itself, because the supplier in {@link #inviteMember} checks for this row and it
-     * is gone. <strong>Do not add a withdrawal-specific sentence there.</strong> It would be one
-     * more bit about state the caller can already read from the list, and the supplier would then
-     * have to tell "withdrawn here" from "expired" from "never existed" — recreating exactly the
-     * row-state coupling ADR-0015 removed.
+     * <p>What it <em>does</em> free is stock, and it does so with no code: <strong>HD-133's
+     * uniqueness slot</strong> ({@code workspace_invites_pending_email_uk}, V22), because the row
+     * is gone and the index has nothing to collide with. That is now the load-bearing half of this
+     * endpoint rather than a side effect — an unaccepted invitation blocks a fresh one to the same
+     * address <em>even after it expires</em> (the index predicate cannot mention expiry), so this
+     * DELETE is the <em>only</em> way to re-offer access at a different role or with a fresh link,
+     * and {@code DuplicateInviteException} sends its reader here by name. Two obligations follow:
+     * this endpoint must keep working on expired rows, and {@link #listInvites} must keep showing
+     * them — <strong>the set of rows that can block an invitation and the set an administrator can
+     * see must be one set.</strong>
+     *
+     * <p><strong>Do not add a withdrawal-specific sentence to the cooldown refusal.</strong> There
+     * used to be an addendum there (<em>"that invitation is still valid — ask them to check their
+     * inbox"</em>) which suppressed itself after a withdrawal because its supplier looked for this
+     * row; HD-133 made it unreachable — the duplicate refusal now rejects a superset of its
+     * condition one step earlier — and it was removed with its finder. Reviving it in any form
+     * would be one more bit about state the caller can already read from the list, and the supplier
+     * would have to tell "withdrawn here" from "expired" from "never existed", recreating exactly
+     * the row-state coupling ADR-0015 removed.
      *
      * <p><strong>404 for an already-withdrawn one, 409 for an accepted one, and the difference is
      * not cosmetic.</strong> Because withdrawal deletes, "already withdrawn" is <em>physically
@@ -753,4 +953,108 @@ public class WorkspaceService {
         }
         return sb.toString();
     }
+
+    /**
+     * <strong>The name of the partial unique index HD-133 added (V22)</strong>, and the only
+     * constraint whose violation this class is allowed to turn into a 409.
+     *
+     * <p>Not derived from anything: PostgreSQL reports the index name and Hibernate hands it
+     * through, so a rename in a future migration must be mirrored here — at which point the
+     * duplicate insert stops being translated and starts 500-ing, which is loud rather than silent.
+     */
+    private static final String PENDING_EMAIL_UNIQUE_CONSTRAINT = "workspace_invites_pending_email_uk";
+
+    /**
+     * Is this integrity violation the pending-invite index losing a race, or a real fault?
+     *
+     * <p>Translating <em>every</em> {@code DataIntegrityViolationException} on this path into a
+     * 409 would hide a genuine 500-class bug behind a plausible-looking conflict — the shape that
+     * makes an incident hard to diagnose. {@code workspace_invites} also carries a unique
+     * {@code token_hash} and three foreign keys, any of which failing here means something quite
+     * different and must keep its 500.
+     *
+     * <p><strong>THIS METHOD logs only the constraint NAME</strong>: no SQL, no exception message,
+     * no user input — and on this path the input in question is a third party's email address.
+     * Keeping that true of the whole REQUEST needs one more thing, because Hibernate's
+     * {@code SqlExceptionHelper} logs the driver exception at ERROR before this is called:
+     * {@code logServerErrorDetail=false} on the datasource, which masks PostgreSQL's DETAIL
+     * (`Key (workspace_id, lower(email))=(…, victim@example.com) already exists`). Same shape as
+     * {@code ComponentService.isNameConflict} / {@code LabelService.isNameConflict}.
+     *
+     * <p><strong>THE FALLBACK'S TRIGGER IS A SERVER MESSAGE LOCALE, NOT A SILENT DRIVER.</strong>
+     * {@link #constraintNameOf} reads the name Hibernate's dialect extracted, and the PostgreSQL
+     * extractor finds it by matching the literal English fragment
+     * {@code violates unique constraint "} — so on a server whose {@code lc_messages} is anything
+     * else it returns null for a perfectly well-formed 23505. Without a fallback the race would
+     * then answer <strong>500 instead of 409</strong>, in a configuration nobody would notice
+     * until it happened.
+     *
+     * <p>So the fallback matches the constraint's own name, which PostgreSQL quotes verbatim in
+     * every locale, against the messages in the cause chain — gated on SQLSTATE 23505 so a message
+     * that merely mentions the index (a lock error, a dump of the statement) cannot qualify. It
+     * deliberately does NOT test {@code instanceof DuplicateKeyException}: that is a product of
+     * {@code SQLErrorCodeSQLExceptionTranslator}, and under JPA {@code HibernateJpaDialect}
+     * translates a constraint violation into a plain {@link DataIntegrityViolationException}, so
+     * the branch was unreachable — a fallback that never fires is not a fallback.
+     */
+    private static boolean isDuplicateInvite(DataIntegrityViolationException e) {
+        String constraint = constraintNameOf(e);
+        boolean duplicate = constraint != null
+                ? PENDING_EMAIL_UNIQUE_CONSTRAINT.equalsIgnoreCase(constraint)
+                : namesPendingEmailIndex(e);
+        if (duplicate) {
+            log.debug("Invite insert lost the pending-address race on constraint [{}]",
+                    constraint != null ? constraint : PENDING_EMAIL_UNIQUE_CONSTRAINT);
+        } else {
+            log.warn("Invite insert failed on an unexpected constraint [{}] — rethrowing",
+                    constraint != null ? constraint : "unknown");
+        }
+        return duplicate;
+    }
+
+    private static String constraintNameOf(Throwable e) {
+        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
+            if (t instanceof ConstraintViolationException cve) return cve.getConstraintName();
+        }
+        return null;
+    }
+
+    /**
+     * The locale-proof fallback: does this failure name <em>our</em> index, and is it a uniqueness
+     * violation at all?
+     *
+     * <p><strong>Both halves are load-bearing.</strong> The name alone is not enough — a lock
+     * timeout, a statement cancellation or any error that happens to quote the failing statement
+     * would mention the index too, and answering those a 409 would tell a caller "somebody else
+     * invited this address" when nobody did. SQLSTATE alone is not enough either: 23505 on this
+     * insert could equally be {@code token_hash}. Together they are the same decision the dialect
+     * would have made, reached without depending on the server speaking English — PostgreSQL
+     * quotes an identifier verbatim in every locale, which is exactly why the name is the part
+     * worth matching and the surrounding words are not.
+     *
+     * <p>The walk is depth-bounded rather than merely self-reference-guarded, for the reason
+     * {@code GlobalExceptionHandler.sqlStateOf} gives: a two-step cause cycle would otherwise spin
+     * forever on a thread that is already handling a failure.
+     */
+    private static boolean namesPendingEmailIndex(Throwable e) {
+        boolean uniqueViolation = false;
+        boolean namesIndex = false;
+        Throwable t = e;
+        for (int depth = 0; t != null && depth < MAX_CAUSE_DEPTH; t = t.getCause(), depth++) {
+            if (t instanceof SQLException se && SQLSTATE_UNIQUE_VIOLATION.equals(se.getSQLState())) {
+                uniqueViolation = true;
+            }
+            String message = t.getMessage();
+            if (message != null && message.contains(PENDING_EMAIL_UNIQUE_CONSTRAINT)) {
+                namesIndex = true;
+            }
+        }
+        return uniqueViolation && namesIndex;
+    }
+
+    /** PostgreSQL {@code unique_violation}. Not localised, unlike the message that carries it. */
+    private static final String SQLSTATE_UNIQUE_VIOLATION = "23505";
+
+    /** Generous enough that no real chain reaches it, small enough that a cycle cannot hang. */
+    private static final int MAX_CAUSE_DEPTH = 20;
 }

@@ -80,11 +80,13 @@ export default function WorkspacePeoplePage() {
    * that hook would make every screen in the feature refetch a list only this
    * one renders.
    *
-   * Three writes move it, and the third is the one that is easy to miss:
-   * sending an invite (a new row), withdrawing one (a gone row) and **removing a
-   * member** — HD-132 deletes that member's unaccepted invitations as a side
-   * effect, so without this the screen would keep offering a Withdraw button for
-   * rows the server has already deleted.
+   * Anything that can change what the list contains moves it, including two
+   * that are easy to miss. **Removing a member**: HD-132 deletes that member's
+   * unaccepted invitations as a side effect, so without this the screen would
+   * keep offering a Withdraw button for rows the server has already deleted.
+   * And **an invite that was refused as a duplicate** (HD-133): nothing was
+   * written, but the refusal points at a row this list is supposed to be
+   * showing, and the surest reason it is absent is that this copy is stale.
    */
   const invalidateInvites = useCallback(
     () => qc.invalidateQueries({ queryKey: invitesKey(wsId) }),
@@ -258,7 +260,22 @@ function InviteRow({ wsId, roles, onInvited }: {
       // countdown beside it could only disagree with it. `classifyConflict`
       // reads `Retry-After` before any `errorType`, so a 429 arrives as
       // `kind: 'retry'` — this row wants nothing from it but the sentence.
-      setError(classifyConflict(err).detail)
+      const refusal = classifyConflict(err)
+      setError(refusal.detail)
+      // **A duplicate refusal moves the list below** (HD-133). Its remedy is
+      // "withdraw the blocking invitation under Workspace settings → People" —
+      // this screen — so the row it names has to be on screen when the sentence
+      // is read: a stale list (or one loaded before somebody else invited the
+      // same address) is exactly how an administrator concludes the refusal is
+      // wrong. Keyed on the kind, never on the status: the "already a member"
+      // 409 is also a 409, carries no `errorType`, outranks this one when both
+      // apply, and names a row this list does not contain — refreshing for it
+      // would only redraw an unchanged list.
+      //
+      // The sentence is set FIRST and the refetch is not awaited into the
+      // message path, so a slow or failing invalidation can never cost the
+      // reader the refusal itself.
+      if (refusal.kind === 'duplicateInvite') await onInvited()
     } finally {
       setSending(false)
     }
@@ -317,9 +334,11 @@ export function invitesKey(wsId: string | undefined) {
  * easy to get wrong:
  *
  *  • **Expired rows are shown, labelled.** They are returned deliberately:
- *    nothing sweeps them, they stay withdrawable, and HD-133's uniqueness will
- *    one day refuse a re-invite over one — a row that cannot be seen is a row
- *    that cannot be cleared and a refusal that cannot be explained.
+ *    nothing sweeps them, they stay withdrawable, and HD-133's uniqueness now
+ *    refuses a re-invite over one (the index predicate cannot read a clock, so a
+ *    lapsed row keeps holding the slot until somebody withdraws it) — a row that
+ *    cannot be seen is a row that cannot be cleared and a refusal that cannot be
+ *    explained.
  *  • **A degraded role is a placeholder, never a guess** — `role` and `roleId`
  *    are withheld together precisely so a client cannot look the name back up.
  *  • **404 is success**, not an error. See {@link InvitationRow}.

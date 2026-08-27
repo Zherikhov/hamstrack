@@ -10,11 +10,32 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+/**
+ * <strong>Every insert into {@code workspace_invites} must run the duplicate pre-check FIRST and
+ * the mail throttle SECOND</strong> (HD-133 §4.1, V22 header). This is a requirement on new code
+ * rather than a description of today's callers, because it is precisely the thing a second writer
+ * of this table inherits none of.
+ *
+ * <p>The reason is an ordering, not a query. {@code workspace_invites_pending_email_uk} makes a
+ * duplicate insert fail, and {@code RecipientMailThrottle} <em>records</em> its
+ * {@code mail_send_events} row inside the same transaction, before the insert. So a constraint
+ * violation that surfaces after the throttle has run rolls that row back while the caller has
+ * already observed the refusal — a free way to probe a stranger's mail ceilings without ever
+ * spending them. Checking {@link #findPendingByWorkspaceAndFoldedEmail} above
+ * {@code inviteThrottle.requireRecipientCeilings} turns the common case into a 409 that leaves the
+ * recorded event alone. What makes that 409 cost the caller anything is a separate line —
+ * {@code inviteThrottle.requireSenderVolume}, spent ABOVE this check — because the two halves of
+ * the throttle obey opposite placement rules: the in-memory sender counter no rollback returns
+ * goes above every refusal, the recorded recipient event goes below them all.
+ *
+ * <p>A path that skips the order fails <em>closed</em> — it cannot create the duplicate, it can
+ * only report it as a 500 and leak the probe. That is the whole of what is at stake, and it is why
+ * this note is on the interface rather than on one method.
+ */
 public interface WorkspaceInviteRepository extends JpaRepository<WorkspaceInvite, UUID> {
 
     /**
@@ -148,40 +169,54 @@ public interface WorkspaceInviteRepository extends JpaRepository<WorkspaceInvite
     List<WorkspaceInvite> findUnacceptedForWorkspace(@Param("workspaceId") UUID workspaceId);
 
     /**
-     * Is there still a live invitation to this address <strong>in this workspace</strong>? Used for
-     * exactly one thing: deciding whether the invite cooldown's refusal may say <em>"that invitation
-     * is still valid — ask them to check their inbox"</em> (HD-190 §8.3).
+     * <strong>The one unaccepted invitation this workspace may hold for this address</strong> —
+     * the sentence behind HD-133's {@code 409 DUPLICATE_INVITE}.
      *
-     * <p><strong>A claim about a row is checked against the row.</strong> Removing a member deletes
-     * their unaccepted invites ({@link #deleteUnacceptedByWorkspaceAndEmail}, HD-132), so
-     * "remove, realise the mistake, re-invite" is a real workflow that lands inside the cooldown —
-     * and there the sentence would be false, sending an admin to tell somebody to look for an email
-     * that no longer works. That is a refusal prescribing an unperformable action, which is the
-     * mistake this project has already shipped three times, so the sentence is emitted only when
-     * this returns true. It is an {@code exists}, run only on the refusal path.
+     * <p><strong>The index is the invariant; this query is only the message.</strong> Two
+     * concurrent requests both find nothing here and both insert;
+     * {@code workspace_invites_pending_email_uk} (V22) is what makes one of them fail. So this
+     * decides whether the common case gets a sentence or a stack trace, and nothing else — do not
+     * read it as the enforcement, and do not delete the constraint translation in
+     * {@code WorkspaceService.inviteMember} on the strength of it.
      *
-     * <p><strong>Scoped to the workspace being invited into, not to the sender.</strong> The
-     * cooldown behind the refusal is keyed on (sender, recipient) across every workspace in the
-     * instance, so it can fire because of a send from a workspace the caller has since lost access
-     * to — and member removal deletes invites addressed <em>to</em> the removed member, not ones
-     * <em>sent by</em> them, so such a row outlives their membership. A sender-scoped predicate
-     * would therefore let this sentence report the current state of a row in a workspace the caller
-     * can no longer see: one bit about a membership event elsewhere, paid on the refusal path.
-     * Authoring a row is not entitlement to its present state. Scoped this way, the claim only ever
-     * describes a row in a workspace where membership and {@code workspace.member.manage} were
-     * proven moments earlier. The cost is that the sentence is simply omitted when the cooldown came
-     * from elsewhere — the addendum is optional by construction and never false either way, so
-     * nothing is lost but a helpful hint the caller could not have acted on anyway. This is also why
-     * the refusal names the address and never a workspace.
+     * <p><strong>{@code lower()} in JPQL, so PostgreSQL answers with the same function the index
+     * was built from — and NOT {@code equals} on the already-folded Java string.</strong> That
+     * shortcut is the trap this method exists to foreclose: {@code inviteMember} folds with
+     * {@code toLowerCase(Locale.ROOT)}, which is a <em>different function</em> from PostgreSQL's
+     * {@code lower()}, and {@code InviteMemberRequest} constrains only the <em>local part</em> to
+     * ASCII — the domain may be internationalised. Where the two folds disagree on one character,
+     * a Java-side check says "free" while the index says "taken": a constraint violation at flush,
+     * a rollback, and precisely the free mail-ceiling probe the check order exists to prevent.
+     * Ask the database the question the index answers. It is index-backed for free, because the
+     * partial unique index <em>is</em> the access path for this predicate.
      *
-     * <p>Exact match on the address, not {@code lower()}: {@code inviteMember} folds it with
-     * {@code Locale.ROOT} once, at the boundary, and everything downstream compares exactly (HD-120).
-     * The throttle counts a further-folded <em>inbox key</em>, so a cooldown triggered by a different
-     * spelling of the same inbox finds no row here and prints no sentence — which is correct: there
-     * is no invitation at <em>this</em> address to go and look for.
+     * <p><strong>Nor {@code MailAddresses.throttleKey}</strong>, which folds {@code +tag}, Gmail
+     * dots and punycode as well. That key identifies an <em>inbox</em>, and this constraint is
+     * about an <em>offer</em>: an offer is redeemed by exact match against {@code users.email}
+     * (HD-120), so folding {@code bob+2@} onto {@code bob@} here would refuse an invitation to a
+     * genuinely different account and make the constraint a claim the accept path does not honour.
+     * Fold as far as the harm points — a ceiling folds onto the inbox, an offer onto the address.
+     * The gap that leaves (one workspace, two spellings, two live offers) is covered from the
+     * other side by the mail cooldown, which does fold them together.
+     *
+     * <p><strong>{@code Optional} rather than {@code List}, and that is safe only BECAUSE the
+     * index exists</strong> — before V22 this predicate could match several rows. Flyway runs to
+     * completion before the application serves traffic, so by the time this can be called the
+     * invariant already holds.
+     *
+     * <p>Expiry is deliberately absent from the predicate: it cannot be in the index (see V22),
+     * so a pre-check that ignored expired rows would hand a would-be inviter a 201 the database
+     * then refuses. The caller reads {@code expiresAt} off the returned row to pick which of the
+     * two wordings to use — reported as a field, never applied as a filter, which is the same rule
+     * {@link #findUnacceptedForWorkspace} follows for the list this refusal points at.
      */
-    boolean existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(
-            Workspace workspace, String email, Instant now);
+    @Query("""
+            SELECT i FROM WorkspaceInvite i
+             WHERE i.workspace.id = :workspaceId AND lower(i.email) = lower(:email)
+               AND i.acceptedAt IS NULL
+            """)
+    Optional<WorkspaceInvite> findPendingByWorkspaceAndFoldedEmail(
+            @Param("workspaceId") UUID workspaceId, @Param("email") String email);
 
     // Pending invites addressed to a user's email (still filtered for expiry in
     // the service). Newest first so the invites screen shows recent ones on top.
@@ -198,10 +233,13 @@ public interface WorkspaceInviteRepository extends JpaRepository<WorkspaceInvite
      * Revoke every UNACCEPTED invite for one address in ONE workspace — part of removing a
      * member (HD-132).
      *
-     * <p><strong>Without this, removal does not remove.</strong> {@code inviteMember} only
-     * refuses someone who is <em>already</em> a member and there is no
-     * {@code UNIQUE(workspace_id, email)} on this table, so leftover pending invites are
-     * normal (a re-send, a double submit). They are invisible while the person is a member
+     * <p><strong>Without this, removal does not remove.</strong> {@code inviteMember} refuses
+     * someone who is <em>already</em> a member, and since V22 it also refuses a second
+     * invitation to a pending address — but neither of those helps here, because the row this
+     * deletes is one that was written while the person was <em>not yet</em> a member and is
+     * still perfectly valid. (Before V22 there could be several of them; the plural in this
+     * query is now historical for one workspace, and is still correct because the delete is
+     * not the thing that establishes it.) They are invisible while the person is a member
      * because {@code listPendingInvites} filters on {@code !existsByWorkspaceAndUser} — which
      * means the removal is exactly what makes them <em>re</em>appear, as a live join button on
      * the invitee's onboarding screen. {@code acceptInvite} likewise only blocks current

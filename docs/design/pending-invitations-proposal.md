@@ -311,8 +311,19 @@ because it must not be "improved":
 
 > After a withdrawal, the cooldown's optional addendum — *"That invitation is still valid — ask them
 > to check their inbox, including spam."* — is **automatically suppressed**, because the supplier at
-> `WorkspaceService.inviteMember` evaluates
+> `WorkspaceService.inviteMember` evaluated
 > `existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(…)`, and the row is gone.
+
+**Superseded by HD-133, and the addendum went with it.** That ticket's duplicate pre-check sits one
+step *above* the cooldown and matches a strict superset of the condition the addendum tested (same
+workspace, same address folded, unaccepted, expiry irrelevant), so no request can reach the cooldown
+while such a row still stands. The sentence became unreachable — and an unreachable sentence is a
+claim a future reader would trust — so both it and its finder were deleted;
+`existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter` no longer exists, and
+`findPendingByWorkspaceAndFoldedEmail` answers the 409 in its place. The `Supplier` parameter on
+`InviteThrottle` survives deliberately: **if the duplicate refusal is ever narrowed**, an addendum
+becomes reachable again, and the paragraph below is why it would then still have to be checked
+against the row before being printed.
 
 HD-190 built that check for the *remove-a-member-then-re-invite* workflow. Withdrawal is a third
 workflow with the same shape and it inherits the correct behaviour with no code change: the 429 still
@@ -565,9 +576,12 @@ roster's `email` field that every member can already read.
 ### 12.1 HD-133 — and yes, there is an order
 
 **HD-158 changes nothing about HD-190's ordering warning.** That warning says a duplicate pre-check
-must sit **above** `inviteThrottle.require`, because the throttle records its `mail_send_events` row
-inside `inviteMember`'s transaction and any later rollback unwrites it while the refusal was already
-observed — a free probe of another tenant's ceilings. Withdrawal is a *different transaction on a
+must sit **above** the half of the throttle that records — `inviteThrottle.requireRecipientCeilings`
+as HD-133 shipped it — because it writes its `mail_send_events` row inside `inviteMember`'s
+transaction and any later rollback unwrites it while the refusal was already observed: a free probe
+of another tenant's ceilings. (The sender-volume half is spent *above* that pre-check, being an
+in-memory counter no rollback returns; that is why `InviteThrottle` is two methods.) Withdrawal is a
+*different transaction on a
 different endpoint* and never runs inside `inviteMember`; it neither weakens nor strengthens that
 rule. It stands exactly as written, in all three of its places.
 

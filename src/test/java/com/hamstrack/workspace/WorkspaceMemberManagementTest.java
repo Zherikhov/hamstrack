@@ -1133,13 +1133,21 @@ class WorkspaceMemberManagementTest {
 
     /**
      * <strong>Removal that leaves an invite standing does not remove anybody.</strong>
-     * {@code inviteMember} only refuses someone who is <em>already</em> a member and there is
-     * no {@code UNIQUE(workspace_id, email)} on {@code workspace_invites}, so a leftover
-     * unaccepted invite is an ordinary consequence of a re-send. It is invisible while they
-     * are a member — {@code listPendingInvites} filters on {@code !existsByWorkspaceAndUser}
-     * — which means the removal is precisely what makes it reappear, as a live join button.
-     * One click and they are back at the invite's role, with no admin action and no
-     * notification.
+     * {@code inviteMember} only refuses someone who is <em>already</em> a member, and
+     * <strong>accepting an invitation does not delete the ones that were not used</strong> — so a
+     * leftover unaccepted invite is an ordinary consequence of inviting somebody who joined by
+     * another route, or of a second invitation sent before the first was accepted. It is
+     * invisible while they are a member — {@code listPendingInvites} filters on
+     * {@code !existsByWorkspaceAndUser} — which means the removal is precisely what makes it
+     * reappear, as a live join button. One click and they are back at the invite's role, with no
+     * admin action and no notification.
+     *
+     * <p><strong>HD-133 narrowed how many such rows there can be and removed none of this
+     * hazard.</strong> {@code workspace_invites_pending_email_uk} (V22) is PARTIAL — it covers
+     * {@code (workspace_id, lower(email)) WHERE accepted_at IS NULL} — so it bounds a workspace to
+     * one standing offer per address and says nothing at all about accepted rows. One leftover row
+     * is exactly as much of a way back in as four were, which is why this test still plants both
+     * an unaccepted row and an accepted one and asserts a different fate for each.
      */
     @Test
     void removalRevokesLeftoverInvitesSoTheRemovedMemberCannotWalkBackIn() throws Exception {

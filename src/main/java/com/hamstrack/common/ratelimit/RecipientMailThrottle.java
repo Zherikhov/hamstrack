@@ -32,8 +32,9 @@ import java.util.function.Supplier;
  * Before it, any account that could log in could make Hamstrack send mail to any address on the
  * internet, without limit, by typing that address into the invite box of a workspace it had created
  * seconds earlier. The attack it closes is <em>one victim, many workspaces the abuser creates</em>:
- * a per-workspace bound inspects the wrong dimension (each workspace holds one invitation) and so
- * does a {@code UNIQUE(workspace_id, email)}. Only a key that ignores the workspace sees it.
+ * a per-workspace bound inspects the wrong dimension (each workspace holds one invitation), and so
+ * does the per-workspace uniqueness HD-133 later added — a fresh workspace is a fresh index key, so
+ * every send in this attack is the abuser's first. Only a key that ignores the workspace sees it.
  *
  * <h2>What "the key" means, and why it is not the address</h2>
  * Every ceiling counts {@code MailAddresses.throttleKey(...)} — one key per destination

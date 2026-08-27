@@ -75,13 +75,29 @@ class ReferencedRowConflictContractTest extends LabelTestBase {
      * The status id the probes point an issue at. It names no row in {@code statuses}, so the FK
      * refuses — and <strong>this is the value PostgreSQL discloses</strong>, because its
      * {@code DETAIL} on a {@code 23503} names the offending KEY:
-     * {@code Key (status_id)=(dead0000-…)=is not present in table "statuses"}.
+     * {@code Key (status_id)=(dead0000-…) is not present in table "statuses"}.
      *
      * <p>Fixed rather than {@code gen_random_uuid()} for exactly that reason. While the SQL
      * generated the id server-side, the test had no handle on the one string the leak-guard
      * needed to check, and checked the issue id instead — which the database never mentions,
      * since it is only the {@code WHERE}-clause target. A leak-guard must assert on <em>the value
      * the database chose to disclose</em>, not on the value the test happened to have.
+     *
+     * <p><strong>Since HD-133 the sentence above is true of the SERVER and no longer true of what
+     * this process sees, and that makes the guard below vacuous rather than wrong.</strong> The
+     * datasource runs {@code logServerErrorDetail=false} ({@code application.properties}), so
+     * PgJDBC drops {@code DETAIL} — along with {@code HINT}, {@code POSITION}, {@code WHERE} and
+     * {@code INTERNAL QUERY} — from {@code getMessage()} on every server error raised on this
+     * pool. The key value therefore never reaches the handler at all, and no plausible bug in the
+     * handler could put it on the wire. That is a stronger guarantee than this assertion, held at
+     * a lower layer, and it is measured by {@code ServerErrorDetailMaskTest}.
+     *
+     * <p>The guard stays anyway, and the reason is the one that decides these: it is the only
+     * thing that would notice if the mask were ever lifted — an operator may legitimately set
+     * {@code DB_LOG_SERVER_ERROR_DETAIL=true} for a debugging session, and the property could be
+     * removed outright by somebody restoring a diagnostic. The rest of this file's scan (the
+     * constraint names, the SQL, the SQLSTATE) still bites today and is what keeps the method
+     * honest in the meantime.
      */
     static final String ABSENT_STATUS_ID = "dead0000-0000-7000-8000-00000000beef";
 
@@ -147,11 +163,17 @@ class ReferencedRowConflictContractTest extends LabelTestBase {
         assertThat(body)
                 .as("""
                         THE ASSERTION THIS FILE GOT WRONG ONCE, AND THE REASON IT IS NOW NEGATIVE. \
-                        A 23503 arrives in two opposite directions. A parent delete refused ("is \
-                        still referenced from table issues") can be answered with remap-or-archive. \
-                        A child write refused ("is not present in table statuses") cannot: the \
-                        referenced row does not exist, nothing is being deleted, and neither remedy \
-                        is an action its reader could take. The probe above runs \
+                        A 23503 arrives in two opposite directions. A parent delete refused \
+                        ("update or delete on table statuses violates foreign key constraint … on \
+                        table issues") can be answered with remap-or-archive. A child write \
+                        refused ("insert or update on table issues violates foreign key constraint \
+                        …") cannot: the referenced row does not exist, nothing is being deleted, \
+                        and neither remedy is an action its reader could take. Those are the \
+                        PRIMARY-message spellings, and they are the pair to quote since HD-133 set \
+                        logServerErrorDetail=false: PostgreSQL also states the direction in DETAIL \
+                        ("is still referenced from table …" / "is not present in table …"), this \
+                        comment quoted that pair, and DETAIL no longer reaches this process at \
+                        all. The probe above runs \
                         UPDATE issues SET status_id = gen_random_uuid(), which is purely the second \
                         kind — and the earlier version of this test asserted the body contained \
                         "replacement" and "archive", under a comment about only prescribing \
@@ -175,8 +197,18 @@ class ReferencedRowConflictContractTest extends LabelTestBase {
                         on a 23503 actually names ("Key (status_id)=(…) is not present in table \
                         statuses"). The constraint name is an internal identifier, the SQL names \
                         our tables, and on a parent-delete violation the key would be an id \
-                        belonging to whichever tenant owns it. All of it belongs in the WARN log, \
-                        in the shape handlePessimisticLock uses.
+                        belonging to whichever tenant owns it. What is left of it belongs in the \
+                        WARN log, in the shape handlePessimisticLock uses.
+
+                        AND "WHAT IS LEFT" IS THE HONEST PHRASING SINCE HD-133, WHICH MAKES THE \
+                        LAST LINE OF THIS ASSERTION VACUOUS AND THE OTHERS NOT. \
+                        logServerErrorDetail=false on the datasource drops DETAIL at the driver, \
+                        so the key value reaches neither the log nor this handler and cannot leak \
+                        from here however the handler is written; ServerErrorDetailMaskTest holds \
+                        that, one layer down, by measuring it. The constraint names, the SQL and \
+                        the SQLSTATE below are in the PRIMARY message and still arrive, so those \
+                        lines still bite. See ABSENT_STATUS_ID's own javadoc for why the vacuous \
+                        line stays.
 
                         This assertion used to check the ISSUE id, which the database never \
                         mentions — it is only the WHERE-clause target — so it proved nothing about \

@@ -78,6 +78,26 @@ export type ConflictKind =
   /** The workspace is at its custom-role cap. Do not retry. */
   | { kind: 'roleLimit'; detail: string }
   /**
+   * **An unaccepted invitation to this address already stands in this
+   * workspace** (HD-133) — one standing offer per address per workspace, so a
+   * second one is refused rather than queued or silently replacing the first.
+   *
+   * The identical request will fail identically, so there is no retry: the
+   * remedy `detail` names is to withdraw the blocking invitation on Workspace
+   * settings → People and invite again. Two wordings arrive under this one code
+   * — the blocking row is still live, or it has lapsed and is merely on file
+   * (an expired invitation occupies the slot, because the constraint cannot
+   * read a clock). That difference is the useful part and lives ONLY in
+   * `detail`, so render the sentence and never branch on its wording.
+   *
+   * Named separately from `plain` for one reason: the screen that shows this
+   * refusal also lists the blocking invitation, and it must refresh that list —
+   * a stale copy is how an administrator concludes the refusal is wrong. The
+   * "already a member" 409 carries **no** `errorType` on purpose and wins when
+   * both apply, so it lands on `plain` and moves no list.
+   */
+  | { kind: 'duplicateInvite'; detail: string }
+  /**
    * A plain conflict — the last Owner, the last project administrator, a built-in
    * role, a stale `version`, a taken name — **or an `errorType` this build does
    * not recognise**, which is deliberately treated the same way: render `detail`,
@@ -111,6 +131,7 @@ export function classifyConflict(err: unknown): ConflictKind {
     case 'ROLE_IN_USE': return { kind: 'roleInUse', usage: err.usage, detail }
     case 'SELF_HELD_ROLE': return { kind: 'selfHeld', detail }
     case 'ROLE_LIMIT_REACHED': return { kind: 'roleLimit', detail }
+    case 'DUPLICATE_INVITE': return { kind: 'duplicateInvite', detail }
     // An unrecognised (or absent) errorType is "no retry available".
     default: return { kind: 'plain', detail }
   }

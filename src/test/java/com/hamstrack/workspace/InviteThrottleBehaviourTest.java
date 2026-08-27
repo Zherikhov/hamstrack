@@ -51,9 +51,24 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * <p>This file drives the real endpoint. Its centre is
  * {@link #theTicketsAttackOneVictimManyWorkspacesIsRefused()} — the shape the ticket describes,
- * which a per-workspace cap and HD-133's {@code UNIQUE(workspace_id, email)} both inspect the wrong
- * dimension of, because each workspace holds exactly one invitation. Only a key that ignores the
- * workspace sees it.
+ * which a per-workspace cap and HD-133's {@code workspace_invites_pending_email_uk} both inspect
+ * the wrong dimension of, because each workspace holds exactly one invitation. Only a key that
+ * ignores the workspace sees it. That constraint has since shipped (V22, a PARTIAL unique index on
+ * {@code (workspace_id, lower(email)) WHERE accepted_at IS NULL}) and it stops none of this: every
+ * send in the attack is in a different workspace and therefore a different index key. The two are
+ * complements, never substitutes.
+ *
+ * <p><strong>What HD-133 took out of this file.</strong> The cooldown's optional addendum —
+ * <em>"That invitation is still valid — ask them to check their inbox, including spam."</em> — is
+ * gone, along with the repository finder behind it and the test that pinned it. Its condition (this
+ * workspace, this address, unaccepted, unexpired) is a strict SUBSET of the duplicate refusal's
+ * (this workspace, {@code lower()} address, unaccepted), so no request can reach the cooldown with
+ * such a row standing: the sentence became unreachable through the API and a sentence that cannot
+ * be emitted is a claim a future reader will trust. The property that replaced it —
+ * <em>a second invitation to a pending address is refused before these ceilings are consulted</em>
+ * — is {@code DuplicateInviteRefusalTest}, which is also where every duplicate-of-an-address case
+ * now lives. This file keeps the ceilings, and each of its cases therefore uses either a fresh
+ * address or a fresh workspace.
  *
  * <p><strong>The tenancy property is the one to read first.</strong>
  * {@link #aNonMemberOverEveryCeilingGets404AndNever429()} asserts the opposite of what reports and
@@ -107,8 +122,9 @@ class InviteThrottleBehaviourTest {
      * <strong>The ticket's attack, and its test.</strong> One abuser presses "invite" at one victim
      * from a succession of workspaces they create. Workspace creation is free and unbounded, so
      * every per-workspace control is inspecting a dimension the attack does not use: each workspace
-     * holds one invitation, a cap of 500 is never approached, and a
-     * {@code UNIQUE(workspace_id, email)} is satisfied every time.
+     * holds one invitation, a cap of 500 is never approached, and
+     * {@code workspace_invites_pending_email_uk} — which is per {@code (workspace_id,
+     * lower(email))} — is satisfied every time.
      *
      * <p>The refusal names the address — the caller's own past action, so it discloses nothing — and
      * <strong>never names a workspace</strong>, because the earlier invitation may have come from
@@ -191,11 +207,20 @@ class InviteThrottleBehaviourTest {
      * does not delete the record of a delivery.</em>
      *
      * <p>The last assertion is AC 11 and it is about wording, not about a ceiling: the refusal
-     * keeps refusing but stops telling the admin to go and look for an invitation that no longer
-     * exists. Nothing in {@code revokeInvite} implements that — the supplier at
-     * {@code inviteMember} already asks whether a live row is there — which is exactly why it is
-     * worth pinning: it is inherited behaviour, and inherited behaviour is what a later change
-     * breaks without touching the test that covers it.
+     * keeps refusing but does not tell the admin to go and look for an invitation that no longer
+     * exists.
+     *
+     * <p><strong>What holds that has changed, and the old reason is no longer true.</strong> It
+     * used to be a supplier at {@code inviteMember} that asked the table whether a live row was
+     * there, so the sentence suppressed itself. HD-133 removed the sentence outright: its condition
+     * is a strict subset of the duplicate refusal's, so it could no longer be reached through the
+     * API at all, and a claim that cannot be emitted is one a reader will still trust. So this
+     * assertion is now a guard rather than a probe — it is what fails if a future path revives an
+     * addendum without also reviving the check that a claim about a row is made only while the row
+     * is there. Kept for that, and because the sequence it drives (withdraw, then re-invite the
+     * same address in the same workspace) is the one place in this file where the duplicate check
+     * runs and finds nothing: the withdrawal really did free the uniqueness slot, so what answers
+     * is still the ceiling.
      */
     @Test
     void withdrawingTheInvitationDoesNotLiftTheCooldownAndTheEventRowKeepsItsTimestamp()
@@ -230,12 +255,18 @@ class InviteThrottleBehaviourTest {
 
         var refusal = invite(admin, workspace, mistyped)
                 .andExpect(status().isTooManyRequests());
+        assertThat(refusal.andReturn().getResponse().getStatus())
+                .as("the withdrawal freed the UNIQUENESS slot, so the duplicate check finds "
+                    + "nothing and the request reaches the ceilings — which is what makes the "
+                    + "429 above a statement about the cooldown rather than about the row. A "
+                    + "409 here would mean withdrawal had stopped deleting")
+                .isEqualTo(429);
         assertThat(detailOf(refusal))
-                .as("AC 11: the ceiling still bites, but the row it used to point at is gone, so "
-                    + "the addendum suppresses itself — nothing in the withdrawal implements that, "
-                    + "the supplier at inviteMember asks the table. Sending the admin looking for "
-                    + "an invitation they themselves withdrew is a refusal prescribing an action "
-                    + "its reader cannot perform")
+                .as("AC 11: the ceiling still bites, and it does not send the admin looking for an "
+                    + "invitation they themselves withdrew — a refusal prescribing an action its "
+                    + "reader cannot perform. Since HD-133 no invite refusal can say this at all "
+                    + "(the addendum was removed as unreachable), so this is the guard that a "
+                    + "revived supplier does not bring back the claim without the check")
                 .doesNotContain("still valid");
     }
 
@@ -275,39 +306,24 @@ class InviteThrottleBehaviourTest {
                 .andExpect(status().isTooManyRequests());
     }
 
-    /**
-     * The cooldown's message makes a claim about a row, so it is checked against the row
-     * (section 8.3). "That invitation is still valid — ask them to check their inbox" is useful and
-     * true while the invitation exists, and stale the moment it does not: declining deletes it, and
-     * so does removing the invitee as a member ({@code deleteUnacceptedByWorkspaceAndEmail}), which
-     * is the workflow — remove, realise the mistake, re-invite — that lands inside the cooldown.
+    /*
+     * REMOVED BY HD-133, AND THE REPLACEMENT IS IN ANOTHER FILE.
      *
-     * <p>Both halves are asserted, because a message that never makes the claim would pass the
-     * second half alone and lose the sentence that makes the refusal actionable.
+     * theCooldownOnlyClaimsTheEarlierInviteIsWaitingWhileItActuallyIs asserted that a second
+     * invitation to a pending address in the SAME workspace produced a 429 whose detail contained
+     * "still valid", and that declining removed the sentence. The first half is now a 409: the
+     * duplicate refusal's matching set (this workspace, lower(email), unaccepted, expiry
+     * irrelevant) is a strict SUPERSET of the addendum's (this workspace, this address,
+     * unaccepted, unexpired), so every request that could have produced that sentence is refused
+     * one step earlier by one that says the same thing better and names a remedy its reader can
+     * perform. The supplier and its finder were deleted rather than documented as dead.
+     *
+     * Re-baselining it to expect the 409 would have kept a test that no longer says anything: it
+     * would assert a status without asserting the ORDER that status proves. The stronger property
+     * — refused BEFORE the ceilings are consulted, recording no mail_send_events row — is
+     * DuplicateInviteRefusalTest, together with the cross-sender case where answering with a
+     * ceiling would be a free probe of a stranger's daily cap.
      */
-    @Test
-    void theCooldownOnlyClaimsTheEarlierInviteIsWaitingWhileItActuallyIs() throws Exception {
-        var sender = user();
-        var workspace = workspaceOwnedBy(sender);
-        var invitee = address("waiting");
-
-        invite(sender, workspace, invitee).andExpect(status().isCreated());
-
-        assertThat(detailOf(invite(sender, workspace, invitee)))
-                .as("the invitation is still sitting in the invitee's inbox, so telling them to "
-                    + "look is the one genuinely actionable thing this refusal can offer")
-                .contains("still valid");
-
-        var declined = user(invitee);
-        workspaceService.declineInvite(declined, onlyInviteIdFor(invitee));
-
-        assertThat(detailOf(invite(sender, workspace, invitee)))
-                .as("the row is gone, so the claim is false. A refusal that lies about its own "
-                    + "remedy is how a retryable 429 gets read as a wall — and this is the one "
-                    + "place in the feature where a refusal can go stale, which is why the "
-                    + "sentence is behind a count(*) instead of an assumption")
-                .doesNotContain("still valid");
-    }
 
     // ================================================================ tenancy
 
@@ -328,6 +344,14 @@ class InviteThrottleBehaviourTest {
      * address is inside their own cooldown, and it has taken its whole daily allowance from other
      * senders. Every one of those would produce a 429 in their own workspace. Against a workspace
      * they cannot see, and against one that does not exist, both must be an indistinguishable 404.
+     *
+     * <p><strong>Each ceiling is demonstrated where it is the one that can answer, which HD-133
+     * made a distinction that matters.</strong> The recipient half is now unreachable in a
+     * workspace where the address is already pending — the duplicate 409 pre-empts it — so the
+     * cooldown is exercised in a second workspace of the caller's own, where the address is free
+     * and the only thing left to refuse is the ceiling. Asserting it in a workspace holding the
+     * row would still be a 429 today (the sender budget answers first once it is full), and would
+     * be a 429 that says nothing about the ceilings this file is named after.
      */
     @Test
     void aNonMemberOverEveryCeilingGets404AndNever429() throws Exception {
@@ -346,14 +370,25 @@ class InviteThrottleBehaviourTest {
             invite(otherSender, workspaceOwnedBy(otherSender), victim)
                     .andExpect(status().isCreated());
         }
-        // Ceiling A: the rest of the hourly budget, spent on addresses nobody else touches.
-        for (int i = 1; i < SENDER_HOURLY_DEFAULT; i++) {
+
+        // Premise 1, the RECIPIENT ceilings, in a second workspace of the caller's own — where
+        // this address has never been invited, so nothing but the cooldown and the daily cap can
+        // refuse it. (In `own` the address is pending, and HD-133 answers 409 before the ceilings
+        // are consulted at all.) This refused request still costs a unit of sender volume, which
+        // the arithmetic below accounts for.
+        invite(stranger, workspaceOwnedBy(stranger), victim)
+                .andExpect(status().isTooManyRequests());
+
+        // Ceiling A: the rest of the hourly budget, spent on addresses nobody else touches. Two
+        // units are already gone — the accepted send and the refused one above.
+        for (int i = 2; i < SENDER_HOURLY_DEFAULT; i++) {
             invite(stranger, own, address("filler-" + i)).andExpect(status().isCreated());
         }
 
-        // The premise. In a workspace they DO belong to this caller is refused; without it the
-        // 404s below could be a broken endpoint refusing everyone.
-        invite(stranger, own, victim).andExpect(status().isTooManyRequests());
+        // Premise 2, the SENDER budget, on an address that is free everywhere — so this 429 can
+        // only be the caller's own volume. Without both premises the 404s below could be a broken
+        // endpoint refusing everyone.
+        invite(stranger, own, address("one-too-many")).andExpect(status().isTooManyRequests());
 
         // A caller who is not a member must not learn, from a 429, that this address has been
         // invited elsewhere in the instance — nor that this workspace exists. Non-existence and

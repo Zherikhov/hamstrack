@@ -57,8 +57,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * asserted from reading the call site. That is the shape of every real cause — a constraint
  * violation, a late refusal, a statement cancelled at the bound {@code BoundedJpaTransactionManager}
  * applies — and it is reachable today: {@code register}'s {@code users.email} UNIQUE settles at the
- * commit that follows the publish, and HD-133's planned {@code UNIQUE(workspace_id, email)} does the
- * same for invites.
+ * commit that follows the publish, and HD-133 shipped the same shape for invites in
+ * {@code workspace_invites_pending_email_uk} (V22, partial and over {@code lower(email)}), which a
+ * concurrent second invitation to one address really can lose at the flush.
  *
  * <p>{@link MailService} is a Mockito bean here, and deliberately: the question is <em>whether and
  * when the mailer was called</em>, not what it puts on the wire. Mocking it also removes the
@@ -162,7 +163,8 @@ class MailFollowsTheCommitTest {
         assertThatThrownBy(() -> txTemplate.executeWithoutResult(status -> {
             workspaceService.inviteMember(owner, workspace.getId(),
                     new InviteMemberRequest(invitee, null, "MEMBER"));
-            throw new IllegalStateException("HD-133's UNIQUE(workspace_id, email) colliding at flush");
+            throw new IllegalStateException(
+                    "workspace_invites_pending_email_uk colliding at flush");
         })).isInstanceOf(IllegalStateException.class);
 
         assertThat(inviteRepository.findAll().stream()

@@ -469,12 +469,22 @@ public class ComponentService {
      * <p><strong>One deliberate exception exists, and it is not a licence.</strong>
      * {@code GlobalExceptionHandler.handleDataIntegrityViolation} — the backstop under every
      * path like this one — logs {@code ex.toString()}. It has to: a {@code 23503} arrives in two
-     * opposite directions with opposite remedies ("still referenced from" versus "is not present
-     * in"), the two are indistinguishable from SQLSTATE alone, and the client is deliberately
-     * told neither, so that message is the only place an operator can learn which. It is safe for
-     * the reason this rule exists: every parameter is bound, so the statement logs with
+     * opposite directions with opposite remedies ("update or delete on table …" versus "insert or
+     * update on table …"), the two are indistinguishable from SQLSTATE alone, and the client is
+     * deliberately told neither, so an operator who has to tell them apart reads it there. It is
+     * safe for the reason this rule exists: every parameter is bound, so the statement logs with
      * placeholders and no user input reaches the line. A call site with its OWN sentence — like
      * this one — knows its direction already and needs none of that.
+     *
+     * <p>Both halves of that sentence were re-worded by HD-133 and the reason is worth one line,
+     * because it applies to any future comment here. It used to quote the DETAIL pair ("still
+     * referenced from" / "is not present in") and to call that message <em>the only place</em> an
+     * operator can learn the direction. The datasource now runs {@code logServerErrorDetail=false},
+     * so {@code DETAIL} reaches neither the log nor {@code getMessage()}: the quoted phrases are
+     * what PostgreSQL emits and not what this process can read, and the surviving discriminator is
+     * the primary message quoted above. "The only place" was the more durable error of the two —
+     * a uniqueness claim about one message, in a file whose own point is that a message may stop
+     * carrying what it used to.
      */
     private static boolean isNameConflict(DataIntegrityViolationException e) {
         String constraint = constraintNameOf(e);

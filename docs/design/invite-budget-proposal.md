@@ -3,7 +3,10 @@
 **Status:** proposal / design review. **Date:** 2026-08-27. **Author:** systems-analyst.
 **Release:** 0.18.0 (public-launch readiness), priority **Urgent** — a launch gate, because the abuse
 it permits is aimed at strangers and is sent from our domain.
-**Related:** HD-133 (`UNIQUE(workspace_id, email)` on pending invites — filed, not built),
+**Related:** HD-133 (one standing offer per address per workspace — **built**, and it shipped as the
+partial expression index `workspace_invites_pending_email_uk` on `(workspace_id, lower(email))
+WHERE accepted_at IS NULL`, not the plain `UNIQUE(workspace_id, email)` this document assumed
+throughout),
 HD-202 (per-address throttle on forgot-password / resend-verification — filed, not built),
 HD-199 (`RATE_LIMIT_TRUST_FORWARDED_FOR` — built, unmerged), HD-188 (Flyway chain squash — 0.18.0).
 **Touches:** `WorkspaceService.inviteMember`, `common.ratelimit/**`, `common.mail/**`,
@@ -113,9 +116,11 @@ nothing at all against either. §6 says which is which and recommends not buildi
 
 ### 2.2 Out of scope, named so nothing here reads as covering them
 
-- **HD-133's `UNIQUE(workspace_id, email)`.** Complementary and still worth building; it stops the
-  duplicate *row* and this stops the duplicate *mail*. §8.6 says how they interact and which one has
-  to land first if both ship in 0.18.0.
+- **HD-133's uniqueness rule** — shipped as `workspace_invites_pending_email_uk`, a *partial*
+  expression index on `(workspace_id, lower(email)) WHERE accepted_at IS NULL` rather than the plain
+  `UNIQUE(workspace_id, email)` written here. Complementary: it stops the duplicate *row* and this
+  stops the duplicate *mail*. §8.6 says how they interact and which one had to land first; this one
+  did.
 - **A per-workspace cap on outstanding invites.** In scope for the *ticket*, and this spec
   **recommends against building it** (§6.4). It is the one control here that is theatre against the
   named attack, and its refusal would prescribe an action its reader cannot perform.
@@ -169,7 +174,10 @@ The order inside `inviteMember` becomes:
 2. `memberService.requireMemberAdmin` → **403**.
 3. `roleCatalog.requireAssignable` → **422**; OWNER guard → 422; grant ceiling → 403.
 4. "already a member" → **409**.
-5. **`inviteThrottle.require(actor, email)` → 429** ← new, here and nowhere earlier.
+5. **`inviteThrottle.require(actor, email)` → 429** ← new, here and nowhere earlier. *(HD-133 later
+   split this into `requireSenderVolume`, spent one step earlier, and `requireRecipientCeilings`,
+   spent here — see that ticket's §4.1. The tenancy argument below is unaffected: both halves are
+   still after step 1.)*
 6. Write `WorkspaceInvite`, write `InviteSendEvent`, `metrics.inviteSent()`, send mail.
 
 **These ceilings cannot be a `PrincipalThrottleInterceptor`, and the reason is not only that the
@@ -671,14 +679,24 @@ required.
 
 **This landed first, so HD-133 now carries a constraint it did not have when this section was
 written.** The throttle records its `mail_send_events` row inside `inviteMember`'s transaction,
-*before* the `workspace_invites` insert. A `UNIQUE(workspace_id, email)` violation on that insert
-rolls the transaction back and unwrites the recorded event — so a caller could observe the ceilings'
-refusals while never spending them, by aiming repeatedly at an address they have already invited.
-**The duplicate check must therefore run ABOVE `inviteThrottle.require`, not below it, and must be an
-explicit pre-check rather than a caught constraint violation.** The same applies to any other
-refusal HD-133 adds on this path. The note lives in three places on purpose: the comment block at
-the call site in `WorkspaceService.inviteMember` (which HD-133 must edit anyway), the header of
-`V21__mail_send_events.sql`, and here.
+*before* the `workspace_invites` insert. A uniqueness violation on that insert (HD-133 shipped it as
+the partial index `workspace_invites_pending_email_uk`, not the plain `UNIQUE(workspace_id, email)`
+assumed here) rolls the transaction back and unwrites the recorded event — so a caller could observe
+the ceilings' refusals while never spending them, by aiming repeatedly at an address they have
+already invited. **The duplicate check must therefore run ABOVE the half of the throttle that
+RECORDS, not below it, and must be an explicit pre-check rather than a caught constraint
+violation.** The same applies to any other refusal HD-133 adds on this path.
+
+**What HD-133 found when it built this, and it is the correction to make if you read the paragraph
+above as the whole rule.** "Everything that can refuse goes above the throttle" makes each new
+refusal *free* if the throttle is one call, because the caller's own volume is spent below all of
+them. `InviteThrottle` is therefore two methods: `requireSenderVolume` (in memory, no rollback
+returns it, spent **above** the duplicate check) and `requireRecipientCeilings` (writes the event,
+spent **below** it). The ordering rule is about transactional state a rollback can unwrite, and only
+the second half has any.
+
+The note lives in three places on purpose: the comment block at the call site in
+`WorkspaceService.inviteMember`, the header of `V21__mail_send_events.sql`, and here.
 
 Neither ticket should be delayed for the other; both should cite the other so a reader of either
 knows it is not the whole answer.

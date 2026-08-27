@@ -26,7 +26,8 @@ import java.util.UUID;
  * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
  * (since M1), so workspace creation no longer seeds any issue types or statuses.
  *
- * <p><strong>Inviting is throttled, and that 429 is spent LAST</strong> (HD-190).
+ * <p><strong>Inviting is throttled AFTER tenancy and authorization</strong> (HD-190), unlike the
+ * report and search budgets, which are interceptors spent before anything is resolved.
  * {@code POST /{id}/invites} answers 429 + {@code Retry-After} past any of the invitation
  * ceilings ({@code InviteThrottle} — a per-(sender, address) cooldown, a per-address daily
  * cap, and a per-sender hourly/daily volume budget), and a refusal sends no mail and writes
@@ -35,6 +36,24 @@ import java.util.UUID;
  * authorization: an unknown workspace and a non-member alike still answer 404 even when the
  * caller is over every ceiling. Inverting that would answer a recipient-keyed question to a
  * non-member — a 429 where this project requires a 404.
+ *
+ * <p><strong>One standing invitation per address, and it is refused ABOVE the ceilings</strong>
+ * (HD-133). {@code POST /{id}/invites} answers <strong>409 {@code DUPLICATE_INVITE}</strong> when an
+ * unaccepted invitation to the same address already exists in this workspace — including an
+ * <em>expired</em> one, because {@code workspace_invites_pending_email_uk} is
+ * {@code WHERE accepted_at IS NULL} and an index predicate cannot depend on the clock. The remedy
+ * the refusal names is a withdrawal, which is why it is only a performable refusal since HD-158.
+ * Two different 409s share this endpoint and are told apart by {@code errorType}, not by status:
+ * already-a-member carries none and wins.
+ *
+ * <p>That check sits <em>above</em> {@code inviteThrottle.requireRecipientCeilings}, so a duplicate
+ * spends no <em>recipient</em> allowance — and, more importantly, a violation raised BELOW it would
+ * roll back the recorded send event and hand callers a free probe of another tenant's ceilings. It
+ * sits <em>below</em> {@code inviteThrottle.requireSenderVolume}, so the duplicate 409 still costs
+ * the caller a unit of their own hourly and daily volume: an endpoint with no principal throttle
+ * interceptor cannot afford a refusal that is free to repeat. Both 429s are therefore possible on
+ * this endpoint and they mean different things — over your own volume, versus this recipient has
+ * had enough mail — and both are only ever seen by a proven member.
  *
  * <p><strong>Withdrawing an invitation frees nothing measured over time</strong> (HD-158 §5).
  * {@code DELETE /{id}/invites/{inviteId}} deletes the row and touches no
@@ -318,7 +337,11 @@ public class WorkspaceController {
      * {@code mail_send_events} row is touched, so the per-(sender, inbox) invite cooldown and
      * the per-inbox daily cap survive a withdrawal intact and {@code invite → revoke →
      * invite} is refused exactly as {@code invite → invite} would be (HD-190, ADR-0015).
-     * What it does free is stock — HD-133's future uniqueness slot — and that needs no code.
+     * What it does free is stock — HD-133's uniqueness slot — and that needs no code: the row is
+     * gone, so the partial unique index has nothing left to collide with. Since an unaccepted
+     * invitation blocks a fresh one to the same address even after it expires, this DELETE is the
+     * only way to re-offer access at a different role or with a new link, and the duplicate 409
+     * sends its reader here by name.
      */
     @DeleteMapping("/{id}/invites/{inviteId}")
     @ResponseStatus(HttpStatus.NO_CONTENT)

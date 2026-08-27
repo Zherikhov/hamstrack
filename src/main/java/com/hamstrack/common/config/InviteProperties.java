@@ -79,9 +79,11 @@ public record InviteProperties(
          * How long one principal must wait before inviting THE SAME ADDRESS again, ACROSS EVERY
          * WORKSPACE IN THE INSTANCE. This is the ticket's attack and this is its control: the
          * abuser presses "invite" at one victim from a succession of workspaces they create, so a
-         * per-workspace bound inspects the wrong dimension and HD-133's UNIQUE(workspace_id, email)
-         * inspects the same wrong dimension with a constraint. Only a key that ignores the
-         * workspace sees the pattern.
+         * per-workspace bound inspects the wrong dimension, and so does HD-133's
+         * workspace_invites_pending_email_uk: that constraint now exists, it holds one offer per
+         * address per workspace, and it stops none of this, because every send here is in a
+         * different workspace and therefore a different index key. Only a key that ignores the
+         * workspace sees the pattern. The two are complements, never substitutes.
          *
          * Keyed on (sender, recipient) rather than on the recipient alone, on purpose: a global
          * recipient key would make an ordinary refusal disclose, to an admin in workspace A, that

@@ -56,7 +56,11 @@ export interface ConflictInfo {
   /**
    * `STRANDED_PROJECTS` · `STRANDED_BY_INHERITANCE` · `ADOPTION_BLOCKED` · `ADOPTION_ROLE_UNREADABLE` ·
    * `LAST_PROJECT_ADMIN_BULK` · `ROLE_IN_USE` · `SELF_HELD_ROLE` ·
-   * `ROLE_LIMIT_REACHED`. Typed as an open string on purpose — the server may
+   * `ROLE_LIMIT_REACHED` · `DUPLICATE_INVITE`. Not every conflict has one — the
+   * "already a member" refusal deliberately carries none, and it outranks
+   * `DUPLICATE_INVITE` when both describe the same address, which is why a
+   * caller branches on this field and never on the 409 itself.
+   * Typed as an open string on purpose — the server may
    * add one, and an unknown code must degrade to "render `detail`".
    */
   errorType?: string

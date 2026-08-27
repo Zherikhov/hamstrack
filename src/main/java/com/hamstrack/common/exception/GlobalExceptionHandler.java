@@ -5,6 +5,7 @@ import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.DuplicateInviteException;
 import com.hamstrack.workspace.exception.InviteAlreadyAcceptedException;
 import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
 import com.hamstrack.workspace.exception.RoleInUseException;
@@ -211,6 +212,26 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(InviteAlreadyAcceptedException.class)
     public ResponseEntity<ProblemDetail> handleInviteAlreadyAccepted(
             InviteAlreadyAcceptedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason (HD-133 §8): {@code POST /api/workspaces/{ws}/invites} answers
+     * <strong>409</strong> for two entirely different states — the invitee is already a member
+     * ({@code AlreadyWorkspaceMemberException}, no discriminator, nothing for the client to do but
+     * show it) and this one, where the remedy is a control the client owns. A client that cannot
+     * tell them apart cannot refresh the pending list so the blocking row is on screen beside the
+     * sentence naming it, and a stale list is exactly how an administrator concludes the refusal
+     * is wrong.
+     *
+     * <p>No payload. The detail echoes the address the caller just submitted, and the blocking
+     * row itself is already readable in full through {@code GET /api/workspaces/{ws}/invites} by
+     * the permission this caller proved to be refused at all.
+     */
+    @ExceptionHandler(DuplicateInviteException.class)
+    public ResponseEntity<ProblemDetail> handleDuplicateInvite(DuplicateInviteException ex) {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         problem.setProperty("errorType", ex.getErrorType());
         return ResponseEntity.status(ex.getStatus()).body(problem);
@@ -687,13 +708,22 @@ public class GlobalExceptionHandler {
      * {@code 23503} is raised in <strong>two opposite directions</strong>, and this handler can
      * tell them apart only by reading PostgreSQL's message, which the rule above forbids:
      * <ul>
-     *   <li><strong>Parent delete refused</strong> — {@code DETAIL: Key (id)=(…) is still
-     *       referenced from table "issues"}. Something exists that points at the row being
-     *       deleted. Remap or archive are real actions here.</li>
-     *   <li><strong>Child write refused</strong> — {@code DETAIL: Key (status_id)=(…) is not
-     *       present in table "statuses"}. The referenced row does <em>not</em> exist, nothing is
-     *       being deleted, and neither remap nor archive is anything the caller could do.</li>
+     *   <li><strong>Parent delete refused</strong> — {@code update or delete on table "statuses"
+     *       violates foreign key constraint … on table "issues"}. Something exists that points at
+     *       the row being deleted. Remap or archive are real actions here.</li>
+     *   <li><strong>Child write refused</strong> — {@code insert or update on table "issues"
+     *       violates foreign key constraint …}. The referenced row does <em>not</em> exist,
+     *       nothing is being deleted, and neither remap nor archive is anything the caller could
+     *       do.</li>
      * </ul>
+     * <strong>Quoted from the PRIMARY message, not from {@code DETAIL}</strong>, and that is a
+     * statement about this application rather than about PostgreSQL. The server also spells the
+     * direction in {@code DETAIL} — {@code Key (id)=(…) is still referenced from table "issues"} /
+     * {@code Key (status_id)=(…) is not present in table "statuses"} — and this list quoted that
+     * pair until HD-133 set {@code logServerErrorDetail=false} on the datasource to keep
+     * {@code DETAIL}'s key VALUES out of the logs. Those two sentences are still what PostgreSQL
+     * emits and are no longer what this process can read, so the discriminator to reason about,
+     * to log and to test against is the primary-message pair above.
      * The <em>second</em> is the reachable one. The three catalog deletes all pre-check, so
      * direction one needs a path that bypasses them; direction two needs only a TOCTOU on an
      * ordinary issue write — {@code IssueService} resolves a status, a concurrent
@@ -731,8 +761,18 @@ public class GlobalExceptionHandler {
      * <p><strong>Nothing from the database reaches the wire.</strong> Not the constraint name, not
      * the SQL, not the parameters, not the key values — PostgreSQL's {@code DETAIL} carries the
      * offending key in both directions, and that is an id belonging to whichever tenant owns it.
-     * All of it goes in the log line with the request method and the mapped pattern, in the shape
-     * {@link #handlePessimisticLock} uses; the client gets a sentence.
+     * What is left of it goes in the log line with the request method and the mapped pattern, in
+     * the shape {@link #handlePessimisticLock} uses; the client gets a sentence.
+     *
+     * <p><strong>"All of it" is no longer accurate about the LOG either, and the difference is the
+     * point of this paragraph.</strong> Since HD-133 the datasource runs
+     * {@code logServerErrorDetail=false} (see {@code application.properties}), so {@code DETAIL},
+     * {@code HINT} and {@code POSITION} never reach {@code getMessage()} and therefore never reach
+     * the log line below — the key values are gone from both destinations, not merely from the
+     * response. The constraint name, the two table names and the direction all live in the PRIMARY
+     * message and survive, which is why the 409 translation, the direction hint in the WARN and
+     * every constraint-name test still work. An operator who needs the key back has one variable,
+     * {@code DB_LOG_SERVER_ERROR_DETAIL}, and it is documented as a one-session tool.
      *
      * <h4>Two bindings, because Spring's DAO hierarchy only exists on translated paths</h4>
      * The same trap {@link #handlePessimisticLock} and {@link #handleQueryTimeout} each fell into
@@ -800,6 +840,18 @@ public class GlobalExceptionHandler {
             // fault with no sentence written for it yet, and inventing one would be worse than a
             // 500. ERROR with the throwable, because unlike its lock neighbours this is not
             // normal contention — it means a write the application believed was valid was not.
+            //
+            // Logging the WHOLE throwable is only safe because of a setting made elsewhere: a
+            // 23505 arriving here would otherwise carry PostgreSQL's DETAIL, and DETAIL spells the
+            // colliding key VALUES — on the invite path, a third party's email address.
+            // logServerErrorDetail=false on the datasource (application.properties, HD-133) masks
+            // it at the driver, which is the only layer that can: Hibernate's SqlExceptionHelper
+            // has already logged the same message at ERROR before this handler is reached, so
+            // redacting here would suppress nothing. If that property is ever removed — or set
+            // back to true, which an operator may legitimately do for one debugging session via
+            // DB_LOG_SERVER_ERROR_DETAIL — this line and every SQL log in the application start
+            // emitting row values again. That is why the variable is documented as temporary and
+            // why the default lives in application.properties rather than in a deployment file.
             log.error("Unhandled data integrity violation on {} {} (SQLSTATE {}) — answering 500",
                     request.getMethod(), route, sqlState, ex);
             var problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR,
@@ -811,16 +863,27 @@ public class GlobalExceptionHandler {
         // request was refused rather than half-applied. It is still worth a line, for the reason
         // handlePessimisticLock logs — turning the 500 into a clean 409 removes the only signal an
         // operator had that a delete path is missing its pre-check. ex.toString() rather than the
-        // throwable: the message carries the constraint name and PostgreSQL's DETAIL, which is the
+        // throwable: the message carries the constraint name and the two table names, which is the
         // whole of what an operator needs, and the frames are Hibernate's.
-        // The log line is where the DIRECTION lives, because the message the client must not see
-        // is exactly what distinguishes them: "is still referenced from table X" (a parent delete
-        // that bypassed its pre-check — a bug in that path) versus "is not present in table X" (a
+        //
+        // The log line is where the DIRECTION lives, because the message the client must not see is
+        // exactly what distinguishes them: "update or delete on table X" (a parent delete that
+        // bypassed its pre-check — a bug in that path) versus "insert or update on table X" (a
         // child write racing a concurrent delete — expected, and the caller should retry). An
         // operator needs to know which; nobody else can be told without leaking the key.
-        log.warn("Foreign key violation on {} {}: {} — answering 409 {}. \"still referenced\" means "
-                 + "a delete path is missing its pre-check; \"is not present\" means a write raced "
-                 + "a concurrent delete and the retry will normally succeed.",
+        //
+        // THOSE PHRASES ARE THE PRIMARY MESSAGE, DELIBERATELY, AND THE PAIR THIS USED TO NAME WAS
+        // NOT. PostgreSQL also states the direction in its DETAIL line — "is still referenced from
+        // table X" / "is not present in table X" — and this comment quoted that pair until HD-133
+        // set logServerErrorDetail=false on the datasource to keep DETAIL's KEY VALUES out of the
+        // logs (see application.properties). DETAIL no longer reaches getMessage(), so a log line
+        // keyed on those words would now match nothing while still reading correct. The primary
+        // message survives the mask and carries the same distinction, so the signal is intact and
+        // it is the half to key on. Verified against PostgreSQL, both directions, both settings.
+        log.warn("Foreign key violation on {} {}: {} — answering 409 {}. \"update or delete on "
+                 + "table\" means a delete path is missing its pre-check; \"insert or update on "
+                 + "table\" means a write raced a concurrent delete and the retry will normally "
+                 + "succeed.",
                 request.getMethod(), route, ex.toString(), REFERENCE_CONSTRAINT_ERROR_TYPE);
         var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
                 "This change conflicts with a related record, so it was not applied. Something "

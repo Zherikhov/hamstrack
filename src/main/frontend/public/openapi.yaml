@@ -1442,6 +1442,65 @@ paths:
         does not depend on rate limiting being enabled.
 
 
+        **One standing invitation per address per workspace — a second is a
+        `409` carrying `errorType: "DUPLICATE_INVITE"`.** While this workspace
+        holds an *unaccepted* invitation to the same address (compared
+        case-insensitively), inviting it again is refused rather than
+        replacing, re-sending or extending the standing one: withdrawing a
+        grant is a security-relevant act with an endpoint, an audit line and a
+        confirmation of its own, and `invite` does not perform it silently
+        under another verb. To change the role or send a fresh link, withdraw
+        the standing invitation and invite again — two calls, against a row
+        that is listed on the screen the form sits on.
+
+
+        **An expired invitation still blocks, and only a withdrawal clears
+        it.** Nothing in this product sweeps invitations, and the uniqueness
+        rule cannot exclude expired rows even in principle — a database index
+        can only enforce a condition that does not change with the clock, and
+        "not yet expired" does. So a lapsed row keeps the address reserved
+        until somebody withdraws it
+        (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`, which accepts
+        expired rows and needs the permission the refused caller just proved),
+        and `GET /workspaces/{workspaceId}/invites` lists it carrying
+        `status: "EXPIRED"` for exactly that reason: **the rows that can block
+        an invitation and the rows an administrator can see are one set.** This
+        is the rule labels, components, versions and sprints already follow — a
+        dead row keeps its slot until somebody clears it, and the refusal's job
+        is to say who clears it and where.
+
+
+        **Two refusals now share this `409`, and `errorType` is what tells them
+        apart — not the status, and never the wording.** A duplicate carries
+        `errorType: "DUPLICATE_INVITE"`, in one of two wordings chosen by
+        whether the blocking invitation has lapsed. The older refusal — the
+        invitee is **already a member** — carries no `errorType` and **wins
+        when both apply**: a person can be both a member and the addressee of a
+        leftover unaccepted row, and being in the workspace is the more useful
+        answer. Per the API-wide rule, read an absent `errorType` as "not this
+        refusal" rather than as an unrecognised one.
+
+
+        **A duplicate is refused *above* the ceilings, so it spends no
+        invitation allowance.** Retrying one costs neither the caller's hourly
+        nor their daily budget and does not touch the recipient's cooldown,
+        exactly as a `400`, a `403` or a `422` here does not. See the `429`
+        response for the whole order.
+
+
+        **Uniqueness and the ceilings normalise the address differently, on
+        purpose, and the difference is visible from the client.** Uniqueness is
+        about the **offer**, which is redeemed by an exact match against the
+        account that accepts it — so it compares the address as written, and an
+        extra match there would refuse an invitation to a genuinely different
+        person. A ceiling is about the **delivery**, so it counts one
+        destination inbox however the address is spelled, and an extra match
+        there merely refuses sooner. Each folds as far as its own harm points.
+        Hence `victim@x.com` and `victim+a@x.com` are two invitations and one
+        inbox: the second is never refused as a duplicate and may well be
+        refused as a `429`.
+
+
         **Throttled — and this `429` is spent after the `404`.** Past one of the
         invitation ceilings (a per-(sender, address) cooldown, a per-address
         daily cap, and a per-sender hourly/daily volume budget) the answer is
@@ -1467,11 +1526,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: User is already a member
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '409': { $ref: '#/components/responses/InviteConflict' }
         '422': { $ref: '#/components/responses/UnknownRole' }
         '429': { $ref: '#/components/responses/InviteThrottled' }
 
@@ -1497,6 +1552,19 @@ paths:
 
         **An expired invitation is withdrawable too** (`204`). The list offers
         the control on every row it shows, so it works on every row it shows.
+
+
+        **Withdrawal is how an address is freed for a fresh invitation, and
+        that is the load-bearing half of this operation rather than a side
+        effect.** A workspace holds at most one unaccepted invitation per
+        address, and an unaccepted one blocks a new one **even after it has
+        expired**, so this `DELETE` is the only way to re-offer access at a
+        different role or with a fresh link —
+        `POST /workspaces/{workspaceId}/invites` sends the reader of its
+        `DUPLICATE_INVITE` refusal here by name. Two obligations follow, and
+        they are why the paragraph above and the list's treatment of expired
+        rows are not details: this operation must keep working on expired
+        invitations, and the list must keep showing them.
 
 
         **A `404` here means the invitation is already gone, and a client
@@ -1530,7 +1598,9 @@ paths:
         revocation this API grows: a revocation frees only a resource whose
         count it actually reduces — outstanding rows, a uniqueness slot, a
         stock cap — never one measured over time. Deleting the record of an
-        offer does not delete the record of a delivery.
+        offer does not delete the record of a delivery. What a withdrawal
+        *does* free is exactly such a count — the uniqueness slot above — so
+        the retry meets a ceiling rather than a `DUPLICATE_INVITE`.
       operationId: revokeWorkspaceInvite
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -8462,8 +8532,9 @@ components:
         opposite of the report and search budgets.** The order is: workspace
         resolved (`404` for an unknown workspace and for a non-member alike) →
         `workspace.member.manage` (`403`) → the role reference and the grant
-        ceiling (`422` / `403`) → already a member (`409`) → these ceilings
-        (`429`). **A workspace the caller cannot see answers `404` even when the
+        ceiling (`422` / `403`) → already a member (`409`) → a standing
+        unaccepted invitation to the same address (`409 DUPLICATE_INVITE`) →
+        these ceilings (`429`). **A workspace the caller cannot see answers `404` even when the
         caller is over every ceiling**, and a `429` here is only ever seen by a
         proven member who may invite. Do not carry the reports/search sentence
         ("the budget is spent before the workspace is resolved") across to this
@@ -8496,9 +8567,10 @@ components:
         grows: a revocation frees only a resource whose count it reduces —
         outstanding rows, a uniqueness slot, a stock cap — never one measured
         over time. Deleting the record of an offer does not delete the record
-        of a delivery. One visible consequence: after a withdrawal the
-        cooldown's refusal no longer suggests asking the invitee to check their
-        inbox, because that invitation is gone — the refusal itself stands.
+        of a delivery. What a withdrawal *does* free is a count it actually
+        reduces — the uniqueness slot behind `DUPLICATE_INVITE` — which is why
+        the retry reaches these ceilings at all instead of being refused one
+        step earlier as a duplicate.
 
 
         `Retry-After` is a real wait, and on one ceiling it is deliberately
@@ -8549,6 +8621,43 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    InviteConflict:
+      description: >-
+        `POST /workspaces/{workspaceId}/invites` refused by the state of the
+        workspace rather than by the caller's permissions. **Two refusals share
+        this status and are told apart by `errorType`** — never by the status
+        and never by the wording of `detail`.
+
+
+        **The invitee is already a member** — no `errorType` at all, and this
+        one **wins when both apply**: a person can be both a member and the
+        addressee of a leftover unaccepted invitation, and being in the
+        workspace is the more useful answer to the more important question.
+
+
+        **A standing unaccepted invitation to the same address** —
+        `errorType: "DUPLICATE_INVITE"`. One offer per address per workspace;
+        the standing one is left exactly as it is, neither replaced nor
+        re-sent nor extended, and **an expired invitation counts** (the
+        operation description says why it must). The remedy `detail` names is
+        `DELETE /workspaces/{workspaceId}/invites/{inviteId}`, which needs the
+        permission the caller has already proved.
+
+
+        Both are `409` rather than `403` for the usual reason: the permissions
+        are fine, a state invariant is what refuses, and the identical request
+        succeeds once the state is cleared — by withdrawing the standing
+        invitation, or by removing the member. Neither carries `Retry-After`,
+        and **neither spends any invitation allowance**: both are checked above
+        the ceilings, so retrying either costs nothing (see `InviteThrottled`
+        for the full order).
+      content:
+        application/problem+json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/DuplicateInviteProblemDetail'
 
     InviteAlreadyAccepted:
       description: >-
@@ -8768,6 +8877,42 @@ components:
                 The label that already uses this name. Null only in the rare
                 case where the winner could not be re-read (e.g. it was deleted
                 between the failed insert and the lookup).
+
+    DuplicateInviteProblemDetail:
+      description: >-
+        The `409` body of an invitation refused because this workspace already
+        holds an unaccepted invitation to the same address. See the
+        `InviteConflict` response for the other `409` the same operation
+        answers and for why that one wins when both apply.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [DUPLICATE_INVITE]
+              description: >-
+                Always present on this body, and the supported way to tell it
+                from the already-a-member `409` on the same operation, which
+                carries none. Per the API-wide rule, read an **absent**
+                `errorType` as "not this refusal" rather than as an
+                unrecognised one.
+              example: DUPLICATE_INVITE
+            detail:
+              type: string
+              description: >-
+                A sentence to render verbatim: it names the address just
+                submitted and points at the control that frees the slot —
+                Workspace settings → People, i.e.
+                `DELETE /workspaces/{workspaceId}/invites/{inviteId}`. There
+                are **two wordings, one `errorType`**, chosen by whether the
+                blocking invitation has lapsed; the lapsed one says it is still
+                on file rather than still in flight, since an expired
+                invitation blocks just the same. Prose for a human — do not
+                parse it and do not match on it. The blocking row's role is
+                deliberately not carried: it can be `null` on a row whose role
+                cannot be described, and the list beside the form already
+                shows it.
 
     InviteAlreadyAcceptedProblemDetail:
       description: >-

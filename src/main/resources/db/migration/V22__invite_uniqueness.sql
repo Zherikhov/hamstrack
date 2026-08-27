@@ -1,0 +1,254 @@
+-- ---------------------------------------------------------------------------
+-- HD-133 (One standing offer per address per workspace)
+-- ---------------------------------------------------------------------------
+-- workspace_invites carried UNIQUE on token_hash and nothing else, so the same
+-- person could hold several live offers to one workspace at once. Three costs,
+-- worst first: THE ROLE BECOMES A COIN FLIP (two live offers at MEMBER and
+-- ADMIN, and the access the invitee ends up with depends on which link they
+-- click); revocation is incomplete by construction (withdrawing "the"
+-- invitation is meaningless when there are four); and the invitee's onboarding
+-- screen lists the same workspace several times. It is also the enabling
+-- condition for the re-entry hole HD-132 had to close.
+--
+-- Full design: docs/design/invite-uniqueness-proposal.md.
+--
+-- THE PREDICATE CANNOT MENTION EXPIRY, AND THAT IS POSTGRESQL'S ANSWER RATHER
+-- THAN A PRODUCT CHOICE. A partial index predicate must be IMMUTABLE; now() is
+-- STABLE, so `WHERE accepted_at IS NULL AND expires_at > now()` is refused by
+-- the server, and a predicate over a fixed instant stops being true the next
+-- day. So EXPIRED ROWS DO OCCUPY THE SLOT. That is also the shape this schema
+-- already chose four times — labels_workspace_name_uk,
+-- components_project_name_uk, versions_project_name_uk, sprints_project_name_uk
+-- all let an archived row keep its name on purpose, with a 409 that nudges
+-- toward unarchive/rename. The general form: A DEAD ROW KEEPS ITS SLOT UNTIL
+-- SOMEBODY CLEARS IT, AND THE REFUSAL'S JOB IS TO SAY WHO CLEARS IT AND WHERE.
+-- That is honourable here only because HD-158 shipped withdrawal first: it
+-- exists, it works on expired rows, it needs the same permission the refused
+-- caller just proved, and the blocking row is on the same screen as the form.
+-- Anyone who wants expired rows not to block is asking for a retention sweep,
+-- not for a different index — and no sweep exists yet.
+--
+-- THE LIST PREDICATE AND THIS ONE MUST STAY THE SAME PREDICATE.
+-- WorkspaceInviteRepository.findUnacceptedForWorkspace filters on
+-- accepted_at IS NULL and nothing else, which is exactly what is below. The
+-- property to preserve, not the pair of queries: THE SET OF ROWS THAT CAN BLOCK
+-- AN INVITATION AND THE SET OF ROWS AN ADMINISTRATOR CAN SEE MUST BE ONE SET.
+-- Narrow either and you create a row nobody can find and nobody can clear.
+--
+-- WHY lower(email) AND NOT THE THROTTLE KEY. Uniqueness is about the OFFER, and
+-- an offer is redeemed by exact match against users.email (acceptInvite,
+-- HD-120). MailAddresses.throttleKey additionally folds +tag, Gmail dots and
+-- punycode because a MAIL CEILING is about the DELIVERY — one key per inbox.
+-- Fold as far as the harm points: an extra match refuses SOONER, which is
+-- fail-safe for a ceiling and a hole for an offer (it would refuse an
+-- invitation to a genuinely different account). So victim@x and victim+a@x are
+-- two index keys and one throttle key, in both cases correctly.
+--
+-- AND WHY lower() AT ALL, given that WorkspaceService.inviteMember already
+-- folds with Locale.ROOT before every insert. Not to stop Bob@ and bob@ both
+-- standing today — they are already the same string by then. ONE durable
+-- reason, and it is a PROPERTY rather than a claim about history: THE INDEX
+-- MUST NOT SILENTLY STOP ENFORCING ANYTHING IF THE BOUNDARY FOLD IS EVER MOVED,
+-- WEAKENED, OR FORGOTTEN ON A NEW WRITE PATH. A rule that holds only while
+-- every writer remembers to pre-fold is not an invariant.
+--
+-- An earlier draft justified lower() with a second reason — "rows written
+-- BEFORE that boundary fold existed may still be mixed-case". THAT POPULATION
+-- IS NOT REAL: `git log -S toLowerCase` places the invite-side fold in the
+-- initial commit, so no release of this application has ever written a
+-- mixed-case row through inviteMember. Step 1 below is therefore
+-- PRECAUTIONARY — it exists for a row some other writer left in a database we
+-- cannot see, not for one we know is there. (The ticket's own justification,
+-- "the accept path already matches case-insensitively", is FALSE too —
+-- acceptInvite compares with equals, deliberately and at length, because there
+-- an extra match lets the wrong person accept. Same index, sound reason, two
+-- wrong premises.)
+--
+-- FOR ANY FUTURE WRITER OF THIS TABLE — a bulk-invite endpoint, SSO
+-- auto-provisioning, an admin import. The index is the invariant and the
+-- pre-check in inviteMember is only the sentence, so such a path fails CLOSED:
+-- it cannot create the duplicate, it can only report it badly. What it owes is
+-- the ORDER, and it is TWO rules because InviteThrottle is two methods. The
+-- duplicate check goes ABOVE inviteThrottle.requireRecipientCeilings, never
+-- below: that half RECORDS its mail_send_events row in the same transaction
+-- before this table is written, so a constraint violation afterwards unwrites
+-- that row while the caller has already observed the refusal — a free way to
+-- probe a stranger's mail ceilings without spending them. V21's header states
+-- the same rule from the other side. And the check goes BELOW
+-- inviteThrottle.requireSenderVolume, which is in-memory and therefore has
+-- nothing a rollback can unwrite: spend it above every refusal, or each new
+-- refusal on this path is one more the caller can repeat for free.
+--
+-- lower() is IMMUTABLE and therefore indexable, unlike now(). An expression
+-- index over text is collation-sensitive in the usual PostgreSQL way: a
+-- glibc/ICU collation change wants a REINDEX, the same as every other text
+-- index in this schema.
+--
+-- Standing rules: no PG ENUM, no CHAR(n), no new column — so no UUID-v7 or
+-- @CreatedDate obligation arises here. Plain CREATE UNIQUE INDEX, not
+-- CONCURRENTLY: the latter cannot run inside a transaction and Flyway runs each
+-- migration in one. The table holds one row per invitation ever issued and
+-- three paths delete from it, so the SHARE lock is held for milliseconds.
+--
+-- BUT THE SIZE ARGUMENT IS NOT THE ONE THAT KEEPS THIS FILE SAFE, AND SAYING SO
+-- IS THE POINT OF THIS PARAGRAPH. How long SHARE is held decides how long a
+-- conflicting lock holder waits; whether ANYONE HOLDS ONE decides whether this
+-- deadlocks. Today nobody does — deploy.yml runs `docker compose up -d`, which
+-- stops the old container before starting the new one, so no instance serves
+-- traffic while Flyway runs and the DELETE below contends with nothing.
+-- THE CYCLE EXISTS THE MOMENT THAT CHANGES: a live writer holds ROW EXCLUSIVE
+-- on this table, the two DELETEs below take row locks, CREATE UNIQUE INDEX then
+-- asks for SHARE and waits behind ROW EXCLUSIVE, and a live transaction waiting
+-- on one of the deleted rows closes it. PostgreSQL aborts one side; if it picks
+-- the migration, Flyway rolls this file back whole and startup fails loudly and
+-- re-runnably — tolerable, not safe. So the condition to watch is a ROLLING
+-- DEPLOY OR A SECOND REPLICA (docs/design/p2-scaleout-proposal.md), not a row
+-- count, and whoever lands one owes this file a re-read rather than a longer
+-- timeout. That same condition, and only that one, also makes the benign
+-- version reachable: both steps below and the CREATE INDEX run in ONE Flyway
+-- transaction, so an invitation committed by a still-serving old instance
+-- inside that window can fail the index build outright. Loud, re-runnable, and
+-- the same answer — start Flyway with nothing else writing this table.
+
+-- 1. Precautionary: drop UNACCEPTED rows whose stored address is not already
+--    folded. NOT a fold — a DELETE — and the difference is who receives the
+--    offer.
+--
+--    WHAT THIS STEP BUYS, STATED AS THE THING THAT HAPPENS WITHOUT IT. Step 2
+--    keeps the NEWEST row per (workspace, lower(email)). So with step 2 alone and
+--    both `GOOD@x.com` (newer) and `good@x.com` (older) standing in one workspace,
+--    the mixed-case row does not merely survive — IT WINS THE SLOT AND STEP 2
+--    DELETES THE LOWERCASE ONE. A redeemable invitation destroyed by a migration,
+--    silently, in favour of one that (barring the foreign-writer case below)
+--    nobody can accept. That is the cost of dropping this step or moving it below
+--    step 2, and it is a stronger reason than "three unredeemable rows would be
+--    left standing".
+--
+--    THE OBVIOUS FIX IS THE WRONG ONE. `UPDATE ... SET email = lower(email)`
+--    keeps the invitation and looks strictly gentler. It is not: that row was
+--    MAILED TO THE MIXED-CASE SPELLING, and Bob@x.com and bob@x.com are two
+--    different mailboxes on any RFC-compliant server. Folding it in place hands
+--    a standing offer of workspace access to whoever owns the lowercase
+--    address — a stranger, potentially — which is exactly the hazard HD-120's
+--    exact-match accept comparison exists to prevent. CHANGING THE ADDRESS
+--    CHANGES WHO THE OFFER GOES TO, and a migration may not do that silently.
+--
+--    THE ROW IS ALMOST CERTAINLY DEAD TOO, and this is SUPPORTING EVIDENCE
+--    rather than the argument — it rests on premises about writers we cannot
+--    see, and the paragraph above rests on none. acceptInvite matches
+--    invite.email against users.email with equals (deliberately, HD-120), and
+--    every users row THIS APPLICATION creates is folded at signup (AuthService,
+--    AdminUserService, DataSeeder — all three), so NOBODY HOLDING AN ACCOUNT
+--    THIS APPLICATION CREATED CAN ACCEPT A MIXED-CASE INVITATION.
+--
+--    THAT CLAIM IS NARROWER THAN IT LOOKS, AND THE GAP IS DELETED ON PURPOSE.
+--    Nothing in the schema enforces the fold on users: the only constraint is
+--    users_email_key UNIQUE (email), with no lower() index and no CHECK. So a
+--    foreign writer — an LDAP/SSO importer, an admin script — can leave BOTH an
+--    account `Sso.User@x.com` and an unaccepted invite to the same spelling, and
+--    those match EXACTLY: that row IS redeemable, and this DELETE removes it.
+--    Verified on a real database rather than reasoned about. Note the two are
+--    correlated rather than independent — the importer that leaves a mixed-case
+--    invite is the one that leaves a mixed-case user — so this is the expected
+--    shape of the population, not a corner of it.
+--
+--    ACCEPTED, AND THE ALTERNATIVE WAS CONSIDERED AND DECLINED. Adding
+--    `AND NOT EXISTS (SELECT 1 FROM users u WHERE u.email = wi.email)` would make
+--    the SQL match the proof and spare exactly those rows. It is worse: a spared
+--    mixed-case row then contends in step 2, where NEWEST wins, and can take the
+--    slot from its lowercase sibling — the counterfactual at the top of this
+--    step, reintroduced for the one population the exception exists to protect.
+--    Trading one live invitation for another is not an improvement, and the
+--    unconditional DELETE at least picks the occupant the application can serve.
+--    The honest framing is that the index declares ONE SLOT PER FOLDED ADDRESS,
+--    so a database holding genuinely distinct Bob@ and bob@ offers cannot be
+--    fully served by this schema either way; step 1 is where that cost is paid,
+--    visibly, once.
+--
+--    Leaving such a row standing would also newly cost something: from the index
+--    below onward it occupies the slot, so the corrective re-invitation to the
+--    correct spelling is refused with DUPLICATE_INVITE until an administrator
+--    withdraws it. And a deleted offer is recoverable by re-inviting — by the
+--    same administrator, from the same screen — which a RETARGETED one is not.
+--    "The migration deletes invitations" reads alarming without that sentence,
+--    so the sentence stays.
+--
+--    MEASURED BEFORE SHIPPING, 2026-08-27. PRODUCTION over SSM: zero unaccepted
+--    invites at all, so zero mixed-case ones, and zero mixed-case rows in users.
+--    DEVELOPMENT IS NOT THE SAME AND SAYING SO WOULD BE THE SAME KIND OF ERROR
+--    THIS FILE KEEPS CORRECTING: it holds 1528 unaccepted invites. What matches
+--    is the part that decides the outcome — zero mixed-case invites and zero
+--    mixed-case users — and a dry run of BOTH steps on development deletes
+--    nothing. So this step is a no-op on every database we can see and exists
+--    for the ones we cannot: a self-hosted install whose table some other writer
+--    touched. If it ever deletes anything, that is the finding, not the fix.
+--
+--    ACCEPTED ROWS ARE NEVER TOUCHED, here or below: they are the only record
+--    that a person was invited at all, they sit outside the index by design,
+--    and a mixed-case accepted row is a historical fact rather than a live
+--    offer.
+--
+--    ORDER MATTERS: this runs BEFORE the de-duplication, so a mixed-case row can
+--    never win the "newest per (workspace, folded address)" contest. Moving it
+--    below step 2, or dropping it, is the destroyed-live-invitation case at the
+--    top of this step — not merely an unredeemable survivor.
+DELETE FROM workspace_invites
+ WHERE accepted_at IS NULL
+   AND email <> lower(email);
+
+-- 2. Resolve existing duplicates: keep the NEWEST unaccepted row per
+--    (workspace, folded address).
+--
+--    WHY NEWEST WINS: it carries the most recent intent and the most recent
+--    role. It is also the last to lapse, because expires_at is a FIXED seven-day
+--    offset from creation — so keeping the newest can never delete a live row in
+--    favour of a lapsed one. IF THE TTL EVER BECOMES CONFIGURABLE OR
+--    PER-INVITATION, THAT SENTENCE STOPS BEING TRUE AND THIS RULE MUST BE
+--    RE-READ.
+--
+--    id DESC IS A TIE-BREAK, NOT DECORATION: created_at defaults to NOW(),
+--    which is transaction-time, so rows written in one transaction (seeding, a
+--    scripted import) share it exactly. UUID v7 is time-ordered, so id DESC
+--    continues the same ordering and is unique — the cleanup is deterministic
+--    instead of "whichever the planner returns".
+--
+--    THE LOSING ROWS' TOKENS DIE, and that is the intent: their links 404
+--    through findByTokenHashForUpdate with no extra code, exactly as a
+--    withdrawal does. Nobody is notified, consistent with HD-158.
+--
+--    DELETE rather than expire (expires_at = now()): an expired row still
+--    occupies the uniqueness slot, so expiring the losers would leave the
+--    migration unable to achieve its own goal. Deletion is also what all three
+--    existing revocation paths do (withdraw, decline, member removal).
+--
+--    ACCEPTED ROWS ARE NEVER TOUCHED, for the reason step 1 gives.
+--
+--    AND BY THE TIME THIS RUNS EVERY REMAINING UNACCEPTED ADDRESS IS ALREADY
+--    FOLDED, so "keep the newest" can no longer preserve a row that nobody is
+--    able to accept — which it could if step 1 were moved below this one or
+--    dropped. lower() stays in the PARTITION BY regardless: it must be the same
+--    expression the index is built from, or the survivors of this step are not
+--    the set the index will accept.
+DELETE FROM workspace_invites wi
+ USING (
+     SELECT id,
+            row_number() OVER (PARTITION BY workspace_id, lower(email)
+                               ORDER BY created_at DESC, id DESC) AS rn
+       FROM workspace_invites
+      WHERE accepted_at IS NULL
+ ) ranked
+ WHERE wi.id = ranked.id
+   AND ranked.rn > 1;
+
+-- 3. One standing offer per address per workspace.
+--
+--    PARTIAL, so accepted rows keep no slot: invited -> joined -> removed ->
+--    invited again is a normal sequence and must stay one. Setting accepted_at
+--    is therefore the fourth way the slot is freed, alongside the three deletes.
+--
+--    Do NOT mirror this as @Table(uniqueConstraints = ...) on WorkspaceInvite:
+--    JPA cannot express a partial index, and a full unique constraint declared
+--    there would describe a rule the schema does not have.
+CREATE UNIQUE INDEX workspace_invites_pending_email_uk
+    ON workspace_invites (workspace_id, lower(email))
+ WHERE accepted_at IS NULL;
