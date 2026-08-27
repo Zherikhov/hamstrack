@@ -18,8 +18,9 @@ import java.util.UUID;
 
 /**
  * Workspace management: create/list/get workspaces, list members, invite by
- * email and accept invites, and — since HD-132 — administer an existing
- * membership (change a role, remove a member). The workspace is the tenant
+ * email and accept invites, since HD-132 administer an existing membership
+ * (change a role, remove a member), and since HD-158 see and withdraw the
+ * invitations this workspace has issued and not had accepted. The workspace is the tenant
  * boundary — every nested resource is resolved through the caller's membership,
  * and a non-member gets 404 (never 403) so workspace existence is not revealed.
  * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
@@ -34,6 +35,15 @@ import java.util.UUID;
  * authorization: an unknown workspace and a non-member alike still answer 404 even when the
  * caller is over every ceiling. Inverting that would answer a recipient-keyed question to a
  * non-member — a 429 where this project requires a 404.
+ *
+ * <p><strong>Withdrawing an invitation frees nothing measured over time</strong> (HD-158 §5).
+ * {@code DELETE /{id}/invites/{inviteId}} deletes the row and touches no
+ * {@code mail_send_events} row, so the invite cooldown and the per-inbox daily cap survive it
+ * intact and {@code invite → revoke → invite} is refused exactly as {@code invite → invite}
+ * would be. The rule this instance of it obeys, stated as a property because a list of paths
+ * goes stale one path before it does: <em>a revocation may free only a resource whose count it
+ * actually reduces — outstanding rows, a uniqueness slot, a stock cap — and never one measured
+ * over time. Deleting the record of an offer does not delete the record of a delivery.</em>
  *
  * <p><strong>Member administration</strong> ({@code PATCH}/{@code DELETE
  * /{id}/members/{userId}}) requires {@code workspace.member.manage} — the same
@@ -244,6 +254,78 @@ public class WorkspaceController {
                                       @Valid @RequestBody InviteMemberRequest req) {
         workspaceService.inviteMember(user, id, req);
         return Map.of("message", "Invite sent to " + req.email());
+    }
+
+    /**
+     * <strong>Every invitation this workspace has issued and not had accepted</strong>
+     * (HD-158 §4.1) — the administrator's view, and the counterpart to
+     * {@code GET /api/invites}, which is the <em>invitee's</em>.
+     *
+     * <p>Gate: {@code workspace.member.manage}. <strong>200</strong> a JSON array, newest
+     * first, no envelope and no pagination — consistent with {@code GET /{id}/members},
+     * which is unbounded over the same population · <strong>403</strong> a proven member
+     * without the permission, naming it · <strong>404</strong> unknown workspace or
+     * non-member, indistinguishably.
+     *
+     * <p>Two properties of the array worth stating on the wire contract, because a client
+     * would otherwise guess wrong about both. <strong>Expired rows are included</strong>,
+     * carrying {@code status: "EXPIRED"} — nothing in this product sweeps one, a member
+     * removal deletes one, and HD-133's uniqueness will refuse a re-invite over one, so a
+     * row hidden here is a row no admin can clear and no future refusal can point at.
+     * <strong>Accepted rows are excluded</strong> — they are history, the membership row is
+     * the live fact, and a withdraw control beside something withdrawal cannot affect is a
+     * lie.
+     *
+     * <p>{@code role} and {@code roleId} are {@code null} <em>together</em> on a row whose
+     * {@code role_id} fails the scope/ownership assertion; the rest of the list is
+     * unaffected. Emitting the id of a role whose key was withheld would hand the name back
+     * by proxy.
+     */
+    @GetMapping("/{id}/invites")
+    public List<WorkspaceInviteResponse> invites(@AuthenticationPrincipal User user,
+                                                 @PathVariable UUID id) {
+        return workspaceService.listInvites(user, id);
+    }
+
+    /**
+     * <strong>Withdraw an invitation</strong> (HD-158 §4.2) — a hard delete, so the emailed
+     * token link and {@code POST /api/invites/{id}/accept} both answer 404 immediately
+     * afterwards and the invitee's own list stops showing it, with nothing else written.
+     *
+     * <p>Gate: {@code workspace.member.manage}, and deliberately <em>not</em> the grant
+     * ceiling — withdrawing is subtraction and grants the revoker nothing, so anyone who may
+     * administer membership may withdraw any invitation here, including ones they did not
+     * send.
+     *
+     * <p><strong>204</strong> withdrawn, including for an expired invitation (the list offers
+     * the control on every row it shows, so it works on every row it shows) ·
+     * <strong>403</strong> · <strong>404</strong> unknown workspace, non-member, an id
+     * belonging to another workspace, or <strong>an invitation already withdrawn</strong> ·
+     * <strong>409 {@code INVITE_ALREADY_ACCEPTED}</strong> the invitee accepted it in the
+     * meantime.
+     *
+     * <p><strong>The 404 and the 409 are different states with different remedies, and a
+     * client must branch on them.</strong> Because withdrawal deletes, "already withdrawn"
+     * is physically identical to "never existed", so it is a plain 404 — the same answer a
+     * second DELETE of an already-removed member gets — and <strong>the client renders it as
+     * success</strong>: the caller's goal ("this invitation must not be acceptable") is
+     * already true, and the API states the truth about the resource while the client states
+     * the truth about the intent. It must <em>not</em> extend that to the 409, which is why
+     * that one carries an {@code errorType} and a detail naming the member and the People
+     * screen.
+     *
+     * <p><strong>Withdrawing frees nothing measured over time.</strong> No
+     * {@code mail_send_events} row is touched, so the per-(sender, inbox) invite cooldown and
+     * the per-inbox daily cap survive a withdrawal intact and {@code invite → revoke →
+     * invite} is refused exactly as {@code invite → invite} would be (HD-190, ADR-0015).
+     * What it does free is stock — HD-133's future uniqueness slot — and that needs no code.
+     */
+    @DeleteMapping("/{id}/invites/{inviteId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void revokeInvite(@AuthenticationPrincipal User user,
+                             @PathVariable UUID id,
+                             @PathVariable UUID inviteId) {
+        workspaceService.revokeInvite(user, id, inviteId);
     }
 
     @PostMapping("/accept-invite")

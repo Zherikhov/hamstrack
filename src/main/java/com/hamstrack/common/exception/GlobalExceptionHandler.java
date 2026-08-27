@@ -5,6 +5,7 @@ import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.InviteAlreadyAcceptedException;
 import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
 import com.hamstrack.workspace.exception.RoleInUseException;
 import com.hamstrack.workspace.exception.RoleLimitReachedException;
@@ -194,6 +195,22 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(RoleLimitReachedException.class)
     public ResponseEntity<ProblemDetail> handleRoleLimitReached(RoleLimitReachedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason (HD-158 §8.2): {@code DELETE /api/workspaces/{ws}/invites/{id}}
+     * answers <strong>404</strong> for an invitation that is gone and <strong>409</strong> for one
+     * that was accepted, and the client's behaviour on the two is <em>opposite</em> — it renders
+     * the 404 as success and must render this one as a refusal. A discriminator is the only thing
+     * that lets it tell them apart without parsing prose. No payload: the detail names the member,
+     * and the caller can already read both the roster and the invitation list.
+     */
+    @ExceptionHandler(InviteAlreadyAcceptedException.class)
+    public ResponseEntity<ProblemDetail> handleInviteAlreadyAccepted(
+            InviteAlreadyAcceptedException ex) {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         problem.setProperty("errorType", ex.getErrorType());
         return ResponseEntity.status(ex.getStatus()).body(problem);

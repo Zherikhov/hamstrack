@@ -7,7 +7,11 @@ import org.springframework.core.ResolvableType;
 import org.springframework.data.repository.CrudRepository;
 
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -33,11 +37,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  * and one commit away from a DTO. Spring Data would derive it silently and it would work. So the
  * question is asked of the interface itself, at the commit that adds the method.
  *
- * <p>Four separate doors, because each fails a different way: inheritance adds row-returning
+ * <p><strong>Since HD-158 it seals both directions, and the second one is not about a leak.</strong>
+ * Four of the doors below are ways a row could <em>leave</em>; the fifth is a way a row could be
+ * <em>removed</em>. A delete keyed on a recipient or a sender refunds a ceiling — it hands back a
+ * send slot rather than an address — so it would pass all four of the others while defeating the
+ * control this table exists to be.
+ *
+ * <p>Five separate doors, because each fails a different way: inheritance adds row-returning
  * methods nobody typed; a declared method can return the entity in half a dozen generic shapes; a
- * new projection record is a row read wearing a different type; and a query filtered on the
- * submitted address is not a leak at all but the other defect this feature already shipped once —
- * counting spellings instead of inboxes.
+ * new projection record is a row read wearing a different type; a query filtered on the submitted
+ * address is not a leak at all but the other defect this feature already shipped once — counting
+ * spellings instead of inboxes; and a delete keyed on anything but age is a refund.
  */
 class MailSendEventRepositorySealTest {
 
@@ -175,10 +185,64 @@ class MailSendEventRepositorySealTest {
     }
 
     /**
+     * <strong>The only thing a row here may be deleted for is being old</strong> (HD-158 §5.4).
+     *
+     * <p>The four assertions above are all about a row <em>leaving</em>, and none of them would
+     * fail a refund. A {@code @Modifying int deleteByRecipientKeyAndSenderUserId(…)} returns an
+     * aggregate, hands back no entity, inherits nothing, and filters on {@code recipientKey} rather
+     * than on the submitted address — it passes every one of them while making the ceilings
+     * resettable on demand. Asserted in that direction rather than assumed: exactly that method was
+     * added to the interface, this test went red, and the other five stayed green.
+     *
+     * <p><strong>Why the property needs a test and not a sentence.</strong> {@code mail_send_events}
+     * exists because the first cut of the invite cooldown derived its state from
+     * {@code workspace_invites}, and three paths delete a row there — one of them pressed by the
+     * victim, since {@code declineInvite} DELETEs. {@code V21}'s header named the future hazard
+     * exactly: correctness that depends on the continued <em>absence</em> of a delete endpoint
+     * breaks silently in a future ticket. HD-158 is that ticket — it ships
+     * {@code DELETE /api/workspaces/{ws}/invites/{inviteId}} — and the answer it gives (a
+     * withdrawal refunds nothing) is held on this end by nothing but the absence of a method. This
+     * is where that absence becomes structural.
+     *
+     * <p>Phrased as "the predicate is {@code createdAt}, and nothing else" rather than as a list of
+     * forbidden columns, because a deny-list goes stale one column before the table does. The rule
+     * is that a row is removed for its <strong>age</strong>, never for being <strong>about</strong>
+     * somebody — so a delete that names no predicate at all fails too: it names no age, and it
+     * takes every row.
+     */
+    @Test
+    void noDeleteMayBeKeyedOnAnythingButAge() {
+        var offending = new LinkedHashMap<String, Set<String>>();
+        for (var method : offeredMethods()) {
+            if (!isDelete(method)) {
+                continue;
+            }
+            var keyedOn = propertiesMentionedIn(predicateOf(method));
+            if (!keyedOn.equals(Set.of("createdAt"))) {
+                offending.put(signature(method), keyedOn);
+            }
+        }
+
+        assertThat(offending)
+                .as("a delete keyed on a recipient, a sender or a workspace is a refund; the "
+                    + "ceilings then reset on demand and HD-190 is defeated by "
+                    + "invite -> revoke -> invite — two legitimate calls, no exploit, one extra "
+                    + "HTTP request per message. Only the retention sweep may remove a row here, "
+                    + "and it removes rows for being OLD (createdAt), never for being ABOUT "
+                    + "somebody: a revocation may free stock — outstanding rows, a uniqueness "
+                    + "slot, a stock cap — and never flow — sends, cooldowns, daily ceilings. "
+                    + "Deleting the record of an offer does not delete the record of a delivery. "
+                    + "Each offender maps to the entity properties its predicate mentions; an "
+                    + "empty set means it names no predicate at all, which takes every row."
+                    + WHY)
+                .isEmpty();
+    }
+
+    /**
      * Tripwire. Every assertion above is of the form "nothing in this set offends", so an empty set
-     * passes all four while guarding nothing — and an interface that has been emptied, moved or
-     * renamed produces exactly that. The number is not pinned (adding an aggregate is legitimate and
-     * this file should not have an opinion about it); the emptiness is.
+     * passes every one of them while guarding nothing — and an interface that has been emptied,
+     * moved or renamed produces exactly that. The number is not pinned (adding an aggregate is
+     * legitimate and this file should not have an opinion about it); the emptiness is.
      */
     @Test
     void theSealIsNotGuardingAnEmptyInterface() {
@@ -213,6 +277,86 @@ class MailSendEventRepositorySealTest {
             return true;
         }
         return Arrays.stream(type.getGenerics()).anyMatch(generic -> mentions(generic, target));
+    }
+
+    /**
+     * Whether this method removes rows — in either spelling. An explicit {@code @Query} answers for
+     * itself (JPQL or native, both open with the verb); otherwise Spring Data derives one from the
+     * name, and {@code delete…}/{@code remove…} are the two prefixes it derives a delete from.
+     */
+    private static boolean isDelete(Method method) {
+        var query = method.getAnnotation(Query.class);
+        if (query != null) {
+            return words(query.value()).startsWith("delete ");
+        }
+        return method.getName().startsWith("delete") || method.getName().startsWith("remove");
+    }
+
+    /**
+     * The part that decides <em>which</em> rows go, normalised to words: everything after
+     * {@code WHERE} for a declared query, everything after {@code By} for a derived one. Empty for
+     * a delete that narrows nothing — the {@code deleteAll} shape, treated as an offence rather
+     * than as an absence, because a delete with no predicate names no age and takes every row.
+     */
+    private static String predicateOf(Method method) {
+        var query = method.getAnnotation(Query.class);
+        var statement = words(query == null ? method.getName() : query.value());
+        var opener = query == null ? " by " : " where ";
+        var at = statement.indexOf(opener);
+        return at < 0 ? "" : statement.substring(at + opener.length());
+    }
+
+    /**
+     * Which entity properties a predicate mentions, asked of {@link MailSendEvent}'s own fields —
+     * inherited ones included, {@code createdAt} being one — rather than of a hand-kept list of
+     * column names, so a property added to the entity is covered on the day it is added.
+     *
+     * <p>Every spelling of every field is covered because both sides are normalised identically: a
+     * JPQL {@code e.createdAt}, a native {@code created_at} and a derived
+     * {@code …ByCreatedAtBefore} all reduce to the words {@code created at}.
+     */
+    private static Set<String> propertiesMentionedIn(String predicate) {
+        var haystack = " " + predicate + " ";
+        var mentioned = new LinkedHashSet<String>();
+        // Longest phrase first, and each match is consumed: senderUserId has to claim
+        // "sender user id" before the bare id field can match its tail, or every sender-keyed
+        // delete would also report a predicate on a primary key it never mentions.
+        var byLengthDescending = entityFields().stream()
+                .sorted(Comparator.comparingInt((String field) -> words(field).length()).reversed())
+                .toList();
+        for (var field : byLengthDescending) {
+            var phrase = " " + words(field) + " ";
+            if (haystack.contains(phrase)) {
+                mentioned.add(field);
+                haystack = haystack.replace(phrase, " ");
+            }
+        }
+        return mentioned;
+    }
+
+    /**
+     * Lower-cased words, split at every non-alphanumeric run and at every camelCase hump, so the
+     * two sides of a comparison can be written in whichever spelling their own layer uses.
+     */
+    private static String words(String text) {
+        return text.replaceAll("([a-z0-9])([A-Z])", "$1 $2")
+                .replaceAll("[^A-Za-z0-9]+", " ")
+                .toLowerCase(Locale.ROOT)
+                .trim();
+    }
+
+    /** Every instance field of the entity, up the hierarchy through {@code CreatedOnlyEntity}. */
+    private static List<String> entityFields() {
+        var names = new ArrayList<String>();
+        for (Class<?> type = MailSendEvent.class; type != null && type != Object.class;
+             type = type.getSuperclass()) {
+            for (var field : type.getDeclaredFields()) {
+                if (!field.isSynthetic() && !Modifier.isStatic(field.getModifiers())) {
+                    names.add(field.getName());
+                }
+            }
+        }
+        return names;
     }
 
     private static String signature(Method method) {

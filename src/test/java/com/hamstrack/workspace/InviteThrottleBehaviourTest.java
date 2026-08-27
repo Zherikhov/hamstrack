@@ -31,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -164,6 +165,113 @@ class InviteThrottleBehaviourTest {
                 .isZero();
 
         invite(abuser, workspaceOwnedBy(abuser), victimAddress)
+                .andExpect(status().isTooManyRequests());
+    }
+
+    /**
+     * <strong>The administrator's own withdrawal must not unlock their next send either</strong>
+     * (HD-158 AC 10 and AC 11) — the headline of the ticket that made this file's premise a live
+     * question again.
+     *
+     * <p>{@code V21}'s header named this exact hazard: <em>correctness that depends on the
+     * continued ABSENCE of a delete endpoint breaks silently in a future ticket</em>.
+     * {@code DELETE /api/workspaces/{ws}/invites/{id}} is that endpoint. If withdrawing refunded a
+     * ceiling, {@code invite -> revoke -> invite} would defeat the whole control with two
+     * legitimate calls, no exploit and one extra HTTP request per message — and it would do it
+     * from a door the product hands to the sender, unlike the decline above, which at least
+     * belongs to the victim.
+     *
+     * <p>Four assertions, and the middle two are the ones that would still be true of a broken
+     * build if only the status were checked: the invitation row is really gone (so the refusal is
+     * not coming from the row's continued existence), the {@code mail_send_events} row is still
+     * there, and <strong>it still carries its original {@code created_at}</strong> — a refund
+     * implemented as "touch the row forward" would leave the count intact and reset the cooldown
+     * anyway. The rule, stated as a property because a list of deletion paths goes stale one path
+     * before it does: <em>a revocation may free stock, never flow. Deleting the record of an offer
+     * does not delete the record of a delivery.</em>
+     *
+     * <p>The last assertion is AC 11 and it is about wording, not about a ceiling: the refusal
+     * keeps refusing but stops telling the admin to go and look for an invitation that no longer
+     * exists. Nothing in {@code revokeInvite} implements that — the supplier at
+     * {@code inviteMember} already asks whether a live row is there — which is exactly why it is
+     * worth pinning: it is inherited behaviour, and inherited behaviour is what a later change
+     * breaks without touching the test that covers it.
+     */
+    @Test
+    void withdrawingTheInvitationDoesNotLiftTheCooldownAndTheEventRowKeepsItsTimestamp()
+            throws Exception {
+        var admin = user();
+        var workspace = workspaceOwnedBy(admin);
+        var mistyped = address("withdrawn");
+
+        invite(admin, workspace, mistyped).andExpect(status().isCreated());
+        var eventsAfterSend = eventRowsFor(mistyped);
+        var sentAt = firstEventInstantFor(mistyped);
+
+        mockMvc.perform(delete("/api/workspaces/" + workspace.getId() + "/invites/"
+                               + onlyInviteIdFor(mistyped))
+                        .header("Authorization", "Bearer " + jwtService.generateAccessToken(admin)))
+                .andExpect(status().isNoContent());
+
+        assertThat(inviteRowsFor(mistyped))
+                .as("the premise: withdrawing really does DELETE the row. If it ever stops "
+                    + "deleting, the assertions below stop exercising the defect")
+                .isZero();
+        assertThat(eventRowsFor(mistyped))
+                .as("the message is already in the mailbox and cannot be unsent, so the record of "
+                    + "the delivery survives the deletion of the offer. A refund here would also "
+                    + "be a cross-tenant write: the daily cap counts one INBOX instance-wide, so "
+                    + "this workspace would be deciding how much mail another may send a stranger")
+                .isEqualTo(eventsAfterSend);
+        assertThat(firstEventInstantFor(mistyped))
+                .as("same row, same timestamp: a 'refund' written as touching created_at forward "
+                    + "would leave every count in this file intact and reset the cooldown anyway")
+                .isEqualTo(sentAt);
+
+        var refusal = invite(admin, workspace, mistyped)
+                .andExpect(status().isTooManyRequests());
+        assertThat(detailOf(refusal))
+                .as("AC 11: the ceiling still bites, but the row it used to point at is gone, so "
+                    + "the addendum suppresses itself — nothing in the withdrawal implements that, "
+                    + "the supplier at inviteMember asks the table. Sending the admin looking for "
+                    + "an invitation they themselves withdrew is a refusal prescribing an action "
+                    + "its reader cannot perform")
+                .doesNotContain("still valid");
+    }
+
+    /**
+     * <strong>And withdrawing N invitations does not restore N slots of the recipient's daily
+     * ceiling</strong> (HD-158 AC 10, second half).
+     *
+     * <p>The cooldown above is per (sender, inbox); this is the instance-wide per-inbox cap, and it
+     * is the half a refund would break for somebody who is not even a party to the withdrawal.
+     * Five distinct senders each invite one victim and each immediately withdraw, leaving the
+     * table with <strong>no invitation rows at all</strong> — the state a derived ceiling would
+     * read as "nobody has ever mailed this person". The sixth sender is still refused.
+     */
+    @Test
+    void withdrawingEveryInvitationDoesNotRestoreTheRecipientsDailySlots() throws Exception {
+        var victim = address("daily-cap");
+
+        for (int i = 0; i < RECIPIENT_DAILY_DEFAULT; i++) {
+            var sender = user();
+            var workspace = workspaceOwnedBy(sender);
+            invite(sender, workspace, victim).andExpect(status().isCreated());
+            mockMvc.perform(delete("/api/workspaces/" + workspace.getId() + "/invites/"
+                                   + onlyInviteIdFor(victim))
+                            .header("Authorization",
+                                    "Bearer " + jwtService.generateAccessToken(sender)))
+                    .andExpect(status().isNoContent());
+        }
+
+        assertThat(inviteRowsFor(victim))
+                .as("every invitation to this address has been withdrawn — which is precisely the "
+                    + "state a ceiling derived from workspace_invites would read as 'never mailed'")
+                .isZero();
+        assertThat(eventRowsFor(victim)).isEqualTo(RECIPIENT_DAILY_DEFAULT);
+
+        var newcomer = user();
+        invite(newcomer, workspaceOwnedBy(newcomer), victim)
                 .andExpect(status().isTooManyRequests());
     }
 
@@ -415,6 +523,20 @@ class InviteThrottleBehaviourTest {
         var key = com.hamstrack.common.mail.MailAddresses.throttleKey(email);
         return transactions.execute(status -> em.createQuery(
                         "SELECT count(e) FROM MailSendEvent e WHERE e.recipientKey = :key", Long.class)
+                .setParameter("key", key).getSingleResult());
+    }
+
+    /**
+     * The oldest {@code mail_send_events} timestamp for this inbox — the value both ceilings
+     * measure from. Asserted across a withdrawal because the row surviving is not enough on its
+     * own: a refund written as "move created_at forward" leaves every count in this file intact
+     * and hands the cooldown back anyway.
+     */
+    private java.time.Instant firstEventInstantFor(String email) {
+        var key = com.hamstrack.common.mail.MailAddresses.throttleKey(email);
+        return transactions.execute(status -> em.createQuery(
+                        "SELECT min(e.createdAt) FROM MailSendEvent e WHERE e.recipientKey = :key",
+                        java.time.Instant.class)
                 .setParameter("key", key).getSingleResult());
     }
 

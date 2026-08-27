@@ -144,6 +144,7 @@ public class ProductMetrics {
     private final Counter invitesSent;
     private final Counter invitesAccepted;
     private final Counter invitesDeclined;
+    private final Counter invitesRevoked;
     private final Counter attachmentsUploaded;
     private final DistributionSummary attachmentBytes;
 
@@ -166,6 +167,8 @@ public class ProductMetrics {
                 .description("Workspace invites accepted").register(registry);
         this.invitesDeclined = Counter.builder("hamstrack.invites.declined")
                 .description("Workspace invites declined").register(registry);
+        this.invitesRevoked = Counter.builder("hamstrack.invites.revoked")
+                .description("Workspace invites withdrawn by an administrator").register(registry);
         this.attachmentsUploaded = Counter.builder("hamstrack.attachments.uploaded")
                 .description("Attachments uploaded").register(registry);
         this.attachmentBytes = DistributionSummary.builder("hamstrack.attachments.bytes")
@@ -252,6 +255,17 @@ public class ProductMetrics {
 
     public void inviteDeclined() {
         invitesDeclined.increment();
+    }
+
+    /**
+     * An administrator withdrew a pending invitation (HD-158 §10) — the missing term in the
+     * invitation lifecycle. Without it a withdrawn invitation is indistinguishable from an ignored
+     * one, so the acceptance ratio HD-190 leans on cannot tell a workspace tidying up from a
+     * workspace being ignored. No alert rule is proposed; the counter exists so an operator
+     * investigating one has the term available.
+     */
+    public void inviteRevoked() {
+        invitesRevoked.increment();
     }
 
     // --- email ---

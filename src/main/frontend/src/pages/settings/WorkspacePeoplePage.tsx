@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { useParams } from 'react-router'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, UserPlus } from 'lucide-react'
 import {
-  apiGetWorkspace, apiInviteWorkspaceMember, apiListWorkspaceMembers, apiUpdateWorkspaceMemberRole,
+  ApiResponseError,
+  apiGetWorkspace, apiInviteWorkspaceMember, apiListWorkspaceInvites, apiListWorkspaceMembers,
+  apiRevokeWorkspaceInvite, apiUpdateWorkspaceMemberRole,
 } from '../../api'
 import { useAuthStore } from '../../auth'
 import { usePermissions } from '../../hooks/usePermissions'
@@ -11,7 +13,7 @@ import { useRoleInvalidation, useRoles, sortRoles } from '../../hooks/useRoles'
 import { Avatar, Button, Input } from '../../components/ui'
 import { Chip, RoleLabel, RoleSelect, SettingsPageHeader, classifyConflict, resolveRoleById } from '../../components/roles'
 import RemoveMemberDialog from '../../components/RemoveMemberDialog'
-import type { WorkspaceMember } from '../../types'
+import type { WorkspaceInvite, WorkspaceMember } from '../../types'
 
 /**
  * Workspace settings → **People** (HD-123 S6 · §14.2).
@@ -70,6 +72,28 @@ export default function WorkspacePeoplePage() {
   const [busyRow, setBusyRow] = useState<string | null>(null)
   const [removing, setRemoving] = useState<WorkspaceMember | null>(null)
 
+  const qc = useQueryClient()
+  /**
+   * The pending list, refreshed. **Deliberately not folded into
+   * `useRoleInvalidation`**, which is the list of everything a *permission set*
+   * rides on — an invitation is neither a role nor a membership, and widening
+   * that hook would make every screen in the feature refetch a list only this
+   * one renders.
+   *
+   * Three writes move it, and the third is the one that is easy to miss:
+   * sending an invite (a new row), withdrawing one (a gone row) and **removing a
+   * member** — HD-132 deletes that member's unaccepted invitations as a side
+   * effect, so without this the screen would keep offering a Withdraw button for
+   * rows the server has already deleted.
+   */
+  const invalidateInvites = useCallback(
+    () => qc.invalidateQueries({ queryKey: invitesKey(wsId) }),
+    [qc, wsId],
+  )
+  const invalidateAll = useCallback(async () => {
+    await Promise.all([invalidate(), invalidateInvites()])
+  }, [invalidate, invalidateInvites])
+
   async function changeRole(member: WorkspaceMember, roleId: string) {
     setBusyRow(member.userId)
     setRowError(prev => ({ ...prev, [member.userId]: '' }))
@@ -92,7 +116,7 @@ export default function WorkspacePeoplePage() {
         subtitle="Who is in this workspace, and what each of them may do. A role is a bundle of permissions — there is no ladder, so “bigger” is not a question the product asks."
       />
 
-      {canManage && <InviteRow wsId={wsId!} roles={roles} onInvited={invalidate} />}
+      {canManage && <InviteRow wsId={wsId!} roles={roles} onInvited={invalidateAll} />}
 
       <div className="rounded-lg border overflow-hidden"
            style={{ background: 'white', borderColor: 'var(--color-border)' }}>
@@ -163,20 +187,13 @@ export default function WorkspacePeoplePage() {
         built yet, so you cannot remove your own membership from this screen.
       </p>
 
-      {/* A visible stub rather than a silent omission: there is no endpoint that
-          lists a workspace's pending invitations, so this screen cannot show
-          them yet even though an invite it sends is real. */}
-      <div className="rounded-lg border border-dashed px-4 py-3 mt-4"
-           style={{ borderColor: 'var(--color-border-2)' }}>
-        <div className="text-xs font-semibold uppercase tracking-wider mb-1"
-             style={{ color: 'var(--color-text-muted)' }}>
-          Pending invitations · coming soon
-        </div>
-        <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-          Invitations you send are delivered and can be accepted — but there is no endpoint yet that
-          lists or revokes the ones still outstanding, so they cannot be shown here.
-        </p>
-      </div>
+      {/* Mounted ONLY for a holder of `workspace.member.manage` — `can()` answers
+          false while the permission set is still loading, so this section can pop
+          in but can never flash in and vanish. Everything it renders is email
+          addresses, so there is no read-only residue worth showing to anybody
+          else: not an empty list (a falsehood on their screen), not a count
+          (disclosure with no matching ability). */}
+      {canManage && wsId && <PendingInvitations wsId={wsId} roles={roles} />}
 
       {removing && wsId && (
         <RemoveMemberDialog
@@ -184,7 +201,7 @@ export default function WorkspacePeoplePage() {
           member={removing}
           workspaceName={workspace?.name}
           onClose={() => setRemoving(null)}
-          onRemoved={invalidate}
+          onRemoved={invalidateAll}
         />
       )}
     </div>
@@ -279,4 +296,243 @@ function InviteRow({ wsId, roles, onInvited }: {
       </p>
     </form>
   )
+}
+
+// ── Pending invitations (HD-158) ────────────────────────────────────────────
+
+/** Every read of the workspace's own invitations. One place, so the three writes that move it agree. */
+export const WORKSPACE_INVITES_KEY_ROOT = 'workspace-invites' as const
+
+export function invitesKey(wsId: string | undefined) {
+  return [WORKSPACE_INVITES_KEY_ROOT, wsId] as const
+}
+
+/**
+ * **Access this workspace has offered and not had taken up** — the section that
+ * replaced the "coming soon" stub.
+ *
+ * Rendered only behind `workspace.member.manage` (the parent decides that; the
+ * query is never fired without it, so a member who lacks the permission produces
+ * no request at all and therefore no error banner). Four things it does that are
+ * easy to get wrong:
+ *
+ *  • **Expired rows are shown, labelled.** They are returned deliberately:
+ *    nothing sweeps them, they stay withdrawable, and HD-133's uniqueness will
+ *    one day refuse a re-invite over one — a row that cannot be seen is a row
+ *    that cannot be cleared and a refusal that cannot be explained.
+ *  • **A degraded role is a placeholder, never a guess** — `role` and `roleId`
+ *    are withheld together precisely so a client cannot look the name back up.
+ *  • **404 is success**, not an error. See {@link InvitationRow}.
+ *  • **The confirmation carries the one fact the admin cannot otherwise know**:
+ *    re-inviting the same address may have to wait, because invitations to one
+ *    address are rate limited. It names no number — the server owns those.
+ */
+function PendingInvitations({ wsId, roles }: {
+  wsId: string
+  roles: ReturnType<typeof sortRoles>
+}) {
+  const qc = useQueryClient()
+  const { data: invites = [], isLoading, error } = useQuery({
+    queryKey: invitesKey(wsId),
+    queryFn: () => apiListWorkspaceInvites(wsId),
+  })
+  const refresh = useCallback(
+    () => qc.invalidateQueries({ queryKey: invitesKey(wsId) }),
+    [qc, wsId],
+  )
+
+  return (
+    <section className="mt-6">
+      <h2 className="text-sm font-semibold mb-1" style={{ color: 'var(--color-text)' }}>
+        Pending invitations
+      </h2>
+      {/* Inline maxWidth: our @theme --spacing-* scale shadows Tailwind's
+          max-w-{xs..3xl} sizes (max-w-xl would be 32px) — see CLAUDE.md */}
+      <p className="text-xs mb-3" style={{ color: 'var(--color-text-muted)', maxWidth: 620 }}>
+        An invitation is a standing offer of access: anyone holding the link and that mailbox can
+        join until it lapses. Withdrawing one takes the offer back immediately — the link and the
+        invitation both stop working.
+      </p>
+
+      <div className="rounded-lg border overflow-hidden"
+           style={{ background: 'white', borderColor: 'var(--color-border)' }}>
+        {isLoading && (
+          <div className="px-4 py-6 mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</div>
+        )}
+        {!isLoading && error && (
+          <div className="px-4 py-3 text-xs" style={{ color: 'var(--color-error)' }}>
+            {classifyConflict(error).detail}
+          </div>
+        )}
+        {!isLoading && !error && invites.length === 0 && (
+          <div className="px-4 py-4 text-sm" style={{ color: 'var(--color-text-muted)' }}>
+            No invitations are waiting for a reply.
+          </div>
+        )}
+        {invites.map(invite => (
+          <InvitationRow key={invite.id} wsId={wsId} invite={invite} roles={roles} onChanged={refresh} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+/**
+ * One invitation, with a two-step inline confirm rather than a modal.
+ *
+ * **The 404 branch is the load-bearing part.** A withdrawal races two other
+ * deletions in this product — another administrator's click, and a member
+ * removal, which deletes that address's unaccepted invitations as a side effect
+ * — and because withdrawal hard-deletes, "already gone" is physically identical
+ * to "never existed". The server therefore answers 404, and the caller's job is
+ * to notice that the user's *intent* is already satisfied: refetch, say nothing.
+ *
+ * It is keyed on `err.status`, and it has to be: the 404's sentence is
+ * deliberately the same one the workspace-level 404 uses ("Workspace not
+ * found"), because an invite id must not become an existence oracle. Nothing
+ * about the wording can tell the two apart, and a client that tried would break
+ * on the first copy edit.
+ *
+ * The 409 is the opposite case and must NOT be swallowed with it: the invitee
+ * accepted first, the row is real, and the server's sentence names the member
+ * and points at this very screen — a remedy needing exactly the permission the
+ * reader just proved. It is rendered verbatim, through `classifyConflict`, which
+ * is also what makes any other refusal (a 403 ceiling, a busy-row retry) arrive
+ * as its own sentence instead of a bare status.
+ */
+function InvitationRow({ wsId, invite, roles, onChanged }: {
+  wsId: string
+  invite: WorkspaceInvite
+  roles: ReturnType<typeof sortRoles>
+  onChanged: () => Promise<void> | void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const resolved = resolveRoleById(roles, invite.roleId)
+  const expired = invite.status === 'EXPIRED'
+
+  async function withdraw() {
+    setBusy(true)
+    setError('')
+    try {
+      await apiRevokeWorkspaceInvite(wsId, invite.id)
+      await onChanged()
+    } catch (err) {
+      // 404 — already withdrawn, or deleted along with its member. The
+      // invitation is gone, which is exactly what the click asked for, so this
+      // is a success with nothing to report. Keyed on the STATUS, never on the
+      // message: the detail is the same string the workspace-level 404 uses.
+      if (err instanceof ApiResponseError && err.status === 404) {
+        await onChanged()
+        return
+      }
+      // Everything else is the server's sentence, verbatim — the 409 above all,
+      // whose whole value is naming the person and the remedy.
+      setError(classifyConflict(err).detail)
+    } finally {
+      setBusy(false)
+      setConfirming(false)
+    }
+  }
+
+  return (
+    <div className="px-4 py-3 border-b last:border-b-0 flex flex-col gap-2"
+         style={{ borderColor: 'var(--color-border)' }}>
+      <div className="flex items-center gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--color-text)' }}>
+            {/* An address is bidi-neutral text that neighbouring content can flip around. */}
+            <bdi className="truncate">{invite.email}</bdi>
+            {expired && (
+              <Chip tone="warning" title="This invitation can no longer be accepted. Withdrawing it clears the row — nothing else removes it.">
+                expired
+              </Chip>
+            )}
+          </div>
+          <div className="text-xs truncate" style={{ color: 'var(--color-text-muted)' }}>
+            invited by {invite.invitedByName}
+            {' · '}
+            <time dateTime={invite.createdAt} title={absolute(invite.createdAt)}>{relative(invite.createdAt)}</time>
+            {' · '}
+            <time dateTime={invite.expiresAt} title={absolute(invite.expiresAt)}>
+              {expired ? 'expired ' : 'expires '}{relative(invite.expiresAt)}
+            </time>
+          </div>
+        </div>
+
+        <div style={{ width: 190, flexShrink: 0 }}>
+          {/* The invited role. A row the server refused to describe withholds the
+              name and the id together, so there is nothing to look up — the
+              placeholder is the only honest answer. */}
+          {resolved
+            ? <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>{resolved.name}</span>
+            : <RoleLabel role={invite.role} />}
+        </div>
+
+        <div style={{ width: 90, flexShrink: 0 }} className="flex justify-end">
+          {!confirming && (
+            <Button variant="ghost" size="sm" disabled={busy}
+                    aria-label={`Withdraw the invitation to ${invite.email}`}
+                    onClick={() => { setError(''); setConfirming(true) }}>
+              Withdraw
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {confirming && (
+        <div className="flex flex-col gap-2 rounded-md px-3 py-2"
+             style={{ background: 'var(--color-surface-2)' }}>
+          <p className="text-xs" style={{ color: 'var(--color-text-secondary)' }}>
+            Withdraw the invitation to <bdi>{invite.email}</bdi>? The link stops working straight
+            away. You can invite this address again later, though a repeat invitation to the same
+            address may have to wait — invitations to one address are rate limited.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button variant="danger" size="sm" loading={busy}
+                    aria-label={`Confirm withdrawing the invitation to ${invite.email}`}
+                    onClick={withdraw}>
+              Withdraw invitation
+            </Button>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => setConfirming(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+    </div>
+  )
+}
+
+/**
+ * A coarse relative time ("3 hours ago", "in 6 days"), rendered beside the exact
+ * timestamp in a `title`. Presentation only — **`status` decides whether a row is
+ * expired**, never this, because expiry is settled by the server clock and a
+ * skewed browser must not disagree with the endpoint that will refuse the
+ * acceptance.
+ */
+function relative(iso: string): string {
+  const ms = new Date(iso).getTime() - Date.now()
+  if (!Number.isFinite(ms)) return ''
+  const fmt = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' })
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [
+    ['year', 365 * 86_400_000],
+    ['month', 30 * 86_400_000],
+    ['day', 86_400_000],
+    ['hour', 3_600_000],
+    ['minute', 60_000],
+  ]
+  for (const [unit, span] of units) {
+    if (Math.abs(ms) >= span) return fmt.format(Math.round(ms / span), unit)
+  }
+  return fmt.format(Math.round(ms / 1000), 'second')
+}
+
+function absolute(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
 }

@@ -291,7 +291,7 @@ These are the **built-in** roles, and what follows is what each one *grants* —
 |---|---|
 | See a workspace and its projects, issues, members | workspace membership; no permission |
 | Create a project | `project.create` — every workspace role (creator becomes project `MANAGER`) |
-| Invite a member, change a member's role, remove a member | `workspace.member.manage` — workspace `OWNER`/`ADMIN` |
+| Administer who is in the workspace — every step of an invitation, from sending one to [listing and withdrawing](#pending-invitations-seeing-them-and-withdrawing-one) it, plus changing a member's role and removing them | `workspace.member.manage` — workspace `OWNER`/`ADMIN` |
 | Manage the **global** taxonomy (statuses / priorities / issue types / fields / workflows / sets) and any project's bindings | system `ADMIN` |
 | Manage **workspace-scoped** taxonomy and the bindings of projects in the workspace | `workspace.taxonomy.manage` — workspace `OWNER`/`ADMIN` ([delegated](#delegated-administration)) |
 | Manage **project-private** taxonomy and this project's bindings | `project.taxonomy.manage` — project `MANAGER` only ([delegated](#delegated-administration)) |
@@ -844,6 +844,8 @@ The workspace is the top-level container (and tenancy boundary): members, projec
 | `PATCH` | `/workspaces/{id}/members/{userId}` | `workspace.member.manage` | Change a member's role (`{"roleId"}`, or the deprecated `{"role"}` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling on both the old and the new role). Returns the member |
 | `DELETE` | `/workspaces/{id}/members/{userId}?adoptStrandedProjects=` | `workspace.member.manage` | Remove a member from the workspace — not their account. `204`; `409` when it would leave a project without an administrator, cleared by repeating the call with `adoptStrandedProjects=true` |
 | `POST` | `/workspaces/{id}/invites` | `workspace.member.manage` | Email an invite (`{"email", "roleId"}`, or the deprecated `role` — [exactly one](#naming-a-role-roleid-and-the-deprecated-role-key); subject to the grant ceiling, never `OWNER`). The address is capped at [255 characters](#validation-failures-400) and its [local part must be ASCII](#an-invited-address-must-have-an-ascii-local-part-400) — two separate `400`s. [Throttled](#invitations-are-throttled): `429` + `Retry-After` past an invitation ceiling, and a refusal sends no mail and writes no invite. `201` |
+| `GET` | `/workspaces/{id}/invites` | `workspace.member.manage` | [Every invitation this workspace has issued and not had accepted](#pending-invitations-seeing-them-and-withdrawing-one) — newest first, expired ones included and labelled |
+| `DELETE` | `/workspaces/{id}/invites/{inviteId}` | `workspace.member.manage` | [Withdraw an invitation](#pending-invitations-seeing-them-and-withdrawing-one). `204`, including for an expired one; `404` once it is gone (treat as success); `409` if it was accepted meanwhile |
 | `GET` | `/workspaces/{id}/roles` | member | The workspace's roles — see [Custom roles](#custom-roles) |
 | `GET` | `/workspaces/{id}/project-access` | `workspace.edit` | The [project-access](#project-access) page in one request: mode, default project role, the roles you may set it to, and the current impact |
 | `POST` | `/workspaces/{id}/project-access/preview` | `workspace.edit` | What a change *would* do. Same body as the `PATCH`; **persists nothing** |
@@ -1197,6 +1199,55 @@ The `detail` differs per ceiling — it names the address for the cooldown, whic
 The two address-keyed ceilings count in the database, so they are **exact and instance-wide**: unaffected by a restart or a redeploy, by which app node served the request, or by the invitee declining an earlier invitation. The per-sender volume budget counts in memory per app node like the other budgets in this API, so a deployment running several instances gives each sender that budget *per instance* — a bound on abuse, never a quota to quote exactly. Counting is per **accepted attempt** rather than per delivered message: an address that bounces still consumes a slot.
 
 **The master switch takes all of them with it.** Where rate limiting is disabled instance-wide (`app.rate-limit.enabled=false`), this endpoint stops answering `429` altogether — the ceilings are not raised, they are not consulted. Nothing else about the endpoint changes. On a self-hosted instance that switch is `RATE_LIMIT_ENABLED`, and the five settings behind the ceilings are in [Operator settings](#operator-settings-that-affect-the-api).
+
+### Pending invitations: seeing them, and withdrawing one
+
+**`GET /workspaces/{id}/invites` lists every invitation this workspace has issued and not had accepted**, and **`DELETE /workspaces/{id}/invites/{inviteId}` withdraws one.** Both need [`workspace.member.manage`](#permissions) — the same permission that sends an invitation in the first place. A member who lacks it gets `403` naming the permission; a non-member, and a workspace that does not exist, get the same `404` as everywhere else in this API.
+
+The list is a bare JSON array, newest first, with no envelope and no pagination — the same shape as `GET /workspaces/{id}/members`, which is unbounded over the same population.
+
+```json
+// GET /workspaces/{id}/invites
+[
+  {
+    "id": "0198c4a1-…",
+    "email": "name@company.com",
+    "roleId": "0191b2c3-…",              // null when this row's role could not be described
+    "role": "MEMBER",                    // null in the same case — the two are withheld together
+    "invitedById": "0190a1b2-…",
+    "invitedByName": "Olga Ivanova",
+    "createdAt": "2026-08-25T09:14:02Z",
+    "expiresAt": "2026-09-01T09:14:02Z",
+    "status": "PENDING"                  // PENDING | EXPIRED
+  }
+]
+```
+
+**Expired invitations are in the list on purpose, and filtering them out is a mistake.** They carry `status: "EXPIRED"` and are otherwise ordinary rows. What this list returns is everything an administrator can still act on — every row that can still block a re-invitation, still be cleaned up, or still be named by a refusal — and nothing in this product sweeps an expired invitation on its own. A row hidden here is a row nobody can clear and one that no refusal can point at, so render them rather than dropping them; `status` is there to label them, not to filter by. `status` is computed by the server even though `expiresAt` is right beside it: expiry is decided by the server's clock, and a browser whose clock is skewed must not disagree with the endpoint that will accept or refuse the acceptance.
+
+**Accepted invitations never appear.** They are history, not a standing grant: the membership row is the live fact and the person is in the roster. That also means the list is not where you look after a withdrawal is refused with `409` — the row is there, but this endpoint does not describe it.
+
+**`role` and `roleId` are `null` together.** A row whose stored role fails its scope/ownership check answers both as `null` and the rest of the list is unaffected — one corrupt row must not empty an administration screen, and emitting the id of a role whose key was withheld would hand the name back by proxy. Render such a row with no role rather than guessing one. An invitation can never carry the built-in `OWNER`.
+
+**A withdrawal is a hard delete, and `204` means it is done** — including for an expired invitation, because the list offers the control on every row it shows, so it works on every row it shows. Afterwards the emailed link and `POST /invites/{id}/accept` both answer `404`, and the invitee's own `GET /invites` stops listing it on their next fetch. There is no body.
+
+**The [grant ceiling](#the-grant-ceiling) deliberately does not apply here.** A ceiling stops somebody handing out authority they do not hold; withdrawing hands out nothing. So anyone who may administer membership may withdraw any invitation in the workspace, including one they did not send and one carrying a role wider than their own — the alternative would leave a standing grant nobody present could revoke.
+
+**A `404` from the withdrawal means the invitation is already gone, and a client should render it as success.** Because withdrawing deletes, "already withdrawn" is physically identical to "never existed" and to "belongs to another workspace" — a second click, a double submit, or a race with another administrator all land here, and the caller's goal ("this invitation must not be acceptable") is already true. **Branch on the status, never on the message:** the `detail` on this `404` is deliberately the same string as the one an unknown workspace returns, so no wording tells "this invitation is gone" from "this workspace is not yours", and none ever will.
+
+**A `409` is the opposite, and must not be swallowed with it.** The invitee accepted in the meantime, the invitation really is there, and withdrawing it would change nothing. It is the one refusal on this endpoint that names a remedy — and the remedy needs exactly the permission they just proved, `workspace.member.manage`, to remove the new member from People. The shape, not the sentence, is what to code against:
+
+```json
+{
+  "status": 409,
+  "errorType": "INVITE_ALREADY_ACCEPTED",
+  "detail": "That invitation was accepted — <name> is now a member of this workspace. …"
+}
+```
+
+Match on `errorType` and render `detail` verbatim; the wording is prose and may change. (Removal has guards of its own — the ceiling, the last-owner invariant, [stranded projects](#managing-members) — so this `409` promises a door, not that nothing lies behind it.)
+
+**Withdrawing is not a way to reset anything.** The [invitation ceilings](#invitations-are-throttled) are keyed on a destination inbox, on a sender, or on both, and are counted independently of the invitation row, so a withdrawal frees none of them: **`invite → withdraw → invite` is refused with `429` exactly as `invite → invite` would be**, and the `Retry-After` is unchanged by the withdrawal. This is the property most likely to be assumed the other way round, and it is visible from the client. The rule behind it, which holds for any revocation this API grows: a revocation frees only a resource whose count it actually reduces — outstanding rows, a uniqueness slot, a stock cap — never one measured over time. Deleting the record of an offer does not delete the record of a delivery. One consequence you will see: after a withdrawal, the cooldown's refusal stops suggesting that the invitee check their inbox — that invitation is gone — while still refusing.
 
 ## Projects
 

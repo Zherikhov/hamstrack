@@ -1339,6 +1339,59 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/invites:
+    get:
+      tags: [Workspaces]
+      summary: List the workspace's unaccepted invitations
+      description: |
+        Every invitation this workspace has issued and not had accepted — the
+        administrator's counterpart to `GET /invites`, which is the *invitee's*
+        view of their own. Requires `workspace.member.manage`, the same
+        permission that sends one and withdraws one.
+
+
+        A JSON **array**, newest first (`createdAt` descending), with no
+        envelope and no pagination — the same shape as
+        `GET /workspaces/{workspaceId}/members`, which is unbounded over the
+        same population.
+
+
+        **Expired invitations are in the list, carrying `status: "EXPIRED"`,
+        and filtering them out client-side is a mistake.** The list is the
+        complete set of rows that can still block a re-invitation, still be
+        cleaned up, or still be pointed at by a refusal — nothing in this
+        product ever sweeps an expired invitation, so a row hidden here is one
+        no administrator can clear and one no future refusal can explain. That
+        is a property of the list rather than a fact about expiry: whatever
+        predicate is added to the invitations table next, what this endpoint
+        returns is everything an administrator can still act on.
+
+
+        **Accepted invitations are not in it, at all.** They are history rather
+        than a standing grant — the membership row is the live fact and the
+        person appears in `GET /workspaces/{workspaceId}/members` — and a
+        withdraw control offered beside something withdrawal cannot affect
+        would be a lie. Do not expect to find an invitation here after the
+        `DELETE` for it answers `409`.
+
+
+        A row whose stored role cannot be described answers `role: null`
+        **and** `roleId: null` together, and the rest of the list is
+        unaffected: one corrupt row must not empty an administration screen,
+        and emitting the id of a role whose key was withheld would hand the
+        name back by proxy.
+      operationId: listWorkspaceInvites
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK — the unaccepted invitations, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceInviteResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [Workspaces]
       summary: Invite a member by email
@@ -1421,6 +1474,73 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422': { $ref: '#/components/responses/UnknownRole' }
         '429': { $ref: '#/components/responses/InviteThrottled' }
+
+  /workspaces/{workspaceId}/invites/{inviteId}:
+    delete:
+      tags: [Workspaces]
+      summary: Withdraw an invitation
+      description: |
+        Withdraws an invitation this workspace issued: the row is **deleted**,
+        so the emailed link and `POST /invites/{id}/accept` both answer `404`
+        immediately afterwards and the invitee's own `GET /invites` stops
+        listing it. `204`, with no body.
+
+
+        Requires `workspace.member.manage` — and deliberately **not** the grant
+        ceiling that `POST /workspaces/{workspaceId}/invites` and
+        `PATCH /workspaces/{workspaceId}/members/{userId}` apply. A ceiling
+        stops somebody handing out authority they do not hold; a withdrawal is
+        subtraction and hands out nothing, so anyone who may administer
+        membership may withdraw any invitation here, including one they did not
+        send and one carrying a role wider than their own.
+
+
+        **An expired invitation is withdrawable too** (`204`). The list offers
+        the control on every row it shows, so it works on every row it shows.
+
+
+        **A `404` here means the invitation is already gone, and a client
+        should render it as success.** Because withdrawal deletes, "already
+        withdrawn" is physically identical to "never existed" and to "belongs
+        to another workspace", so all three answer `404` — as do an unknown
+        workspace and a caller who is not a member. The caller's goal is
+        already true, and nothing was left half-done. **Branch on the status,
+        never on the message:** the `detail` on this `404` is deliberately the
+        same string as the workspace-level one, so no wording distinguishes
+        "this invitation is gone" from "this workspace is not yours", and none
+        ever will.
+
+
+        **The `409` is the opposite and must not be swallowed with it** — the
+        invitee accepted the invitation in the meantime, the row is really
+        there, and withdrawing it would change nothing. It is the one refusal
+        on this operation that names a remedy, so it carries
+        `errorType: "INVITE_ALREADY_ACCEPTED"` and a `detail` that names the
+        new member and sends the reader to the People screen — a remedy needing
+        exactly the permission they just proved. Render `detail` verbatim and
+        match on `errorType`; the sentence is prose and may be reworded.
+
+
+        **Withdrawing frees nothing measured over time.** The invitation
+        ceilings documented under `POST /workspaces/{workspaceId}/invites` are
+        keyed on a destination inbox, on a sender, or on both, and they live
+        independently of the invitation row, so a withdrawal touches none of
+        them: `invite → withdraw → invite` is refused with `429` exactly as
+        `invite → invite` would be. The rule behind that, which holds for any
+        revocation this API grows: a revocation frees only a resource whose
+        count it actually reduces — outstanding rows, a uniqueness slot, a
+        stock cap — never one measured over time. Deleting the record of an
+        offer does not delete the record of a delivery.
+      operationId: revokeWorkspaceInvite
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/inviteId'
+      responses:
+        '204':
+          description: Withdrawn — no body. Also the answer for an expired invitation
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InviteAlreadyAccepted' }
 
   /workspaces/{workspaceId}/roles:
     get:
@@ -1862,6 +1982,12 @@ paths:
         Pending, non-expired workspace invites sent to the signed-in user's
         email — the onboarding "join a team" surface. Accept/decline by id
         without needing the emailed token link.
+
+
+        An invitation can also leave this list without the caller doing
+        anything: an administrator of the workspace that sent it may withdraw
+        it (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`), and it is
+        then simply gone on the next fetch, with no notification.
       operationId: listMyInvites
       responses:
         '200':
@@ -1881,6 +2007,12 @@ paths:
         The role the invite carries is re-validated before it is written onto
         the new membership; an invite whose stored role is no longer usable in
         that workspace is refused with the same `404`.
+
+
+        The same `404` also covers an invitation an administrator of that
+        workspace **withdrew** in the meantime — a withdrawal deletes the row,
+        so it is indistinguishable from one that never existed. Re-read
+        `GET /invites` rather than treating it as a transient failure.
       operationId: acceptInviteById
       parameters: [ { $ref: '#/components/parameters/adminId' } ]
       responses:
@@ -7326,6 +7458,17 @@ components:
         that holds no membership in this workspace is a `404` about the
         membership — it reveals nothing about whether the account exists.
       schema: { type: string, format: uuid }
+    inviteId:
+      name: inviteId
+      in: path
+      required: true
+      description: >-
+        The invitation to withdraw. An id that belongs to another workspace,
+        one that was never issued and one that has already been withdrawn are
+        the same `404` — the id is not an existence oracle, and a withdrawal
+        deletes, so "already withdrawn" has nothing left to tell apart from
+        "never existed".
+      schema: { type: string, format: uuid }
     issueNumber:
       name: number
       in: path
@@ -8344,6 +8487,20 @@ components:
         the text**. None of them carries an `errorType`.
 
 
+        **Withdrawing an invitation resets none of this**
+        (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`). Every ceiling
+        above is keyed on a sender, on a destination inbox, or on both, and each is counted
+        independently of the invitation row, so deleting the row frees nothing:
+        `invite → withdraw → invite` is refused exactly as `invite → invite`
+        would be. The general rule, which holds for any revocation this API
+        grows: a revocation frees only a resource whose count it reduces —
+        outstanding rows, a uniqueness slot, a stock cap — never one measured
+        over time. Deleting the record of an offer does not delete the record
+        of a delivery. One visible consequence: after a withdrawal the
+        cooldown's refusal no longer suggests asking the invitee to check their
+        inbox, because that invitation is gone — the refusal itself stands.
+
+
         `Retry-After` is a real wait, and on one ceiling it is deliberately
         coarse. For the cooldown and the per-sender budget it is the exact
         seconds until the caller's own slot frees; for the per-address daily cap
@@ -8392,6 +8549,33 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    InviteAlreadyAccepted:
+      description: >-
+        `DELETE /workspaces/{workspaceId}/invites/{inviteId}` on an invitation
+        the invitee has **accepted**. Reachable only as a race — they accepted
+        between the list being rendered and the button being pressed — and
+        nothing is written.
+
+
+        **This is the one refusal on that operation that names a remedy**, and
+        it is why the accepted state does not share the `404` the withdrawn one
+        gets. The invitation is really there, it is in this workspace, and the
+        problem it describes ("that person now has access") is exactly the one
+        withdrawal was aimed at — so `detail` names the new member and points
+        at the People screen, i.e. removing them, which needs
+        `workspace.member.manage`: the permission the caller proved to reach
+        this at all. That door has guards of its own (the grant ceiling, the
+        last-owner invariant, stranded projects), each with its own actionable
+        refusal; this `409` promises a door, not that nothing lies behind it.
+
+
+        A client that renders the `404` from this operation as success — as it
+        should — **must not** extend that to this status. `errorType` is how
+        the two are told apart; the sentence is prose and may be reworded.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/InviteAlreadyAcceptedProblemDetail' }
   headers:
     ReportCsvDisposition:
       description: >-
@@ -8585,6 +8769,39 @@ components:
                 case where the winner could not be re-read (e.g. it was deleted
                 between the failed insert and the lookup).
 
+    InviteAlreadyAcceptedProblemDetail:
+      description: >-
+        The `409` body of a withdrawal refused because the invitation was
+        already accepted. See the `InviteAlreadyAccepted` response for when it
+        is reachable and why this state does not answer the `404` an
+        already-withdrawn invitation gets.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [INVITE_ALREADY_ACCEPTED]
+              description: >-
+                Always present on this body, and the supported way to tell it
+                from the `404` the same operation answers for an invitation
+                that is simply gone — the one a client renders as success.
+                Per the API-wide rule, read an **absent** `errorType` as "not
+                this refusal" rather than as an unrecognised one.
+              example: INVITE_ALREADY_ACCEPTED
+            detail:
+              type: string
+              description: >-
+                A sentence to render verbatim: it names the person who is now a
+                member, says that withdrawing would change nothing, and points
+                at the People screen for removing them. Prose for a human — do
+                not parse it and do not match on it. The name falls back to the
+                invited address, which the caller submitted and can read on the
+                very row they clicked.
+              example: >-
+                That invitation was accepted — Olga Ivanova is now a member of
+                this workspace. Withdrawing it would change nothing. Remove
+                them from People if that was not intended.
     StrandedProjectsProblemDetail:
       description: >-
         The `409` body of a change refused because it would leave one or more
@@ -10038,6 +10255,73 @@ components:
             entry with no role rather than guessing one.
         joinedAt: { type: string, format: date-time }
 
+    WorkspaceInviteResponse:
+      type: object
+      description: >-
+        One unaccepted invitation of a workspace, as its administrators see it
+        (`GET /workspaces/{workspaceId}/invites`).
+
+
+        **Deliberately not the same shape as `PendingInvite`**, which is the
+        *invitee's* view of their own invitations across every workspace: that
+        one carries a `workspaceName`, no address and no inviter id, because
+        its audience is somebody who is not yet a member of the workspace that
+        owns the row. Different audience, different disclosure — sharing one
+        shape would put a workspace's submitted addresses one field away from
+        the onboarding screen.
+      properties:
+        id: { type: string, format: uuid }
+        email:
+          type: string
+          format: email
+          description: >-
+            The invited address, as it is stored and as it was mailed —
+            lower-cased (`Locale.ROOT`) by `POST …/invites`, so it may differ
+            in case from what was typed.
+        roleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The invited role's **identity** — the id of a row in
+            `GET /workspaces/{workspaceId}/roles`. `null` exactly when `role`
+            is `null`, and never on its own: the two are withheld together, so
+            the id cannot hand back a name the server refused to give.
+        role:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          nullable: true
+          description: >-
+            The invited role's **key**. `null` means the server refused to
+            describe this row's role, which the list survives rather than
+            failing the whole screen over one row. Render such an entry with no
+            role rather than guessing one. An invitation can never carry the
+            built-in `OWNER`.
+        invitedById: { type: string, format: uuid }
+        invitedByName:
+          type: string
+          description: >-
+            The inviter's display name, rendered even if that account has since
+            left the workspace or been deactivated — historical attribution
+            stays, as it does on every other surface here.
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [PENDING, EXPIRED]
+          example: PENDING
+          description: >-
+            Whether this invitation can still be accepted. **Server-computed on
+            purpose**, though a client could compare `expiresAt` with its own
+            clock: expiry is decided by the server, and a browser whose clock is
+            skewed must not disagree with the endpoint that will accept or
+            refuse the acceptance.
+
+
+            **`EXPIRED` is a label, not a filter.** Such a row is listed and is
+            withdrawable (`204`) exactly like a `PENDING` one, because nothing
+            in this product ever removes it on its own. There is no `ACCEPTED`
+            value: an accepted invitation leaves this list entirely.
     InviteMemberRequest:
       type: object
       required: [email]

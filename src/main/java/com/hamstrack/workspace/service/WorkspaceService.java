@@ -8,6 +8,7 @@ import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
+import com.hamstrack.common.persistence.LockTimeout;
 import com.hamstrack.common.ratelimit.InviteThrottle;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.tx.AfterCommit;
@@ -17,6 +18,7 @@ import com.hamstrack.workspace.entity.*;
 import com.hamstrack.workspace.exception.*;
 import com.hamstrack.workspace.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -27,6 +29,7 @@ import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class WorkspaceService {
 
     /**
@@ -64,6 +67,11 @@ public class WorkspaceService {
      * {@code InviteThrottle}.
      */
     private final InviteThrottle inviteThrottle;
+    /**
+     * HD-158 §6.3: this class now takes a row lock on {@code workspace_invites} — on both accept
+     * paths and on the withdrawal — and a lock wait has no bound of its own. Bound, then lock.
+     */
+    private final LockTimeout lockTimeout;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -347,11 +355,199 @@ public class WorkspaceService {
                 () -> mailService.sendWorkspaceInviteEmail(email, workspaceName, rawToken));
     }
 
+    /**
+     * <strong>Every invitation this workspace has issued and not had accepted</strong> (HD-158
+     * §4.1) — the administrator's counterpart to {@link #listPendingInvites}, which is the
+     * <em>invitee's</em> view of their own.
+     *
+     * <p><strong>Permission: {@code workspace.member.manage}</strong>, and the answer for a member
+     * who lacks it is a <strong>403</strong>, not an empty list and not a count. This list is
+     * <em>nothing but</em> addresses — there is no residue worth rendering read-only once they are
+     * removed — so "read-only for everyone" and "not an address-enumeration surface" cannot both
+     * hold, and the second wins. An empty array would be a statement we know to be false, rendered
+     * as "no invitations are waiting" on a workspace that has ten; this project already refuses
+     * that shape elsewhere. A count without addresses would disclose without granting any ability
+     * to act on the disclosure.
+     *
+     * <p>That 403 does <strong>not</strong> contradict the 404 posture. Tenancy is answered first
+     * and answered the way it always is — {@code requireMember} cannot tell a non-member from an
+     * unknown workspace and neither can its caller. 403 is what a <em>proven member</em> gets, the
+     * same as on every other gated call in this codebase.
+     *
+     * <p>Newest first, expired rows included and labelled rather than filtered — see
+     * {@code WorkspaceInviteRepository.findUnacceptedForWorkspace} for why a list narrower than
+     * the table is a list that cannot explain the next refusal.
+     *
+     * <p>Roles are resolved with the degrade, exactly as {@link #listMembers} and
+     * {@link #listPendingInvites} do: one corrupt {@code role_id} renders that row with
+     * {@code role: null} and {@code roleId: null} instead of emptying an admin screen. The source
+     * tag names {@code workspace_invites} so the ERROR points at the table the wrong row is in.
+     */
+    @Transactional(readOnly = true)
+    public List<WorkspaceInviteResponse> listInvites(User actor, UUID workspaceId) {
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        memberService.requireMemberAdmin(ctx.permissions());
+        return inviteRepository.findUnacceptedForWorkspace(workspaceId).stream()
+                .map(i -> WorkspaceInviteResponse.of(i,
+                        workspaceAccess.resolveRoleOrDegrade(i.getRole().getId(),
+                                        RoleScope.WORKSPACE, workspaceId,
+                                        RoleScopeViolationSource.WORKSPACE_INVITES)
+                                .orElse(null)))
+                .toList();
+    }
+
+    /**
+     * <strong>Withdraw an invitation</strong> (HD-158 §4.2) — a hard delete of the
+     * {@code workspace_invites} row.
+     *
+     * <p><strong>Permission: {@code workspace.member.manage}</strong>, and the grant ceiling is
+     * deliberately <em>not</em> applied even though {@link #inviteMember} applies it. A ceiling
+     * exists to stop somebody handing out authority they do not hold; withdrawing is subtraction
+     * and grants the revoker nothing. Applying it would produce a refusal — "you may not withdraw
+     * this invitation because it carries a permission you lack" — that protects nobody and leaves
+     * an unrevokable standing grant in the workspace, which is the state this exists to end. An
+     * invitation can never carry the built-in Owner ({@link OwnerIsNotGrantableException}), so no
+     * invitation can outrank every holder of the permission.
+     *
+     * <p><strong>The delete is sufficient by construction.</strong> The emailed link resolves
+     * through {@code findByTokenHashForUpdate} and accept-by-id through {@code findByIdForUpdate},
+     * and both {@code orElseThrow} a 404; the invitee's own {@code GET /api/invites} stops listing
+     * it on the next fetch. Nothing else has to be written for "a withdrawn invitation cannot be
+     * accepted" to hold.
+     *
+     * <p><strong>And it frees nothing measured over time — no {@code mail_send_events} row is
+     * touched here, deliberately</strong> (HD-158 §5, ADR-0015). {@code V21} exists because the
+     * first design derived the invite cooldown from <em>this very table</em>, and review killed it
+     * on the observation that a row here is deleted by paths the sender does not control — one of
+     * them pressed by the victim, since {@code declineInvite} deletes. Its header named the future
+     * hazard directly: correctness that depends on the continued <em>absence</em> of a delete
+     * endpoint breaks silently in a future ticket. <strong>This method is that future
+     * ticket.</strong> A refund here would defeat the whole control with two legitimate calls and
+     * no exploit ({@code invite -> revoke -> invite}), and it would be a cross-tenant write
+     * besides — the daily cap counts one <em>inbox</em> instance-wide, so workspace A would be
+     * deciding how much mail workspace B may send a stranger. The rule to carry forward, phrased
+     * as a property because a list of paths goes stale one path before it does:
+     *
+     * <blockquote>A revocation may free only a resource whose count it actually reduces —
+     * outstanding rows, a uniqueness slot, a stock cap. It may never free a resource measured over
+     * time: sends, cooldowns, daily ceilings. <strong>Deleting the record of an offer does not
+     * delete the record of a delivery.</strong></blockquote>
+     *
+     * <p>What it <em>does</em> free is stock, and it does so with no code: HD-133's future
+     * uniqueness slot, because the row is gone and the index has nothing to collide with. One more
+     * behaviour is inherited rather than written — after a withdrawal the cooldown's optional
+     * addendum (<em>"that invitation is still valid — ask them to check their inbox"</em>)
+     * suppresses itself, because the supplier in {@link #inviteMember} checks for this row and it
+     * is gone. <strong>Do not add a withdrawal-specific sentence there.</strong> It would be one
+     * more bit about state the caller can already read from the list, and the supplier would then
+     * have to tell "withdrawn here" from "expired" from "never existed" — recreating exactly the
+     * row-state coupling ADR-0015 removed.
+     *
+     * <p><strong>404 for an already-withdrawn one, 409 for an accepted one, and the difference is
+     * not cosmetic.</strong> Because withdrawal deletes, "already withdrawn" is <em>physically
+     * identical</em> to "never existed" and to "belongs to another tenant" — the house style
+     * already answers 404 for a repeat member removal, and anything else would require inventing a
+     * tombstone whose only purpose is to make a second DELETE feel nicer. That 404 prescribes
+     * nothing and asserts nothing false; the caller's actual goal is already true, which is why
+     * the client renders it as success. An accepted invitation is the opposite: it is the one
+     * state here whose reader can act, so it gets a 409 that says how.
+     *
+     * @throws WorkspaceNotFoundException 404 — unknown workspace, non-member, or no such
+     *     invitation <em>in this workspace</em>. One exception and one message for all of them on
+     *     purpose: an id from another tenant must not be told apart from a fabricated one, and the
+     *     detail is not an existence oracle any more than the status code is. <strong>Round-1
+     *     review asked whether an already-withdrawn invitation should say "Invitation not found"
+     *     rather than "Workspace not found"; the answer is no, and the reason is not that it would
+     *     leak today.</strong> It would not: only a proven member reaches this line, so the one
+     *     party who can tell the two details apart already knows their own membership. But that is
+     *     a property of the current CALLER SET, not of the code — the same shape as the lock
+     *     waiver {@link #declineInvite} just had to undo — and a second string here would make
+     *     every branch a future ticket adds under this method re-argue which of the two it picks,
+     *     with a cross-tenant id told apart from a fabricated one the first time somebody picks
+     *     wrong. One string forecloses that by construction, and it costs the caller nothing they
+     *     could act on: 404 and 409 are the branch that matters, and the client already renders
+     *     this 404 as success. If the distinction is ever wanted for a test, it belongs in the
+     *     EXCEPTION TYPE, where an assertion can read it and no client can.
+     * @throws InviteAlreadyAcceptedException 409 {@code INVITE_ALREADY_ACCEPTED}.
+     */
+    @Transactional
+    public void revokeInvite(User actor, UUID workspaceId, UUID inviteId) {
+        // Bound every lock wait in this transaction BEFORE anything can queue on one — this
+        // method takes a row lock and a lock wait has no bound of its own (HD-158 §6.3).
+        lockTimeout.applyToCurrentTransaction();
+        // Tenancy first: 404 for a non-member and an unknown workspace, indistinguishably.
+        var ctx = workspaceAccess.requireMember(actor, workspaceId);
+        // Then the permission, and before the lock — an unauthorized caller never takes one.
+        // That this is possible here and NOT on the invitee's by-id paths is a property of where
+        // each authorizing fact lives, not an inconsistency: see
+        // WorkspaceInviteRepository.findByIdForUpdate.
+        memberService.requireMemberAdmin(ctx.permissions());
+        // Two-key finder, never findById-then-compare: the workspace is part of the question.
+        // FOR UPDATE because this is the first write to this table by an actor other than the
+        // invitee, so it is the first that can interleave with acceptInvite — and WorkspaceInvite
+        // has no @Version, so the loser of that race gets a StaleStateException 500 rather than a
+        // clean 409. Under the lock, whichever side arrives second reads a settled row: verified
+        // both ways — an accept committing under a waiting withdrawal yields this 409, and a
+        // withdrawal committing under a waiting accept yields the accept's 404 with no membership
+        // row written.
+        var invite = inviteRepository.findByIdAndWorkspaceIdForUpdate(inviteId, workspaceId)
+                .orElseThrow(WorkspaceNotFoundException::new);
+        if (invite.isAccepted()) {
+            throw new InviteAlreadyAcceptedException(inviteeName(invite.getEmail()));
+        }
+        // Read the two facts the audit line needs BEFORE the delete: both are lazy, and the
+        // project reads first and mutates last. (The locking finder deliberately does not fetch
+        // the role — see findByTokenHashForUpdate — so this is the one place it is loaded, one
+        // extra single-row select on a path that already took a lock.)
+        var roleKey = invite.getRole().getKey();
+        var recipientDomain = MailAddresses.domainOf(invite.getEmail());
+        // Expired rows are withdrawable: the list offers the control on every row it shows, so it
+        // must work on every row it shows, and nothing else in this product ever removes one.
+        inviteRepository.delete(invite);
+        // The ONLY attribution a withdrawal leaves (HD-158 round 1). The spec argued none was
+        // needed because "the row it deleted is described entirely by ids the operator already
+        // has" — which is a claim a SOFT delete could keep and this one cannot: after the 204
+        // there is no row to join those ids back to, the metric below is tagless, and "who
+        // withdrew the invitation to the new CFO, and when" becomes unanswerable anywhere in the
+        // system. Withdrawing a standing grant is a security-relevant act and its two neighbours
+        // both log one (workspace.member.role_changed, workspace.member.removed).
+        //
+        // Ids, plus the recipient DOMAIN only — never the local part. That is the same rule the
+        // invite send follows a few methods up, and for the same reason: this line ships to Loki,
+        // where an address would outlive the workspace_invites row that legitimately held it.
+        // The address is not lost while it matters: it is on the row until this delete. This line
+        // pairs with the send line by workspace and recipient domain, which are the only two
+        // fields that line carries — it names no invite id, so do not write "the id ties them".
+        log.info("workspace.invite.revoked workspace={} actor={} invite={} role={} recipientDomain={}",
+                workspaceId, actor.getId(), inviteId, roleKey, recipientDomain);
+        // The missing term in the invitation lifecycle — without it a withdrawn invitation is
+        // indistinguishable from an ignored one, and the acceptance ratio HD-190 leans on cannot
+        // tell a workspace cleaning up from a workspace being ignored. On the 204 only.
+        metrics.inviteRevoked();
+    }
+
+    /**
+     * Who the accepted invitation let in, for the 409's sentence. The address is the fallback
+     * rather than a failure: {@code users.email} and {@code workspace_invites.email} are both
+     * {@code Locale.ROOT}-folded on write so the lookup normally hits, and an address the caller
+     * submitted themselves and can read on the very row they clicked discloses nothing new if it
+     * does not.
+     */
+    private String inviteeName(String email) {
+        return userRepository.findByEmail(email)
+                .map(User::getDisplayName)
+                .filter(name -> !name.isBlank())
+                .orElse(email);
+    }
+
     // Accept via the emailed token link.
     @Transactional
     public WorkspaceResponse acceptInvite(User actor, String rawToken) {
+        // Bound the wait before taking the lock below (HD-158 §6.3). First statement, because a
+        // bound applied after a locking read bounds nothing.
+        lockTimeout.applyToCurrentTransaction();
         var hash = TokenUtils.sha256(rawToken);
-        var invite = inviteRepository.findByTokenHash(hash)
+        var invite = inviteRepository.findByTokenHashForUpdate(hash)
                 .orElseThrow(WorkspaceNotFoundException::new);
         return acceptInvite(actor, invite);
     }
@@ -381,19 +577,53 @@ public class WorkspaceService {
                 .toList();
     }
 
-    // Accept a specific invite by id (from the onboarding screen).
+    // Accept a specific invite by id (from the onboarding screen). Like declineInvite, this locks
+    // a caller-supplied id BEFORE the email equality that authorizes it, which reads as the
+    // opposite of revokeInvite's "permission first, then the lock". It is not: a revoker's
+    // authorizing fact lives in another table and is knowable before this row is touched, while
+    // the invitee's authorizing fact IS this row. Stated once, on the finder both paths share.
     @Transactional
     public WorkspaceResponse acceptInvite(User actor, UUID inviteId) {
-        var invite = inviteRepository.findById(inviteId)
+        lockTimeout.applyToCurrentTransaction();
+        var invite = inviteRepository.findByIdForUpdate(inviteId)
                 .orElseThrow(WorkspaceNotFoundException::new);
         return acceptInvite(actor, invite);
     }
 
-    // Decline an invite addressed to the caller. Removes it (single-use,
-    // email-bound); an admin can always re-invite.
+    /**
+     * Decline an invite addressed to the caller. Removes it (single-use, email-bound); an admin
+     * can always re-invite.
+     *
+     * <p><strong>Locked, and the reason it was not is the reason it now is.</strong> HD-158 §6.3
+     * waived a lock here because "it is the invitee acting on their own row, it cannot race their
+     * own accept" — true of the world that sentence was written in, where the invitee was this
+     * table's only writer, and falsified by {@link #revokeInvite} in the very same ticket. What
+     * the waiver leaves behind is not a crash and not corruption: an administrator's withdrawal
+     * committing between an unlocked read here and the flush makes the DELETE affect zero rows,
+     * Hibernate raises {@code StaleStateException}, and {@code GlobalExceptionHandler} turns that
+     * into a 409 reading <em>"Someone else is changing this right now — try again in a
+     * moment"</em>. The invitee is told to retry a request that can never succeed again, because
+     * their invitation is permanently gone — <strong>a refusal prescribing an action its reader
+     * cannot perform</strong>, which is a mistake this project has now shipped four times. Under
+     * the lock the second arrival reads a settled row and answers definitely: the withdrawal
+     * committed first, so there is no row, so this is the 404 below.
+     *
+     * <p>The general form, because a list of a table's writers goes stale one writer before the
+     * list does: <em>a waiver justified by "there is only one writer" expires the moment a ticket
+     * adds the second, and the ticket that adds it is the one that owes the fix.</em>
+     *
+     * @throws WorkspaceNotFoundException 404 — no such invitation, one addressed to somebody
+     *     else, or one withdrawn while this call waited for the lock.
+     */
     @Transactional
     public void declineInvite(User actor, UUID inviteId) {
-        var invite = inviteRepository.findById(inviteId)
+        // Bound the wait before taking the lock (HD-158 §6.3). First statement, because a bound
+        // applied after a locking read bounds nothing.
+        lockTimeout.applyToCurrentTransaction();
+        // Locked, and taken BEFORE the address check that authorizes it — see
+        // WorkspaceInviteRepository.findByIdForUpdate for why that ordering is the same rule
+        // revokeInvite follows above, not the opposite of it.
+        var invite = inviteRepository.findByIdForUpdate(inviteId)
                 .orElseThrow(WorkspaceNotFoundException::new);
         // Exact equals for the reason spelled out on the accept path below: both sides are
         // Locale.ROOT-folded on write, so an ignore-case compare would only widen this to

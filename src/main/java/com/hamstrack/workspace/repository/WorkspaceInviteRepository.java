@@ -3,7 +3,9 @@ package com.hamstrack.workspace.repository;
 import com.hamstrack.workspace.entity.Role;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceInvite;
+import jakarta.persistence.LockModeType;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
@@ -14,7 +16,136 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface WorkspaceInviteRepository extends JpaRepository<WorkspaceInvite, UUID> {
-    Optional<WorkspaceInvite> findByTokenHash(String tokenHash);
+
+    /**
+     * The emailed join link, <strong>locked</strong> (HD-158 §6.3).
+     *
+     * <p><strong>Why every accept path locks now, when none of them needed to before.</strong>
+     * Until the withdrawal endpoint existed, a {@code workspace_invites} row had one writer at a
+     * time in practice: the invitee, accepting or declining their own row. Withdrawal is the first
+     * write by <em>another</em> actor, so accept and withdraw can now interleave — and
+     * {@link WorkspaceInvite} extends {@code CreatedOnlyEntity} and carries no {@code @Version},
+     * so the loser does not get an optimistic-locking 409. It gets Hibernate's unexpected
+     * row-count {@code StaleStateException}: a <strong>500 for the invitee, after the transaction
+     * has already decided to make them a member</strong>. Under the lock each side reads a
+     * definite state and answers definitely — the accept finds no row (404), or the withdrawal
+     * finds {@code accepted_at} set (409).
+     *
+     * <p><strong>{@code PESSIMISTIC_WRITE}, which Hibernate 7 emits against PostgreSQL as
+     * {@code FOR NO KEY UPDATE} — observed in the log, not assumed from the annotation.</strong>
+     * The spec asked for plain {@code FOR UPDATE}, reasoning that the <em>"{@code FOR NO KEY
+     * UPDATE}, never {@code FOR UPDATE}"</em> rule is about {@code workspaces}, whose row every FK
+     * child insert in the tenant would otherwise queue behind, and that <strong>no table has a
+     * foreign key to {@code workspace_invites}</strong>. Both halves are true and the conclusion is
+     * simply moot: the dialect does not emit {@code FOR UPDATE} for this lock mode, so the choice
+     * is not one this call site gets to make. It costs nothing, and the reason is the property
+     * rather than the mode's name — {@code FOR NO KEY UPDATE} conflicts with <em>itself</em>, so
+     * two transactions that both take it on one row still serialise, which is the entire job of
+     * this lock. The one thing it additionally permits is {@code FOR KEY SHARE}, which PostgreSQL
+     * takes on a parent row for an FK child insert, and this table has no children. So do not
+     * "restore" the spec's wording by dropping to a native {@code FOR UPDATE}: it would strengthen
+     * nothing, and it would cost the {@code @Lock} annotation. (The same annotation on
+     * {@code WorkspaceMemberRepository.lockAllByWorkspaceAndRoleId} emits the same mode, which is
+     * how this was checked.)
+     *
+     * <p><strong>No {@code JOIN FETCH} on any locking finder in this file, and that is not an
+     * oversight.</strong> PostgreSQL applies {@code FOR UPDATE} to every table the statement
+     * selects from, so a fetch join here would lock the {@code workspaces}, {@code roles} and
+     * {@code users} rows too — reintroducing exactly the workspace-row lock the rule above forbids,
+     * by the back door. The associations are lazy and are loaded after the lock, which is free on
+     * these single-row paths. The <em>list</em> is the opposite case and does fetch (see
+     * {@link #findUnacceptedForWorkspace}) because it takes no lock at all.
+     *
+     * <p>Every caller of a locking finder in this file calls
+     * {@code LockTimeout.applyToCurrentTransaction()} first — bound, then lock.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT i FROM WorkspaceInvite i WHERE i.tokenHash = :tokenHash")
+    Optional<WorkspaceInvite> findByTokenHashForUpdate(@Param("tokenHash") String tokenHash);
+
+    /**
+     * The invitee acting on their own row by id — <strong>accept and decline</strong> from the
+     * onboarding screen, <strong>locked</strong>, same race and same reason as
+     * {@link #findByTokenHashForUpdate}. Not workspace-scoped, deliberately: the invitee reaches
+     * this before being a member of anything, and the row is bound to their address by the exact
+     * match in {@code acceptInvite}/{@code declineInvite}, which is what actually authorizes them.
+     *
+     * <p><strong>Decline locks too, since HD-158 round 1.</strong> The spec waived it on the
+     * ground that the invitee cannot race their own accept; withdrawal made another actor a writer
+     * of this table, and unlocked the loser of that race got a 409 telling them to retry something
+     * that could never succeed again. See {@code WorkspaceService.declineInvite}.
+     *
+     * <p><strong>Both callers take this lock BEFORE the check that authorizes them, and that is a
+     * decision rather than the oversight it looks like</strong> (HD-158 round 1, item 5).
+     * {@code revokeInvite} does the opposite — membership and {@code workspace.member.manage}
+     * first, lock second, with a comment saying an unauthorized caller never takes one — and the
+     * two orderings are the same rule, not a contradiction: <em>authorize as early as the
+     * authorizing fact can be read.</em> A revoker's authority lives in {@code workspace_members},
+     * a different table, so it is knowable before this row is touched. The invitee's authority is
+     * the address <em>on this row</em>: it cannot be read earlier, and reading it unlocked would
+     * authorize against a copy the lock is there to invalidate.
+     *
+     * <p>What that concedes, knowingly: somebody holding an invite id can make a transaction hold
+     * a row lock on it for as long as the immediate 404 takes to roll back. Bounded by
+     * {@code lock_timeout} (applied by every caller before the lock), on a UUID v7 id that is not
+     * guessable and is disclosed only to the invitee and the workspace's own administrators, and
+     * contending with nothing but other writers of that one invitation. Do not "fix" it by moving
+     * the address check above the read — there is nothing above the read to check it against.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT i FROM WorkspaceInvite i WHERE i.id = :id")
+    Optional<WorkspaceInvite> findByIdForUpdate(@Param("id") UUID id);
+
+    /**
+     * One invitation of ONE workspace, <strong>locked</strong> — the withdrawal (HD-158 §4.3).
+     *
+     * <p><strong>The workspace is part of the question, never of a follow-up {@code if}.</strong>
+     * This repository extends {@code JpaRepository}, so a bare {@code findById} compiles and is
+     * precisely the shape this project's top bug class takes: an id from another tenant would
+     * resolve, and the comparison that caught it would be one refactor away from being dropped. A
+     * miss is a 404 whether the id is fabricated, belongs to another tenant, or was withdrawn a
+     * second ago — the id is not an existence oracle.
+     */
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT i FROM WorkspaceInvite i WHERE i.id = :id AND i.workspace.id = :workspaceId")
+    Optional<WorkspaceInvite> findByIdAndWorkspaceIdForUpdate(
+            @Param("id") UUID id, @Param("workspaceId") UUID workspaceId);
+
+    /**
+     * <strong>Every unaccepted invitation this workspace has issued</strong> — the administrator's
+     * list (HD-158 §4.1), newest first.
+     *
+     * <p><strong>Expired rows are included, and the predicate is deliberately no narrower than
+     * {@code acceptedAt IS NULL}.</strong> Nothing in this product sweeps an expired invitation, a
+     * member removal deletes one, and HD-133's uniqueness will refuse a re-invite over one — so a
+     * row hidden from this list is a row no admin can clear and no future refusal can point at.
+     * The general form, which survives the next predicate somebody is tempted to add: <em>the list
+     * must be the complete set of rows that can still block, grant, or be cleaned up.</em> Whether
+     * a row is still live is reported as a field, never as a filter.
+     *
+     * <p>Accepted rows are excluded: they are history, the {@code workspace_members} row is the
+     * live fact, and offering a "withdraw" control beside something withdrawal cannot affect is a
+     * lie the screen would tell once per accepted invitation, for ever.
+     *
+     * <p>{@code JOIN FETCH} on <em>both</em> associations, so that the bound on this list is
+     * <em>this query's own</em> rather than an instance-wide setting it neither owns nor names.
+     * Dropping them does not produce N+1 in this build, and an earlier revision of this paragraph
+     * said it did: {@code hibernate.default_batch_fetch_size=100} (application.properties) collapses
+     * the per-row loads into one batched select per association. Measured over ten rows with ten
+     * distinct inviters — four statements with both fetches, five without, and five for a single row
+     * too. So the fetches buy exactly one statement today, and the reason to keep them is that the
+     * batch size degrades to one select per 100 rows on a long history, which is precisely the
+     * history this list is required to return in full.
+     *
+     * <p>(The locking finders above must NOT fetch — see {@link #findByTokenHashForUpdate}; this one
+     * takes no lock, which is what makes the fetch safe.)
+     */
+    @Query("""
+            SELECT i FROM WorkspaceInvite i JOIN FETCH i.role JOIN FETCH i.invitedBy
+             WHERE i.workspace.id = :workspaceId AND i.acceptedAt IS NULL
+             ORDER BY i.createdAt DESC
+            """)
+    List<WorkspaceInvite> findUnacceptedForWorkspace(@Param("workspaceId") UUID workspaceId);
 
     /**
      * Is there still a live invitation to this address <strong>in this workspace</strong>? Used for
