@@ -175,7 +175,7 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds). **Three** non-auth surfaces have throttles of their own:
+    header (seconds). Several non-auth surfaces have throttles of their own:
     `POST …/issues/{number}/rank` allows at most one whole-project rank
     rebalance per project per 60 s and answers `429` + `Retry-After` for a
     second one inside that window — a retryable throttle, not a fault; every
@@ -184,11 +184,18 @@ info:
     surface — `…/search/**` **plus `…/filters/**`**, since validating a saved
     filter is search-surface work wherever it is mounted — shares a **second,
     separate** per-principal budget
-    (`app.search.requests-per-minute`, 120/min by default). Both report budgets are
-    checked **before** the workspace/project is resolved, so an over-budget
-    caller sees `429` even for a project they could not otherwise see.
-    `POST …/search/insights` is a report living on the search path and spends
-    **both** budgets — see the `Reports` tag.
+    (`app.search.requests-per-minute`, 120/min by default). Both per-principal
+    budgets are checked **before** the workspace/project is resolved, so an
+    over-budget caller sees `429` even for a project they could not otherwise
+    see. `POST …/search/insights` is a report living on the search path and
+    spends **both** budgets — see the `Reports` tag. Finally,
+    `POST …/workspaces/{workspaceId}/invites` carries ceilings of its own — a
+    per-(sender, inbox) cooldown, a per-inbox daily cap (both count the
+    destination inbox rather than the spelling of the address) and a per-sender
+    hourly/daily volume budget — and answers `429` + `Retry-After` past any of
+    them. Those are spent **after** the workspace is resolved, the deliberate
+    opposite of the two budgets above: a workspace the caller cannot see answers
+    `404` even when the caller is over a ceiling. See `inviteMember`.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/hamstrack
@@ -465,7 +472,8 @@ paths:
       description: |
         Sends a verification email. `termsAccepted: true` is required when the
         instance has terms acceptance enabled (see `GET /meta`). Returns `403`
-        when the operator disabled public signup.
+        when the operator disabled public signup, and `422` when `password` is
+        a value this project itself published (see that response).
       operationId: register
       security: []
       requestBody:
@@ -483,6 +491,25 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
           description: Email is already registered
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `password` is a value **this project has itself published** as
+            production configuration, so it is known to everyone who can read
+            the repository. Today that is the single literal
+            `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
+            seeded administrator's password. Send a different password —
+            nothing else about the request is at fault, and the account was not
+            created.
+
+
+            **This is not a password-strength rule and does not grow into
+            one.** It holds only values *we* published, under their own
+            variable's name; a weak password this project never printed is
+            accepted exactly as before. Body is a `ProblemDetail` — branch on
+            the status, not on the wording of `detail`.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -619,7 +646,11 @@ paths:
     post:
       tags: [Auth]
       summary: Set a new password with the emailed token
-      description: Revokes all active sessions on success.
+      description: |
+        Revokes all active sessions on success. Returns `422` when `newPassword`
+        is a value this project itself published; that refusal happens **before
+        the token is consumed**, so the same link can be re-used with a
+        different password (see that response).
       operationId: resetPassword
       security: []
       requestBody:
@@ -640,6 +671,29 @@ paths:
               schema: { $ref: '#/components/schemas/MessageResponse' }
         '400':
           description: Token is invalid, expired or already used
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `newPassword` is a value **this project has itself published** as
+            production configuration, so it is known to everyone who can read
+            the repository. Today that is the single literal
+            `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
+            seeded administrator's password.
+
+
+            **The reset token is still usable.** This is checked before the
+            reset row is consumed, so the caller retries on the same link with
+            a different password — unlike the `400` above, which means the link
+            itself is spent.
+
+
+            **This is not a password-strength rule and does not grow into
+            one.** It holds only values *we* published, under their own
+            variable's name; a weak password this project never printed is
+            accepted exactly as before. Body is a `ProblemDetail` — branch on
+            the status, not on the wording of `detail`.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1303,6 +1357,46 @@ paths:
         roles. The legacy `role` **key** still works and is now deprecated;
         **exactly one of the two must be present**, and neither or both is a
         `422`, as is a role reference this instance cannot assign.
+
+
+        **The invited address must have an ASCII local part — a `400`, and a
+        delivery rule rather than a style rule.** The invitation is stored
+        under, and *mailed to*, the address case-folded (`Locale.ROOT`
+        lower-case), and the recipient ceilings derive their key from that same
+        value, so the address that is bound is the address that is written to.
+        That fold is also what makes a non-ASCII local part dangerous:
+        lower-casing collapses U+212A KELVIN SIGN onto a plain `k`, so such an
+        address would deliver a workspace name and a *live join token* to a
+        different real person — the one who owns the ASCII spelling, and whose
+        account address therefore matches the folded invitation exactly, so
+        they could accept it. Refusing at the boundary takes away nothing that
+        was ever deliverable: there is no SMTPUTF8 path here, so the address
+        could not have been sent as typed.
+
+
+        **Non-ASCII is refused *before* the `@` and accepted *after* it, and
+        the halves differ because the transformations do.** Folding a local
+        part changes *which mailbox* receives the message. The only thing that
+        happens to an internationalised domain is punycode, and only inside the
+        throttle key: the `xn--` form and the Unicode spelling are one domain
+        to a resolver, so that is a normalisation onto the same host rather
+        than a fold onto somebody else's mailbox, and the message itself is
+        addressed to the domain as sent. The check is anchored on the **last**
+        `@`, so a quoted local part containing one of its own
+        (`"a@b"@example.com`, which the format rule accepts) still passes. The
+        refusal is an ordinary validation `400` keyed `email`, answered before
+        anything else the endpoint does — it spends no invitation allowance and
+        does not depend on rate limiting being enabled.
+
+
+        **Throttled — and this `429` is spent after the `404`.** Past one of the
+        invitation ceilings (a per-(sender, address) cooldown, a per-address
+        daily cap, and a per-sender hourly/daily volume budget) the answer is
+        `429` with `Retry-After`, and nothing is sent or written when it
+        refuses. Unlike the report and search budgets, the ceilings are spent
+        **after** the workspace has been resolved, so a workspace the caller is
+        not a member of answers `404` even when the caller is over every
+        ceiling. See the `429` response below.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1317,6 +1411,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
@@ -1325,6 +1420,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422': { $ref: '#/components/responses/UnknownRole' }
+        '429': { $ref: '#/components/responses/InviteThrottled' }
 
   /workspaces/{workspaceId}/roles:
     get:
@@ -8100,9 +8196,12 @@ components:
         whatever an operator has configured, so lowering *either* property lowers
         the panel. **A panel refresh therefore competes with report fetches *and*
         with searches.** The per-principal budgets — this one and the search
-        budget — are therefore **the one place in this API where `429` precedes
-        `404`**: an over-budget caller is refused even for a project they cannot
-        see. Keying
+        budget — are therefore **the only `429`s in this API spent before the
+        resource is resolved**: an over-budget caller is refused even for a
+        project they cannot see. The invitation ceilings on
+        `POST …/workspaces/{workspaceId}/invites` are the deliberate
+        counter-case — spent **after** the workspace is resolved, so that
+        refusal can never precede a `404` (see `InviteThrottled`). Keying
         on the caller rather than the project is what keeps that refusal free of
         tenancy information — and it means the budget bounds one **user**, not
         one workspace: aggregate report load still scales with the number of
@@ -8203,6 +8302,93 @@ components:
         Error responses are unaffected by that declaration: a `404`, `429` or
         `400` on one of these paths still comes back as a `application/problem+json`
         problem detail, not as CSV.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    InviteThrottled:
+      description: >-
+        Past one of the invitation ceilings on
+        `POST /workspaces/{workspaceId}/invites`: `429` with `Retry-After`
+        (seconds). A retryable throttle, not a fault — **no mail was sent and no
+        invitation row was written**, so the identical request is safe to repeat
+        once the wait has passed, and invitations already sent are unaffected.
+
+
+        **This `429` is spent AFTER tenancy and authorization, the deliberate
+        opposite of the report and search budgets.** The order is: workspace
+        resolved (`404` for an unknown workspace and for a non-member alike) →
+        `workspace.member.manage` (`403`) → the role reference and the grant
+        ceiling (`422` / `403`) → already a member (`409`) → these ceilings
+        (`429`). **A workspace the caller cannot see answers `404` even when the
+        caller is over every ceiling**, and a `429` here is only ever seen by a
+        proven member who may invite. Do not carry the reports/search sentence
+        ("the budget is spent before the workspace is resolved") across to this
+        endpoint: a recipient-keyed refusal spent that early would answer a
+        cross-tenant question to a non-member. One corollary worth relying on:
+        no refusal above spends any allowance.
+
+
+        **Several ceilings answer with this one status and are not
+        distinguishable by it**: a cooldown before the same sender may invite the
+        same address again — across every workspace on the instance
+        (`app.invites.recipient-cooldown-minutes`, 60 minutes by default); a cap
+        on invitations one address may receive per day from the whole instance,
+        whoever sends them (`app.invites.max-per-recipient-per-day`, 5); and a
+        per-sender volume budget over two independent windows
+        (`app.invites.max-per-sender-per-hour` and
+        `app.invites.max-per-sender-per-day`, 20 and 100). The `detail` wording
+        differs per ceiling — it names the address for the cooldown and stays
+        terse for the per-address cap, which would otherwise describe another
+        tenant's activity — so **branch on the status and `Retry-After`, never on
+        the text**. None of them carries an `errorType`.
+
+
+        `Retry-After` is a real wait, and on one ceiling it is deliberately
+        coarse. For the cooldown and the per-sender budget it is the exact
+        seconds until the caller's own slot frees; for the per-address daily cap
+        it is the moment the oldest send in that window ages out **rounded up to
+        the next 15-minute boundary** — an absolute deadline rather than a
+        rounded-off countdown, so `now + Retry-After` names the same instant
+        however often it is asked and only that 15-minute bucket is disclosed.
+        That deadline comes from a send the caller may not be able to see, which
+        is why it is coarsened at all; it removes the cheap single-request
+        version of that question rather than putting the instant out of reach,
+        since a caller who keeps retrying until the refusal lifts learns it
+        anyway. It never under-states the wait, on a daily ceiling it can be
+        hours, and it is never `0`. The two recipient-keyed
+        ceilings count in PostgreSQL, so they are exact and instance-wide and are
+        unaffected by a restart, a redeploy, which node served the request, or
+        the invitee declining; the per-sender budget counts in memory per app
+        node like every other budget here, so a multi-node deployment allows up
+        to one budget per node. Counting is per accepted attempt rather than per
+        delivered message, so an address that bounces still consumes a slot.
+        `app.rate-limit.enabled=false` disables all of them, and the endpoint
+        then never answers `429` at all.
+
+
+        **The two recipient-keyed ceilings count the destination inbox, never
+        the spelling of the address.** Spellings a mail provider delivers to one
+        mailbox are one key, so re-spelling an address buys neither a fresh
+        cooldown nor a fresh daily slot, and a caller can meet a `429` that the
+        address as typed would not predict. Which spellings a provider folds
+        together is a property of the destination and is refined over time, so
+        rely on "one inbox, one slot" rather than on a list of transformations —
+        with one boundary that is not going to move: **look-alike characters are
+        never folded**. What gets folded is a published fact about how a provider
+        delivers mail, whereas whether two characters look alike to a human is a
+        guess about who somebody is, and two addresses differing by one Cyrillic
+        letter are two people.
+        Mail is delivered to the address as submitted apart from **case** — it
+        is lower-cased first, and the invitation records that lower-cased
+        spelling — but nothing beyond that: the inbox folding above is a
+        throttle key and never a recipient. That one case fold is why the
+        endpoint refuses a non-ASCII local part with a `400`; the operation
+        description carries the argument.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -9860,7 +10046,21 @@ components:
         both are alike a `422`. See `roleId` for why both fields exist and why
         "both" is refused rather than resolved by precedence.
       properties:
-        email: { type: string, format: email, maxLength: 255 }
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          pattern: '^[\u0000-\u007F]*@[^@]*$'
+          description: >-
+            **The local part must be ASCII** — everything before the last `@`.
+            A non-ASCII character there is a `400`, because the invitation is
+            stored under, and *mailed to*, this address case-folded, and that
+            fold collapses U+212A KELVIN SIGN onto a plain `k`: the message
+            would go to whoever owns the ASCII spelling. **The domain half is
+            deliberately unrestricted** — an internationalised domain is only
+            ever carried to its punycode wire form, and only inside the
+            throttle key, which picks the same host rather than a different
+            mailbox. See the operation description.
         roleId:
           type: string
           format: uuid

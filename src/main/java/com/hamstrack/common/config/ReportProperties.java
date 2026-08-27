@@ -119,8 +119,9 @@ public record ReportProperties(
          * comfortable. Refusing past it is a 429 + Retry-After, never a wrong number.
          *
          * There is no "unlimited": 0 is out of range and fails startup. The off switch
-         * is app.rate-limit.enabled, which is the master switch for every in-memory
-         * limiter in the app and is documented as such.
+         * is app.rate-limit.enabled, the master switch shared by every limiter that has
+         * one, and documented as such. Not every limiter does: the backlog-rebalance
+         * cooldown is a fixed internal safety valve with no switch at all.
          */
         @DefaultValue("60") @Min(1) @Max(10_000) int requestsPerMinute
 ) {}

@@ -226,6 +226,21 @@ function InviteRow({ wsId, roles, onInvited }: {
       setSentTo(trimmed)
       setEmail('')
     } catch (err) {
+      // **The typed address survives every refusal.** `setEmail('')` lives on
+      // the success path above and must STAY there — nothing in this handler may
+      // clear the field. The case that makes it load-bearing is the invite
+      // ceilings' 429 (HD-190): that refusal's whole remedy is "send this same
+      // address again in X", so emptying the box on the way out would make the
+      // admin retype from memory the one thing they were asked to keep. The
+      // other refusals want it kept too — a 403 grant-ceiling refusal is cleared
+      // by choosing a narrower role, not by retyping the person.
+      //
+      // `detail` is rendered VERBATIM and no wait is recomputed from
+      // `retryAfter`: every throttled refusal here already names the wait in
+      // prose ("Try again in 59 minutes"), so a second, independently rounded
+      // countdown beside it could only disagree with it. `classifyConflict`
+      // reads `Retry-After` before any `errorType`, so a 429 arrives as
+      // `kind: 'retry'` — this row wants nothing from it but the sentence.
       setError(classifyConflict(err).detail)
     } finally {
       setSending(false)

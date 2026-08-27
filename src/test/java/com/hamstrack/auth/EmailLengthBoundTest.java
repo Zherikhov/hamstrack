@@ -59,11 +59,23 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * today's handler, not of the field. Bound the field, not the itinerary.
  *
  * <p><strong>Scope, so the boundary is not mistaken for a guarantee.</strong> The scan reads
- * source text, matches {@code @Email} written on the same line as the declaration it
- * annotates, and strips comments so that prose <em>about</em> {@code @Email} is not mistaken
- * for one. An annotation split across lines would be reported rather than missed, which is
- * the safe direction. It says nothing about columns reached by any route other than a
- * validated request body.
+ * source text and strips comments, so that prose <em>about</em> {@code @Email} is not
+ * mistaken for one. It says nothing about columns reached by any route other than a validated
+ * request body.
+ *
+ * <p><strong>It reads declarations, not lines, and that is a correction rather than a
+ * design.</strong> The first version matched {@code @Email} and {@code String} <em>on one
+ * line</em> and claimed that a declaration spanning several would be "reported rather than
+ * missed, which is the safe direction". That was false, and HD-190 proved it: adding a
+ * {@code @Pattern} to {@code InviteMemberRequest.email} pushed the type onto a third line, and
+ * the field silently left the scan — so the one address field on the invitation path, the path
+ * a whole ticket about outbound mail was hardening, became the one field nothing checked.
+ * Nothing failed except the {@code checked >= 6} tripwire below, which is the only reason this
+ * was noticed at all and is the argument for keeping such a tripwire under every
+ * "nothing offends" assertion. The scan now walks from each {@code @Email} to the
+ * {@code String} it annotates, so annotations may be laid out however anyone likes; a
+ * declaration it cannot resolve is <em>reported</em>, which is what the old sentence promised
+ * and did not do.
  */
 @SpringBootTest(properties = {
         "app.rate-limit.enabled=false",
@@ -80,8 +92,17 @@ class EmailLengthBoundTest {
     /** {@code users.email}, {@code workspace_invites.email} — both {@code VARCHAR(255)}. */
     private static final int COLUMN_WIDTH = 255;
 
-    private static final Pattern EMAIL_DECLARATION = Pattern.compile("@Email\\b.*\\bString\\b");
+    private static final Pattern EMAIL_ANNOTATION = Pattern.compile("@Email\\b");
+    private static final Pattern STRING_TYPE = Pattern.compile("\\bString\\b");
     private static final Pattern SIZE_MAX = Pattern.compile("@Size\\s*\\([^)]*\\bmax\\s*=\\s*(\\d+)");
+
+    /**
+     * How far past an {@code @Email} its {@code String} may be before the scan gives up and
+     * reports rather than guesses. Generous — {@code InviteMemberRequest} carries a multi-line
+     * {@code @Pattern} between the two — but finite, so a missing type cannot silently swallow
+     * the next declaration's bound.
+     */
+    private static final int DECLARATION_WINDOW = 600;
 
     @Autowired MockMvc mockMvc;
     @Autowired jakarta.validation.Validator validator;
@@ -107,25 +128,38 @@ class EmailLengthBoundTest {
         var offenders = new ArrayList<String>();
         var checked = 0;
         for (var file : files) {
-            var lines = stripComments(Files.readString(file, StandardCharsets.UTF_8)).split("\n", -1);
-            for (int i = 0; i < lines.length; i++) {
-                if (!EMAIL_DECLARATION.matcher(lines[i]).find()) {
+            var source = stripComments(Files.readString(file, StandardCharsets.UTF_8));
+            Matcher email = EMAIL_ANNOTATION.matcher(source);
+            while (email.find()) {
+                checked++;
+                var where = file + ":" + lineOf(source, email.start());
+                var declaration = declarationAround(source, email.start());
+                if (declaration == null) {
+                    offenders.add(where + " — cannot find the String this @Email annotates "
+                            + "within " + DECLARATION_WINDOW + " characters, so this field's "
+                            + "bound could not be checked at all");
                     continue;
                 }
-                checked++;
-                Matcher size = SIZE_MAX.matcher(lines[i]);
+                Matcher size = SIZE_MAX.matcher(declaration);
                 if (!size.find()) {
-                    offenders.add(file + ":" + (i + 1) + " — @Email with no @Size at all");
+                    offenders.add(where + " — @Email with no @Size at all");
                 } else if (Integer.parseInt(size.group(1)) > COLUMN_WIDTH) {
-                    offenders.add(file + ":" + (i + 1) + " — @Size(max = " + size.group(1)
+                    offenders.add(where + " — @Size(max = " + size.group(1)
                             + ") is wider than the " + COLUMN_WIDTH + "-character column");
                 }
             }
         }
 
+        // The tripwire, and it has already earned its keep once: every assertion below is of
+        // the form "nothing offends", so a scan that has stopped seeing declarations passes
+        // while guarding nothing. That is not hypothetical here — HD-190 moved one field's
+        // type onto another line and this is the line that noticed.
         assertThat(checked)
-                .as("the scan found no @Email declarations at all, which cannot be right — "
-                        + "the pattern has probably stopped matching how they are written")
+                .as("the scan found %d @Email declarations, fewer than the %d that exist. A "
+                        + "field that has left the scan is a field with no bound as far as this "
+                        + "test is concerned, and the offender list below will be empty and "
+                        + "green while it happens. Do not lower this number to make it pass — "
+                        + "find out which declaration stopped matching", checked, 6)
                 .isGreaterThanOrEqualTo(6);
 
         assertThat(offenders)
@@ -204,6 +238,44 @@ class EmailLengthBoundTest {
                 + "c".repeat(55) + ".com";
         assertThat(address).hasSize(300);
         return address;
+    }
+
+    /**
+     * The declaration an {@code @Email} belongs to: back to whatever ended the previous one
+     * ({@code (} {@code ,} {@code ;} {@code \{} {@code \}}), forward to the {@code String} it
+     * annotates. Both halves matter — {@code @Size} may be written before {@code @Email}
+     * ({@code CreateUserRequest}) or after it ({@code RegisterRequest}), and the type may be
+     * several annotations further down ({@code InviteMemberRequest}).
+     *
+     * <p>{@code null} when no type turns up inside {@link #DECLARATION_WINDOW}, and the caller
+     * reports that rather than passing over it. Guessing further would eventually read the
+     * <em>next</em> declaration's {@code @Size} and certify a bound belonging to another field.
+     */
+    private static String declarationAround(String source, int emailAt) {
+        int start = 0;
+        for (int i = emailAt - 1; i >= 0; i--) {
+            char c = source.charAt(i);
+            if (c == '(' || c == ',' || c == ';' || c == '{' || c == '}') {
+                start = i + 1;
+                break;
+            }
+        }
+        Matcher type = STRING_TYPE.matcher(source);
+        if (!type.find(emailAt) || type.start() - emailAt > DECLARATION_WINDOW) {
+            return null;
+        }
+        return source.substring(start, type.end());
+    }
+
+    /** 1-based, so a reported offender can be opened where it is. */
+    private static int lineOf(String source, int index) {
+        int line = 1;
+        for (int i = 0; i < index; i++) {
+            if (source.charAt(i) == '\n') {
+                line++;
+            }
+        }
+        return line;
     }
 
     private static List<Path> javaSources() throws IOException {

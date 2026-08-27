@@ -1,0 +1,65 @@
+[Unit]
+Description=Hamstrack configuration drift check (HD-199)
+Documentation=https://github.com/Zherikhov/hamstrack/blob/main/docs/design/config-delivery-proposal.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hamstrack-config-drift
+
+# The box's own knobs, and the ONLY supported way to set them. COMPOSE_FILES is the one
+# that matters: a deployment that runs no observability stack must narrow the set, or the
+# `containers` scope compares against a compose file that is not there and reports
+# containers=1 for ever about a stack that is entirely healthy. Without this line the
+# variable reaches only the hand-run path — `COMPOSE_FILES=… hamstrack-config-drift` — and
+# the hourly timer, which is what actually publishes the metric, never sees it.
+# An EnvironmentFile rather than an inline Environment= because THIS FILE IS COMPARED
+# BYTE-FOR-BYTE with the synced copy (the `installed-ops` drift scope): editing the
+# installed unit to add a variable would show as permanent drift on every check. The
+# leading `-` makes the file optional, so a box that needs nothing sets nothing.
+# Also read: CONFIG_DRIFT_TEXTFILE_DIR, CONFIG_DRIFT_UNIT_DIR, CONFIG_DRIFT_BIN_DIR.
+EnvironmentFile=-/etc/hamstrack/drift.env
+
+# Bounded because it runs hourly beside a production app on a 1909 MB box with no swap.
+# What lives in this cgroup is bash, sha256sum, find and the docker CLI — no dump, no
+# upload, no Python bundle — so this is an order of magnitude below the backup job's
+# ceiling. Exceeding it fails the unit, which is loud, contained, and not an outage.
+# Measure it the way ops-prod-hardening.md §6.3 step f measures the backup unit: read the
+# cgroup WHILE IT RUNS. `systemctl show -p MemoryPeak` does NOT exist here (the property
+# arrived in systemd 253; Amazon Linux 2023 ships 252, and `show` returns 0 while silently
+# omitting it).
+MemoryHigh=96M
+MemoryMax=128M
+TasksMax=32
+
+# A check that cannot finish must not hold the box's attention: it publishes its metrics
+# from an EXIT trap, and SIGTERM is trapped like any other exit, so a timeout still leaves
+# a truthful reading rather than yesterday's.
+TimeoutStartSec=300
+
+# Be the first thing to yield — this runs while the product is meant to be serving.
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+# Same honest accounting as hamstrack-backup.service: this unit talks to the DOCKER
+# SOCKET, which is root-equivalent by construction. None of the settings below reduce an
+# attacker's capability; they bound the blast radius of a MISTAKE and make an unexpected
+# write show up as an error instead of a modified host.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+UMask=0022
+# Everything read-only except the one directory this job writes. The path must EXIST before
+# the unit starts or systemd refuses to set up the namespace and the unit fails before the
+# script runs — the install step creates it, and so does the backup job's.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter/textfile_collector
+
+# No [Install] section, deliberately — like hamstrack-backup.service. This unit is started
+# by its .timer; `systemctl enable` on the SERVICE would be a second, boot-time trigger
+# nobody asked for. Enable the timer.

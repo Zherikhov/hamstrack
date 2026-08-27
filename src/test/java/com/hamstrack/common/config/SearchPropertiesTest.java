@@ -47,8 +47,10 @@ class SearchPropertiesTest {
 
     /**
      * There is deliberately no "unlimited": 0 is the value an operator writes to mean "turn it
-     * off", and the off switch is {@code app.rate-limit.enabled}, which turns off every limiter in
-     * the app rather than silently leaving this surface open.
+     * off", and the off switch is {@code app.rate-limit.enabled}, which turns off every limiter
+     * that HAS an off switch rather than silently leaving this surface open. (One is deliberately
+     * outside it: the backlog-rebalance cooldown is a fixed internal safety valve with no variable
+     * and no switch - see application.properties and docs/self-hosting.md.)
      */
     @Test
     void zeroOrNegativeRefusesToStart() {

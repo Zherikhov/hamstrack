@@ -1,6 +1,20 @@
 # Email contact point. The address comes from the OBS_ALERT_EMAIL_TO env var
 # (Grafana expands ${...} in provisioning files). Grafana's SMTP is configured
 # via GF_SMTP_* on the grafana service.
+#
+# That variable is load-bearing for the RULES, not only for delivery: if it expands
+# to an empty string, this contact point fails validation and Grafana refuses to
+# provision the whole alerting tree in this directory - rules.yml included - and then
+# refuses to start at all, exiting 1 and crash-looping under restart: unless-stopped
+# ("failed to validate integration \"email\" (UID hamstrack-email) ... could not find
+# addresses in settings", measured on grafana:11.5.2). Note where the silence is: not
+# in Grafana, which is loudly dead in `docker compose ps`, but in the DEPLOY - `up -d`
+# exits 0 anyway, so automation reports success. Both compose files therefore
+# guarantee a value before Grafana ever sees it (the prod one with a ${...:?} refusal
+# that names the variable and the .env file, which the Grafana error above does not;
+# the dev one with a literal), and nothing here may reintroduce a fallback address: a
+# placeholder default is how this file spent months mailing an undeliverable domain
+# from our verified sender.
 apiVersion: 1
 
 contactPoints:

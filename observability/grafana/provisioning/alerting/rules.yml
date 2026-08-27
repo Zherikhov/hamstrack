@@ -276,6 +276,128 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
+      # HD-187. The backup job is a HOST systemd timer, not a container, so it emits nothing
+      # to Loki and nothing to the app's metrics: its only channel to a person is the
+      # node-exporter textfile it writes. Two rules, because a backup has two failures and only
+      # one of them is loud — a dump that fails is over in seconds, while a dump that SUCCEEDS
+      # and then fails to upload leaves a perfectly good file on the volume that is about to be
+      # lost, with every local check green.
+      #
+      # BackupRunFailed is the fast one: the last run reported a stage failure, visible within
+      # an hour. BackupStale is the slow, load-bearing one: nothing has landed off-box in 26
+      # hours — which is the only rule that can see the run NOT HAPPENING AT ALL (a stopped
+      # timer, a hung flock, a box that was down), a condition BackupRunFailed cannot detect
+      # because a job that does not run reports nothing.
+      #
+      # BackupStale is deliberately NOT scoped to stage="upload". That series is never
+      # written when the job runs with BACKUP_TARGET=local — the mode docs/self-hosting.md
+      # offers a reader with no object store — so scoping to it left the entire DC
+      # configuration with no rule that could see the timer stop, while that page promised
+      # both rules "start working with no extra configuration". Unaggregated and per-stage,
+      # so Grafana raises one instance per stage and the annotation can name which; on Cloud
+      # the only change is that a fully stopped timer raises two instances instead of one.
+      #
+      # noDataState: OK is deliberate and has a cost. It keeps the rules dormant on an
+      # install that runs the observability stack without the backup timer (the metric simply
+      # does not exist there). The price is that DELETING the .prom file — or losing the
+      # node-exporter bind mount — silences the alert instead of firing it. The installer
+      # writes zero-timestamp sentinel STATE files, so the first run to execute at all
+      # publishes a series that is instantly stale rather than a healthy-looking one; note
+      # that the series itself appears only once the script has run once and emitted a .prom,
+      # which is why installing the job ends with a manual run (ops-prod-hardening §6.3d) and
+      # why confirming the series exists is a step of the restore drill.
+      #
+      # AN ANNOTATION IS RENDERED PER INSTANCE, SO IT MUST DESCRIBE EXACTLY ONE. These two
+      # rules are unaggregated, so `stage` is already decided by the time the text renders.
+      # The summary below used to interpolate the stage correctly and then append a legend
+      # covering BOTH stages — the reader was told the right stage and then handed a
+      # two-branch key to apply to themselves, the other branch guaranteed irrelevant to the
+      # message it appeared in. Grouping makes that worse rather than redundant: policies.yml
+      # groups by `alertname`, so a fully stopped timer puts BOTH stage instances in ONE
+      # email and the legend was printed twice, once beside each stage it half-applied to.
+      # Do not restate the reason as "one notification per instance" — that is a property of
+      # the notification policy, not of this rule, and that policy already makes it false;
+      # what holds is that the TEXT is expanded per instance. Found by HD-187's acceptance
+      # test on a deliberately fired BackupStale; `if`/`eq`/`$labels` confirmed to expand
+      # (not render literally) on the pinned grafana:11.5.2, one branch per stage. Branch on
+      # $labels inside the template; never enumerate cases the instance has already settled.
+      # The `else` makes the branch total, which is only truthful while `stage` has exactly
+      # the two values hamstrack-backup.sh emits: a third one would be described as a missing
+      # dump. If you add a stage to the .prom, add its arm here in the same commit.
+      - uid: hamstrack-backup-stale
+        title: BackupStale
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Backup stage {{ $labels.stage }} has not succeeded in over 26 hours — {{ if eq $labels.stage "upload" }}nothing has landed off-box{{ else }}the job is not running at all{{ end }}; see journalctl -u hamstrack-backup on the host'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - hamstrack_backup_last_success_timestamp_seconds'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [93600] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The `stage` label is the whole value of this alert — it is what tells "no dump was
+      # taken" from "a good dump is on the box and only the upload failed", and those have
+      # opposite first moves during an incident. It is only as truthful as the .prom, which
+      # is why hamstrack-backup.sh's ExecStopPost handler stands down when the run's EXIT
+      # trap already published: the handler can only say "both stages failed, size 0", and
+      # it fires on every non-success result, so it used to relabel exactly the failure this
+      # rule exists to distinguish.
+      #
+      # Its summary names the one stage its instance carries and stops there — the per-
+      # instance rule above applies here too, and this text is what it looks like satisfied.
+      - uid: hamstrack-backup-run-failed
+        title: BackupRunFailed
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last Hamstrack backup run failed at stage {{ $labels.stage }} — see journalctl -u hamstrack-backup on the host"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_backup_last_status'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       # A stored role_id failed the scope/ownership assertion (HD-127). No request can
       # create such a row — every write door resolves role ids through
       # RoleRepository.findAssignable(id, workspaceId, scope) — so any non-zero value is a
@@ -309,6 +431,264 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # HD-199. The two rules below watch the DELIVERY of configuration rather than the
+      # application: they are the only thing that proves the sync worked and keeps working.
+      # The metrics come from the host systemd unit hamstrack-config-drift.service (and
+      # from the tail of every apply-config.sh run) through node-exporter's textfile
+      # collector, so they arrive under the Prometheus job `node`, exactly like the backup
+      # metrics above and for the same reason: a deploy is not something the JAR can see.
+      #
+      # A drifted box is usually a DELIBERATE incident edit, so these are `warning` and not
+      # `critical`: the job of the alert is to make sure the edit is un-done, not to wake
+      # anybody. `.env` for durable, the file for temporary, a commit for permanent — and
+      # this is what remembers the middle one.
+      #
+      # noDataState: OK has the same shape and the same price as the backup rules: it keeps
+      # the pair dormant on an install that runs this stack without the drift timer, and it
+      # means that DELETING the .prom silences the alert instead of firing it. The distinct
+      # gap here is that apply-config.sh publishes at every deploy even when the timer is
+      # NOT installed — so the series exists, looks healthy, and is only as fresh as the
+      # last deploy. hamstrack_config_check_timestamp_seconds is what tells those two
+      # states apart, and it is the whole reason that metric exists.
+      #
+      # AN ANNOTATION IS RENDERED PER INSTANCE, SO IT MUST DESCRIBE EXACTLY ONE. The query
+      # is deliberately UNAGGREGATED, and it must stay that way: the summary branches on
+      # $labels.scope, and any aggregation that drops the label — a max(), a sum(), a
+      # count() — would render the branch against an instance with no scope and hand the
+      # reader the wrong first move, or none. The scope is the only label that makes this
+      # alert actionable. Each scope has a different first move, so the summary names one
+      # and never a legend covering all three. The `else` makes the branch total, which is
+      # truthful only while `scope` has exactly the three values hamstrack-config-drift.sh
+      # emits: a fourth would be described as an uninstalled ops artefact. If you add a
+      # scope to the .prom, add its arm here in the same commit. WHAT differs is in the
+      # journal and in the script's stdout, never in a label.
+      - uid: hamstrack-config-drift
+        title: ConfigDrift
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ if eq $labels.scope "files" }}A synced file in /opt/hamstrack differs from the commit that was deployed — an edit made on the box, which the next deploy will overwrite. Re-deploy to restore it, or commit it{{ else if eq $labels.scope "containers" }}A container is running a service definition that is not the one on disk in /opt/hamstrack — the file was replaced and the stack was never brought up. Run the deploy again{{ else }}An ops artefact installed under /usr/local/bin or /etc/systemd/system differs from the copy in /opt/hamstrack/ops — a deploy places files and never installs them, so the install step in docs/ops-prod-hardening.md §6.3 is what closes this{{ end }}; journalctl -u hamstrack-config-drift names what differs'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_config_drift'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The un-pin reminder, as a mechanism rather than as a sentence in a checklist. An
+      # emergency rollback is `APP_IMAGE_TAG=<version>` in /opt/hamstrack/.env — a file no
+      # deploy touches, so the pin survives by construction and therefore cannot be undone
+      # by forgetting. `for: 6h` is the point: a pin still in place after six hours is
+      # either forgotten or has become the intended version, and both deserve a sentence to
+      # a person. Unaggregated so the instance carries `tag` and the summary can name it.
+      #
+      # This metric says the tag is not `latest`; it does NOT say the deploy is blocked.
+      # apply-config.sh refuses on the pin having MOVED (`.env` versus `.deployed-image-tag`),
+      # so a box that pins by policy fires this rule while deploying perfectly happily. The
+      # summary therefore gives BOTH outcomes an action — un-pin, or adopt the version with
+      # one `--adopt-pin` run — because "it has become the intended version" left alone is
+      # the state where deploys stay red for ever and nothing else says so.
+      #
+      # NOT `--allow-pinned`, and the difference is why there are two flags: that one
+      # proceeds for a single run and deliberately leaves `.deployed-image-tag` alone, so an
+      # operator who reaches for it at hour six — an urgent config fix during the very
+      # incident this pin is holding — does not thereby tell the next unattended deploy that
+      # a rolled-back image is the intended one. Adoption is the deliberate act, and this
+      # summary is read by somebody tired.
+      - uid: hamstrack-deploy-image-pinned
+        title: DeployImagePinned
+        condition: B
+        for: 6h
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Production has been pinned to image tag {{ $labels.tag }} for six hours — APP_IMAGE_TAG is set in /opt/hamstrack/.env. Config delivery is refused while the pin disagrees with .deployed-image-tag, so every deploy is red until you un-pin OR adopt the pin. Un-pin it (set it to latest or remove the line) and `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d`; or, if this version is now the intended one, adopt it by running the applier once by hand with --adopt-pin, which re-stamps the tag and lets deploys resume. If the rollback is still in progress and you only need one configuration change applied now, use --allow-pinned instead: it applies this run and does NOT re-stamp, so the next unattended deploy still refuses (docs/ops-prod-hardening.md §3)"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_deploy_image_pinned'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # ---------------------------------------------------------------------------
+      # HD-190 — the invitation mailer. THREE RULES, RANKED BY VALUE, which is the
+      # reverse of the order they would naturally be written in.
+      #
+      # The ranking is the finding, so read it before adding a fourth: a rule built on
+      # THROTTLE REFUSALS can only see an attacker who HITS a ceiling. An attacker who
+      # reads the configured numbers and stays beneath them trips no RateLimitedException
+      # and is invisible to InviteThrottleTripping below. What is always true, whichever
+      # ceiling did or did not fire, is the VOLUME of mail leaving the box and the
+      # PROPORTION of invitations anybody accepts. Those are rules 1 and 2.
+      #
+      # None is `critical`. None of this is "the product is down", and paging an operator
+      # for abuse trains them to mute the folder that also carries AppDown.
+      # ---------------------------------------------------------------------------
+
+      # RULE 1, the most valuable: the direct measurement of the loss, independent of
+      # every ceiling. 500/day is a sixth of Hamstrack Cloud's 3000/month provider quota
+      # (Resend's free tier), i.e. the month is gone in six days. THAT NUMBER IS OURS, NOT
+      # YOURS: a self-hosted install on its own SMTP relay may have a far larger quota or
+      # none at all, and 500/day may be an ordinary Tuesday there. If it is, edit the
+      # threshold in this file (observability/grafana/provisioning/alerting/rules.yml) —
+      # Grafana thresholds in this stack are provisioned, not environment-driven, so this
+      # is the file to change and there is no variable to set.
+      # A real onboarding week can approach it, which is exactly why
+      # this is a warning that says GO AND LOOK rather than one that says act: the
+      # domain-only INFO line ("mail send allowed: ... recipientDomain=") separates one
+      # abuser mailing four hundred domains from one customer onboarding four hundred
+      # colleagues at one domain, and Prometheus cannot, because no metric here may carry
+      # an address or an id.
+      - uid: hamstrack-mail-daily-volume-high
+        title: MailDailyVolumeHigh
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 500 emails sent in 24h - at Hamstrack Cloud's 3000/month provider quota that consumes the month in six days (self-hosted on your own relay, your quota may differ - the threshold lives in observability/grafana/provisioning/alerting/rules.yml), and the first symptom of running out is that new users silently stop receiving verification links. Do not change a ceiling yet: search the app logs for the line 'mail send allowed' and group by recipientDomain. Many unrelated domains with a low acceptance ratio is a spam run (see InviteVolumeUnaccepted); one domain is a customer onboarding, and the action there is to RAISE INVITE_MAX_PER_SENDER_PER_DAY, not to lower anything. The mail_send_events table answers 'which account' for the last INVITE_EVENT_RETENTION_DAYS days"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_email_sent_total{outcome="success"}[24h]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [500] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 2, the discriminator - and the only rule here that sees an abuser who stays
+      # under every ceiling. Real invitations get accepted; spam does not, and nothing
+      # else in the metric surface separates the two.
+      #
+      # The `and on()` guard is what keeps it quiet: below 200 invitations in six hours
+      # the expression returns no data and noDataState: OK holds, so a small instance
+      # where two invitations went unanswered never fires.
+      #
+      # THE KNOWN FALSE POSITIVE, STATED SO IT IS NOT DISCOVERED: a genuine 300-person
+      # onboarding started at 17:00 on a Friday shows a low acceptance ratio for hours.
+      # The six-hour window and `for: 30m` absorb the ordinary version of that; the
+      # Friday-evening version WILL fire, and the summary says so. A rule with a named,
+      # explained false positive survives; one whose false positive is a surprise gets
+      # muted within a week, which is the failure this rule exists to avoid.
+      - uid: hamstrack-invite-volume-unaccepted
+        title: InviteVolumeUnaccepted
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 200 invitations in 6h with under 10% accepted - a spam run looks exactly like this and a real onboarding does not, because real invitations get accepted. KNOWN FALSE POSITIVE: a genuine large onboarding started on a Friday evening also looks like this for a few hours, so check before acting. The check is one query - search the app logs for the line 'mail send allowed' and group by recipientDomain: many unrelated domains is abuse, one customer domain is an onboarding. The mail_send_events table names the account. If it is abuse, lower INVITE_MAX_PER_SENDER_PER_DAY and disable the account; if it is an onboarding, raise it"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: '(sum(increase(hamstrack_invites_accepted_total[6h])) / clamp_min(sum(increase(hamstrack_invites_sent_total[6h])), 1)) and on() (sum(increase(hamstrack_invites_sent_total[6h])) > 200)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [0.1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 3, least valuable and still worth having: it catches the LOUD abuser, and
+      # only the loud one. Listed last on purpose - anyone who builds only this rule has
+      # built a monitor for the incompetent. The kind label is what makes it actionable,
+      # because the three kinds mean three different things.
+      - uid: hamstrack-invite-throttle-tripping
+        title: InviteThrottleTripping
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Invitation ceilings refused more than 20 requests in 15m. READ THE kind LABEL: invite_sender_volume is bulk-shaped (one account sending a lot - check whether it is a customer onboarding before lowering anything); invite_recipient_cooldown is harassment-shaped (one account pressing invite at one address across workspaces); invite_recipient_daily is the sharpest, one address hit from SEVERAL accounts, which costs the attacker a mailbox per account and is almost never innocent. This rule cannot see an attacker who stays under the ceilings - MailDailyVolumeHigh and InviteVolumeUnaccepted are the ones that can"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_ratelimit_hit_total{kind=~"invite_.*"}[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [20] }
                   operator: { type: and }
                   query: { params: [] }
                   reducer: { type: last, params: [] }

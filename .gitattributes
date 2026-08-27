@@ -1,2 +1,26 @@
 /mvnw text eol=lf
 *.cmd text eol=crlf
+
+# HD-187: these are executed on Linux (Amazon Linux 2023) by systemd. A CRLF
+# checkout makes the shebang unreadable ("bad interpreter: /usr/bin/env bash^M")
+# and systemd reject the unit files, so pin them to LF regardless of core.autocrlf.
+*.sh text eol=lf
+*.service text eol=lf
+*.timer text eol=lf
+
+# Env-file templates are pinned for the same reason and a worse failure mode: nothing
+# rejects them, the CR just becomes part of the last value on the line. `backup.env.example`
+# is BOTH `.`-sourced by hamstrack-backup.sh and parsed by systemd's `EnvironmentFile=`, and
+# a `BACKUP_TARGET=s3\r` copied out of a Windows checkout matches neither the `s3` nor the
+# `local` branch and yields a bucket name with a trailing CR. `.env.prod.example` is copied
+# to `.env` and fed to Compose `env_file:`, where a stray CR lands inside JWT_SECRET or a
+# password and produces an authentication failure nobody can see in the file. Both are
+# Linux-side configuration that a Windows editor should never be allowed to reshape.
+*.env.example text eol=lf
+.env.prod.example text eol=lf
+
+# HD-199: the deploy manifest is read line by line by apply-config.sh on the box. A CR
+# would ride along on every path (`observability/\r`), and the script would refuse the
+# manifest with "does not exist in the release tree" naming a path that plainly does. It
+# trims trailing whitespace defensively, which is a backstop and not a reason to ship CRs.
+ops/deploy/synced-paths.txt text eol=lf

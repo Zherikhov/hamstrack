@@ -7,6 +7,7 @@ import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.RoleScopeViolationSource;
 import com.hamstrack.common.observability.ProductMetrics.WorkspaceSource;
+import com.hamstrack.common.ratelimit.InviteThrottle;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.util.TokenUtils;
 import com.hamstrack.workspace.dto.*;
@@ -54,6 +55,13 @@ public class WorkspaceService {
     private final WorkspaceMemberService memberService;
     /** HD-130 §10: {@code app.workspace.default-project-access-mode}, for NEW workspaces only. */
     private final WorkspaceProperties workspaceProperties;
+    /**
+     * HD-190: the invitation ceilings — per-sender volume (in memory) and the persisted
+     * recipient-keyed cooldown + daily cap, spent in that order. Injected here rather than bound to
+     * a path because the recipient key makes a refusal a tenancy statement; see
+     * {@code InviteThrottle}.
+     */
+    private final InviteThrottle inviteThrottle;
 
     // User-initiated creation (the API path) — completes first-login onboarding.
     @Transactional
@@ -165,6 +173,26 @@ public class WorkspaceService {
      * which no single catalog entry can express — and it lives in
      * {@code WorkspaceMemberService} so the invite path and the member-administration
      * paths cannot drift apart. Same predicate, one copy.
+     *
+     * <p><strong>Check order is the contract</strong> (HD-190 §4.2): workspace resolved
+     * (<strong>404</strong> for a non-member and an unknown workspace alike) → {@code
+     * workspace.member.manage} (403) → role assignable / OWNER-not-grantable / grant ceiling
+     * (422, 403) → already a member (409) → <strong>the invitation ceilings (429)</strong> →
+     * write the invite and send the mail. Nothing above the ceilings sends mail, so a refusal
+     * there costs neither the caller's own budget nor a stranger's recipient cap; and the 429 is
+     * spent after tenancy, so — unlike every other 429 in this API — it is only ever seen by a
+     * proven member.
+     *
+     * <p><strong>Seam for a per-workspace cap on outstanding invitations</strong> (HD-190 §6.4,
+     * open question Q1 — deliberately not built here). If it is ever wanted it belongs
+     * <em>between</em> the already-a-member check and {@code inviteThrottle.require}, counting
+     * {@code workspace_invites} rows with {@code acceptedAt IS NULL AND expiresAt > now()}, and it
+     * is a <strong>409 stock cap</strong> in the shape of {@code app.roles.max-custom-per-workspace}
+     * — not a 429, and <em>not</em> under {@code app.rate-limit.enabled}, because that switch turns
+     * off brute-force protection and an operator turning that off has not asked to remove an
+     * unrelated stock cap. Its prerequisite is a pending-invite list plus a revoke endpoint:
+     * neither exists today, so its refusal ("revoke some") would prescribe an action its reader
+     * cannot perform. Nothing below is arranged around its absence.
      */
     @Transactional
     public void inviteMember(User actor, UUID workspaceId, InviteMemberRequest req) {
@@ -181,17 +209,97 @@ public class WorkspaceService {
             throw new OwnerIsNotGrantableException();
         }
         memberService.requireWithinGrantCeiling(ctx, granted);
+        // Folded with Locale.ROOT ONCE, HERE, and compared with = everywhere downstream (HD-120).
+        // Not lower(), not equalsIgnoreCase: this value identifies the INVITATION — it is what
+        // acceptInvite matches an account against — and there an extra match lets the wrong person
+        // accept somebody else's invitation, so the comparison stays exact.
+        //
+        // THE THROTTLE BELOW NEEDS THE OPPOSITE and gets it elsewhere. For a ceiling an extra match
+        // raises a count and refuses SOONER, so over-folding is fail-safe and under-folding is the
+        // hole: keyed on this value alone, victim+1@ / victim+2@ / v.i.c.t.i.m@googlemail.com are
+        // distinct strings that reach one human, and both recipient ceilings read zero every time.
+        // So the throttle counts MailAddresses.throttleKey(email) — derived inside the throttle, not
+        // here, so no call site can forget it — while this value stays exactly what was typed.
+        var email = req.email().toLowerCase(Locale.ROOT);
         // Check not already a member
-        userRepository.findByEmail(req.email().toLowerCase(Locale.ROOT)).ifPresent(user -> {
+        userRepository.findByEmail(email).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {
                 throw new AlreadyWorkspaceMemberException();
             }
         });
 
+        // HD-190 — the invitation ceilings, and this is the ONLY place they may be spent.
+        //
+        // Everything above refuses without sending mail, so a caller can exhaust neither their own
+        // budget nor a stranger's recipient cap by probing invalid roles or workspaces they cannot
+        // see.
+        //
+        // That is a claim about everything ABOVE this line, and NOT about this line. The two halves
+        // inside are spent in order, so a request refused by the RECIPIENT ceilings has already
+        // spent one unit of the caller's own hourly and daily SENDER budget: that budget is an
+        // in-memory counter incremented inside its own compute, so nothing here gives it back, not
+        // even a rollback. Accepted, and worth stating rather than implying otherwise — the cost is
+        // self-inflicted, keyed on the caller, and ages out with the caller's own window. The
+        // direction that would matter is the reverse, and it does not happen: a sender-budget
+        // refusal never spends a victim's recipient cap, which is why the sender half runs first.
+        //
+        // And everything above has already answered the tenancy question: a 429 from here is
+        // only ever seen by a proven member, which is exactly why these ceilings are NOT an
+        // interceptor — a recipient-keyed refusal spent before the workspace is resolved would
+        // answer a cross-tenant question to a non-member, where this project requires a 404.
+        //
+        // The supplier is evaluated only if the cooldown fires: it decides whether the refusal may
+        // claim the earlier invitation is still waiting in the invitee's inbox. Removing a member
+        // deletes their unaccepted invites (HD-132), so that claim goes stale in exactly the
+        // workflow — remove, realise the mistake, re-invite — that lands inside the cooldown.
+        //
+        // Scoped to THIS workspace, not to the actor: the cooldown ignores workspaces, so it can
+        // fire on a send from one the actor has since been removed from, and their own sent invites
+        // survive that removal. An actor-scoped check would then report the live state of a row they
+        // can no longer reach. They may see this row: membership and member.manage were proven a few
+        // lines up.
+        // FOR HD-133 (UNIQUE(workspace_id, email) on workspace_invites), AND FOR ANY OTHER CHECK
+        // THAT CAN REFUSE THIS REQUEST: it goes ABOVE this line, never below it. The throttle
+        // RECORDS its mail_send_event here, in this transaction, before the insert further down.
+        // Anything that rolls the transaction back afterwards — a constraint violation, a late 409,
+        // an exception from a new validation — unwrites that row, which hands callers a free way to
+        // probe the recipient ceilings without ever spending them: the refusal is observed, the
+        // count is not. HD-190's own ordering follows the same rule and is why every tenancy, role
+        // and already-a-member check is above.
+        //
+        // AND THE INVERSE IS THE SHARPER HALF OF THE SAME ROLLBACK, because the send at the end of
+        // this method is @Async and is therefore NOT ordered after the commit. A rollback taken
+        // after the throttle passed leaves all three of: MAIL SENT, CEILING NOT SPENT, and a join
+        // link whose workspace_invites row never existed. Repeated, that is the mail-bomb these
+        // ceilings exist to stop, delivered free of charge, plus a recipient whose link answers 404.
+        // Not reachable today — token_hash is the only UNIQUE on workspace_invites and it is 32
+        // random bytes, so nothing below here throws on a duplicate. HD-133's
+        // UNIQUE(workspace_id, email) is exactly what makes it reachable: a re-invite that clears a
+        // short cooldown and then collides at flush has this shape precisely. Moving the duplicate
+        // check above this line closes both halves at once.
+        //
+        // (V21's header carries the rule too — the probe half of it; that migration is applied and
+        // must not be edited, so this comment is the fuller copy. Both exist because whoever adds
+        // the constraint opens a new migration, the entity and this method, and has no reason to
+        // read the header of an applied one.)
+        //
+        // AND NOTHING SLOW GOES BETWEEN THIS LINE AND THE COMMIT. The throttle takes
+        // pg_advisory_xact_lock on the RECIPIENT KEY and holds it to commit, and a recipient address
+        // is something two tenants legitimately share — so any wait added below is a wait one tenant
+        // can impose on another by inviting the same person. That is why the mail send at the end of
+        // this method is @Async and must stay @Async, and why a synchronous SMTP round trip here
+        // would become a cross-tenant lock without changing a line in RecipientMailThrottle.
+        inviteThrottle.require(actor.getId(), email, workspace.getId(),
+                () -> inviteRepository.existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(
+                        workspace, email, Instant.now())
+                        ? "That invitation is still valid — ask them to check their inbox, "
+                          + "including spam."
+                        : null);
+
         var rawToken = TokenUtils.generateRawToken();
         var invite = new WorkspaceInvite();
         invite.setWorkspace(workspace);
-        invite.setEmail(req.email().toLowerCase(Locale.ROOT));
+        invite.setEmail(email);
         invite.setRole(roleCatalog.reference(granted.id()));
         invite.setTokenHash(TokenUtils.sha256(rawToken));
         invite.setInvitedBy(actor);
@@ -199,7 +307,17 @@ public class WorkspaceService {
         inviteRepository.save(invite);
         metrics.inviteSent();
 
-        mailService.sendWorkspaceInviteEmail(req.email(), workspace.getName(), rawToken);
+        // The folded value, not req.email(): the throttle counted it, workspace_invites stores it and
+        // the log line took its domain from it, so mailing anything else would make "the address we
+        // bounded is the address we wrote to" false by one character. Case only, today — but it is
+        // the line a future normalisation would silently not apply to.
+        //
+        // What makes it SAFE to write to a folded address is the ASCII-only local part enforced on
+        // InviteMemberRequest, and the two must move together: this fold is toLowerCase(Locale.ROOT),
+        // which collapses U+212A KELVIN SIGN onto plain k, so without that constraint this line
+        // would hand a workspace name and a live join token to whoever owns the ASCII spelling. Any
+        // widening of what the DTO accepts has to be re-argued HERE, at the send.
+        mailService.sendWorkspaceInviteEmail(email, workspace.getName(), rawToken);
     }
 
     // Accept via the emailed token link.
@@ -274,10 +392,27 @@ public class WorkspaceService {
         // compare here can never rescue a legitimate invitee - it can only ADD matches, and
         // what it adds is Unicode confusables. equalsIgnoreCase compares through
         // Character.toUpperCase/toLowerCase, which collapse dotless i (U+0131), dotted
-        // capital I (U+0130), long s (U+017F) and the Kelvin sign (U+212A) onto ASCII
-        // i / s / k. Locale.ROOT folding does not, and neither does the UNIQUE on
-        // users.email, so each of those spells a genuinely DIFFERENT account: an invite
-        // addressed to <dotless-i>van@x.com was redeemable by ivan@x.com.
+        // capital I (U+0130) and long s (U+017F) onto ASCII i / s. Locale.ROOT folding does
+        // not, and neither does the UNIQUE on users.email, so each of those spells a
+        // genuinely DIFFERENT account: an invite addressed to <dotless-i>van@x.com was
+        // redeemable by ivan@x.com.
+        //
+        // The Kelvin sign (U+212A) is NOT a fourth member of that list, and it was written
+        // here as one: toLowerCase(Locale.ROOT) DOES collapse it onto plain k, so it never
+        // survives the fold on either side of this comparison. Redemption is safe against it
+        // for a different mechanism than the one above - AuthService folds every users.email
+        // write with the same Locale.ROOT, so the Kelvin and the ASCII spelling insert the
+        // SAME string and the second registration is refused by the UNIQUE. There is no
+        // second account for a wrong person to be. What that character does carry is a
+        // SENDING-side hazard, where the same fold silently retargets an invitation at the
+        // ASCII person's real inbox - closed at the boundary, by InviteMemberRequest
+        // refusing a non-ASCII local part.
+        //
+        // And that constraint does NOT make this comparison redundant, which is the easy wrong
+        // conclusion to draw from the paragraph above. It bounds the INVITED address only. The
+        // confusable half of the dangerous pair is the ACCOUNT's address - RegisterRequest
+        // carries no such restriction, so users.email may perfectly well hold <dotless-i>van@x.com
+        // - and it is an ASCII invite plus a non-ASCII account that equalsIgnoreCase would match.
         //
         // So do not "restore" the case-insensitive form. Against a pair of values that are
         // canonical on write, case-insensitivity is not tolerance for how someone typed

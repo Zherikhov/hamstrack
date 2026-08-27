@@ -8,12 +8,49 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
 public interface WorkspaceInviteRepository extends JpaRepository<WorkspaceInvite, UUID> {
     Optional<WorkspaceInvite> findByTokenHash(String tokenHash);
+
+    /**
+     * Is there still a live invitation to this address <strong>in this workspace</strong>? Used for
+     * exactly one thing: deciding whether the invite cooldown's refusal may say <em>"that invitation
+     * is still valid — ask them to check their inbox"</em> (HD-190 §8.3).
+     *
+     * <p><strong>A claim about a row is checked against the row.</strong> Removing a member deletes
+     * their unaccepted invites ({@link #deleteUnacceptedByWorkspaceAndEmail}, HD-132), so
+     * "remove, realise the mistake, re-invite" is a real workflow that lands inside the cooldown —
+     * and there the sentence would be false, sending an admin to tell somebody to look for an email
+     * that no longer works. That is a refusal prescribing an unperformable action, which is the
+     * mistake this project has already shipped three times, so the sentence is emitted only when
+     * this returns true. It is an {@code exists}, run only on the refusal path.
+     *
+     * <p><strong>Scoped to the workspace being invited into, not to the sender.</strong> The
+     * cooldown behind the refusal is keyed on (sender, recipient) across every workspace in the
+     * instance, so it can fire because of a send from a workspace the caller has since lost access
+     * to — and member removal deletes invites addressed <em>to</em> the removed member, not ones
+     * <em>sent by</em> them, so such a row outlives their membership. A sender-scoped predicate
+     * would therefore let this sentence report the current state of a row in a workspace the caller
+     * can no longer see: one bit about a membership event elsewhere, paid on the refusal path.
+     * Authoring a row is not entitlement to its present state. Scoped this way, the claim only ever
+     * describes a row in a workspace where membership and {@code workspace.member.manage} were
+     * proven moments earlier. The cost is that the sentence is simply omitted when the cooldown came
+     * from elsewhere — the addendum is optional by construction and never false either way, so
+     * nothing is lost but a helpful hint the caller could not have acted on anyway. This is also why
+     * the refusal names the address and never a workspace.
+     *
+     * <p>Exact match on the address, not {@code lower()}: {@code inviteMember} folds it with
+     * {@code Locale.ROOT} once, at the boundary, and everything downstream compares exactly (HD-120).
+     * The throttle counts a further-folded <em>inbox key</em>, so a cooldown triggered by a different
+     * spelling of the same inbox finds no row here and prints no sentence — which is correct: there
+     * is no invitation at <em>this</em> address to go and look for.
+     */
+    boolean existsByWorkspaceAndEmailAndAcceptedAtIsNullAndExpiresAtAfter(
+            Workspace workspace, String email, Instant now);
 
     // Pending invites addressed to a user's email (still filtered for expiry in
     // the service). Newest first so the invites screen shows recent ones on top.

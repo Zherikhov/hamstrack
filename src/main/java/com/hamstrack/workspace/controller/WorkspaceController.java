@@ -25,6 +25,16 @@ import java.util.UUID;
  * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
  * (since M1), so workspace creation no longer seeds any issue types or statuses.
  *
+ * <p><strong>Inviting is throttled, and that 429 is spent LAST</strong> (HD-190).
+ * {@code POST /{id}/invites} answers 429 + {@code Retry-After} past any of the invitation
+ * ceilings ({@code InviteThrottle} — a per-(sender, address) cooldown, a per-address daily
+ * cap, and a per-sender hourly/daily volume budget), and a refusal sends no mail and writes
+ * no invite. Unlike the report and search budgets, which are interceptors spent before
+ * anything is resolved, these run inside the service <em>after</em> tenancy and
+ * authorization: an unknown workspace and a non-member alike still answer 404 even when the
+ * caller is over every ceiling. Inverting that would answer a recipient-keyed question to a
+ * non-member — a 429 where this project requires a 404.
+ *
  * <p><strong>Member administration</strong> ({@code PATCH}/{@code DELETE
  * /{id}/members/{userId}}) requires {@code workspace.member.manage} — the same
  * permission the invite path checks (HD-126, S3). Two further rules apply to both verbs:

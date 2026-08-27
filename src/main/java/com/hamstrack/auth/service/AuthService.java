@@ -12,6 +12,7 @@ import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
 import com.hamstrack.common.observability.ProductMetrics.LoginReason;
 import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
+import com.hamstrack.common.seed.DataSeeder;
 import com.hamstrack.common.security.JwtService;
 import com.hamstrack.common.util.TokenUtils;
 import jakarta.servlet.http.Cookie;
@@ -58,6 +59,7 @@ public class AuthService {
         if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {
             throw new TermsNotAcceptedException();
         }
+        rejectPublishedPassword(req.password());
         // Locale.ROOT, never the JVM default. This fold IS the account identity: users.email
         // carries a byte-exact UNIQUE and every lookup is an exact match, so a fold that varies
         // with the container locale varies which address a person owns - a Turkish JVM stores
@@ -187,6 +189,7 @@ public class AuthService {
 
     @Transactional
     public void resetPassword(ResetPasswordRequest req) {
+        rejectPublishedPassword(req.newPassword());
         var hash = sha256(req.token());
         var reset = passwordResetRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidTokenException::new);
@@ -206,6 +209,29 @@ public class AuthService {
     }
 
     // --- helpers ---
+
+    /**
+     * <strong>The two places a password can enter {@code users} through the running
+     * application</strong> — register, and completing a reset — refuse the value this project
+     * published in its own {@code .env.prod.example} (HD-200).
+     *
+     * <p>Both bounded it only with {@code @Size(min = 8, max = 100)} and the literal is 19
+     * characters, so an administrator could set their own password to it: the next boot then
+     * refuses to start with a message about a template they never edited, and until that
+     * restart the instance is administrable by anyone who can read the repository. This is
+     * the same predicate the two startup guards use — {@code DataSeeder.isPublishedPassword},
+     * over {@code DataSeeder.PUBLISHED_PASSWORDS} — so the three cannot disagree, and it is
+     * emphatically NOT a strength check: what justifies the one entry is that we published
+     * it, under that variable's own name.
+     *
+     * <p>Refused before the reset token is marked used, so a caller who hits this can retry
+     * on the same link.
+     */
+    private void rejectPublishedPassword(String password) {
+        if (DataSeeder.isPublishedPassword(password)) {
+            throw new PublishedPasswordException();
+        }
+    }
 
     private AuthResponse issueTokens(User user, HttpServletResponse response) {
         var accessToken = jwtService.generateAccessToken(user);

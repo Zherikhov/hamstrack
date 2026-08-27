@@ -55,6 +55,16 @@ public class MailService {
                 + "\n\nThis link expires in 1 hour.");
     }
 
+    /**
+     * <strong>This {@code @Async} is load-bearing for something other than latency: do not remove
+     * it.</strong> Its only caller is {@code WorkspaceService.inviteMember}, which is still holding
+     * {@code pg_advisory_xact_lock(hashtext(recipient_key))} — taken by
+     * {@code RecipientMailThrottle}, held until that transaction commits. A recipient address is
+     * something two tenants legitimately share, so making this synchronous would move an SMTP round
+     * trip inside a lock one tenant can make another tenant queue behind, simply by inviting the
+     * same person. Nothing in the throttle would have to change for that to happen, which is why the
+     * warning is here rather than only there.
+     */
     @Async("mailExecutor")
     public void sendWorkspaceInviteEmail(String to, String workspaceName, String token) {
         var link = appProperties.baseUrl() + "/accept-invite?token=" + token;

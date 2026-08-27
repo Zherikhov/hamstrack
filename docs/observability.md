@@ -50,7 +50,9 @@ Hamstrack ships two things:
 | **Per-container CPU/RAM** | cAdvisor | Host & Containers dashboard |
 | **PostgreSQL** | postgres-exporter | Postgres dashboard |
 | **Business metrics** (signups, active users, issues/projects created, logins, invites, email, attachments) | app custom Micrometer meters | Product dashboard |
-| **Alerts** (app/DB down, error rate, latency, disk, email failures, heap) | Grafana unified alerting | email (+ Grafana UI) |
+| **Backup freshness** | host `systemd` job → node-exporter textfile collector | Explore → Prometheus, and the two backup alert rules |
+| **Config drift** (the box versus the commit deployed to it) | host `systemd` job → node-exporter textfile collector | Explore → Prometheus, and the `ConfigDrift` / `DeployImagePinned` rules |
+| **Alerts** (app/DB down, error rate, latency, disk, email failures, heap, backup freshness, config drift…) | Grafana unified alerting | email (+ Grafana UI) |
 
 ---
 
@@ -92,6 +94,25 @@ Hamstrack ships two things:
 public. The management port `:9090`, Prometheus, Loki, the exporters and Grafana
 are **internal to the compose network** and never published to the internet.
 Operators reach Grafana over a tunnel, not a public URL.
+
+**One signal enters from outside the diagram: the textfile collector.**
+node-exporter is started with
+`--collector.textfile.directory=/var/lib/node_exporter/textfile_collector` and that
+host directory is bind-mounted read-only into the container at the **same path** on
+both sides (node-exporter prefixes some paths with `--path.rootfs`, and an identical
+path resolves to the same host directory under either behaviour, so the flag cannot
+be subtly wrong). Anything that writes a valid `.prom` file there becomes a metric
+under the `node` job with no new process, no new port and no new scrape target. Its users are the
+**host `systemd` timers** — the scheduled database backup (HD-187) and the config-drift
+check (HD-199) — which are outside the compose project entirely and therefore invisible to
+Alloy, which collects logs through the Docker socket. For anything that runs that way, a
+`.prom` file is its only channel to a person; its own text stays on the box
+(`journalctl -u hamstrack-backup`, `journalctl -u hamstrack-config-drift`).
+
+A `command`/`volumes` change like that one needs `docker compose … up -d
+node-exporter` to **recreate** the container; a `restart` will not pick it up. Create
+the host directory before the container starts, or Docker creates it for you at mount
+time.
 
 ---
 
@@ -169,7 +190,7 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_auth_login_total` | counter | `outcome`(success/failure), `reason`(ok/bad_credentials/not_verified/disabled) | login attempts |
 | `hamstrack_auth_email_verified_total` | counter | — | email verifications |
 | `hamstrack_auth_password_reset_total` | counter | `phase`(requested/completed) | password-reset flow |
-| `hamstrack_ratelimit_hit_total` | counter | `kind`(ip_window/login_backoff) | rate-limit rejections |
+| `hamstrack_ratelimit_hit_total` | counter | `kind`(ip_window/login_backoff/rank_rebalance/report_requests/search_requests/invite_sender_volume/invite_recipient_cooldown/invite_recipient_daily) | rate-limit rejections. The three `invite_*` kinds are separate because they mean three different things to whoever reads the alert: `invite_sender_volume` is bulk-shaped, `invite_recipient_cooldown` is harassment-shaped, and `invite_recipient_daily` means one address has taken all it may take in a day — reached from several accounts (each other sender counts once, so that costs a mailbox per slot, which is why it is the sharpest of the three) or by one account spending its own share; the kind alone does not say which, and the domain-only log line and `mail_send_events` do. **A rule built on this metric only ever sees an attacker who HITS a ceiling** — one who stays beneath them is invisible here, which is why `MailDailyVolumeHigh` and `InviteVolumeUnaccepted` rank above `InviteThrottleTripping` |
 | `hamstrack_workspaces_created_total` | counter | `source`(user/onboarding/demo) | workspaces created |
 | `hamstrack_projects_created_total` | counter | — | projects created |
 | `hamstrack_issues_created_total` | counter | `type`(issue-type name, from the admin catalog) | issues created |
@@ -183,6 +204,49 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_workspaces_total` / `hamstrack_projects_total` / `hamstrack_issues_total` | gauge | — | live totals |
 
 Gauges are evaluated at scrape time via cheap `count` queries.
+
+#### Backup metrics — not emitted by the app
+
+Some `hamstrack_*` gauges do not come from the JAR at all, and these four are the first of
+them. They are
+written as a `.prom` file by the host `systemd` unit `hamstrack-backup.service` (HD-187,
+[`ops/backup/`](../ops/backup/)) and picked up by node-exporter's textfile collector, so
+they arrive under the Prometheus job **`node`**, not `hamstrack-app`, and they carry
+neither the `application` nor the `deployment` tag. The application knows nothing about
+backups and deliberately does not: the same binary ships to self-hosters who may back up
+by entirely different means.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `hamstrack_backup_last_success_timestamp_seconds` | gauge | `stage`(dump/upload) | Unix time the stage last **succeeded**. Read from a state file, so a failed run *preserves* the previous value — "this run failed" and "nothing has succeeded since Tuesday" are different facts, and the two alert rules below depend on telling them apart |
+| `hamstrack_backup_last_status` | gauge | `stage`(dump/upload) | whether the most recent run completed that stage (`1`) or not (`0`) |
+| `hamstrack_backup_size_bytes` | gauge | — | size of the dump the most recent run produced. Published so a baseline accumulates; there is deliberately **no** rule on it yet (a threshold set before there is history cries wolf during normal growth) |
+| `hamstrack_backup_duration_seconds` | gauge | — | wall-clock duration of the most recent run |
+
+The only label is `stage`, a two-valued enum — the same cardinality rule as everything
+above. `stage="upload"` is not emitted at all when the job is configured with
+`BACKUP_TARGET=local`, because there is no upload to report on.
+
+#### Config-delivery metrics — not emitted by the app either
+
+Same shape, same channel, different question. Written by
+[`ops/drift/hamstrack-config-drift.sh`](../ops/drift/hamstrack-config-drift.sh) (HD-199) —
+hourly from `hamstrack-config-drift.timer`, **and at the end of every deploy**, because the
+freshest reading should always be the one taken at the moment the configuration changed.
+They answer "has this box changed since it was deployed?", which is a question nothing in
+the application can see: the whole failure they exist for is a repository and a machine
+that disagree.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `hamstrack_config_drift` | gauge | `scope`(files/containers/installed-ops) | whether the box differs from what was deployed (`1`) or not (`0`). **`files`**: a synced file was edited, or a file was added to a synced directory, since the deploy. **`containers`**: the file on disk is right and the running container was never recreated from it. **`installed-ops`**: an artefact installed under `/usr/local/bin` or `/etc/systemd/system` differs from its copy in `/opt/hamstrack/ops` — a deploy places files and never installs them, so this scope exists to say that the gap is open. *Which* files differ goes to the journal, never into a label |
+| `hamstrack_config_deployed_info` | gauge | `sha` | always `1`; the label is the commit whose configuration was last applied. This is what the deploy *applied*, as distinct from whether the box still matches it |
+| `hamstrack_config_check_timestamp_seconds` | gauge | — | when this check last ran. It exists to tell a fresh `0` from a stale one, which matters because the deploy publishes these metrics even where the hourly timer is **not** installed |
+| `hamstrack_deploy_image_pinned` | gauge | `tag` | `1` while `APP_IMAGE_TAG` in `/opt/hamstrack/.env` names anything other than `latest` — an emergency rollback still in place, or a version somebody is deliberately holding. It says the tag is not `latest`; it does **not** say the deploy is blocked, which depends on whether the pin has *moved* since `.deployed-image-tag` was written. The pin lives in `.env` because that file survives every deploy by construction; this metric is what makes un-pinning a mechanism instead of a memory task. Ending the alert has exactly two honest endings — un-pin, or adopt the pin with one `--adopt-pin` apply; `--allow-pinned` deliberately does not end it, because it applies one run without declaring the tag intended |
+
+`scope` is a closed three-valued enum. `sha` and `tag` change on a deploy — a handful of new
+series a week against a 15-day retention, which is worth writing down in a project that
+otherwise forbids unbounded labels.
 
 ---
 
@@ -222,8 +286,78 @@ Auto-provisioned into the **Hamstrack** folder in Grafana:
 ### Alerts
 
 Provisioned Grafana rules (evaluate every 1 min). They route to the **email**
-contact point when `OBS_ALERT_EMAIL_TO` is set; otherwise they still evaluate and
-are visible in Grafana → Alerting.
+contact point, whose address is `OBS_ALERT_EMAIL_TO`.
+
+**`OBS_ALERT_EMAIL_TO` is required, and the rules need it — not only the delivery.**
+The contact point has no "address optional" mode, though prose here used to promise
+one. Two different things happen when the value is missing, and which one you meet
+depends only on how Grafana was started:
+
+| How the value is missing | What happens |
+|---|---|
+| Unset or empty when starting through `docker-compose.observability.yml` | **The `docker compose` command refuses to run**, naming `OBS_ALERT_EMAIL_TO` and the `.env` it belongs in. This is the one an operator meets. The dev file (`docker-compose.observability.dev.yml`) never refuses — it hardcodes a literal address. |
+| An empty string reaching Grafana (Grafana started by hand against `observability/grafana/provisioning`) | Grafana rejects the contact point at provisioning time, **skips the whole alerting tree with it — every rule below is absent** — and then **refuses to start**: it exits 1 and crash-loops under `restart: unless-stopped`, `/api/health` never answering. |
+
+**The stack is not "green with nothing watching it" — Grafana is visibly dead. The
+silence is one layer up.** `docker compose up -d` **still exits 0** while that
+container crash-loops, so a deploy reports success and moves on; only `docker compose
+ps` (or the missing Grafana) shows it. Grafana's own error names an internal
+integration UID, not the variable or the file an operator must fix:
+
+```
+logger=provisioning level=error msg="Failed to provision alerting" error="failure to map file
+contactpoints.yml: failure parsing contact points: email: failed to validate integration \"email\"
+(UID hamstrack-email) of type \"email\": could not find addresses in settings"
+```
+
+That is the case for guarding it at interpolation instead: `${OBS_ALERT_EMAIL_TO:?…}`
+fails *earlier* — before anything is created — and names both the variable and the
+`.env` it belongs in.
+
+**What the refusal costs, since every documented command layers this file onto the
+app's compose file in one invocation:** the abort takes the *whole command*, not just
+the optional stack — `up -d`, and equally `down`, `stop`, `ps` and `logs` when passed
+with both `-f` files. So an operator whose `.env` lost the variable cannot even tear
+the stack down until they put it back. This is acceptable and long-standing
+(`GF_SECURITY_ADMIN_PASSWORD` has behaved this way since day one): Compose resolves
+interpolation *before* it creates, changes or stops anything, so nothing is modified
+by the refusal and a running app keeps running.
+
+**Dashboards without alert mail — the self-hosted case — is possible, one layer up.**
+It does not exist at the contact point (the address is not optional), but it does
+exist at the SMTP switch: set `OBS_ALERT_EMAIL_TO` to any address you own **and**
+`GF_SMTP_ENABLED=false`, and the rules provision, evaluate and show their state in
+Grafana → Alerting with nothing delivered. `GF_SMTP_ENABLED` defaults to `true` and
+is already read by the compose file.
+
+**Verify the routing, not only the rules — and verify it after every Grafana upgrade
+or provisioning change.** From a shell with Grafana reachable (port-forward, or
+`docker exec` into the container):
+
+```bash
+curl -su admin:"$GF_SECURITY_ADMIN_PASSWORD" localhost:3000/api/v1/provisioning/policies \
+  | jq '{receiver, provenance}'
+# expect exactly: { "receiver": "email", "provenance": "file" }
+```
+
+Both fields matter. `receiver != "email"` means the root policy is no longer ours;
+`provenance != "file"` means it is no longer owned by `policies.yml` and can be
+edited away in the UI. **The reason this is worth a check of its own:** Grafana
+carries an unmanaged built-in contact point named `email receiver`, addressed to
+`<example@email.com>`, and `email.com` is a live third-party domain with real MX
+records. So if our provisioned policy is ever lost, alerts do not bounce and do not
+pile up in a queue where someone would notice — **they are delivered to a stranger**.
+`policies.yml` is the only thing fencing that off. While you are there, the rules
+themselves: `curl -su … localhost:3000/api/v1/provisioning/alert-rules | jq length`.
+
+A *default* address is not a third option: shipping one is how these rules spent
+months delivering to a placeholder at an IANA-reserved domain, sent from our own
+verified sending domain — the same sender reputation that carries user
+verification links. Which is also why `.env.prod.example` ships this variable
+**empty** — as, since HD-200, it ships every value that something guards: `${…:?}`
+fires on unset and on empty and *not* on "non-empty and wrong", so a placeholder
+interpolates cleanly and reinstates the exact defect. This variable was the first
+row of that rule rather than an exception to it.
 
 | Rule | Condition | For | Severity |
 |---|---|---|---|
@@ -236,8 +370,91 @@ are visible in Grafana → Alerting.
 | JVMHeapPressure | heap used/max > 90% | 10m | warning |
 | RoleScopeViolation | `increase(hamstrack_role_scope_violation_total[15m]) > 0` | 0m | warning |
 | StatementBudgetExceeded | `increase(hamstrack_db_statement_budget_exceeded_total[15m]) > 5` | 5m | warning |
+| BackupStale | `time() - hamstrack_backup_last_success_timestamp_seconds > 93600` (26 h, per `stage`) | 15m | critical |
+| BackupRunFailed | `hamstrack_backup_last_status < 1` (per `stage`) | 5m | warning |
+| ConfigDrift | `hamstrack_config_drift > 0` (per `scope`) | 30m | warning |
+| DeployImagePinned | `hamstrack_deploy_image_pinned > 0` (per `tag`) | 6h | warning |
+| MailDailyVolumeHigh | `sum(increase(hamstrack_email_sent_total{outcome="success"}[24h])) > 500` | 30m | warning |
+| InviteVolumeUnaccepted | 6h invitation acceptance ratio < 10% **and** > 200 invitations sent in 6h | 30m | warning |
+| InviteThrottleTripping | `sum(increase(hamstrack_ratelimit_hit_total{kind=~"invite_.*"}[15m])) > 20` | 5m | warning |
+
+**The three invitation rules are ranked, and the ranking is the point** (HD-190). A rule
+built on throttle refusals can only see an attacker who *hits* a ceiling; one who reads
+the configured numbers and stays beneath them trips nothing and never appears in
+`hamstrack_ratelimit_hit_total`. So `InviteThrottleTripping` is listed last on purpose —
+anyone who builds only that rule has built a monitor for the incompetent. What stays true
+whichever ceiling did or did not fire is the **volume** of mail leaving the box
+(`MailDailyVolumeHigh`) and the **proportion of invitations anybody accepts**
+(`InviteVolumeUnaccepted`): real invitations get accepted and spam does not, and nothing
+else in the metric surface separates the two. `InviteVolumeUnaccepted` has a **named false
+positive** — a genuine large onboarding started on a Friday evening — which is written into
+its own annotation, because a rule whose false positive is a surprise gets muted within a
+week and a rule that explains its own survives.
+
+`MailDailyVolumeHigh`'s threshold of 500/day is calibrated against **Hamstrack Cloud's**
+mail provider quota (3000 messages a month, Resend's free tier) — a sixth of the month's
+allowance in a day. **A self-hosted install relaying through its own SMTP has a different
+quota, or none**, and 500 a day may be entirely ordinary there; if it is, change the number
+in `observability/grafana/provisioning/alerting/rules.yml`. Alert thresholds in this stack
+are provisioned files rather than environment variables, deliberately — there is nothing to
+set in `.env`.
+
+None of these can name a tenant, an account or an address: the cardinality rule forbids it.
+The bridge is a log line, not a label — every allowed send writes one INFO line carrying the
+sender id, the workspace id and **the recipient's domain only**, never the local part. One
+abuser mailing four hundred domains and one customer onboarding four hundred colleagues at
+one domain are indistinguishable in Prometheus and trivially distinguishable in that line;
+the `mail_send_events` table answers "which account" for `INVITE_EVENT_RETENTION_DAYS` days
+after the fact. Refusals are deliberately **metrics and not log lines**, so a client that
+keeps retrying cannot become a log-flooding vector.
 
 Grafana's SMTP reuses your `MAIL_*` settings (see below).
+
+**The backup rules are two because a backup has two failures and only one of them is
+loud.** A `pg_dump` that fails is over in seconds and reports itself. A dump that
+**succeeds** and then fails to upload leaves a perfectly good file on the volume that is
+about to be lost, with every local check green — that is the failure that quietly turns a
+backup system into a folder, and it is why the metric carries a `stage` label.
+**BackupRunFailed** is the fast one (a stage reported failure). **BackupStale**
+is the slow, load-bearing one, and it is the only rule that can see the job **not running
+at all** — a stopped timer, a hung lock, a box that was down — because a job that does not
+run reports nothing for BackupRunFailed to look at. Both are left **unaggregated**, so
+Grafana raises one instance per stage and the notification names which; for BackupStale that
+is not cosmetic but the difference between working and not on a self-hosted install, where
+`BACKUP_TARGET=local` means the `upload` series is never written and the `dump` stage is the
+only thing a staleness rule can watch. `severity: critical` matches
+AppDown/PostgresDown/DiskFilling: "there is no second copy of the data" belongs in the same
+class as "there is no first copy". The 26-hour threshold is one daily period plus about
+1h50m of slack, so one slow run, a reboot or a `Persistent=true` catch-up does not page
+anybody while two consecutive missed days cannot hide.
+
+**`noDataState: OK` on both is deliberate, and it has a price worth knowing.** It is what
+keeps the rules dormant on an install that runs this stack without the backup timer — the
+metric simply does not exist there, and an alert about a mechanism you never installed is
+noise. The cost is that **deleting the `.prom` file, or losing node-exporter's bind mount,
+silences the alert instead of firing it**. Installing the job writes zero-timestamp sentinel
+**state files** into `/var/lib/hamstrack-backup/`, so the first run to execute at all
+publishes a series that is instantly stale rather than a healthy-looking one — but note what
+that does not do: the **series** appears only once the script has run once and written a
+`.prom`, which is why every install procedure here ends with a manual run rather than with
+enabling the timer. Confirming the series is still present is a step of the periodic restore
+check in [self-hosting.md](self-hosting.md#verify-a-restore).
+
+**ConfigDrift and DeployImagePinned carry the same `noDataState: OK` and one extra gap that
+is peculiar to them.** Their metrics are published by *two* things — the hourly
+`hamstrack-config-drift.timer` and the tail of every deploy — so on a box where the timer
+has not been installed the series **exists and looks healthy**, while being only as fresh as
+the last deploy: an edit made afterwards is invisible until the next one. Nothing about a
+zero says which of those two states produced it, which is the entire reason
+`hamstrack_config_check_timestamp_seconds` is published. An uninstalled check is silent, and
+silence here is not health.
+
+**To try these two rules before they matter, use the dev stack.**
+`docker-compose.observability.dev.yml` provisions the same rule file and now runs
+node-exporter with `--collector.textfile.directory` pointed at `./observability/textfile`.
+Hand-write a `.prom` there — `hamstrack_backup_last_status{stage="dump"} 0`, or a
+`hamstrack_backup_last_success_timestamp_seconds{stage="upload"} 1` for a stale one — wait
+for a scrape, and watch Grafana → Alerting. `*.prom` in that directory is gitignored.
 
 **StatementBudgetExceeded is the only way this condition can reach you.** A statement the
 database cancelled at `DB_STATEMENT_TIMEOUT_MS` answers **`422`**, deliberately — it is a
@@ -278,18 +495,41 @@ it needs an alert: without one it is invisible except as a permanent ERROR trick
 In Cloud the stack is **always on** and wired into the deploy — you don't run
 compose by hand.
 
-1. **Config ships from the repo automatically.** The deploy (GitHub Actions → AWS
-   SSM) downloads the repo-owned config for the built commit and layers both
-   compose files:
-   `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml pull && up -d`.
-   See [ops-prod-hardening §3](ops-prod-hardening.md#config-auto-sync-from-the-repo-2026-08-06).
-2. **One-time server prerequisites** in `/opt/hamstrack/.env` (secrets can't come
-   from the repo):
+1. **Config ships from the repo, at the commit that was built.** The deploy (GitHub
+   Actions → AWS SSM) fetches the repository tree for that commit and applies the paths in
+   [`ops/deploy/synced-paths.txt`](../ops/deploy/synced-paths.txt) — which include
+   `docker-compose.observability.yml` and the whole `observability/` directory — before
+   bringing the stack up with **both** compose files. So a merged change to a dashboard, a
+   datasource or an alert rule reaches the box with the next release, and
+   `observability/` is replaced **wholesale**: a file an operator drops in there is gone at
+   the next deploy. Until 2026-08-26 none of that was true — the deploy synced no files at
+   all, and prod's compose files were dated 11 July and 6 August. Two things follow that a
+   reader here needs:
+   - **A bind-mounted config is read at container start, so replacing the file is not a
+     change compose can see.** Grafana's *service definition* does not change when its
+     provisioning directory does, and `up -d` correctly does nothing — while the container
+     goes on serving the **deleted inode** of the file that was replaced, and both drift
+     scopes read 0 because both of them are right. The deploy therefore restarts the
+     services that bind-mount a changed path — **grafana, prometheus, loki and alloy**, not
+     Grafana alone — whenever `observability/` is among them. By hand, after editing a file
+     on the box: `docker restart hamstrack-grafana-1` (see
+     [ops-prod-hardening §6.3](ops-prod-hardening.md#63-putting-the-job-on-the-box) step d).
+   - **`.env` is still never synced**, so every value in item 2 remains an operator step.
+2. **One-time server prerequisites** in `/opt/hamstrack/.env` — secrets do not come from a
+   public repository, so these stay an operator step and must be in place **before** the
+   deploy that first needs them:
    - `GF_SECURITY_ADMIN_PASSWORD` — **required** (Grafana fails fast without it,
-     aborting `up`).
-   - Optional: `OBS_ALERT_EMAIL_TO`, `PROMETHEUS_RETENTION_TIME`/`_SIZE`,
-     `LOKI_RETENTION_PERIOD`, and `DB_MONITOR_USER`/`DB_MONITOR_PASSWORD` (see the
-     pg_monitor note below).
+     aborting the whole `docker compose` command).
+   - `OBS_ALERT_EMAIL_TO` — **required**. An unset or empty value aborts the whole
+     `docker compose` invocation, and since HD-199 it aborts it **at deploy time, on a
+     staging copy**: the applier resolves every compose file it will run against this `.env` before
+     replacing anything, so a missing value is a red deploy naming the variable rather than
+     a stopped site. What it protects against is worth knowing, because it is silent —
+     without the guard, an empty value leaves Grafana with no alert rules at all (not
+     merely no email) and crash-looping, while `up -d` exits `0`. See
+     [Alerts](#alerts).
+   - Optional: `PROMETHEUS_RETENTION_TIME`/`_SIZE`, `LOKI_RETENTION_PERIOD`, and
+     `DB_MONITOR_USER`/`DB_MONITOR_PASSWORD` (see the pg_monitor note below).
 3. **Access Grafana over AWS SSM** (SSH port 22 is closed on the Cloud host):
    ```bash
    aws ssm start-session --region eu-north-1 --target <INSTANCE_ID> \
@@ -326,11 +566,21 @@ Set in your `.env`:
 
 ```
 GF_SECURITY_ADMIN_PASSWORD=<a strong password>   # required
-OBS_ALERT_EMAIL_TO=you@example.com               # optional (alert emails)
+OBS_ALERT_EMAIL_TO=<an inbox you read>           # required (see Alerts)
+GF_SMTP_ENABLED=true                              # optional — false = evaluate, don't deliver
+GF_SERVER_ROOT_URL=http://localhost:3000          # optional — external URL for links
 LOKI_RETENTION_PERIOD=168h                        # optional
 PROMETHEUS_RETENTION_TIME=15d                     # optional
 PROMETHEUS_RETENTION_SIZE=2GB                     # optional
 ```
+
+> **No SMTP at all, and you only want dashboards?** You still have to give
+> `OBS_ALERT_EMAIL_TO` an address — the contact point cannot exist without one, and
+> the compose file will not start without it. Use any address you own and add
+> **`GF_SMTP_ENABLED=false`**. The rules are then provisioned, evaluate on schedule
+> and show their state in Grafana → Alerting; Grafana simply sends nothing, so the
+> address is never used. That is the "evaluate without delivery" mode — it lives at
+> the SMTP switch, not at the contact point.
 
 **Access Grafana** — it binds `127.0.0.1:3000` on the host and is **not** public.
 Tunnel to it, e.g. over SSH:
@@ -389,21 +639,30 @@ matter only when you run the observability compose file.
 | `LOKI_RETENTION_PERIOD` | `168h` | stack | how long logs are kept |
 | `PROMETHEUS_RETENTION_TIME` | `15d` | stack | metrics retention (time) |
 | `PROMETHEUS_RETENTION_SIZE` | `2GB` | stack | metrics retention (size cap) |
-| `OBS_ALERT_EMAIL_TO` | — | stack | alert email recipient; empty = evaluate but don't email |
+| `OBS_ALERT_EMAIL_TO` | — | stack | **required** when the stack runs (fail-fast, aborting the whole `docker compose` command); alert email recipient — an empty value removes the alert *rules*, not just the email, and leaves Grafana crash-looping |
+| `GF_SMTP_ENABLED` | `true` | stack | Grafana alert delivery on/off. `false` = rules still evaluate, nothing is sent (the no-SMTP self-hosted mode) |
+| `GF_SERVER_ROOT_URL` | `http://localhost:3000` | stack | external URL Grafana builds links with; the default matches the port-forward the runbooks assume |
 | `DB_MONITOR_USER` / `DB_MONITOR_PASSWORD` | — | stack | postgres-exporter login; falls back to `DB_USERNAME`/`DB_PASSWORD` |
-| `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_FROM` | — | app + stack | app email **and** Grafana alert SMTP |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_FROM` | — | app + stack | app email **and** Grafana alert SMTP. `MAIL_FROM` is the alert *sender* and deliberately keeps its default (see the comment on `GF_SMTP_FROM_ADDRESS` in the compose file) |
 
 **Least-privilege DB access for the exporter (recommended for prod):** create a
 read-only monitoring role and point the exporter at it instead of the app user:
 
 ```sql
-CREATE ROLE hamstrack_exporter LOGIN PASSWORD 'a-strong-password';
+CREATE ROLE hamstrack_exporter LOGIN PASSWORD '<a strong password>';
 GRANT pg_monitor TO hamstrack_exporter;
 ```
 ```
 DB_MONITOR_USER=hamstrack_exporter
-DB_MONITOR_PASSWORD=a-strong-password
+DB_MONITOR_PASSWORD=<a strong password>
 ```
+
+The two lines are one credential written twice, so they must match — generate it
+(`openssl rand -base64 24`) rather than filling in something these pages could have
+handed you. A password printed in a public repository opens a `pg_monitor` login on the
+production database to anyone who reads it, which is `DB_PASSWORD=DB_PASSWORD` in another
+dialect. This is also why the placeholder is written `<a strong password>`: it reads as a
+blank to fill in, where `a-strong-password` reads as a value that has already been chosen.
 
 ---
 
@@ -443,10 +702,12 @@ DB_MONITOR_PASSWORD=a-strong-password
 | Grafana login fails | `GF_SECURITY_ADMIN_PASSWORD` changed in the UI ≠ env. Reset: `docker exec <grafana> grafana cli admin reset-admin-password <pw>`. |
 | Prometheus target `DOWN` | Check the target: `hamstrack-app` needs the app reachable on `:9090` inside the network (don't publish it, don't set `management.server.address`); `postgres` needs valid `DB_MONITOR_*`/`DB_*`. |
 | No logs in Loki | App not emitting JSON (needs `cloud`/`dc` profile in prod, or the dev file env vars) / Alloy can't read the docker socket. |
-| Alert emails not arriving | `OBS_ALERT_EMAIL_TO` unset, or `MAIL_*` (Grafana SMTP) misconfigured. |
-| `up` aborts immediately | A fail-fast var is missing — usually `GF_SECURITY_ADMIN_PASSWORD` (or `DB_USERNAME`/`DB_PASSWORD`). Set it in `.env`. |
+| Alert emails not arriving | `MAIL_*` (Grafana SMTP) misconfigured, `GF_SMTP_ENABLED=false` (delivery deliberately off), or the address in `OBS_ALERT_EMAIL_TO` is wrong. Before blaming SMTP, check that the rules and the routing exist: Grafana → Alerting → Alert rules, and `/api/v1/provisioning/policies` → `{"receiver":"email","provenance":"file"}` (see [Alerts](#alerts)). A **lost** root policy is worse than a broken one — Grafana's unmanaged built-in `email receiver` points at a live third-party domain. |
+| Grafana keeps restarting; `up -d` said nothing was wrong | `up -d` exits 0 even when a container crash-loops. An empty `OBS_ALERT_EMAIL_TO` reaching Grafana makes alerting provisioning fail and Grafana exit 1 on every restart. `docker compose … ps` shows it; `docker compose … logs grafana` has `Failed to provision alerting … could not find addresses in settings`. |
+| `up` aborts immediately | A fail-fast var is missing — `GF_SECURITY_ADMIN_PASSWORD`, `OBS_ALERT_EMAIL_TO` (or `DB_USERNAME`/`DB_PASSWORD`). The error names the variable; set it in `.env`. Note this aborts the **entire** command, including `down`/`stop`/`ps`/`logs` with both `-f` files — but nothing is created, changed or stopped, so a running stack is unaffected. |
 | Container panels empty (dev) | Docker-Desktop/WSL2 limitation (see the dev caveats). Works on a real Linux host. |
 | Disk filling from telemetry | Lower `LOKI_RETENTION_PERIOD` / `PROMETHEUS_RETENTION_TIME` / `_SIZE`. |
+| `node_textfile_scrape_error{}` is `1`, or a `hamstrack_backup_*` or `hamstrack_config_*` series stops updating | node-exporter found a **malformed** `.prom` file in the textfile directory and skipped it, so whatever wrote it is publishing nothing while looking installed. It has no alert rule of its own on purpose — the writer replaces the file atomically (temp file in the same directory, then `mv`), which makes a half-written scrape nearly impossible, and a rule per near-impossibility is how a rule set becomes background noise. Check the directory listed in `--collector.textfile.directory`; `promtool check metrics < the-file.prom` names the bad line. A file that is *absent* rather than malformed leaves the error at `0` and the series simply missing — which is why neither `BackupStale` nor `ConfigDrift` can see a deleted `.prom`. |
 
 Never run `docker compose -f docker-compose.prod.yml up --remove-orphans` with the
 observability stack running — always include `-f docker-compose.observability.yml`,
@@ -458,8 +719,10 @@ or it deletes the obs containers.
 
 - **Dashboard:** drop a Grafana dashboard JSON into
   `observability/grafana/dashboards/` (datasource UID `prometheus` or `loki`). The
-  file provider auto-loads it within 30s; on prod it ships via the config
-  auto-sync on the next deploy.
+  file provider auto-loads it within 30s; on prod it reaches the box with the next
+  deploy (`observability/` is a synced path), which also restarts Grafana — a provisioning
+  change needs that, because `up -d` cannot see inside a bind mount. Editing the file on the
+  box yourself does not restart anything: that is your `docker restart` to run.
 - **Business metric:** add a meter in `common.observability.ProductMetrics` and
   emit it from the relevant service **after the entity is saved**. Keep labels
   bounded (enums) — never label by user/workspace/issue id or email.

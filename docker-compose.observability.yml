@@ -59,13 +59,55 @@ services:
       # for the SSM port-forward (localhost:3000).
       GF_SERVER_ROOT_URL: ${GF_SERVER_ROOT_URL:-http://localhost:3000}
       # Alerting → email. The contact-point address is OBS_ALERT_EMAIL_TO; Grafana's
-      # SMTP reuses your MAIL_* settings. Leave OBS_ALERT_EMAIL_TO unset to keep
-      # rules evaluating without an email delivery.
-      OBS_ALERT_EMAIL_TO: ${OBS_ALERT_EMAIL_TO:-alerts@example.com}
+      # SMTP reuses your MAIL_* settings.
+      #
+      # REQUIRED, and deliberately fail-fast like GF_SECURITY_ADMIN_PASSWORD above: an
+      # empty value does NOT mean "evaluate the rules but skip email". Grafana refuses the
+      # whole alerting provisioning tree when the contact point has no address, so the
+      # rules die with it - and then Grafana refuses to START, exits 1 and crash-loops
+      # under restart: unless-stopped (measured on grafana:11.5.2: 7 restarts in 25s,
+      # /api/health never answered). The trap is that `docker compose up -d` STILL EXITS 0
+      # while that happens: the deploy reports success and only `docker compose ps` shows
+      # the dead container. A default address is worse still: it was one, and every rule
+      # delivered to a placeholder domain for months while the comment here claimed nothing
+      # was being sent. Refusing at interpolation is the cheapest place to learn this,
+      # because it happens before anything starts and the message below names the variable
+      # AND the file it belongs in; Grafana's own error names neither - it names an
+      # internal integration UID ("email" / hamstrack-email) in a log nobody is tailing.
+      #
+      # Know what the refusal costs, because every documented command layers this file
+      # ONTO the app's compose file in a single invocation: the abort is not "the optional
+      # stack stayed down", it is the whole command - `up -d`, and equally `down`, `stop`,
+      # `ps` and `logs`. Compose resolves interpolation before it creates, changes or stops
+      # anything, so nothing is modified and a running stack keeps running; it just cannot
+      # be driven until the variable is set. GF_SECURITY_ADMIN_PASSWORD has had exactly
+      # this property since day one.
+      #
+      # Evaluating without delivering IS possible - one layer up, at GF_SMTP_ENABLED
+      # below, not here. A self-hoster with no SMTP sets this to any address they own and
+      # GF_SMTP_ENABLED=false; the rules provision, evaluate and show state in Grafana.
+      # What has no "off" is the contact point's address itself.
+      OBS_ALERT_EMAIL_TO: ${OBS_ALERT_EMAIL_TO:?set OBS_ALERT_EMAIL_TO in .env to the address that should receive alerts - an empty value disables every alert rule, not just email delivery}
+      # The delivery switch. false = the rules still provision and evaluate, Grafana just
+      # sends nothing - the supported way to run dashboards and alerting on a host with no
+      # SMTP, and the reason OBS_ALERT_EMAIL_TO above can be required without cost.
       GF_SMTP_ENABLED: ${GF_SMTP_ENABLED:-true}
       GF_SMTP_HOST: ${MAIL_HOST:-localhost}:${MAIL_PORT:-587}
       GF_SMTP_USER: ${MAIL_USERNAME:-}
       GF_SMTP_PASSWORD: ${MAIL_PASSWORD:-}
+      # The SENDER is deliberately NOT fail-fast, though the argument above is about a
+      # default address in a delivery path. Two reasons it does not carry over reversed:
+      # (1) a wrong recipient is unobservable - Grafana records the notification as sent
+      # and it lands where nobody looks, which is silence that reads as health - whereas a
+      # wrong sender either gets rejected by the relay (a visible error on the contact
+      # point, in Grafana's log) or arrives on an alert you did receive with a visibly odd
+      # From; you learn either way. (2) MAIL_FROM is the APP's variable and this default
+      # mirrors the app's own (application.properties: app.mail-from). A ${...:?} here
+      # would make the observability file the strictest consumer of somebody else's
+      # setting, refusing a configuration the app itself accepts, and would put an SMTP
+      # variable back in the way of the no-SMTP self-hoster that GF_SMTP_ENABLED just
+      # unblocked. If noreply@example.com is wrong for alerts it is equally wrong for
+      # verification mail: fix it at MAIL_FROM, which is the one place that fixes both.
       GF_SMTP_FROM_ADDRESS: ${MAIL_FROM:-noreply@example.com}
       GF_SMTP_FROM_NAME: Hamstrack Alerts
     volumes:
@@ -100,9 +142,16 @@ services:
     image: prom/node-exporter:v1.9.0
     command:
       - --path.rootfs=/host
+      # Backup freshness (HD-187) is published as a .prom file written by the host
+      # systemd unit hamstrack-backup.service. The bind mount below uses the SAME path
+      # inside and outside the container ON PURPOSE: node-exporter prefixes some paths
+      # with --path.rootfs and this directory resolves to the same host directory under
+      # either behaviour, so the flag cannot be subtly wrong.
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
     pid: host
     volumes:
       - /:/host:ro,rslave
+      - /var/lib/node_exporter/textfile_collector:/var/lib/node_exporter/textfile_collector:ro
     mem_limit: 64m
     restart: unless-stopped
 

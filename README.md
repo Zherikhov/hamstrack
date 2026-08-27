@@ -31,7 +31,7 @@ One codebase ships in two deployment models:
 
 ## Self-hosting (DC)
 
-Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. Pin a released image line (e.g. `:0.4`, not `latest`) in a Compose file and run `docker compose up -d`; the schema migrates itself on startup (Flyway).
+Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. Pin a released image line (e.g. `APP_IMAGE_TAG=0.4`, not `latest`) in your `.env` and run `docker compose up -d`; the schema migrates itself on startup (Flyway).
 
 **→ Full walkthrough: [Self-hosting guide](docs/self-hosting.md)** — the Compose file, complete configuration reference, TLS / reverse proxy, email (SMTP), attachment storage, upgrades and backups.
 

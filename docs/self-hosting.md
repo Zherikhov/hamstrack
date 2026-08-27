@@ -17,6 +17,9 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
+  - [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design)
+    - [If your instance has the published admin account](#if-your-instance-has-the-published-admin-account)
+    - [What rotating `JWT_SECRET` does, and what it does not](#what-rotating-jwt_secret-does-and-what-it-does-not)
 - [Configuration](#configuration)
 - [TLS & reverse proxy](#tls--reverse-proxy)
 - [Email (SMTP)](#email-smtp)
@@ -25,11 +28,16 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Optional toggles](#optional-toggles)
 - [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
+  - [Applying repository configuration](#applying-repository-configuration)
   - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
   - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
   - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
+  - [By hand](#by-hand)
+  - [On a schedule](#on-a-schedule)
+  - [Verify a restore](#verify-a-restore)
+  - [Attachments on S3: turn versioning on](#attachments-on-s3-turn-versioning-on)
 - [Troubleshooting](#troubleshooting)
 - [REST API](#rest-api)
 
@@ -61,25 +69,38 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 
 ## Quick start
 
-Pin a released image line (`:0.4`), not `latest`:
+Pin a released image line (`:0.4`), not `latest`. Written as `${APP_IMAGE_TAG:-0.4}` so the
+`APP_IMAGE_TAG` row in [Configuration](#configuration) is true of this file too: set the
+variable in `.env` to move the pin, set nothing and you get `0.4`.
+
+**The secrets below are `${VAR:?…}` rather than sample values, and that is deliberate**:
+Compose refuses to create anything at all until you put them in a `.env` beside this file,
+naming the one it wants. A sample secret in a copy-pasteable snippet is a working secret —
+see [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design).
 
 ```yaml
 # docker-compose.yml
 services:
   app:
-    image: ghcr.io/zherikhov/hamstrack:0.4
+    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.4}
     environment:
       SPRING_PROFILES_ACTIVE: dc
       DB_URL: jdbc:postgresql://postgres:5432/hamstrack
       DB_USERNAME: hamstrack
-      DB_PASSWORD: change-me
-      JWT_SECRET: change-me-to-a-random-string-of-32-plus-bytes
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+      # Min 32 bytes. Generate with: openssl rand -base64 48
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - openssl rand -base64 48}
       APP_BASE_URL: https://tracker.example.com
+      # First administrator, created on startup — self-registration is closed on `dc`, so
+      # without these nobody can log in. Named here on purpose: a variable that is only in
+      # `.env` reaches this container if, and only if, a line like this one puts it there.
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL in .env beside this file}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD in .env - your own, not one from these docs}
       # SMTP — required for email verification (which doubles as login):
       MAIL_HOST: smtp.example.com
       MAIL_PORT: "587"
       MAIL_USERNAME: tracker@example.com
-      MAIL_PASSWORD: change-me
+      MAIL_PASSWORD: <your SMTP password>
       MAIL_SMTP_AUTH: "true"
       MAIL_STARTTLS: "true"
     ports:
@@ -105,7 +126,9 @@ services:
     environment:
       POSTGRES_DB: hamstrack
       POSTGRES_USER: hamstrack
-      POSTGRES_PASSWORD: change-me
+      # The same variable as the app's DB_PASSWORD above, on purpose: two literals can be
+      # edited apart, and then the app cannot log in to its own database.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -120,14 +143,50 @@ volumes:
   attachments_data:
 ```
 
+Beside it, a `.env` that Compose reads. **All four values ship empty, with the instruction
+in a comment above each** — because a filled-in sample in a copy-pasteable block *is* the
+defect this page is about. Whatever stands to the right of `=` here is a value every reader
+of this repository already has, and the `${VAR:?…}` guards above only fire while a value is
+**absent**. So this block cannot start the stack as it stands, on purpose: fill in the one
+the refusal names, run again, and the next names itself.
+
+```
+# .env — next to docker-compose.yml, never committed.
+
+# Any strong password you choose. The compose above uses this one line twice: it seeds the
+# Postgres container AND is what the app logs in with, so they cannot drift apart.
+DB_PASSWORD=
+# The output of:  openssl rand -base64 48
+# Minimum 32 bytes, and never a value copied out of any documentation — including this one.
+# The app refuses the placeholders this project has published, by name.
+JWT_SECRET=
+# Your own address. This becomes the first administrator.
+SEED_ADMIN_EMAIL=
+# A strong password you choose — not one from these docs, and not this variable's own name.
+# Once the administrator exists you can stop seeding: delete BOTH `SEED_ADMIN_*` lines here
+# AND the two `environment:` entries above that name them — together, because Compose
+# refuses to start while a `${VAR:?…}` it still mentions is unset. That also stops a
+# plaintext administrator password living in `.env` forever, and it leaves the account
+# itself exactly as it is.
+SEED_ADMIN_PASSWORD=
+```
+
+**`.env` is substituted into the compose file, not injected into the container.** Compose
+resolves `${…}` in the YAML above and passes on the result; it does **not** hand the
+container everything in `.env`. So a variable reaches the app only through a line in
+`environment:` (or an `env_file: .env`, which is what the bundled
+[`docker-compose.prod.yml`](../docker-compose.prod.yml) uses — there `.env` does both jobs).
+Adding a setting to `.env` and expecting the app to see it is the mistake this paragraph
+exists to prevent.
+
 ```bash
 docker compose up -d
 ```
 
 Browse your instance at its `APP_BASE_URL`, reached through the TLS proxy you put
 in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Public self-registration
-is **closed by default** on self-hosted installs, so set `SEED_ADMIN_EMAIL` +
-`SEED_ADMIN_PASSWORD` to create your first administrator on startup (see
+is **closed by default** on self-hosted installs, so the `SEED_ADMIN_EMAIL` +
+`SEED_ADMIN_PASSWORD` above create your first administrator on startup (see
 [First user](#first-user-the-administrator)). The schema is created and migrated automatically on
 startup (Flyway).
 
@@ -142,7 +201,7 @@ file next to it and load it with `env_file`:
 
 ```yaml
   app:
-    image: ghcr.io/zherikhov/hamstrack:0.4
+    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.4}
     env_file: .env
     # ...only non-secret / internal values remain inline
 ```
@@ -153,20 +212,180 @@ template — it targets the fuller reverse-proxy stack, so use the subset of
 variables that matches your setup (see [Configuration](#configuration)). Keep
 `.env` out of version control.
 
+### An unedited template is refused, by design
+
+Every required value in `.env.prod.example` ships **empty**, and copying it to `.env`
+unedited gets you a stack that will not start. That is the intended behaviour and not a
+broken release.
+
+The reason is that the guards protecting an installation all fail on **absence** —
+`${VAR:?…}` in the compose files, the length check on `JWT_SECRET` in the application —
+and a placeholder is the one thing that is not absent. A template that filled them in
+produced an install that started, worked, and was wrong: until 0.18.0 this file shipped
+`DB_PASSWORD=DB_PASSWORD`, which does not *fail*, it **agrees** — it seeds the Postgres
+container and the application's datasource from the same line — so the instance came up on
+a production database whose password is printed in a public repository.
+
+**What the refusal looks like.** Interpolation is resolved before Compose creates, changes
+or stops anything, so a stack already running keeps running; you simply cannot drive it:
+
+```
+$ cp .env.prod.example .env && docker compose -f docker-compose.prod.yml up -d
+error while interpolating services.app.image: required variable GITHUB_OWNER is missing a
+value: set GITHUB_OWNER in .env
+```
+
+It names **one** variable per run, and **which one is not fixed** — Compose stops at the
+first unset value it happens to reach, so the same unedited file can name `SITE_ADDRESS`
+on the next invocation. Treat it as a chain, not a checklist: set the one it names, run it
+again, and the next names itself. Some come from `docker-compose.prod.yml`, the rest from
+`docker-compose.observability.yml` when you pass that as well — the set is exactly what
+those files guard, which is why nothing here lists it: a list would go stale one entry
+before anyone noticed, and you never need to know it in advance.
+
+Further refusals come from the **application** rather than from Compose. They surface as a
+container that exits during startup, with the reason in `docker compose logs app`:
+
+- `JWT_SECRET` empty or under 32 bytes — an empty line in `.env` reaches the app as an
+  empty *value*, so the length check is what refuses it and the message counts what it got:
+  `jwt.secret (JWT_SECRET) must be at least 32 bytes for HMAC-SHA256; current value is 0
+  bytes. Generate one with: openssl rand -base64 48`. Deleting the line rather than emptying
+  it fails earlier and less helpfully, with a Spring placeholder error naming `${JWT_SECRET}`
+- `JWT_SECRET` set to a value **published in this repository's own documentation** — the old
+  `REPLACE_WITH_…` placeholder was 34 bytes, i.e. long enough to pass the length check, so it
+  is now refused by name. Anyone who can read the repository could otherwise mint an access
+  token for your instance, including one claiming to be an administrator. **If an upgrade
+  starts refusing your secret for this reason, replace it** (`openssl rand -base64 48`) —
+  and see [What rotating `JWT_SECRET` does, and what it does
+  not](#what-rotating-jwt_secret-does-and-what-it-does-not) below, because rotation is the
+  first step of that cleanup and not the whole of it
+- `SEED_ADMIN_PASSWORD` set to **the value this template used to ship** — it repeated its own
+  variable name, so every install created from the unedited template had an **active system
+  administrator whose email and password are both printed in a public repository**. Two
+  strings and you are an administrator: nothing is forged, nothing is guessed, and the
+  per-account login backoff never engages, because a correct password is not a failed
+  attempt. It is refused by name for the same reason `JWT_SECRET`'s placeholder is, and the
+  refusal names the account. **Emptying the variable does not fix it** — see the next section
+- A **system administrator whose stored password is that same published value** — checked
+  against the database rather than against `.env`, because the installations that are
+  actually exposed are the ones whose configuration no longer mentions it. Seeding is
+  idempotent and never re-passwords an existing user, so an operator who set a new
+  `SEED_ADMIN_PASSWORD` and restarted got a clean boot with the account unchanged, and an
+  operator who deleted the `SEED_ADMIN_*` lines years ago never saw the refusal above at
+  all. This one reaches both, it names the account, and it stops being true the moment the
+  account is actually repaired — see the next section. It costs one password verification
+  per administrator checked, and it is bounded: the 25 oldest administrators (the seeded
+  one is the *first*, by construction) plus whichever account `SEED_ADMIN_EMAIL` names
+  today. If you have more than 25, a startup WARN says so rather than letting a partial
+  check read as a complete one
+
+`SEED_ADMIN_PASSWORD` left **empty** has no fail-fast at all — a blank one logs a WARN and
+skips seeding — so the symptom is that **nobody can log in**. That is deliberately the louder
+half of the alternative, which used to be that anyone could.
+
+#### If your instance has the published admin account
+
+Seeding is idempotent, so an upgrade finds the existing user and *skips*: removing
+`SEED_ADMIN_PASSWORD`, or setting a new one, leaves the account exactly as it is, with the
+published password still working. The account has to be repaired directly.
+
+From 0.18.0 the application checks this **against the database**, not against your `.env` —
+so if your configuration says nothing about seeding and the app still refuses to start
+naming an address, that is what it found, and you did nothing wrong today. **The refusal
+fires while the context is still starting, so the port is never bound at all** — the admin
+console is not available to you, and equally not to anyone else for the seconds the check
+takes. (In 0.18.0's first cut it ran as a startup *runner*, which is after the port opens;
+that arrangement served working logins for ~7 s per boot, and on `restart: unless-stopped`
+it did so once per crash-loop cycle. It is a refresh-time check now, and a test asserts the
+web server never reports itself started.) Start from the database:
+
+```sql
+-- The account keeps everything it owns; it only loses its password. Use the address the
+-- refusal named. Run this against your Postgres container with the app stopped:
+--   docker compose -f docker-compose.prod.yml stop app
+--   docker compose -f docker-compose.prod.yml exec postgres \
+--     psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+UPDATE users SET password_hash = NULL WHERE email = 'the-address-the-refusal-named';
+```
+
+The application starts again immediately. Then:
+
+1. Use **Forgot password** on that address to set one of your own (requires working SMTP) —
+   or, from another system administrator, Admin console → **Users** → that user → reset it.
+2. If the account was never meant to exist (you only ever wanted your own), delete it there
+   instead. An install that was never logged into as the seeded admin owns nothing, so
+   nothing is orphaned.
+3. Then set a password of your own in `.env`, or stop seeding entirely. The refusal is
+   cleared by step 1 or 2 and by nothing else — editing `.env` alone no longer makes the
+   application quiet about it, which is the whole change.
+   **If you stop seeding, remove the pair from both places at once:** delete
+   `SEED_ADMIN_EMAIL` and `SEED_ADMIN_PASSWORD` from `.env` **and** the two matching
+   `environment:` lines in your compose file. They are `${VAR:?…}`, so deleting only the
+   `.env` entries makes Compose refuse to start; deleting only the compose lines leaves an
+   administrator's password sitting in plaintext in `.env` forever. Nothing about removing
+   them changes the account — it stays exactly as step 1 left it.
+4. If the instance was publicly reachable with that account active, treat it as a
+   compromise, not a misconfiguration: audit the users list for accounts you did not create,
+   revoke every refresh session and every unused setup link (below), and check recent
+   password resets.
+
+#### What rotating `JWT_SECRET` does, and what it does not
+
+Replacing the signing key **rejects every access token minted under the old key
+immediately** — and that is all it does. It does **not** sign anyone out: refresh tokens are
+opaque random values stored hashed and are independent of `jwt.secret`, and `/api/auth/refresh`
+is public, so each client takes a single `401` and silently re-issues. Sessions continue
+under the new key.
+
+That matters in both directions. Rotation is cheaper than it sounds — nobody is logged out,
+so there is no reason to defer it — and it is **not** a purge, so if you believe a published
+secret was actually used against your instance, it is the first step of the cleanup rather
+than the whole of it:
+
+```bash
+# revoke every refresh session (everyone signs in again on their next 401)
+docker compose -f docker-compose.prod.yml exec postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "DELETE FROM refresh_tokens;"'
+
+# and every unused password-setup/reset link. An admin session forged with the old key can
+# invite a user or reset one, and what that leaves behind is a `password_resets` row with a
+# life of its own - seven days for an admin-issued setup link, one hour for a self-service
+# reset. It is neither a session nor an access token, so neither the key rotation above nor
+# the DELETE above reaches it, and it is the cheapest way to keep a foothold.
+docker compose -f docker-compose.prod.yml exec postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "DELETE FROM password_resets WHERE used_at IS NULL;"'
+```
+
+Anyone mid-signup or mid-reset simply asks for a new link. …Then audit your system
+administrators (Admin console → Users) and the users list generally: a forged token is
+short-lived, but an account created with one outlives every key rotation.
+
 ## Configuration
 
 All configuration is via environment variables; [`.env.prod.example`](../.env.prod.example)
-is a template to crib from (it's owner-oriented — take the subset you need). Full reference:
+is a template to crib from (it's owner-oriented — take the subset you need).
+
+> **A `$` in any `.env` value is an interpolation, not a character.** Docker Compose expands
+> `$NAME`/`${NAME}` inside `.env`, and an undefined name expands to *nothing* — so a
+> generated password of the form `Vk5$mT8pQr2zXn6w` reaches the container as `Vk5`, three
+> characters, with no warning from anything. This is a property of every value in the file,
+> not of any one variable. **Double it (`$$`) to get one literal `$`, or generate a value
+> that has none** — `openssl rand -base64 48` never emits one. It hurts most in
+> `SEED_ADMIN_PASSWORD`, where it seeds an administrator with a password you never chose and
+> cannot read back.
+
+Full reference:
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
+| `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and the Quick-start snippet above (default `0.4`). **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
 | `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
 | `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction may wait for a row lock before giving up, in ms. **From 0.17.0 this applies to every transaction the app opens, not only to the few that lock deliberately** — so an ordinary edit queued behind a long-running change (removing a member with a lot of assigned work is the usual one) now fails after 3 s with a retryable `409` instead of waiting indefinitely. That is the point: it is issued together with `DB_STATEMENT_TIMEOUT_MS` below, because `statement_timeout` counts lock-wait time, and without it a contended write would be cancelled by *that* bound and answered `422` — a refusal that tells the caller not to retry when retrying is exactly what works. Raise it if legitimate edits collide often enough to be noticed. (This row used to name the handful of endpoints that locked on purpose; that list was wrong within one release and is now wrong by design.) Applied with `SET LOCAL` inside each transaction the app opens — **not** as a server-wide PostgreSQL `lock_timeout`, which is why Flyway migrations on the same pool are unaffected and still wait as long as they need: Flyway runs its own transactions and never goes through the app's transaction manager. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default. **From 0.17.0 the usable top of that range is lower than 60000**: `DB_STATEMENT_TIMEOUT_MS` must stay at least twice this value, so at its default of `10000` this one may not exceed **5000**. Raising it past that stops the boot naming both properties — raise the statement bound in the same edit |
 | `DB_STATEMENT_TIMEOUT_MS` | `10000` | How long **any one statement** of an application transaction may run before PostgreSQL cancels it, in ms. Applied with `SET LOCAL` to every transaction the app opens — there is no list of covered endpoints, because the cost of a statement is a property of how much data you have and not of which feature issued it. **Flyway is deliberately not covered**: migrations run their own transactions, and an index build or a table rewrite on a large install legitimately takes minutes. Exceeding it answers `422` with `errorType: STATEMENT_BUDGET_EXCEEDED` and **no** `Retry-After` — an identical retry costs identical time — and logs a WARN naming this variable. It does **not** bound how long a *connection* is held: a transaction of many statements, or one that spends its time assembling a response in Java, can outlive this number. **New in 0.17.0, and on a large install it can turn a slow report, search or member removal into an error** — see [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170) for a size-to-value table. Must be at least **2x `DB_LOCK_TIMEOUT_MS`** or the app refuses to start: `statement_timeout` counts lock-wait time too, so a smaller value would fire first and replace the retryable `409` above with a `422` that is not retryable. Valid range 1000-600000 — but the `2x` rule is the binding one in practice: **with the default `DB_LOCK_TIMEOUT_MS` of 3000 the smallest value that boots is 6000**, and `1000` is only reachable if you also lower the lock bound to 500 or less. `0` means "no bound" to PostgreSQL and is refused, and **blank** stops the boot exactly as `DB_LOCK_TIMEOUT_MS` does. **Raising this is not free:** every second you add is a second one request may hold one of your `DB_POOL_MAX_SIZE` connections, so the same pool serves fewer concurrent slow requests — past ~30 s, raise the pool with it. Identical in `dc` and `cloud` |
-| `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required) |
+| `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required). Generate it — `openssl rand -base64 48` — never reuse a value from any documentation: the app additionally refuses the placeholders this project has published, by name, because they are long enough to pass the length check and an instance signing tokens with one can be impersonated by anybody. See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
@@ -189,8 +408,13 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `AGILE_MAX_BULK_MOVE` | `100` | Max issue ids accepted in one "move to sprint" request; beyond it the request is rejected with 400 and the client chunks it. Valid range 1–500; an out-of-range value fails startup instead of being clamped |
 | `REPORTS_MAX_WINDOW_DAYS` | `365` | Widest window one report may span, in days, counting **both** endpoints. A wider request is refused with `400` naming this cap — it is **never silently narrowed**, because a chart of a window nobody asked for is exactly how a reporting feature earns "these numbers don't match what I expected". Valid range 1–3650; at daily buckets the window length *is* the number of points in the response, which is what the upper bound guards. Identical in `dc` and `cloud`: reporting depth is a product feature, not a plan feature. A value **under 90** is safe and is not a trap: the endpoint's own default window is `min(90, this)`, so the parameterless request the reports page makes on load is always inside the cap — what is never done is clamping a window a caller explicitly asked for. An out-of-range value fails startup instead of being clamped. **Leave the line out to get the default — `REPORTS_MAX_WINDOW_DAYS=` is an empty value, not an absent one, and it stops the boot rather than restoring 365**; that matters more here than elsewhere, because this number is quoted back to API callers inside a 400 |
 | `REPORTS_MAX_ROWS` | `20000` | Most issue **rows** one report may materialise before it declares itself truncated — every report response carries `meta.truncated` + `meta.cap` and the UI prints it, so a cap never bites silently. It does not bite on the flow report, which aggregates in PostgreSQL and returns one row per bucket; it is the budget for the row-level reports (cycle time, aging WIP). Valid range 1–50000; an out-of-range value fails startup instead of being clamped. The ceiling is a byte budget wearing a row count: a shipped row costs roughly 1.9 KB of transient heap at worst (the JDBC row, the DTO and the buffered JSON are all alive at once), so 50000 is ~95 MB for one request — the previous ceiling of 200000 was ~380 MB, i.e. a documented value that could OOM the instance in a single GET. The ceiling is sized against a **reference heap of 512 MB**, and since `HD-152` that is the heap a default install actually gets rather than a premise it hopes for: the image runs the JVM at `-XX:MaxRAMPercentage=50` and the bundled compose limits the app container to `1g` (`APP_MEMORY_LIMIT`), which is 512 MB of heap exactly. So 50000 rows is ~95 MB of a 512 MB heap for one request — legal, large, and the reason the *default* is 20000 (~38 MB worst case) rather than the ceiling. The relationship still has to be maintained by whoever moves either number: the heap follows the container limit, so `APP_MEMORY_LIMIT=2g` doubles it to 1 GB and makes this ceiling correspondingly conservative, while a smaller limit — or your own Compose file with **no** `mem_limit`, where the percentage is taken against host RAM — moves it the other way. And nothing bounds *concurrency*: N users asking together is N of these alive together, so ~95 MB is a per-request figure and never a total. **Leave the line out to get the default — `REPORTS_MAX_ROWS=` is an empty value, not an absent one, and it stops the boot rather than restoring 20000** |
-| `REPORTS_REQUESTS_PER_MINUTE` | `60` | How many report requests **one user** may make per minute across the whole reports surface (every `…/projects/{id}/reports/**` endpoint, not per report) **plus `POST …/workspaces/*/search/insights`**, the Insights panel — a report that lives on the search path and is bound to this limiter explicitly rather than by prefix. For the six project-scoped reports this is the only bound on the **work** a report does: `REPORTS_MAX_WINDOW_DAYS` bounds the response array, the "open at window start" balance is O(project history) whatever window you ask for, and `Cache-Control: private` means no shared cache absorbs a repeat — so without a budget one authenticated member in a loop can saturate `DB_POOL_MAX_SIZE` with entirely legal 200s. Past it the answer is `429` + `Retry-After`; a report is never narrowed or approximated to fit a budget. Counted in-memory per instance. Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `REPORTS_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 60**. Insights is the one exception to "only bound": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
-| `SEARCH_REQUESTS_PER_MINUTE` | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: `POST …/search`, `GET …/search/schema`, `GET …/search/suggest` and `POST …/search/insights` **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After`. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like — a query may carry up to 50 leaf predicates, a `text ~` leaf is two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Counted in-memory per instance, so N replicas allow up to N × the budget per user (it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer). Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter in the app). Identical in `dc` and `cloud`. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. Note that the Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
+| `REPORTS_REQUESTS_PER_MINUTE` | `60` | How many report requests **one user** may make per minute across the whole reports surface (every `…/projects/{id}/reports/**` endpoint, not per report) **plus `POST …/workspaces/*/search/insights`**, the Insights panel — a report that lives on the search path and is bound to this limiter explicitly rather than by prefix. For the six project-scoped reports this is the only bound on the **work** a report does: `REPORTS_MAX_WINDOW_DAYS` bounds the response array, the "open at window start" balance is O(project history) whatever window you ask for, and `Cache-Control: private` means no shared cache absorbs a repeat — so without a budget one authenticated member in a loop can saturate `DB_POOL_MAX_SIZE` with entirely legal 200s. Past it the answer is `429` + `Retry-After`; a report is never narrowed or approximated to fit a budget. Counted in-memory per instance. Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter that **has** an off switch — not the backlog-rebalance cooldown, a fixed internal safety valve with no variable and no switch). Identical in `dc` and `cloud`. **Leave the line out to get the default — `REPORTS_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 60**. Insights is the one exception to "only bound": it is additionally inside `SEARCH_REQUESTS_PER_MINUTE` below. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
+| `SEARCH_REQUESTS_PER_MINUTE` | `120` | How many **search-surface** requests **one user** may make per minute across the whole `…/workspaces/*/search/**` path: `POST …/search`, `GET …/search/schema`, `GET …/search/suggest` and `POST …/search/insights` **and the whole `…/workspaces/*/filters/**` path** — every saved-filter operation, `GET` and `DELETE` included, since the binding is by path and not by method. Saved filters are on this budget because **HQL validation is search-surface work wherever it is mounted**: validating a filter builds the same resolution context `…/search/schema` pays for (roughly eight statements, including a workspace-wide label projection and a full member scan), so creating one with a deliberately invalid body was an unthrottled eight-query refusal loop. It is charged here rather than to the reports pot because a saved filter *is* a saved search. Saved filters (`…/workspaces/*/filters/**`) are on this budget too: validating a filter's HQL builds the same resolution context `…/search/schema` pays for (a workspace-wide label projection and a full member scan), so an invalid-body loop there was the same unthrottled cost wearing different clothes — and a saved filter is a saved search, done by the same person. Past it the answer is `429` + `Retry-After`. **Its own budget rather than the reports one** because a person typing in a search box legitimately fires several requests a minute and must not be starved to protect charts; 120 is roughly ten times ordinary SPA use. Search is not the cheap surface it looks like — a query may carry up to 50 leaf predicates, a `text ~` leaf is two unanchored, unindexable `LIKE`s over a TEXT column, and the endpoint runs the whole predicate **twice** per request (count, then page) — so until this existed the expensive door was the unthrottled one. Counted in-memory per instance, so N replicas allow up to N × the budget per user (it damps an abuse vector rather than enforcing an invariant, so a split budget is a weaker guard and never a wrong answer). Valid range 1–10000; there is **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED` (which disables every limiter that **has** an off switch — not the backlog-rebalance cooldown, a fixed internal safety valve with no variable and no switch). Identical in `dc` and `cloud`. **Leave the line out to get the default — `SEARCH_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 120**. Note that the Insights panel is inside **both** this budget and `REPORTS_REQUESTS_PER_MINUTE` above. It sits on the reports limiter deliberately, because removing that binding would raise the panel’s allowance to the search budget as a side effect — so **the lower configured value binds**, and lowering *either* property lowers the panel. |
+| `INVITE_MAX_PER_SENDER_PER_HOUR` | `20` | Invitations **one account** may send per hour. A ceiling on the invitation **mailer**, not on the invitations table: without it any account that can log in can make this instance send mail to any address on the internet, from a workspace it created seconds ago, and that mail carries your domain's SPF/DKIM — so a stranger's spam complaints land on the reputation that also carries your verification and reset mail. Counted **in memory, per node**, so N replicas allow up to N × this. Past it: `429` + `Retry-After`, and the message tells the admin their already-sent invitations are unaffected. Valid range 1–1000; **no "unlimited" value** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED`. Identical in `dc` and `cloud`. **Leave the line out to get the default — `INVITE_MAX_PER_SENDER_PER_HOUR=` is an empty value, not an absent one, and it stops the boot rather than restoring 20** |
+| `INVITE_MAX_PER_SENDER_PER_DAY` | `100` | The same, per day — and **this is the quota control**. What is at risk is a *monthly* provider quota (Resend's free tier is 3000 messages a month), and any per-minute ceiling loose enough for a human is ~28 800/day, so the daily window is the one that means anything here; there is deliberately **no per-minute window at all**. The two windows are independent: spending the hourly allowance five times over ends the day, and the daily refusal does not lift when the hour rolls. **This is the one you will raise** — onboarding 300 people on install day hits it, and the fix is this variable for a day, not a code change. Valid range 1–10000; `0` fails startup. **Leave the line out to get the default — `INVITE_MAX_PER_SENDER_PER_DAY=` is an empty value, not an absent one, and it stops the boot rather than restoring 100** |
+| `INVITE_RECIPIENT_COOLDOWN_MINUTES` | `60` | Minutes one account must wait before inviting **the same address** again, **across every workspace on the instance**. The abuse this closes is one victim and a succession of workspaces the abuser creates for free, so any per-workspace bound looks at the wrong dimension. Its state lives in the `mail_send_events` table rather than in memory, and **not for durability** — derived from the invitations table it would be cleared by the victim's own *decline* button, i.e. the product would punish the exact action it asks the victim to take. Consequently this ceiling is **cluster-wide and exact**, unlike every other limiter here. It counts the destination **inbox**, not the spelling of the address: `+tag` suffixes are stripped, quoted local parts (`"victim"@…`) are unquoted, the domain is normalised to its ASCII/punycode form, and Gmail's dots and `googlemail.com` alias are folded — so `victim+1@`, `"victim"@` and `v.i.c.t.i.m@googlemail.com` cannot be used to get a fresh cooldown each time. Only published facts about delivery and standard normalisations are folded; addresses differing by a Unicode confusable stay **different** keys, because that would be a guess about identity and would spend a stranger's allowance. Valid range 1–1440, and it must stay **inside `INVITE_EVENT_RETENTION_DAYS`** — the rows this counts are swept on that window, so a cooldown longer than the retention would silently shorten to it; startup fails on that pair rather than letting it drift. `0` fails startup. **Leave the line out to get the default — `INVITE_RECIPIENT_COOLDOWN_MINUTES=` is an empty value, not an absent one, and it stops the boot rather than restoring 60** |
+| `INVITE_MAX_PER_RECIPIENT_PER_DAY` | `5` | **Invitations** one address may receive per day from senders other than you, *plus* how many of your own you may send to it — one number, spent on both. Counted as "my own sends one each, every **other** sender once, however much they sent": counting raw sends would let a single account spend a named person's whole daily allowance and thereby stop **every** workspace on the instance from inviting them for the rest of the day, which is a denial-of-onboarding aimed at a human rather than a defence of one. This way five throwaway accounts inviting one victim once each still trip it at the sixth, while any one account is capped at 5 sends to one inbox and occupies one of the five slots as far as anybody else is concerned — so the price of blocking somebody's invitations is a fresh mailbox per slot. Everything keyed on the sender multiplies by the number of accounts an attacker holds; this does not. Per **kind** of mail, so a future reset/verification cap is a separate bucket — a stranger's invitations must never suppress a victim's own password reset. The known cost, stated so it is not a surprise: at the sixth invitation an innocent admin learns the address has been invited from workspaces they cannot see — one bit, only to somebody who already administers members and already knows the address; the refusal's **wording** is what keeps it at one bit, and its `Retry-After` coarsens the *deadline* (not the remaining duration — rounding the duration re-anchors the quantum to "now", so a caller who probes twice watches it step down onto the true instant). Every probe therefore reports the same moment, and the emitted number decreases one per second rather than being a round multiple. That raises the price of another tenant's send instant; a caller who simply waits for the refusal to lift still learns it, as with any retryable window. If it proves noisy, **raise it rather than removing it — but in small steps**: because the count is "own sends one each, other senders once", N colluding accounts can deliver `N × (cap − N + 1)` messages into one inbox in a day, i.e. `floor((cap+1)² / 4)` at worst — **9/day at 5, but 30/day at 10**. The bound is quadratic, so doubling this number triples the harassment ceiling. Also cluster-wide and exact, and keyed on the inbox rather than the spelling. Valid range 1–1000; `0` fails startup. **Leave the line out to get the default — `INVITE_MAX_PER_RECIPIENT_PER_DAY=` is an empty value, not an absent one, and it stops the boot rather than restoring 5** |
+| `INVITE_EVENT_RETENTION_DAYS` | `7` (min `2`) | Days of `mail_send_events` history kept. It has to outlast **every** ceiling window, because a swept row is a row no ceiling can count — set it below one and that ceiling silently shortens to it, so **startup fails on the pair** instead. There are **two** windows: `INVITE_RECIPIENT_COOLDOWN_MINUTES` (configurable, up to a day) and the **fixed 24 h** window of `INVITE_MAX_PER_RECIPIENT_PER_DAY`, which no variable can lower. Startup compares the retention against the **wider** of them, which is why the range starts at **2** and not 1: one day would be *exactly* 24 h against a 24 h window, and a replica whose sweep clock runs a second ahead then deletes a row another replica's daily count still needs — the cap under-counts and permits a send it meant to refuse, with no error and no log line. The rest of the window is forensic: after the `MailDailyVolumeHigh` alert fires this table is the only place that can answer *who* and *which addresses* — no metric is allowed to carry an address or an id — and it is short enough not to be a durable record of who-emailed-whom. The sweep runs **whether or not `RATE_LIMIT_ENABLED` is true**, because events are recorded either way. Valid range 2–90; `0` and `1` fail startup. **Leave the line out to get the default — `INVITE_EVENT_RETENTION_DAYS=` is an empty value, not an absent one, and it stops the boot rather than restoring 7** |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
 | `DEFAULT_PROJECT_ACCESS_MODE` | `OPEN` | Project-access mode a **newly created** workspace starts in. `OPEN` — everyone in the workspace can work in every project through its default role; add someone to a project only to give them a *different* role. `STRICT` — only people added to a project can change anything in it (everyone can still **see** every project: it narrows writes, never reads). Applies at creation only and **never moves an existing workspace** — change one in Workspace settings → General. Demo seeding uses the same code path, so `STRICT` gives you a strict demo workspace too. Identical in `dc` and `cloud`: access modes are a product feature, not a plan feature. An unrecognised value **aborts startup** rather than falling back |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
@@ -200,7 +424,7 @@ is a template to crib from (it's owner-oriented — take the subset you need). F
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
-| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After` |
+| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search, report and invitation ceilings; see the rate-limiting section |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required |
 
 Every variable the **application** reads is wired to a Spring property via a
@@ -328,6 +552,12 @@ SEED_ADMIN_DISPLAY_NAME=Admin          # optional, defaults to "Admin"
 On boot the account is created (or an existing user with that email is promoted)
 to system admin; it's idempotent, so the variables are safe to leave set.
 
+**Choose the password yourself.** The app refuses to start on the one value this project
+ever published under that variable name (see [An unedited template is refused, by
+design](#an-unedited-template-is-refused-by-design)) — and because seeding is idempotent,
+that refusal is also the *only* notice an already-seeded install ever gets: changing the
+variable later does not change the account.
+
 > **Upgrading from before 0.16.0 on a Turkish, Azeri or Lithuanian locale?** The
 > "or promoted" half of that sentence depends on the address matching, and 0.16.0
 > changed how addresses are folded — so the seeder can miss an existing admin and
@@ -415,18 +645,18 @@ DC operators can disable Cloud-oriented behavior:
 | `PUBLIC_LANDING_ENABLED=false` | hides the public landing page (`/` → login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED=false` | removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN=false` | disables the demo workspace seeded on first login |
-| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for **every** in-memory limiter: brute-force protection on auth endpoints, the per-principal reports budget and the per-principal search budget |
+| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for every limiter that **has** an off switch: brute-force protection on auth endpoints, the per-principal reports budget, the per-principal search budget and the invitation ceilings (`INVITE_*`). Not the backlog-rebalance cooldown, which is a fixed internal safety valve with no variable and no switch. Note it no longer says *in-memory* — the two recipient-keyed invitation ceilings keep their state in PostgreSQL |
 
 Rate-limit tuning (all optional; defaults shown):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off **all three** limiter families at once: the auth budgets in this table, `REPORTS_REQUESTS_PER_MINUTE` and `SEARCH_REQUESTS_PER_MINUTE` |
+| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off every limiter that has an off switch, in one go: the auth budgets in this table, `REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE` and the invitation ceilings (`INVITE_MAX_PER_SENDER_PER_HOUR` / `_PER_DAY`, `INVITE_RECIPIENT_COOLDOWN_MINUTES`, `INVITE_MAX_PER_RECIPIENT_PER_DAY`). One limiter is deliberately outside it: the backlog-rebalance cooldown, a fixed internal safety valve that protects the database from a whole-table rewrite storm and has no environment variable of its own. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` | `15` | per-IP request budget/min across login, register, verify, resend, forgot & reset |
 | `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` | `5` | failed logins for one account before backoff starts |
 | `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` | `30` | first backoff delay (doubles on each further failure) |
 | `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS` | `900` | backoff cap (15 min); a success resets the counter |
-| `RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Key the per-IP budget on the rightmost `X-Forwarded-For` entry. Enable **only** behind a trusted proxy that strips client-supplied XFF; if the app port is directly reachable, leaving this `false` stops clients spoofing XFF to bypass the per-IP limit. The bundled `docker-compose.prod.yml` forces it `true` (all traffic goes through Caddy, which strips XFF). |
+| `RATE_LIMIT_TRUST_FORWARDED_FOR` | `false` | Key the per-IP budget on the rightmost `X-Forwarded-For` entry. Enable **only** behind a trusted proxy that strips client-supplied XFF; if the app port is directly reachable, leaving this `false` stops clients spoofing XFF to bypass the per-IP limit. The bundled `docker-compose.prod.yml` **defaults** it to `true` — `${RATE_LIMIT_TRUST_FORWARDED_FOR:-true}`, because in that stack every request arrives through Caddy, which strips client-supplied XFF — and reads your `.env` when you set it, so `RATE_LIMIT_TRUST_FORWARDED_FOR=false` there is what you want if you publish the app port directly. **Set it in `.env`, never by editing the compose file on the box:** that file is replaced wholesale by the next `git pull` or [config apply](#applying-repository-configuration), which silently restores the default you were overriding. |
 
 The limiter is **in-memory / single-node**. If you run multiple app replicas it
 applies per-node (there's no shared store yet), so keep it in mind when scaling out.
@@ -467,7 +697,29 @@ panel’s allowance to the search budget as a side effect — so **the lower
 configured value binds**, and lowering *either* property lowers the panel. If you
 tune one of the two, check what it does to the panel.
 
-A fifth mechanism is node-local, and it is the only one of the five that is a
+**The invitation ceilings break the pattern, and that is the point.** They are three
+controls with two different homes. The **per-sender volume budget**
+(`INVITE_MAX_PER_SENDER_PER_HOUR` / `INVITE_MAX_PER_SENDER_PER_DAY`) is node-local like
+everything above: N replicas allow up to N × the ceiling and a restart re-arms the
+window. It protects a *spend*, so that degradation is acceptable on the same terms as
+the budgets above.
+
+The **per-recipient cooldown** (`INVITE_RECIPIENT_COOLDOWN_MINUTES`) and the **global
+per-recipient daily cap** (`INVITE_MAX_PER_RECIPIENT_PER_DAY`) are **not** node-local —
+they are the first limiters in this product that are **cluster-wide and exact**, because
+their state is a table in PostgreSQL (`mail_send_events`) rather than a map in a process.
+That is not an optimisation; it is the requirement. These two protect a *person*, not a
+spend, and a cooldown that a deploy or a second replica resets is a cooldown an attacker
+waits out. The same reasoning rules out deriving it from the invitations table, which
+three existing code paths delete rows from — one of them the victim's own *decline*
+button. If you scale out, do not "fix" the asymmetry by moving these into memory.
+
+They also cost the one thing no other limiter here costs: one extra `SELECT` and one
+extra `INSERT` per invitation, plus a PostgreSQL advisory lock held for the rest of that
+transaction and keyed on a hash of the recipient address, so concurrent invitations aimed
+at *the same address* serialise. Invitation is a rare write; nothing else contends with it.
+
+A further mechanism is node-local, and it is the only one that is a
 **security** property: the **permission set of each role is cached in-process for
 10 seconds**. An edit through `PATCH /api/workspaces/{wsId}/roles/{roleId}`
 evicts that entry immediately *on the replica that served it*; every other
@@ -526,6 +778,15 @@ stack you layer on top of your compose file — [Grafana](https://grafana.com/) 
 docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
 ```
 
+**Opting in means naming a destination for the alerts.** The stack provisions
+alert rules, so it refuses to start unless `OBS_ALERT_EMAIL_TO` is set in your
+`.env` (details under *Alerts* below) — alongside `GF_SECURITY_ADMIN_PASSWORD`,
+which has always been required. Because the two files are layered in one command,
+that refusal aborts the **whole** command — `up -d`, and equally `down`, `stop`,
+`ps` and `logs` — not just the observability half. Compose checks this before it
+creates, changes or stops anything, so nothing is modified and a running stack
+keeps running; you just cannot drive it until the variable is back.
+
 You need these files next to your compose file (they're in the repo):
 `docker-compose.observability.yml` and the `observability/` directory
 (`loki/loki-config.yml`, `alloy/config.alloy`, `grafana/provisioning/…`,
@@ -548,6 +809,9 @@ Set in your `.env` (see [`.env.prod.example`](../.env.prod.example)):
 |---|---|---|
 | `GF_SECURITY_ADMIN_PASSWORD` | — | Grafana admin password (**required** when the stack runs) |
 | `GF_SECURITY_ADMIN_USER` | `admin` | Grafana admin username |
+| `OBS_ALERT_EMAIL_TO` | — | where alerts are emailed (**required** when the stack runs; empty also removes the rules) |
+| `GF_SMTP_ENABLED` | `true` | alert delivery on/off — `false` keeps the rules evaluating and sends nothing |
+| `GF_SERVER_ROOT_URL` | `http://localhost:3000` | external URL Grafana builds links with; change only if you front it with a proxy |
 | `LOKI_RETENTION_PERIOD` | `168h` | how long Loki keeps logs (7 days) |
 | `PROMETHEUS_RETENTION_TIME` / `PROMETHEUS_RETENTION_SIZE` | `15d` / `2GB` | metrics retention (whichever is hit first) |
 
@@ -558,15 +822,17 @@ exporter at it via `DB_MONITOR_USER`/`DB_MONITOR_PASSWORD`:
 
 ```sql
 -- run once against the hamstrack database
-CREATE ROLE hamstrack_exporter LOGIN PASSWORD 'a-strong-password';
+CREATE ROLE hamstrack_exporter LOGIN PASSWORD '<a strong password>';
 GRANT pg_monitor TO hamstrack_exporter;
 ```
 
-Then set in `.env`:
+Then set the **same** password in `.env` — the two lines are one credential written twice,
+and a value taken from a page anybody can read is not a credential at all
+(`openssl rand -base64 24`):
 
 ```
 DB_MONITOR_USER=hamstrack_exporter
-DB_MONITOR_PASSWORD=a-strong-password
+DB_MONITOR_PASSWORD=<a strong password>
 ```
 
 `pg_monitor` is a built-in PostgreSQL role granting read-only access to the
@@ -574,10 +840,25 @@ statistics views the exporter reads — no access to your table data. Leave
 `DB_MONITOR_*` unset to fall back to the app credentials.
 
 **Alerts** are provisioned too (AppDown, Postgres down, high 5xx rate, high
-latency, disk filling, email-send failures, JVM heap pressure). Set
-`OBS_ALERT_EMAIL_TO` to receive them by email — Grafana's SMTP reuses your
-`MAIL_*` settings. Leave it empty to keep the rules evaluating (visible in
-Grafana → Alerting) without email delivery.
+latency, disk filling, email-send failures, JVM heap pressure, stale backups…),
+and they need somewhere to go: **`OBS_ALERT_EMAIL_TO` is required** whenever you
+run the observability stack. `docker compose … up` refuses to start without it
+and names the variable. Grafana's SMTP reuses your `MAIL_*` settings.
+
+This is a hard requirement rather than an optional extra because an empty value
+does not merely skip the email — Grafana rejects the alerting provisioning
+wholesale, so the rules are not created at all, and Grafana then refuses to start
+and crash-loops. The part that makes it worth a fail-fast: **`docker compose up -d`
+exits 0 anyway**, so an automated deploy reports success and only `docker compose
+… ps` shows the dead container. Point it at an address, or a group alias, that
+someone actually reads; "disk 15% free" and "no backup for 26 hours" are weekend
+facts.
+
+**Running dashboards on a host with no SMTP?** You still have to name an address —
+the contact point cannot exist without one — but you can turn delivery off:
+set `OBS_ALERT_EMAIL_TO` to any address you own and add **`GF_SMTP_ENABLED=false`**
+to your `.env`. The rules provision, evaluate and show their state in
+Grafana → Alerting, and nothing is ever sent.
 
 **Nothing is exposed publicly.** Grafana binds `127.0.0.1:3000` on the host only;
 Loki and Alloy publish no port at all. Reach Grafana by tunnelling to it (SSH
@@ -604,11 +885,19 @@ Images are published to `ghcr.io/zherikhov/hamstrack` with these tags:
 | `0.4` | latest patch of the 0.4 line — **recommended for production** |
 | `latest` | the newest stable release, or the newest `main` build — whichever published last. Pre-releases (`0.14.0-rc1`) never move it, and neither does a tag on an older commit, so `latest` can legitimately sit *behind* the newest entry on the Releases page. A moving target that can jump mid-upgrade; **not for production** |
 
-Pin a version in your compose (e.g. `:0.4`), then upgrade with:
+**Pin a version in `.env`, not in the compose file** — `APP_IMAGE_TAG=0.4` — then upgrade
+by moving that value and re-running:
 
 ```bash
 docker compose pull && docker compose up -d
 ```
+
+The bundled `docker-compose.prod.yml` resolves the image through `${APP_IMAGE_TAG:-latest}`
+precisely so that pinning is a value you own rather than an edit to a file you may later
+replace: a pin written into the compose file is undone by the next `git pull` or
+re-download, silently and exactly when you were being careful. If you maintain your own
+compose file, `image: ghcr.io/zherikhov/hamstrack:0.4` in it is equivalent — the rule is
+that the pin lives in whichever of the two files *you* own.
 
 **Coming from before 0.17.0, read these first.** That release puts bounds on resources you
 never configured, and none of the resulting failures names the upgrade:
@@ -635,14 +924,80 @@ Database migrations run automatically on startup (Flyway) — no manual step. Se
 the [Releases](https://github.com/Zherikhov/hamstrack/releases) page for notes
 before upgrading across a minor version.
 
-**Pin an exact patch** (`:0.4.3`) for maximum reproducibility — you then upgrade
-deliberately by bumping the tag. `:0.4` instead auto-tracks the newest 0.4.x on
+**Pin an exact patch** (`APP_IMAGE_TAG=0.4.3`) for maximum reproducibility — you then
+upgrade deliberately by bumping the value. `0.4` instead auto-tracks the newest 0.4.x on
 each `docker compose pull`.
 
 **Downgrades are not supported.** Flyway migrations are forward-only, and a newer
 release may change the schema in ways an older image can't read (`ddl-auto` is
 `validate`, so it will refuse to start rather than corrupt data). Always take a
 backup before a minor upgrade so you can roll back by restoring it.
+
+### Applying repository configuration
+
+Upgrading the image is `APP_IMAGE_TAG` plus `docker compose pull && up -d`, above. The
+*other* half of an upgrade is the files: `docker-compose.prod.yml`, the observability
+provisioning under `observability/`, and the ops scripts under `ops/`. If you deploy from a
+clone, `git pull` already updates them and `docker compose up -d` applies them — that is
+enough, and nothing below is required.
+
+`ops/deploy/apply-config.sh` is the same step done deliberately. It is what this project's
+own production box runs, it contains no AWS and no GitHub, and it is offered here because
+it does four things a bare `up -d` does not: it validates the new compose files against
+your real `.env` **before** replacing anything, keeps the last five copies of what it
+replaced under `.config-backup/`, restarts the containers whose config is bind-mounted (a
+replaced file behind a bind mount is invisible to `up -d`), and records what it applied.
+
+```bash
+cd /path/to/your/clone && git pull
+sudo ops/deploy/apply-config.sh . /opt/hamstrack --dry-run   # read the diff first
+sudo ops/deploy/apply-config.sh . /opt/hamstrack
+```
+
+Two things to know before you run it:
+
+- **It targets the bundled stack unless you narrow it.** By default it validates and brings
+  up `docker-compose.prod.yml` and `docker-compose.observability.yml`. If you run a compose
+  file of your own, or no observability stack, say so — a file it names and your tree does
+  not carry is skipped with a log line, so this is also how you avoid being blocked by a
+  variable belonging to a stack you do not run:
+
+  ```bash
+  sudo COMPOSE_FILES=docker-compose.prod.yml ops/deploy/apply-config.sh . /opt/hamstrack
+  ```
+
+  It replaces exactly the paths listed in `ops/deploy/synced-paths.txt`, and directories
+  there are replaced **wholesale** — a file you dropped into `observability/` on the box is
+  gone afterwards. `.env` and `Caddyfile` are never touched, whatever that list says.
+
+- **A pinned `APP_IMAGE_TAG` is fine; a pin that MOVED needs a flag.** Pinning is what this
+  page tells you to do, so re-applying configuration onto a tag that has not changed since
+  the last apply just proceeds. When the tag *has* changed — you bumped the version, or you
+  pinned to roll production back — the script stops before replacing anything, because
+  configuration from a newer tree beside a deliberately older image is a decision rather
+  than a default. Which flag you confirm with says which of those two you are doing:
+
+  - `--adopt-pin` applies **and** re-stamps the tag. This is the upgrade case: you moved to
+    `0.5` on purpose, so the flag is needed once and every later apply on that pin needs
+    none.
+  - `--allow-pinned` applies **this run only** and leaves the stamp alone, so the next
+    unattended apply refuses again. This is the case where you have rolled back and still
+    need one configuration change out; adopting there would make the rolled-back tag your
+    intended version permanently.
+
+  The first apply on a box asks for a flag too, since there is no previous tag to compare
+  against — and it is the same question: adopt if that pin is the version you mean to run,
+  and if you happen to be rolled back at that moment, don't.
+
+- **The pin goes in `.env`, not in your shell.** Compose gives the process environment
+  precedence over `.env`, so `APP_IMAGE_TAG=0.5 sudo -E ops/deploy/apply-config.sh …` would
+  deploy `0.5` while every later `docker compose up -d` — which reads only `.env` — runs
+  whatever that file says. The applier refuses that rather than deploying a tag nothing else
+  can see.
+
+Two further notes if you use it on a schedule: it takes a lock, so a hand run and an
+automated one cannot overlap, and it is idempotent — re-running on an unchanged tree
+replaces identical files and leaves every container alone.
 
 ### Notifications are scoped to a workspace from 0.17.0
 
@@ -1129,8 +1484,10 @@ silent — every statement above reports success whether or not the address it l
 behind is the one the application will look up — so a clean run is not evidence that
 access is restored. A login is.
 
-If the pair was your seed administrator, **rotate `SEED_ADMIN_PASSWORD`** afterwards:
-that password was set on a live administrator account that nobody asked to create.
+If the pair was your seed administrator, **reset that account's password** afterwards:
+`SEED_ADMIN_PASSWORD` was set on a live administrator account that nobody asked to create.
+Change it on the *account* (sign in and change it, or Admin console → Users) — editing the
+variable alone changes nothing, because seeding skips a user that already exists.
 Both rows in that pair are usually administrators, which is why "keep the one with
 history" is the rule rather than "keep the active one".
 
@@ -1138,6 +1495,13 @@ history" is the rule rather than "keep the active one".
 
 Two things to back up: the **PostgreSQL database** and **attachments**. They
 reference each other, so capture them together and restore to a consistent point.
+
+> **Restore it once, or you do not have a backup.** A dump nobody has read back is
+> a belief about a file. The commands below take about fifteen minutes to run
+> against a throwaway container, and they are the only thing that turns the belief
+> into a fact — see [Verify a restore](#verify-a-restore).
+
+### By hand
 
 **Database** — logical dump:
 
@@ -1154,14 +1518,230 @@ docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' 
 (Or snapshot the `postgres_data` volume while the container is stopped.)
 
 **Attachments** — with `STORAGE_TYPE=local`, back up the `attachments_data`
-volume (files under `/app/data/attachments`); with `s3`, rely on your bucket's
-versioning/backup. Take a backup **before every minor upgrade**.
+volume (files under `/app/data/attachments`); with `s3`, see
+[Attachments on S3](#attachments-on-s3-turn-versioning-on) below. Take a backup
+**before every minor upgrade**.
+
+### On a schedule
+
+The repository ships a ready-made job under [`ops/backup/`](../ops/backup/) — the
+same one the hosted instance is set up with. It is a **host `systemd` timer**, not
+a compose service: it costs nothing until it fires, it takes the dump with the `pg_dump`
+that is already inside your postgres container (so the client can never be a
+different version from the server), and it needs no new image.
+
+Per run it produces two objects — a `pg_dump -Fc` custom-format dump and a
+`pg_dumpall --globals-only` file. The second one is a few kilobytes and it is what
+makes a restore come up *complete*: a fresh database recreates your `hamstrack`
+login role from compose, but not a read-only `pg_monitor` exporter role or any
+role you added by hand.
+
+Install (as root, from a checkout of the tag you are running):
+
+```bash
+install -m 0750 -o root -g root ops/backup/hamstrack-backup.sh /usr/local/bin/hamstrack-backup
+install -m 0644 ops/backup/hamstrack-backup.service /etc/systemd/system/
+install -m 0644 ops/backup/hamstrack-backup.timer   /etc/systemd/system/
+mkdir -p /etc/hamstrack /var/backups/hamstrack /var/lib/hamstrack-backup
+# node-exporter's textfile directory, where the job publishes its freshness metrics. Create
+# it even if you do not run the observability stack: the script always writes there, and the
+# unit lists it in ReadWritePaths=, which systemd refuses to set up for a path that does not
+# exist. If you DO run the stack, create it before node-exporter starts (or Docker creates
+# it for you at mount time).
+mkdir -p /var/lib/node_exporter/textfile_collector
+install -m 0640 -o root -g root ops/backup/backup.env.example /etc/hamstrack/backup.env
+$EDITOR /etc/hamstrack/backup.env      # every variable, its default and its meaning
+bash -n /etc/hamstrack/backup.env      # silence = bash can parse it; see below
+
+# Arm the alarm before the first run. A zero sentinel means "installed, never succeeded",
+# so if the first real run never happens, BackupStale fires instead of staying silent
+# forever — the rules use noDataState: OK, and an absent series is silence, not an alert.
+echo 0 > /var/lib/hamstrack-backup/last_success_dump
+echo 0 > /var/lib/hamstrack-backup/last_success_upload
+```
+
+**Uploading to S3 needs AWS CLI v2 ≥ 2.19** (`aws --version`). Backups are written with
+`If-None-Match: *` so a key can never be overwritten — an older CLI does not know the
+option and the run fails after the dump. Amazon Linux 2023 ships a new enough one; Debian
+and Ubuntu ship no `aws` at all, and their `awscli` package is v1, which will not do.
+`BACKUP_TARGET=local` needs none of this.
+
+Run it once by hand before you trust the schedule, then enable the timer — and start it
+**through systemd** rather than as a bare command, so that everything the unit adds is
+exercised too:
+
+```bash
+systemctl daemon-reload
+systemctl start hamstrack-backup.service
+journalctl -u hamstrack-backup -n 50 --no-pager
+systemctl enable --now hamstrack-backup.timer
+systemctl list-timers hamstrack-backup.timer
+```
+
+**Two things nothing else will tell you.** `/etc/hamstrack/backup.env` is hand-edited and
+read by two parsers that disagree. systemd's `EnvironmentFile=` accepts lines bash cannot —
+a stray paren, one quote too few — and the script sources the same file, so the `bash -n`
+above is what catches that kind before 03:15 does. A file bash cannot parse does not silently produce a backup with default settings: the
+run logs a `WARN`, keeps going far enough to publish a failure metric, and then refuses. The
+same refusal covers a line that parses and then *fails* — `BACKUP_S3_PREFIX=$(some-tool)`
+with no such tool on the box — which `bash -n` cannot see, because it parses without running;
+the script runs the file in a child shell before sourcing it, precisely so that case ends in a
+refusal rather than in a backup written to the default prefix and reported as a success.
+And if you ever need to abort a run: `systemctl stop hamstrack-backup.service` reaches the
+whole cgroup and finishes in seconds, while a bare hand run you send `TERM` keeps going
+until the dump it is streaming completes (bash runs a trap only once the current foreground
+command returns — 300 s, measured). To stop one of those now, signal its child as well:
+`pkill -TERM -P <pid>`.
+
+It fires daily at 03:15 UTC with up to 10 minutes of jitter, and `Persistent=true`
+means a box that was down at 03:15 runs the job at the next boot instead of
+skipping the day.
+
+**Where it uploads to.** The full variable reference is in
+[`ops/backup/backup.env.example`](../ops/backup/backup.env.example); three settings
+decide the destination.
+
+| You have | Set | Credentials |
+|---|---|---|
+| AWS S3, on EC2 | `BACKUP_TARGET=s3`, `BACKUP_S3_BUCKET=…`, `BACKUP_S3_REGION=…` | none to set — the instance role arrives over IMDS |
+| AWS S3, not on EC2 | the same | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `/etc/hamstrack/backup.env` (it is `0640 root:root` and both systemd and the script export it), or `~/.aws/credentials`. Also set `AWS_EC2_METADATA_DISABLED=true` |
+| MinIO, Backblaze B2, Wasabi, or any S3-compatible store | the same, plus `BACKUP_S3_ENDPOINT=https://…` (passed straight through as `--endpoint-url`; **`https` only** — an `http` endpoint would upload your whole database in the clear, so the run refuses it), a `BACKUP_S3_REGION` your provider expects (B2 `us-west-004`, MinIO usually `us-east-1` — a wrong one is an opaque signature error), and `BACKUP_S3_PATH_STYLE_ACCESS=true` if your store does not do virtual-host URLs (most MinIO deployments) | the same as the row above |
+| no object store at all | `BACKUP_TARGET=local` | none |
+
+`BACKUP_TARGET=local` dumps, verifies and rotates on a local disk
+(`BACKUP_LOCAL_DIR`, kept for `BACKUP_KEEP_LOCAL_DAYS` days) and skips the upload
+stage entirely. It is a real backup of a bad migration or a dropped table, and it
+is **not** a backup of the machine: a copy on the same disk dies with the disk.
+Point `BACKUP_LOCAL_DIR` at a separate volume, or copy it off yourself.
+
+**Do not make the script delete old backups on the remote side, and it does not.**
+Retention belongs to the storage — an S3 lifecycle rule, your provider's
+equivalent, or `BACKUP_KEEP_LOCAL_DAYS` for a local target. A script that can
+delete one backup can be made to delete all of them, which is the second move of
+anyone who gets into the box. For the same reason, if you use AWS, give the
+instance role `s3:PutObject` on the backup bucket and **not** `s3:GetObject` or
+`s3:DeleteObject`.
+
+**Every run writes `hamstrack_backup.prom`** into node-exporter's textfile directory —
+always, which is why the install block above creates that directory even when you do not
+run the observability stack. **If you also run the stack**, two provisioned alert rules —
+`BackupStale` (a backup stage has not succeeded in 26 hours, critical) and
+`BackupRunFailed` (the last run failed at a stage, warning) — start working with no extra
+configuration beyond that directory and one run of the job, which is what makes the series
+exist. Both rules are **per stage**, which is what
+makes them work in `local` mode too: there is no `upload` stage there, and the `dump` stage
+is then what shows you a timer that has stopped. They stay silent if you never install the
+timer, because the metric does not exist. See
+[Observability](observability.md) for the wiring and the metric names.
+
+### Verify a restore
+
+Do this when you install the mechanism, before every upgrade, and on a calendar
+reminder afterwards. It touches nothing you are running: it is a throwaway
+container on a spare port.
+
+```bash
+# 1. A scratch PostgreSQL of the SAME major version as yours, on a free port.
+#    Bound to 127.0.0.1 and given a throwaway password on purpose: in a moment this
+#    container holds a copy of your production database — every user's email and password
+#    hash, and the SCRAM verifiers from the globals file. A bare `-p 15433:5432` listens on
+#    every interface, so on a cafe or office network that is a reachable full-database read
+#    by anyone who knows the password, and a password printed in this file is known.
+docker run -d --name hamstrack-restore-check \
+  -e POSTGRES_USER=hamstrack -e POSTGRES_PASSWORD=drill-only-password -e POSTGRES_DB=hamstrack \
+  -p 127.0.0.1:15433:5432 postgres:16-alpine
+
+# 2. Restore. --exit-on-error is the point: a restore that reports errors and keeps
+#    going is how a half-restored database gets mistaken for a good one.
+docker cp hamstrack-<TS>.dump hamstrack-restore-check:/tmp/d.dump
+docker exec hamstrack-restore-check \
+  pg_restore -U hamstrack -d hamstrack --no-owner --no-privileges --exit-on-error -v /tmp/d.dump
+
+# 3. Roles. "role hamstrack already exists" is expected and benign — but look at what runs
+#    after that notice and does NOT fail: `pg_dumpall --globals-only` emits
+#    `ALTER ROLE hamstrack ... PASSWORD 'SCRAM-SHA-256$...'`, and that statement SUCCEEDS.
+#    Restoring the globals therefore replaces this container's throwaway password with your
+#    PRODUCTION one.
+docker cp hamstrack-<TS>.globals.sql hamstrack-restore-check:/tmp/g.sql
+docker exec hamstrack-restore-check psql -U hamstrack -d hamstrack -f /tmp/g.sql
+
+# 3b. So put the throwaway password back. DO NOT DELETE THIS LINE AS REDUNDANT — the reason
+#     it looks redundant is the reason it is needed. `docker exec` uses the local socket,
+#     which the image trusts, so step 4 passes either way; what breaks is step 5, the one
+#     that tells "restored" apart from "restored and VALID", because the application
+#     connects over TCP and authenticates. And the obvious way out of that failure is to
+#     type your production database password into a shell on a machine that is already
+#     holding a full copy of production.
+docker exec hamstrack-restore-check psql -U hamstrack -d postgres \
+  -c "ALTER ROLE hamstrack PASSWORD 'drill-only-password';"
+
+# 4. Content, and the migration history that has to survive with it.
+docker exec hamstrack-restore-check psql -U hamstrack -d hamstrack \
+  -c "select count(*) from users" \
+  -c "select count(*) from workspaces" \
+  -c "select count(*) from projects" \
+  -c "select count(*) from issues" \
+  -c "select count(*), max(version), bool_and(success) from flyway_schema_history"
+
+# 5. Point a Hamstrack container at it and let it start. This is the bar: the app
+#    runs Hibernate's ddl-auto=validate, so a schema that restores but does not
+#    match the image is a restore that has not actually worked.
+docker run --rm --network host \
+  -e DB_URL=jdbc:postgresql://localhost:15433/hamstrack \
+  -e DB_USERNAME=hamstrack -e DB_PASSWORD=drill-only-password \
+  -e JWT_SECRET=drill-only-secret-0123456789abcdef0123456789abcdef \
+  -e SERVER_PORT=8081 \
+  ghcr.io/<owner>/hamstrack:<the tag you are running>
+curl -s http://localhost:8081/api/meta
+
+# 6. Tear down. The dump holds every user's email and password hash — do not leave
+#    it on a laptop.
+docker rm -f hamstrack-restore-check
+```
+
+A run passes only if all five hold: `pg_restore` exited 0, the counts match what
+production had at dump time, `flyway_schema_history` is present with
+`bool_and(success)` true, the application **started**, and `/api/meta` answered.
+Anything else is a failed drill and something to fix now rather than during an
+incident. Restoring an old dump into a *newer* image is fine and expected — Flyway
+applies the missing migrations on boot; restoring into an **older** image is the
+schema-validation failure in [Troubleshooting](#troubleshooting).
+
+Write down how long step 1 to step 5 took. That number is your recovery time, and
+it is the only version of it that is not a guess.
+
+### Attachments on S3: turn versioning on
+
+With `STORAGE_TYPE=s3` the application holds `s3:DeleteObject` on your attachments
+bucket, because deleting an attachment is something the product legitimately does.
+A bug or a compromised instance can therefore erase attachments irreversibly, and
+a database dump does not help — it holds the attachment *rows*, whose storage keys
+would point at nothing.
+
+Enable versioning and expire the noncurrent versions, so a delete becomes a
+tombstone you can undo for a month, and you pay only for what was deleted or
+overwritten:
+
+```bash
+aws s3api put-bucket-versioning --bucket "$ATTACH_BUCKET" \
+  --versioning-configuration Status=Enabled
+aws s3api put-bucket-lifecycle-configuration --bucket "$ATTACH_BUCKET" \
+  --lifecycle-configuration '{"Rules":[
+    {"ID":"expire-noncurrent-attachment-versions","Status":"Enabled","Filter":{"Prefix":""},
+     "NoncurrentVersionExpiration":{"NoncurrentDays":30},
+     "AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]}'
+```
+
+Most S3-compatible stores expose the same two settings under different names.
 
 ## Troubleshooting
 
 | Symptom | Likely cause & fix |
 |---|---|
-| App exits at startup with a JWT/key error | `JWT_SECRET` is shorter than 32 bytes — HMAC-SHA256 requires ≥32. Use a longer random string. |
+| App exits at startup with a JWT/key error | `JWT_SECRET` is missing or shorter than 32 bytes — HMAC-SHA256 requires ≥32. Generate one: `openssl rand -base64 48`. |
+| App exits at startup saying `JWT_SECRET` is "a value published in Hamstrack's own documentation" | The secret is one of the placeholders this repository has shipped (they pass the length check, which is why they are refused by name). It is not newly unsafe — the upgrade only started saying so. Replace it with `openssl rand -base64 48`. That rejects every access token signed with the old key immediately but does **not** sign anyone out — clients re-issue from their refresh cookie — so if you think the published value was used against you, [there are two more steps](#what-rotating-jwt_secret-does-and-what-it-does-not). See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design). |
+| App exits at startup saying `SEED_ADMIN_PASSWORD` is "the value this project published" | Your `.env` carries the password the template used to ship, so the administrator account it seeded — named in the message — is signable-into by anyone who can read this repository. **Clearing the variable does not fix it**: seeding is idempotent, the account already exists and keeps that password. Reset or delete that user first, then set your own value or none — [step by step](#if-your-instance-has-the-published-admin-account). |
+| App exits at startup saying a **system administrator HAS** the published password | Read from the database, not from `.env` — so it fires even when your configuration mentions no seeding at all, and it keeps firing after you change `SEED_ADMIN_PASSWORD`, because seeding never re-passwords an existing user. The account named in the message is signable-into by anyone who can read this repository. The app is down, so start from SQL: `UPDATE users SET password_hash = NULL WHERE email = '<the address named>';` — then boot and set a new password via **Forgot password** or another administrator. [Step by step](#if-your-instance-has-the-published-admin-account). |
 | Registration never completes / no email arrives | SMTP misconfigured. Check `MAIL_*` and your provider; test locally with MailHog (`http://localhost:8025`). |
 | Logged out immediately / can't stay signed in | `APP_BASE_URL` scheme doesn't match how users reach the app. The `refresh_token` cookie is `Secure` only with an `https` base — serve HTTPS end-to-end (https base) or use an `http` base for plain HTTP. |
 | `502` right after `up` | The app is still starting (Spring Boot needs ~30–40 s; it has a healthcheck). Wait, or check `docker compose logs app`. |
@@ -1172,6 +1752,7 @@ versioning/backup. Take a backup **before every minor upgrade**.
 | An edit or save that used to work now returns `409` "Someone else is changing this right now" | **New in 0.17.0, and unlike the `422` above it announces nothing** — the status, the message and the `Retry-After` header all existed before, so there is no new string to search for. `DB_LOCK_TIMEOUT_MS` (3 s) now bounds *every* transaction rather than only the few that lock deliberately, so a write queued behind a long-running change gives up instead of waiting indefinitely. **It is retryable and the header says when**, so a client should retry rather than surface it. If legitimate edits collide often enough to be noticed, raise `DB_LOCK_TIMEOUT_MS` — but it may not exceed half `DB_STATEMENT_TIMEOUT_MS` (default `10000`, so `5000` is today's maximum) and the app refuses to start above that, so raise both together. The usual cause is removing a member with a lot of assigned work. |
 | Everyone shares one IP / false `429`s | Behind a proxy/CDN that doesn't pass `X-Forwarded-For` (or passes an untrusted one). Ensure the proxy sets it; the app trusts the right-most entry. |
 | Startup fails naming `app.persistence.statement-timeout-ms` and `app.locking.lock-timeout-ms` | The statement bound is under **2x** the lock bound. PostgreSQL counts lock-wait time inside the statement, so the smaller bound always fires first, and a statement bound at or under the lock bound would make the lock bound dead configuration — every retryable `409` in the product would quietly become a `422` no retry can fix. The message prints both values, the computed minimum and both knobs. **It can fire from the side you did not touch:** raising `DB_LOCK_TIMEOUT_MS` above 5000 while `DB_STATEMENT_TIMEOUT_MS` is at its default 10000 stops the boot. |
+| Startup fails naming `app.invites.event-retention-days` and `app.invites.recipient-cooldown-minutes` | Those are the **property** names behind `INVITE_EVENT_RETENTION_DAYS` and `INVITE_RECIPIENT_COOLDOWN_MINUTES` — the message quotes properties, your `.env` sets variables, so a search for the variable name finds nothing. The retention must be strictly **longer than the widest ceiling window**, which is the larger of the cooldown and the **fixed 24 h** window of `INVITE_MAX_PER_RECIPIENT_PER_DAY`. Raise `INVITE_EVENT_RETENTION_DAYS` (minimum **2**) or lower `INVITE_RECIPIENT_COOLDOWN_MINUTES`. Refusing the boot is deliberate: a retention that undercuts a ceiling silently shortens it to itself, with no error and no log line — the throttle simply stops refusing sends it meant to refuse. |
 | Startup fails with a schema validation error after changing the image | You moved to an **older** image than the DB was migrated to. Use the newer image, or restore a pre-upgrade backup. |
 
 ## REST API

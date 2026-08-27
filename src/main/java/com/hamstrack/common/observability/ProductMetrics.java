@@ -62,7 +62,27 @@ public class ProductMetrics {
         // from REPORT_REQUESTS because the two are sized for different behaviour — a sustained
         // rate here is a client that lost its debounce, or somebody replaying a 50-predicate
         // query, and telling those apart from report load matters for the alert.
-        SEARCH_REQUESTS("search_requests");
+        SEARCH_REQUESTS("search_requests"),
+        // ---- The invitation ceilings (HD-190). Three constants rather than one, because they
+        // mean three different things to whoever reads the alert, and the kind label is the only
+        // thing distinguishing them: no meter here may carry an address or an id.
+        //
+        // NOTE FOR WHOEVER BUILDS AN ALERT ON THESE: a rule built on refusals can only see an
+        // attacker who HITS a ceiling. One who reads the numbers and stays beneath them trips
+        // nothing here and is invisible. The valuable rules watch mail VOLUME and the invitation
+        // ACCEPTANCE RATIO (real invitations get accepted; spam does not) — see
+        // observability/grafana/provisioning/alerting/rules.yml.
+        //
+        // Somebody is sending a lot — bulk / quota shape (InviteSenderVolumeBudget).
+        INVITE_SENDER_VOLUME("invite_sender_volume"),
+        // Somebody is pressing invite at ONE address — harassment shape (RecipientMailThrottle).
+        INVITE_RECIPIENT_COOLDOWN("invite_recipient_cooldown"),
+        // One address has taken all it may take in a day — either from several accounts
+        // (coordinated harassment: the cap counts each other sender once, so reaching it that way
+        // costs a mailbox per slot, which makes this the sharpest of the three) or from one
+        // account spending its own share across the day. The kind alone does not say which; the
+        // domain-only INFO line and mail_send_events do.
+        INVITE_RECIPIENT_DAILY("invite_recipient_daily");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }

@@ -904,6 +904,28 @@ export async function apiListWorkspaceMembers(wsId: string): Promise<WorkspaceMe
  * — and exactly one of the two must be present (neither and both are alike a
  * 422). Refusals: 403 for the grant ceiling (the detail names the offending
  * permission) and for OWNER, which is never invitable, not even by an owner.
+ *
+ * **429 — a throttle, not a fault (HD-190).** The invite mailer carries ceilings
+ * of its own (per-sender volume, a per-recipient cooldown, a global per-recipient
+ * daily cap — and whatever a later release adds), and **which one refused is
+ * legible only from the `detail` sentence**: there is no `errorType`, no distinct
+ * status, nothing machine-readable that tells them apart. So branch on the status
+ * and on `ApiResponseError.retryAfter` (seconds, off the `Retry-After` header),
+ * and **never on the wording** — it is prose the server rewrites freely, and a
+ * client that pattern-matches it breaks on a copy edit. Render `detail` verbatim:
+ * every one of these refusals already names the wait in words, so recomputing a
+ * duration from `retryAfter` can only contradict the sentence beside it.
+ *
+ * A refused invite **sends no mail and writes no invitation row**, so re-sending
+ * the identical request after `Retry-After` is safe and is the entire remedy —
+ * nothing has to be undone first, and the address the caller typed is the one
+ * thing the refusal is asking them to send again, so a form must keep it.
+ *
+ * Unlike the search and report budgets, this one is spent **after** the workspace
+ * is resolved (404 for a non-member, then 403/422/409, then the ceilings), so a
+ * 429 from THIS endpoint does imply the caller is a member of the workspace it
+ * names. Do not carry that reading to a budget spent before resolution — it is a
+ * property of where the check sits, not of the status code.
  */
 export async function apiInviteWorkspaceMember(
   wsId: string,
@@ -1677,9 +1699,10 @@ export const savedFilters = {
 //   • 429 — past this caller's report budget (`app.reports.requests-per-minute`).
 //     A retryable throttle, not a fault: nothing was computed and a retry after
 //     `Retry-After` succeeds (`ApiResponseError.retryAfter` carries it). It is
-//     spent per principal BEFORE the project is resolved, which makes it the one
-//     place on this API where 429 precedes 404 — so a 429 says nothing about
-//     whether the caller can see the project, and no UI may imply otherwise.
+//     spent per principal BEFORE the project is resolved — a budget of that shape
+//     answers 429 ahead of 404, so a 429 says nothing about whether the caller
+//     can see the project, and no UI may imply otherwise. Budgets spent AFTER
+//     resolution exist too and read the other way (see `apiInviteWorkspaceMember`).
 //
 // Unknown/foreign filter ids are NOT an error: the queries are project-scoped
 // first, so an id that does not exist here simply matches nothing and yields an

@@ -1,0 +1,52 @@
+# Which paths of this repository are placed into /opt/hamstrack by a deploy
+# (HD-199 / HD-122). Spec: docs/design/config-delivery-proposal.md §6.
+#
+# One path per line, relative to the repository root and to the target directory.
+# A trailing slash means a DIRECTORY, and a directory is replaced WHOLESALE:
+# staged copy, then swap. A file an operator drops into a synced directory is gone
+# at the next deploy — intended, and the reason this list is short.
+#
+# `#` comments and blank lines are ignored. Globs are refused: the manifest lists
+# literal paths, so what a deploy touches can be read off this file. A leading `./` is
+# normalised away — `./observability/` and `observability/` are the same entry, and are
+# treated identically by the applier's bind-mount restart and by the drift check, which
+# was not true when the two spellings survived as two strings. The last line counts even
+# without a trailing newline: an entry silently dropped by the parser is a path that never
+# reaches the box while the deploy logs success, which is the failure this whole ticket is.
+#
+# This is a file rather than a JSON array inside the workflow's --parameters string
+# precisely so that adding a path is a one-line change with a diff and a reviewer.
+
+docker-compose.prod.yml
+docker-compose.observability.yml
+observability/
+ops/
+
+# ── NEVER SYNCED, and apply-config.sh refuses them even if they appear above ──
+#
+# The refusal is per FILE PLACED, not per line below: a `.env` or a `Caddyfile` committed
+# INSIDE a synced directory is refused too, because a directory entry places files this
+# list never names, and the guarantee here is stated without conditions.
+#
+# .env          — secrets (JWT_SECRET, the database password, SMTP credentials, the
+#                 Grafana password) AND the machine's own decisions: APP_IMAGE_TAG,
+#                 APP_MEMORY_LIMIT, SITE_ADDRESS. The single rollback story depends on
+#                 this file surviving every deploy by construction (§5), so the refusal
+#                 is in the script and not merely in this comment.
+# .env*         — same, for every variant an editor or a hand-copy leaves behind.
+# Caddyfile     — the production copy carries a hand-added Cloudflare `trusted_proxies`
+#                 block (docs/ops-prod-hardening.md §2) that this repository's four-line
+#                 copy does not. Syncing it would replace a hardened config with a bare
+#                 one and downgrade production silently. It becomes syncable only when
+#                 the two stop being different files — §6.3 states the precondition.
+# anything outside the target directory — an absolute path or a `..` component is a
+#                 hard error, whatever this file says.
+#
+# ── SYNCED, and still NOT installed ──
+#
+# ops/ is placed at /opt/hamstrack/ops/. Nothing here installs it: no `install` into
+# /usr/local/bin, no systemd unit, no daemon-reload. A changed script in this repository
+# therefore does not change what runs on a schedule until an operator runs the install
+# step (docs/ops-prod-hardening.md §6.3). That gap is measured — it is the
+# `installed-ops` scope of hamstrack_config_drift — because a gap nothing measures is
+# how HD-199 happened.

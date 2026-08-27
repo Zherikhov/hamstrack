@@ -1,5 +1,15 @@
-# Root notification policy — routes all alerts to the email contact point.
+# Root notification policy - routes all alerts to the email contact point.
 # NOTE: provisioning a policy REPLACES the default notification tree.
+#
+# This file is a fence, not a convenience. Grafana ships an UNMANAGED built-in contact
+# point named "email receiver" addressed to <example@email.com>, and email.com is a live
+# third-party domain with real MX records - not a reserved example domain. So if this
+# policy is ever lost (deleted in the UI once its provenance stops being "file", or
+# skipped because the alerting tree failed to provision), alerts do not bounce and do
+# not queue anywhere visible: they are DELIVERED TO A STRANGER. Nothing else prevents
+# that. Verify with:
+#   curl -su admin:$GF_SECURITY_ADMIN_PASSWORD localhost:3000/api/v1/provisioning/policies \
+#     | jq '{receiver, provenance}'   # expect {"receiver":"email","provenance":"file"}
 apiVersion: 1
 
 policies:

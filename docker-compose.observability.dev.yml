@@ -89,10 +89,25 @@ services:
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
       - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)
+      # The textfile collector, mirrored from the prod file so the two backup alert rules
+      # (BackupStale / BackupRunFailed) can be EXERCISED before they ship. Grafana here
+      # provisions the same observability/grafana/provisioning directory as prod, so those
+      # rules already exist in dev; without this flag they sit at noData→OK and cannot be
+      # made to fire even deliberately — the only two rules whose input comes from outside
+      # the application would be the only two nobody can test.
+      # The directory deliberately DIFFERS from prod's /var/lib/node_exporter/... : it is
+      # repo-relative, because a dev box (Docker Desktop/WSL2) has no such host path and
+      # nothing here writes real backups. To try a rule, hand-write a .prom into
+      # ./observability/textfile/ — e.g.
+      #   hamstrack_backup_last_success_timestamp_seconds{stage="upload"} 1
+      #   hamstrack_backup_last_status{stage="dump"} 0
+      # — wait for a scrape, and watch Grafana → Alerting. *.prom there is gitignored.
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
     pid: host
     volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
+      - ./observability/textfile:/var/lib/node_exporter/textfile_collector:ro
     restart: unless-stopped
 
   cadvisor:

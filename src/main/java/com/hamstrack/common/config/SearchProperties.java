@@ -65,7 +65,8 @@ public record SearchProperties(
          * a person typing IS the normal traffic here, while nobody types a report.
          *
          * There is no "unlimited": 0 is out of range and fails startup. The off switch is
-         * app.rate-limit.enabled, the master switch for every in-memory limiter in the app.
+         * app.rate-limit.enabled — the master switch shared by every limiter that has
+         * one (the backlog-rebalance cooldown does not, and does not answer to it).
          */
         @DefaultValue("120") @Min(1) @Max(10_000) int requestsPerMinute
 ) {}
