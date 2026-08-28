@@ -774,7 +774,7 @@ Values reflect the [operator's configuration](#operator-settings-that-affect-the
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/register` | — | Create an account; sends a verification email. `201`. **`403` when public signup is disabled** (the DC default — accounts are created by an admin instead, see [System administration](#system-administration)). `422` when `password` is [a value this project published](#a-password-this-project-published--a-422) |
+| `POST` | `/auth/register` | — | Create an account; sends a verification email. `201`. **`403` when public signup is disabled** (the DC default — accounts are created by an admin instead, see [System administration](#system-administration)). `409` when the address is already registered (addresses are matched case-insensitively — see below). `422` when `password` is [a value this project published](#a-password-this-project-published--a-422) |
 | `POST` | `/auth/verify-email` | — | Exchange the emailed one-time token for a session |
 | `POST` | `/auth/resend-verification` | — | Re-send the verification email (always `200`) |
 | `POST` | `/auth/login` | — | Email + password → access token + refresh cookie |
@@ -784,7 +784,7 @@ Values reflect the [operator's configuration](#operator-settings-that-affect-the
 | `POST` | `/auth/reset-password` | — | Set a password with a one-time token; revokes all sessions. Backs both the forgot-password email and admin-generated account setup links. `422` when `newPassword` is [a value this project published](#a-password-this-project-published--a-422) — the token stays usable |
 | `GET` | `/auth/me` | ✔ | The current user (`id`, `email`, `displayName`, `avatarUrl`, `systemRole`, `needsOnboarding`) |
 
-Every body in this table that carries an email address caps it at 255 characters — see [validation failures](#validation-failures-400).
+Every body in this table that carries an email address caps it at 255 characters — see [validation failures](#validation-failures-400). Those addresses are **lower-cased before anything is looked up**, and account uniqueness is enforced on that lower-cased form: `Ivan@example.com` and `ivan@example.com` cannot both be accounts, so registering the second is a `409`. Casing in the address you submit therefore never changes which account you reach.
 
 > `needsOnboarding` is **always `false`** on DC — the first-login create-or-join-a-team flow is a Cloud feature (`app.onboarding.enabled`, off here). The invite-acceptance endpoints below still work if a workspace admin sends invites. `GET /invites` lists pending invites addressed to your email; `POST /invites/{id}/accept` · `/decline` accept/remove them by id (accept stays email-bound → `404` otherwise). Accepting also re-checks the role the invite carries before writing it onto the new membership: an invite whose stored role is no longer a usable role of that workspace — a corrupt or hand-edited row, which a normal client never meets — is refused with that same `404` rather than creating a membership nobody could afterwards administer.
 
@@ -1500,7 +1500,7 @@ Endpoints under `/admin/**` require the **system `ADMIN` role** (instance-wide, 
 | `PATCH/DELETE` | `/admin/issue-type-sets/{id}` | Full replacement / delete (`409` while in use; the system default "All types" set is not deletable) |
 | `GET` | `/admin/projects` | Assignment matrix: every project × its bindings |
 | `PATCH` | `/admin/projects/{id}/bindings` | `{"workflowId", "prioritySetId", "fieldSetId", "issueTypeSetId"}` (null = system default); `409` when issues sit in statuses the new workflow lacks |
-| `GET/POST` | `/admin/users` | List accounts (paginated `?page=&size=`, oldest first) / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person. On DC this is the primary way to onboard users |
+| `GET/POST` | `/admin/users` | List accounts (paginated `?page=&size=`, oldest first) / create (`{"email", "displayName", "systemRole?"}`). No password or email — the `201` response is `{"user", "setupLink"}`; hand the one-time `setupLink` (`/reset-password?token=`, valid 7 days) to the person. `409` when the address is already registered (matched case-insensitively, exactly as on [`POST /auth/register`](#auth-endpoints)). On DC this is the primary way to onboard users |
 | `POST` | `/admin/users/{id}/setup-link` | Regenerate the one-time setup link → `{"setupLink"}` |
 | `PATCH` | `/admin/users/{id}` | Change `systemRole` (`ADMIN`/`USER`) and/or `status` (`ACTIVE`/`DISABLED`); `409` when it would disable/demote the last active admin or your own account (disabling revokes the user's refresh tokens) |
 

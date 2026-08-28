@@ -377,8 +377,48 @@ public class DataSeeder implements ApplicationRunner {
         // checklist, which is a runbook about tagging that no self-hoster opens; a remedy
         // filed where its reader never looks is not a remedy.) The image pins the JVM locale
         // from 0.16.0 on, so this cannot recur there; that doc covers the rest (HD-120).
+        //
+        // AND THE LOOKUP FOLDS IN SQL (HD-167), WHICH IS ONLY HALF OF THE ANSWER. A find-or-create
+        // is a WRITE-side question, so it folds: findByFoldedEmail asks it with the expression
+        // users_email_lower_uk is built from, and a row that differs from the configured address
+        // only in case is FOUND rather than duplicated. But this call site does not merely resolve,
+        // it GRANTS - SystemRole.ADMIN, instance-wide, to whatever row comes back - so the fold
+        // stops at finding and an EXACT comparison decides the grant.
+        //
+        // WHAT THE EXACT COMPARISON IS FOR, stated as the alternative rather than as the rule: the
+        // row occupying the folded key may not be one this seeder ever wrote. Before V23 such a row
+        // meant the exact find missed, the insert was refused by users_email_key, and the boot
+        // FAILED LOUDLY out of this ApplicationRunner - an operator looked. A folded find with no
+        // comparison converts exactly that into "existing seed account promoted to system ADMIN",
+        // logged as a success: a stranger holds system ADMIN, SEED_ADMIN_PASSWORD was never applied
+        // so the operator cannot even log in to see it, and this class deliberately never logs the
+        // address, so nothing on the console says whose row it was. So the refusal below is not a
+        // new strictness; it is the loud failure the fold would otherwise have swallowed, kept and
+        // given a sentence. It is the same standing as rejectPublishedPassword: at boot, a refusal
+        // an operator can read beats a grant nobody sees.
+        //
+        // Post-V23 the alternative is NOT "a silently duplicated account" - the index makes a
+        // duplicate impossible, and any comment saying otherwise describes a pre-V23 world.
+        //
+        // No 23505 translation is needed here either, and the reason is mechanism rather than
+        // population: run() is not @Transactional, so SimpleJpaRepository.save opens and commits its
+        // own transaction and a unique violation surfaces from the save() call itself, out of the
+        // ApplicationRunner. Adding @Transactional to run() later moves where that lands.
+        // (Optional is safe only because the index exists - Flyway runs to completion before this
+        // class can be called.)
         var email = adminEmail.toLowerCase(Locale.ROOT);
-        var existing = userRepository.findByEmail(email).orElse(null);
+        var existing = userRepository.findByFoldedEmail(email).orElse(null);
+        if (existing != null && !existing.getEmail().equals(email)) {
+            // No address in the message, by the same rule the rest of this class follows - the id
+            // is what takes an operator to the row, and they are at a database prompt anyway.
+            throw new IllegalStateException(
+                    "Admin seeding refused: a users row (id " + existing.getId() + ") holds the "
+                            + "folded form of seed.admin.email with a different spelling. This "
+                            + "seeder did not write it and will not grant it system ADMIN. Either "
+                            + "correct that row's address or point seed.admin.email at the account "
+                            + "you mean; see docs/self-hosting.md, section \"Duplicate accounts "
+                            + "after an upgrade\".");
+        }
         if (existing != null) {
             // Accounts seeded before system roles existed must still get ADMIN
             if (existing.getSystemRole() != SystemRole.ADMIN) {

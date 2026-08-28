@@ -21,6 +21,7 @@ import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -70,7 +71,13 @@ public class AuthService {
         // not this line: any fold whose result is stored, mailed, or used as a lookup key names
         // its locale (HD-120).
         var email = req.email().toLowerCase(Locale.ROOT);
-        if (userRepository.existsByEmail(email)) {
+        // Folded in SQL, with the same expression users_email_lower_uk is built from (V23) —
+        // NOT existsByEmail. The fold above and PostgreSQL's lower() are different functions, and
+        // this DTO bounds nothing: where they disagree an exact check says "free" while the index
+        // says "taken", so an ordinary signup goes through a doomed INSERT — answered 409 only
+        // because the catch below translates it, and a 500 the day that catch stops matching.
+        // UserRepository states the rule.
+        if (userRepository.existsByFoldedEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
         var user = new User();
@@ -82,7 +89,50 @@ public class AuthService {
             // recorded whenever the box was ticked, even when not required
             user.setTermsAcceptedAt(Instant.now());
         }
-        userRepository.save(user);
+        // saveAndFlush, and the flush is the contract rather than a style choice: a bare save()
+        // defers the INSERT to commit, where the violation is raised AFTER this method has
+        // returned and the catch below cannot see it — leaving today's 500. Two constraints can
+        // fire here and the caller must not be able to tell which, but they fire for ONE reason
+        // and it is not the one this comment used to give: the pre-check above and the index ask
+        // the SAME PostgreSQL lower() of the same two values, so they cannot disagree about a
+        // stored row — a mixed-case squatter is refused by the pre-check, measured, with no INSERT
+        // attempted. What they differ by is the WINDOW between them, and a window is a race: two
+        // concurrent registrations of one address, losing on users_email_key (a 500 before this
+        // ticket) or on users_email_lower_uk (the same race under the new name). Anything else is
+        // a real fault and keeps its 500.
+        //
+        // No lock is added for the race: the window is a single INSERT, there is no transactional
+        // side effect to unwrite on this path, and an advisory lock on every signup would be a
+        // real cost bought to improve a status code in a race. The verification mail is sent
+        // below, after the row exists, so a rolled-back loser mails nothing.
+        try {
+            userRepository.saveAndFlush(user);
+        } catch (DataIntegrityViolationException e) {
+            if (!EmailUniqueness.isDuplicateEmail(e)) throw e;
+            // THE RESPONSES ARE IDENTICAL, DELIBERATELY — same status, same sentence, no
+            // errorType. A caller who could tell the two apart from the BODY would learn whether
+            // the occupying row's spelling matches theirs, which is a property of somebody else's
+            // account.
+            //
+            // THE CLOCK IS NOT IDENTICAL, AND THAT IS RECORDED RATHER THAN FIXED — BUT IT NO
+            // LONGER RECORDS WHAT IT ONCE DID. The pre-check above returns before
+            // passwordEncoder.encode, and bcrypt at strength 12 is ~370 ms on this project's own
+            // measurement, so a fast 409 means "the address was already taken when you asked" and
+            // a slow one means "you lost a race with another registration of the same address".
+            // That residual needs no mixed-case row: with the pre-check folded it exists on a
+            // perfectly clean database. And the distinction an earlier draft of this comment
+            // recorded — canonical occupant versus non-canonical one — is GONE, because the folded
+            // pre-check answers both of them fast; the two are indistinguishable on the clock as
+            // well as in the body. What the clock still separates (a fast 409 from a slow 201) is
+            // already carried by the status code, which register discloses by construction.
+            //
+            // The trade stays anyway: hashing before the pre-check to flatten the race would hand
+            // every unauthenticated caller a bcrypt-12 per request, which is a worse deal than
+            // disclosing that a race happened. login has the same shape for the same reason. If
+            // the pre-check is ever removed, this comment goes with it rather than becoming true
+            // by accident — a slow 409 would then mean something about somebody else's row again.
+            throw new EmailAlreadyUsedException();
+        }
         metrics.userRegistered();
 
         sendVerificationEmail(user);

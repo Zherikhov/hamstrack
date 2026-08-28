@@ -474,6 +474,13 @@ paths:
         instance has terms acceptance enabled (see `GET /meta`). Returns `403`
         when the operator disabled public signup, and `422` when `password` is
         a value this project itself published (see that response).
+
+
+        The address is lower-cased before anything is looked up, and account
+        uniqueness is enforced on that lower-cased form: `Ivan@example.com`
+        and `ivan@example.com` cannot both be accounts, so registering the
+        second is a `409`. Casing in the address you submit therefore never
+        changes which account you reach.
       operationId: register
       security: []
       requestBody:
@@ -3037,6 +3044,11 @@ paths:
         valid 7 days) the admin hands over so the person can set a password.
         On DC this is the primary way to onboard users — public
         self-registration is disabled there.
+
+
+        The address is matched case-insensitively, exactly as on
+        `POST /auth/register`: `Ivan@example.com` and `ivan@example.com`
+        cannot both be accounts, and the second is a `409`.
       operationId: adminCreateUser
       requestBody:
         required: true

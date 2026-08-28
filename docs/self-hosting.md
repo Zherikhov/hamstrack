@@ -32,6 +32,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
   - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
   - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
+  - [Account addresses become case-insensitive in 0.18.0](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 - [Backups](#backups)
   - [By hand](#by-hand)
@@ -915,6 +916,37 @@ never configured, and none of the resulting failures names the upgrade:
   did not move — its reach did. See its row in [Configuration](#configuration), and the
   `409` entry in [Troubleshooting](#troubleshooting).
 
+**Coming from before 0.18.0, run one query before you pull.**
+[Account addresses become case-insensitive](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull):
+the upgrade **refuses to start** — atomically, changing and deleting nothing — if any
+account's stored address is not already lower-case. On an instance whose `users` table only
+Hamstrack has ever written, that number is zero and one `SELECT` proves it. It cannot be
+fixed automatically, because folding an address in place changes which mailbox can reset
+that account's password.
+
+**The same release makes pending invitations case-insensitive too, and that one deletes
+rather than refuses** — deliberately, because a withdrawn offer is recoverable in two
+clicks by the person who sent it, and an account is not. On upgrade, `workspace_invites`
+loses every **unaccepted** row whose address is not already lower-case, and then, where a
+workspace has several unaccepted invitations for one folded address, all but the **newest**.
+Accepted invitations are never touched, and nobody loses access they already have: the only
+effect an invitee can see is a link that no longer works, which is fixed by inviting them
+again. From then on a workspace may hold **one standing invitation per address**, and a
+second attempt is refused with a `409` instead of quietly creating a duplicate. If your
+instance sends a lot of invitations and you want the number in advance, count them the same
+way the migration does:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT count(*) FILTER (WHERE email <> lower(email)) AS mixed_case_removed,
+       (SELECT count(*) - count(DISTINCT (workspace_id, email))
+          FROM workspace_invites
+         WHERE accepted_at IS NULL AND email = lower(email)) AS duplicates_removed
+  FROM workspace_invites
+ WHERE accepted_at IS NULL;
+SQL
+```
+
 **Also new in 0.17.0, and this one wants a check before you pull rather than after:**
 [Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
 The upgrade attributes every existing notification to a workspace and deletes any it cannot
@@ -1289,6 +1321,152 @@ capped your container and the percentage is taken against host RAM — which at 
 *more* heap than before, and closer to the host's ceiling than is safe. Add a
 `mem_limit:` to the app service; the [Quick start](#quick-start) file shows one.
 
+### Account addresses become case-insensitive in 0.18.0 (one query, before you pull)
+
+**Most instances have nothing to do here, and one query proves it in ten seconds.** Run
+it *before* upgrading and you can never meet the block described below.
+
+**What changes.** `users.email` gains a second uniqueness rule — `UNIQUE (lower(email))` —
+so `Ivan@x.com` and `ivan@x.com` can no longer both be accounts. Until now that was true
+only *by convention*: every place in Hamstrack that creates an account lower-cases the
+address first, and nothing but that habit enforced it. From 0.18.0 PostgreSQL enforces it,
+which is what makes it survive an LDAP/SSO import, a bulk load or a support script that
+forgets.
+
+**What does not change.** Nothing about how you log in. Sign-in still matches your address
+exactly, deliberately — a login that folded could resolve one typed address to either of
+two rows, and that is a door, not a convenience. Existing addresses are not rewritten,
+re-cased or merged by the upgrade.
+
+**Run this before you pull:**
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT id, email, status, created_at
+  FROM users
+ WHERE email <> lower(email)
+ ORDER BY created_at;
+SQL
+```
+
+**Empty is the expected result, and it is the only one that needs no action.** Every
+account Hamstrack itself creates is lower-cased at signup, so rows appear here only if some
+*other* writer touched the table — an import, a support script, a dump edited by hand. If
+the query is empty, upgrade normally and skip the rest of this section.
+
+**If it returns rows, the upgrade will refuse to start.** It refuses *atomically*: nothing
+is applied, no index is created, and no account row is changed or deleted. **Flyway records
+nothing either** — on PostgreSQL the schema-history row is written inside the same
+transaction and rolls back with it — so there is no failed migration to `repair` and no
+half-state to clean up: fix the data and start the container again. The message names both
+counts and repeats the queries it needs you to run. Ask which rows collide as well:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT lower(email)                          AS folded,
+       count(*)                              AS copies,
+       array_agg(id    ORDER BY created_at)  AS ids,
+       array_agg(email ORDER BY created_at)  AS addresses
+  FROM users
+ GROUP BY 1
+HAVING count(*) > 1;
+SQL
+```
+
+**Fix them in this order. The order is load-bearing, not a preference.**
+
+1. **Resolve every collision first.** Only you can decide which of two accounts survives,
+   and the answer is *re-address or disable* — never delete: `issues.reporter_id`,
+   `comments.author_id`, `invited_by` and the `created_by` columns all reference `users`
+   with no `ON DELETE`, so a delete either fails on a foreign key or would destroy that
+   person's history. The block under
+   [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
+   retires one row of a pair and hands its address to the survivor. **Its mechanics apply
+   here; one line of its reasoning does not** — it says the survivor must take *the
+   duplicate's* address because that is the spelling the current build just wrote, which is
+   true after the locale-folding incident it was written for and false here. Nothing was
+   just written: both spellings are old, and the duplicate's may be the wrong one. Decide
+   which of the two addresses the pair should end up on, then run the block with that one.
+2. **Then fold whatever is left:**
+   `UPDATE users SET email = lower(email) WHERE email <> lower(email);`
+
+Doing 2 before 1 is not a shortcut. At that moment the new index does not exist yet, so a
+blind fold across a colliding pair **succeeds** in producing two identical addresses and is
+only then refused by the older byte-exact constraint — an error that reads like a different
+bug entirely. Note also that **step 1's own output is mixed-case in two places** — the
+tombstone it leaves (`Ivan@x.com.retired-<id>`) *and* the address it hands the survivor,
+which is the one that matters, because that is a live account rather than a disabled row.
+Step 2 is what clears both. Do not spot-check the tombstone and call it done: **re-run the
+first query** afterwards and expect nothing back.
+
+**Why the upgrade will not do step 2 for you**, given that it is one statement it could
+obviously run. `Bob@x.com` and `bob@x.com` are two different mailboxes on any RFC-compliant
+mail server, so folding an address in place changes **which mailbox can reset that
+account's password**. That is your decision about your people, and a migration may not make
+it silently.
+
+**And why it refuses over a single row that collides with nothing.** That row is already
+broken: its owner cannot log in (sign-in lower-cases what they type before looking it up)
+and cannot receive a reset mail (so does that flow). From 0.18.0 it additionally *occupies*
+the lower-cased address, so registering the correct spelling would be refused with "Email
+is already registered" — for an address nobody holds, in a way no one would ever connect
+back to this row. The upgrade is the one moment anybody looks.
+
+**A non-ASCII address is a different question and blocks nothing.** The upgrade prints a
+notice if it finds one, because it *may* be a legitimate internationalised address or *may*
+be the locale-folding bug described next — and no query can tell those apart, because the
+stored value is a perfectly legal lower-case address either way. The notice is a pointer to
+the next section, not a verdict on your data.
+
+#### If the database's collation provider ever changes
+
+This applies to both address indexes at once — `users_email_lower_uk` and
+`workspace_invites_pending_email_uk` — and it is one procedure, not two. After a C-library
+or ICU upgrade under a running cluster, PostgreSQL says:
+
+```
+WARNING: index "users_email_lower_uk" depends on collation "default" version "2.28",
+         but the current version is "2.36"
+DETAIL:  The index may be corrupted due to changes in sort order.
+HINT:    REINDEX to avoid the risk of corruption.
+```
+
+```sql
+REINDEX INDEX users_email_lower_uk;
+REINDEX INDEX workspace_invites_pending_email_uk;
+ALTER DATABASE hamstrack REFRESH COLLATION VERSION;
+```
+
+What actually breaks is narrower than the warning sounds, and the precise version is worth
+having because the vague one causes panic:
+
+- **Equality does not change.** Under a deterministic collation — every collation this
+  schema uses — equality is byte equality, so a provider change can never make two stored
+  addresses newly equal or newly distinct. No existing account's uniqueness lapses. (That
+  is about the *stored values*. What `lower()` maps them to is a separate question, and
+  the third bullet is where it is answered.)
+- **Sort order can change**, and a btree finds its duplicate candidates by order, so a
+  stale index could fail to notice a *new* duplicate until it is rebuilt. That is what the
+  `REINDEX` is for.
+- **`lower()` itself can change** — it reads `LC_CTYPE` — and this is the part that would
+  matter and does not: the characters whose folding varies between providers are
+  *uppercase* ones, and Hamstrack has already lower-cased every address it stores. On the
+  values in your table, `lower()` is the identity function under every provider in
+  practical use. **And if that ever stopped being true** — a provider that knows a case
+  mapping the app's JVM does not — the failure is the loud one in the next bullet rather than a silent
+  one: every check the application makes goes through the *same* `lower()` the index does,
+  so a disagreement can only produce a refusal you can see, never a duplicate account.
+- **`REINDEX` is the detector, and it fails loudly.** If a provider change ever did fold
+  two stored addresses together — a change in `lower()`'s *image*, which is a different
+  question from the collation *equality* of the first bullet — the rebuild fails with
+  `could not create unique index … Key (lower(email))=(…) already exists` — and run in
+  `psql` you see the `DETAIL` naming the value. (The application's connection pool
+  suppresses that detail so third-party addresses stay out of its log; your session is not
+  the application's.)
+- The bundled compose file pins `postgres:16-alpine`, so the C library changes only when
+  *you* move that tag. This is an upgrade-time event with a known moment, not drift — which
+  is why it lives here and not in a monitor.
+
 ### Duplicate accounts after an upgrade (locale-dependent email folding)
 
 **Most instances can skip this.** It applies only if your Hamstrack container or host
@@ -1435,6 +1613,12 @@ definition the spelling the current build produces, because the duplicate is the
 the current build just wrote. Copy it across in SQL rather than retyping it: one of
 these spellings carries a combining dot (U+0307) that is **invisible in a terminal**,
 so a retyped address can look identical and still not match.
+
+> **Arriving here from the 0.18.0 upgrade instead?** Then that reasoning does not
+> hold, because nothing was just written: both spellings are old, and the duplicate's
+> may be the *wrong* one of the two. The mechanics of the block are unchanged — decide
+> which address the pair should end up on first, and use it wherever the block says
+> "the duplicate's address".
 
 **Run this block in one interactive session**, in the order printed:
 
@@ -1754,7 +1938,8 @@ Most S3-compatible stores expose the same two settings under different names.
 | Everyone shares one IP / false `429`s | Behind a proxy/CDN that doesn't pass `X-Forwarded-For` (or passes an untrusted one). Ensure the proxy sets it; the app trusts the right-most entry. |
 | Startup fails naming `app.persistence.statement-timeout-ms` and `app.locking.lock-timeout-ms` | The statement bound is under **2x** the lock bound. PostgreSQL counts lock-wait time inside the statement, so the smaller bound always fires first, and a statement bound at or under the lock bound would make the lock bound dead configuration — every retryable `409` in the product would quietly become a `422` no retry can fix. The message prints both values, the computed minimum and both knobs. **It can fire from the side you did not touch:** raising `DB_LOCK_TIMEOUT_MS` above 5000 while `DB_STATEMENT_TIMEOUT_MS` is at its default 10000 stops the boot. |
 | Startup fails naming `app.invites.event-retention-days` and `app.invites.recipient-cooldown-minutes` | Those are the **property** names behind `INVITE_EVENT_RETENTION_DAYS` and `INVITE_RECIPIENT_COOLDOWN_MINUTES` — the message quotes properties, your `.env` sets variables, so a search for the variable name finds nothing. The retention must be strictly **longer than the widest ceiling window**, which is the larger of the cooldown and the **fixed 24 h** window of `INVITE_MAX_PER_RECIPIENT_PER_DAY`. Raise `INVITE_EVENT_RETENTION_DAYS` (minimum **2**) or lower `INVITE_RECIPIENT_COOLDOWN_MINUTES`. Refusing the boot is deliberate: a retention that undercuts a ceiling silently shortens it to itself, with no error and no log line — the throttle simply stops refusing sends it meant to refuse. |
-| A database error no longer names the offending row — a failed migration says *which* index it could not create but not *which* rows collided, and a syntax error reports no source position | Expected, not a fault: `DB_LOG_SERVER_ERROR_DETAIL` is `false` by default, which strips PostgreSQL's `DETAIL` / `HINT` / `POSITION` / `WHERE` lines from every error on the application datasource — **and Flyway runs on that same datasource**, so upgrade failures lose their detail along with everything else. It is off because the driver folds `DETAIL` into the message *before* the app can redact it, and on some errors that message carries a user's email address or other row values. **To get one session's worth back:** put `DB_LOG_SERVER_ERROR_DETAIL=true` in `.env`, `docker compose up -d`, reproduce the failure, read the log — then **remove the line and `up -d` again**, because leaving it on writes row values into every log sink you have. Editing `DB_URL` to add `?logServerErrorDetail=true` works on the driver but is undone by the next upgrade, which replaces `docker-compose.prod.yml`.  **Before you re-enable anything, try `docker compose logs postgres`** — this setting is a *client-side render flag*: it changes only what the JDBC driver concatenates into the application's log line. PostgreSQL still writes the same error, `DETAIL` intact, to its own log, so the failure that **already happened** is readable there with no restart, no reproduction, and nothing new written into the app's stream. That is usually the answer, and for a migration that failed mid-upgrade it is strictly better than re-running a failed upgrade with row values switched on. It also means this setting **reduces** the exposure rather than eliminating it on a stack that ships container logs: the database's copy travels the same route. What it does remove is the copy in the application's own stream — the one that reaches support tickets and screenshots — and on an install with no database-log shipper it is the only copy at all. |
+| A database error no longer names the offending row — a failed migration says *which* index it could not create but not *which* rows collided, and a syntax error reports no source position | Expected, not a fault: `DB_LOG_SERVER_ERROR_DETAIL` is `false` by default, which strips PostgreSQL's `DETAIL` / `HINT` / `POSITION` / `WHERE` lines from every error on the application datasource — **and Flyway runs on that same datasource**, so upgrade failures lose their detail along with everything else. It is off because the driver folds `DETAIL` into the message *before* the app can redact it, and on some errors that message carries a user's email address or other row values. **To get one session's worth back:** put `DB_LOG_SERVER_ERROR_DETAIL=true` in `.env`, `docker compose up -d`, reproduce the failure, read the log — then **remove the line and `up -d` again**, because leaving it on writes row values into every log sink you have. Editing `DB_URL` to add `?logServerErrorDetail=true` works on the driver but is undone by the next upgrade, which replaces `docker-compose.prod.yml`.  **Before you re-enable anything, try `docker compose logs postgres`** — this setting is a *client-side render flag*: it changes only what the JDBC driver concatenates into the application's log line. PostgreSQL still writes the same error, `DETAIL` intact, to its own log, so the failure that **already happened** is readable there with no restart, no reproduction, and nothing new written into the app's stream. That is usually the answer, and for a migration that failed mid-upgrade it is strictly better than re-running a failed upgrade with row values switched on. It also means this setting **reduces** the exposure rather than eliminating it on a stack that ships container logs: the database's copy travels the same route. What it does remove is the copy in the application's own stream — the one that reaches support tickets and screenshots — and on an install with no database-log shipper it is the only copy at all. **One failure is exempt and it is the one you are most likely to meet on the 0.18.0 upgrade:** the `users` address pre-flight writes its counts, its queries and its remedy into the *primary* message, which this setting never strips — re-enabling it there tells you nothing new. See the row below. |
+| The upgrade to **0.18.0** stops the boot with a message beginning `HD-167 V23 aborted` | Deliberate — this is the one migration in the product that refuses on purpose, and it is refusing over *your data*, not over a fault. Your `users` table holds at least one address that is not already lower-case, and 0.18.0 adds `UNIQUE (lower(email))`. **Nothing was applied:** no index, no account changed or deleted, and **no schema-history row written**, so there is nothing to `flyway repair` — fix the data and start again. Unlike every other failed migration, **this one carries its own remedy in the primary message** (both counts, the queries that find the rows, and the statements in the one order that works), so the row above does not apply to it: turning `DB_LOG_SERVER_ERROR_DETAIL` on adds nothing here. Full procedure, including why a row that collides with nothing still blocks: [Account addresses become case-insensitive in 0.18.0](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull). |
 | Startup fails with a schema validation error after changing the image | You moved to an **older** image than the DB was migrated to. Use the newer image, or restore a pre-upgrade backup. |
 
 ## REST API

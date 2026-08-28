@@ -990,8 +990,10 @@ public class WorkspaceService {
      * until it happened.
      *
      * <p>So the fallback matches the constraint's own name, which PostgreSQL quotes verbatim in
-     * every locale, against the messages in the cause chain — gated on SQLSTATE 23505 so a message
-     * that merely mentions the index (a lock error, a dump of the statement) cannot qualify. It
+     * every locale, against the messages in the cause chain. <strong>Both</strong> branches are
+     * gated on SQLSTATE 23505 first, so a message that merely mentions the index (a lock error, a
+     * dump of the statement) cannot qualify — and neither can a 23503 whose name the dialect DID
+     * extract, which is the half this method used to state and the code used to skip. It
      * deliberately does NOT test {@code instanceof DuplicateKeyException}: that is a product of
      * {@code SQLErrorCodeSQLExceptionTranslator}, and under JPA {@code HibernateJpaDialect}
      * translates a constraint violation into a plain {@link DataIntegrityViolationException}, so
@@ -999,9 +1001,15 @@ public class WorkspaceService {
      */
     private static boolean isDuplicateInvite(DataIntegrityViolationException e) {
         String constraint = constraintNameOf(e);
-        boolean duplicate = constraint != null
-                ? PENDING_EMAIL_UNIQUE_CONSTRAINT.equalsIgnoreCase(constraint)
-                : namesPendingEmailIndex(e);
+        // SQLSTATE FIRST, AND FOR BOTH BRANCHES (corrected in HD-167's review, together with its
+        // copy in EmailUniqueness — one gap, two spellings). The name alone is not sufficient in
+        // either branch: Hibernate's PostgreSQL delegate routes 23502/23503/23514 through the SAME
+        // constraint-name extractor, so a non-unique integrity violation bearing this index's name
+        // would have reached the primary branch and been answered "already invited".
+        boolean duplicate = isUniqueViolation(e)
+                && (constraint != null
+                        ? PENDING_EMAIL_UNIQUE_CONSTRAINT.equalsIgnoreCase(constraint)
+                        : namesPendingEmailIndex(e));
         if (duplicate) {
             log.debug("Invite insert lost the pending-address race on constraint [{}]",
                     constraint != null ? constraint : PENDING_EMAIL_UNIQUE_CONSTRAINT);
@@ -1012,44 +1020,78 @@ public class WorkspaceService {
         return duplicate;
     }
 
+    /**
+     * <strong>Depth-bounded, like its two neighbours — and this is the walk that makes their
+     * bounds reachable</strong>, because it runs first on every call. Why a
+     * {@code t != t.getCause()} guard is not enough: see {@link #namesPendingEmailIndex}.
+     * Same shape as {@code GlobalExceptionHandler.sqlStateOf}, deliberately — one idiom.
+     */
     private static String constraintNameOf(Throwable e) {
-        for (Throwable t = e; t != null && t != t.getCause(); t = t.getCause()) {
+        Throwable t = e;
+        for (int depth = 0; t != null && depth < MAX_CAUSE_DEPTH; t = t.getCause(), depth++) {
             if (t instanceof ConstraintViolationException cve) return cve.getConstraintName();
         }
         return null;
     }
 
     /**
-     * The locale-proof fallback: does this failure name <em>our</em> index, and is it a uniqueness
-     * violation at all?
+     * The locale-proof fallback: does this failure name <em>our</em> index?
      *
-     * <p><strong>Both halves are load-bearing.</strong> The name alone is not enough — a lock
-     * timeout, a statement cancellation or any error that happens to quote the failing statement
-     * would mention the index too, and answering those a 409 would tell a caller "somebody else
-     * invited this address" when nobody did. SQLSTATE alone is not enough either: 23505 on this
-     * insert could equally be {@code token_hash}. Together they are the same decision the dialect
-     * would have made, reached without depending on the server speaking English — PostgreSQL
-     * quotes an identifier verbatim in every locale, which is exactly why the name is the part
-     * worth matching and the surrounding words are not.
+     * <p>The name alone is not enough — a lock timeout, a statement cancellation or any error that
+     * happens to quote the failing statement would mention the index too, and answering those a
+     * 409 would tell a caller "somebody else invited this address" when nobody did. That half is
+     * {@link #isUniqueViolation}, asked above of <strong>both</strong> branches; it used to live
+     * here, which left the primary branch matching on a bare name. What remains here is the part
+     * that is genuinely this branch's: PostgreSQL quotes an identifier verbatim in every locale,
+     * which is exactly why the name is the part worth matching and the surrounding words are not.
      *
-     * <p>The walk is depth-bounded rather than merely self-reference-guarded, for the reason
-     * {@code GlobalExceptionHandler.sqlStateOf} gives: a two-step cause cycle would otherwise spin
-     * forever on a thread that is already handling a failure.
+     * <p><strong>Every cause-chain walk in this trio is depth-bounded</strong> — this one,
+     * {@link #isUniqueViolation} and {@link #constraintNameOf} alike — for the reason
+     * {@code GlobalExceptionHandler.sqlStateOf} gives and in the same shape: a {@code t !=
+     * t.getCause()} guard catches a one-step self-reference and nothing else, so a two-step cause
+     * cycle (A → B → A) would spin forever on a thread that is already handling a failure.
+     *
+     * <p><strong>A bound is worth only what the FIRST walk is worth.</strong> This paragraph used
+     * to be written about this method, and was true of it — while {@code constraintNameOf}, which
+     * runs first on every single call of {@link #isDuplicateInvite}, was merely
+     * self-reference-guarded. The two bounds here and in {@link #isUniqueViolation} were therefore
+     * unreachable for the one input they were written for: the walk spun before it reached them,
+     * and this sentence described a protection the code did not have (measured 2026-08-28 — the
+     * cycle wedged Surefire until the JVM was killed by hand). Stated about the group rather than
+     * about a member, because that is the property that has to hold: a bound skipped on a walk
+     * that runs earlier silently disarms every bound after it. Fixed together with the
+     * byte-identical copy in {@code EmailUniqueness} — which is where the seal for it lives
+     * ({@code EmailUniquenessTranslationTest.aTwoStepCauseCycleTerminates}) — because fixing one
+     * and leaving the other is how an idiom becomes two idioms.
      */
     private static boolean namesPendingEmailIndex(Throwable e) {
-        boolean uniqueViolation = false;
-        boolean namesIndex = false;
+        Throwable t = e;
+        for (int depth = 0; t != null && depth < MAX_CAUSE_DEPTH; t = t.getCause(), depth++) {
+            String message = t.getMessage();
+            if (message != null && message.contains(PENDING_EMAIL_UNIQUE_CONSTRAINT)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * <strong>Is this a uniqueness violation at all?</strong> — asked of <em>both</em> branches of
+     * {@link #isDuplicateInvite}, which is the whole point of it being a method.
+     *
+     * <p>SQLSTATE alone is not enough (23505 on this insert could equally be {@code token_hash});
+     * the name alone is not enough either, for the two different reasons the two branches give.
+     * Together they are the same decision the dialect would have made, reached without depending on
+     * the server speaking English.
+     */
+    private static boolean isUniqueViolation(Throwable e) {
         Throwable t = e;
         for (int depth = 0; t != null && depth < MAX_CAUSE_DEPTH; t = t.getCause(), depth++) {
             if (t instanceof SQLException se && SQLSTATE_UNIQUE_VIOLATION.equals(se.getSQLState())) {
-                uniqueViolation = true;
-            }
-            String message = t.getMessage();
-            if (message != null && message.contains(PENDING_EMAIL_UNIQUE_CONSTRAINT)) {
-                namesIndex = true;
+                return true;
             }
         }
-        return uniqueViolation && namesIndex;
+        return false;
     }
 
     /** PostgreSQL {@code unique_violation}. Not localised, unlike the message that carries it. */
