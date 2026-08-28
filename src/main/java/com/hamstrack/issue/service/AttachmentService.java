@@ -7,6 +7,7 @@ import com.hamstrack.common.event.AttachmentDeleted;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.storage.FileStorage;
+import com.hamstrack.common.tx.AfterCommit;
 import com.hamstrack.issue.dto.AttachmentResponse;
 import com.hamstrack.issue.entity.Issue;
 import com.hamstrack.issue.entity.IssueAttachment;
@@ -21,8 +22,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.MediaTypeFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.util.StringUtils;
 import org.springframework.web.multipart.MultipartFile;
@@ -108,8 +107,10 @@ public class AttachmentService {
             fileStorage.store(reserved.storageKey(), in, reserved.sizeBytes(), reserved.contentType());
         } catch (IOException | RuntimeException e) {
             // Step 3 — compensate: delete ONLY the reserved row (scoped to the resolved
-            // issue). If compensation itself fails, log the orphan for out-of-band
-            // cleanup (mirrors deleteFromStorageAfterCommit) and still surface the 500.
+            // issue). If compensation itself fails, log the orphan for out-of-band cleanup and
+            // still surface the 500 — the same policy deleteFromStorageAfterCommit follows (record
+            // it, never fail the request on it), at WARN because this one leaves a row an operator
+            // can find rather than a blob only the log names.
             compensateFailedUpload(actor, workspaceId, projectId, issueNumber,
                     reserved.attachmentId(), reserved.storageKey());
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store file");
@@ -239,20 +240,30 @@ public class AttachmentService {
                 .forEach(this::deleteFromStorageAfterCommit);
     }
 
-    // Blob deletion must not precede the commit (a rollback can't restore the file),
-    // and a storage failure must not fail the request — the row is gone, the orphan
-    // blob is only a cleanup concern
+    // Blob deletion must not precede the commit (a rollback can't restore the file), and a storage
+    // failure must not fail the request — the row is gone, the orphan blob is only a cleanup
+    // concern. This is where the rule was first written by hand; HD-181 gave it a name and this now
+    // calls it, so there is one shape to copy rather than two to choose between. Two deliberate
+    // consequences of the move: the failure is logged at ERROR rather than WARN (AfterCommit has one
+    // severity, and an orphan nobody will ever come back for is what that severity is about — no
+    // alert reads log level, they are all metric-based), and a call site reached with no transaction
+    // deletes inline instead of throwing "synchronization is not active".
+    //
+    // What keeps that inline branch safe is a contract on the CALLER, not a property of the
+    // transaction state at the moment of the call: callers must already have the row's deletion
+    // inside a transaction when they get here. "No transaction, so there is no rollback to protect
+    // the blob from" holds only for a caller that opens none afterwards either — and this class
+    // already contains the other shape, since upload() is deliberately not @Transactional and runs
+    // its DB work through txTemplate. Delete a blob inline and then write through a template that
+    // rolls back, and the result is row present, blob gone: a live attachment whose download can
+    // never be served. That is the opposite direction from the one this method tolerates (an orphan
+    // blob is a cleanup concern, an orphan row is broken data), and it is what the hand-rolled code
+    // this replaced refused loudly with IllegalStateException. Both callers today are proxied
+    // @Transactional and removeStoredFilesForIssue opens one of its own; the contract is what keeps
+    // that true of the next one.
     private void deleteFromStorageAfterCommit(String storageKey) {
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                try {
-                    fileStorage.delete(storageKey);
-                } catch (RuntimeException e) {
-                    log.warn("Failed to delete stored attachment {}", storageKey, e);
-                }
-            }
-        });
+        AfterCommit.run("delete of stored attachment blob " + storageKey,
+                () -> fileStorage.delete(storageKey));
     }
 
     // Business-policy gate (size + file type), enforced here rather than only at

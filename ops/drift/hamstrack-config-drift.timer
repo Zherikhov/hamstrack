@@ -1,0 +1,15 @@
+[Unit]
+Description=Hourly Hamstrack configuration drift check
+
+[Timer]
+OnCalendar=hourly
+# Spread it off the top of the hour, away from the scrape and away from anything else that
+# runs on a round number.
+RandomizedDelaySec=300
+# If the box was down, check at the next boot rather than skipping the window. ConfigDrift
+# has `for: 30m`, so one missed hour never turns into a missed alert.
+Persistent=true
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

@@ -8,6 +8,7 @@ import com.hamstrack.issue.service.AttachmentService;
 import com.hamstrack.issue.service.CommentService;
 import com.hamstrack.issue.service.IssueService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import lombok.RequiredArgsConstructor;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.data.domain.Sort;
@@ -140,7 +141,7 @@ public class IssueController {
                                   @RequestParam(required = false) UUID fixVersionId,
                                   @RequestParam(required = false) UUID sprintId,
                                   @RequestParam(defaultValue = "false") boolean noSprint,
-                                  @RequestParam(required = false) Integer page,
+                                  @RequestParam(required = false) @Max(Paging.MAX_PAGE) Integer page,
                                   @RequestParam(required = false) Integer size,
                                   @RequestParam(defaultValue = "false") boolean excludeDone) {
         // Parsed here (not bound as an enum @RequestParam): Spring's String→enum
@@ -211,7 +212,7 @@ public class IssueController {
                                                       @PathVariable UUID workspaceId,
                                                       @PathVariable UUID projectId,
                                                       @PathVariable long number,
-                                                      @RequestParam(required = false) Integer page,
+                                                      @RequestParam(required = false) @Max(Paging.MAX_PAGE) Integer page,
                                                       @RequestParam(required = false) Integer size) {
         return issueService.getHistory(actor, workspaceId, projectId, number,
                 Paging.of(page, size, Sort.by("createdAt").ascending()));
@@ -252,7 +253,7 @@ public class IssueController {
                                                       @PathVariable UUID workspaceId,
                                                       @PathVariable UUID projectId,
                                                       @PathVariable long number,
-                                                      @RequestParam(required = false) Integer page,
+                                                      @RequestParam(required = false) @Max(Paging.MAX_PAGE) Integer page,
                                                       @RequestParam(required = false) Integer size) {
         return commentService.list(actor, workspaceId, projectId, number,
                 Paging.of(page, size, Sort.by("createdAt").ascending()));

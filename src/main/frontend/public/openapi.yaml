@@ -137,6 +137,26 @@ info:
     known bound — and nothing here is a schedule to key on. See
     `ReferenceConstraintProblemDetail`.
 
+
+    **A value longer than the column that had to hold it is a `400`, not a
+    crash.** Where the database refuses a write because a string overflowed its
+    column, the refusal reaches the caller as `400` with
+    `errorType: "VALUE_TOO_LONG"` and
+    `detail: "Some of the text you submitted is too long."` Nothing is
+    half-applied. **This is a property of the API rather than of a set of
+    endpoints** — it is applied where the database reports the overflow, not at
+    chosen handlers, so any write may answer it and no operation below lists
+    it. **A caller should not normally meet it**: a request field that is too
+    long is refused at the door by a field-anchored `400` that names it (see
+    `ValidationProblemDetail`), or by a service check that names the limit, and
+    those are the refusals to code against. This one is the backstop under them
+    and **names no field**, because by the time it is raised the body is gone
+    and the database has reported a width rather than a column — so a client
+    may branch on the `errorType` but must not be given a field it cannot be
+    told. Meeting it means some path is missing a bound; the server logs it as
+    a fault even though it answers as a client error. Shorten the longest free
+    text in the request and send it again. See `ValueTooLongProblemDetail`.
+
     **`errorType` says which failure a body is**, wherever one status covers
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
@@ -144,9 +164,10 @@ info:
     refused over project administrators carries `STRANDED_PROJECTS`,
     `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`, and any request stopped
     for outrunning the server’s time budget carries
-    `STATEMENT_BUDGET_EXCEEDED`, and a write the database refuses because a
+    `STATEMENT_BUDGET_EXCEEDED`, a write the database refuses because a
     reference could not be satisfied carries
-    `REFERENCE_CONSTRAINT_VIOLATION`.
+    `REFERENCE_CONSTRAINT_VIOLATION`, and one it refuses because a string was
+    wider than its column carries `VALUE_TOO_LONG`.
     Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
@@ -175,7 +196,7 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds). **Three** non-auth surfaces have throttles of their own:
+    header (seconds). Several non-auth surfaces have throttles of their own:
     `POST …/issues/{number}/rank` allows at most one whole-project rank
     rebalance per project per 60 s and answers `429` + `Retry-After` for a
     second one inside that window — a retryable throttle, not a fault; every
@@ -184,11 +205,18 @@ info:
     surface — `…/search/**` **plus `…/filters/**`**, since validating a saved
     filter is search-surface work wherever it is mounted — shares a **second,
     separate** per-principal budget
-    (`app.search.requests-per-minute`, 120/min by default). Both report budgets are
-    checked **before** the workspace/project is resolved, so an over-budget
-    caller sees `429` even for a project they could not otherwise see.
-    `POST …/search/insights` is a report living on the search path and spends
-    **both** budgets — see the `Reports` tag.
+    (`app.search.requests-per-minute`, 120/min by default). Both per-principal
+    budgets are checked **before** the workspace/project is resolved, so an
+    over-budget caller sees `429` even for a project they could not otherwise
+    see. `POST …/search/insights` is a report living on the search path and
+    spends **both** budgets — see the `Reports` tag. Finally,
+    `POST …/workspaces/{workspaceId}/invites` carries ceilings of its own — a
+    per-(sender, inbox) cooldown, a per-inbox daily cap (both count the
+    destination inbox rather than the spelling of the address) and a per-sender
+    hourly/daily volume budget — and answers `429` + `Retry-After` past any of
+    them. Those are spent **after** the workspace is resolved, the deliberate
+    opposite of the two budgets above: a workspace the caller cannot see answers
+    `404` even when the caller is over a ceiling. See `inviteMember`.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/hamstrack
@@ -465,7 +493,18 @@ paths:
       description: |
         Sends a verification email. `termsAccepted: true` is required when the
         instance has terms acceptance enabled (see `GET /meta`). Returns `403`
-        when the operator disabled public signup.
+        when the operator disabled public signup, and `422` when `password`
+        cannot be stored as sent — because it is a value this project itself
+        published, or because it costs more than 72 UTF-8 bytes (see that
+        response; the byte limit binds well before the character one for any
+        non-Latin script).
+
+
+        The address is lower-cased before anything is looked up, and account
+        uniqueness is enforced on that lower-cased form: `Ivan@example.com`
+        and `ivan@example.com` cannot both be accounts, so registering the
+        second is a `409`. Casing in the address you submit therefore never
+        changes which account you reach.
       operationId: register
       security: []
       requestBody:
@@ -486,9 +525,82 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `password` cannot be stored as sent. **More than one refusal shares
+            this status on this endpoint**; branch on the status, then read
+            `detail` to tell them apart. Nothing is created by either.
+
+
+            **It costs more than 72 UTF-8 bytes.** The hash this application
+            writes is BCrypt, which hashes at most 72 bytes, so the real ceiling
+            is on bytes and the `maxLength: 72` on the field only covers the
+            half a character count can see. Latin letters cost 1 byte each,
+            accented Latin, Greek and Cyrillic 2, most other scripts 3, and
+            emoji 4 — so a Cyrillic passphrase is refused at 37 characters and a
+            CJK one at about 25, well inside the character bound, while an
+            ASCII password of 73+ characters is instead a field-anchored
+            `400`. `detail` gives the byte count of what was sent, the limit
+            and that arithmetic, because "72 bytes" is not something a person
+            typing a passphrase can evaluate.
+
+
+            **It is a value this project has itself published** as
+            production configuration, so it is known to everyone who can read
+            the repository. Today that is the single literal
+            `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
+            seeded administrator's password. Send a different password —
+            nothing else about the request is at fault, and the account was not
+            created.
+
+
+            **This is not a password-strength rule and does not grow into
+            one.** It holds only values *we* published, under their own
+            variable's name; a weak password this project never printed is
+            accepted exactly as before. Body is a `ProblemDetail` — branch on
+            the status, not on the wording of `detail`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/verify-email:
+    get:
+      tags: [Auth]
+      summary: Follow the verification link from the email
+      description: |
+        The address the verification email links to. It reads nothing and
+        verifies nothing — it answers `302` to the SPA's own
+        `/verify-email?token=…` route, which then calls the `POST` below.
+        Documented because it is a public URL an already-sent email can point
+        at, not because a client should call it.
+      operationId: verifyEmailLink
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string, maxLength: 64 }
+          description: >-
+            The token from the emailed link, bounded from its generator (43
+            Base64url characters). Over-long is a `400`.
+      responses:
+        '302':
+          description: Redirect to the in-app verification screen
+          headers:
+            Location:
+              schema: { type: string }
+              description: '`/verify-email?token=…`, URL-encoded'
+        '400':
+          description: >-
+            `token` is longer than its bound — a `ValidationProblemDetail` with
+            `token` in the `errors` map, exactly as a body field's bound is
+            reported (a declared constraint is reported the same way whichever
+            door it is written on). A *missing* `token` is the other kind: no
+            constraint was reached, so it is a plain problem body with no map.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
     post:
       tags: [Auth]
       summary: Verify email with the one-time token
@@ -619,7 +731,13 @@ paths:
     post:
       tags: [Auth]
       summary: Set a new password with the emailed token
-      description: Revokes all active sessions on success.
+      description: |
+        Revokes all active sessions on success. Returns `422` when
+        `newPassword` cannot be stored as sent — because it is a value this
+        project itself published, or because it costs more than 72 UTF-8 bytes.
+        Every refusal on that status happens **before the token is consumed**,
+        so the same link can be re-used with a different password (see that
+        response).
       operationId: resetPassword
       security: []
       requestBody:
@@ -630,8 +748,18 @@ paths:
               type: object
               required: [token, newPassword]
               properties:
-                token: { type: string }
-                newPassword: { type: string, minLength: 8, maxLength: 100 }
+                token: { type: string, maxLength: 64 }
+                newPassword:
+                  type: string
+                  minLength: 8
+                  maxLength: 72
+                  description: >-
+                    Bounded in two units, exactly as `RegisterRequest.password`
+                    is: above 72 **characters** a field-anchored `400`, and
+                    above 72 **UTF-8 bytes** a `422` (see that response). A
+                    Cyrillic passphrase reaches the byte limit at 37 characters.
+                    The `422` runs before the reset row is consumed, so the
+                    link survives it.
       responses:
         '200':
           description: Password reset
@@ -640,6 +768,45 @@ paths:
               schema: { $ref: '#/components/schemas/MessageResponse' }
         '400':
           description: Token is invalid, expired or already used
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            `newPassword` cannot be stored as sent. **More than one refusal
+            shares this status on this endpoint**; branch on the status, then
+            read `detail` to tell them apart. **The reset token survives either
+            one** — both are checked before the reset row is consumed, so the
+            caller retries on the same link.
+
+
+            **It costs more than 72 UTF-8 bytes** — the ceiling BCrypt hashes
+            to, which a character count cannot see. Latin letters cost 1 byte
+            each, accented Latin, Greek and Cyrillic 2, most other scripts 3,
+            and emoji 4, so a Cyrillic passphrase is refused at 37 characters
+            while an ASCII one of 73+ characters is instead a field-anchored
+            `400`. `detail` gives the byte count, the limit and that
+            arithmetic.
+
+
+            **It is a value this project has itself published** as
+            production configuration, so it is known to everyone who can read
+            the repository. Today that is the single literal
+            `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
+            seeded administrator's password.
+
+
+            **The reset token is still usable.** This is checked before the
+            reset row is consumed, so the caller retries on the same link with
+            a different password — unlike the `400` above, which means the link
+            itself is spent.
+
+
+            **This is not a password-strength rule and does not grow into
+            one.** It holds only values *we* published, under their own
+            variable's name; a weak password this project never printed is
+            accepted exactly as before. Body is a `ProblemDetail` — branch on
+            the status, not on the wording of `detail`.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -1285,6 +1452,59 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
 
   /workspaces/{workspaceId}/invites:
+    get:
+      tags: [Workspaces]
+      summary: List the workspace's unaccepted invitations
+      description: |
+        Every invitation this workspace has issued and not had accepted — the
+        administrator's counterpart to `GET /invites`, which is the *invitee's*
+        view of their own. Requires `workspace.member.manage`, the same
+        permission that sends one and withdraws one.
+
+
+        A JSON **array**, newest first (`createdAt` descending), with no
+        envelope and no pagination — the same shape as
+        `GET /workspaces/{workspaceId}/members`, which is unbounded over the
+        same population.
+
+
+        **Expired invitations are in the list, carrying `status: "EXPIRED"`,
+        and filtering them out client-side is a mistake.** The list is the
+        complete set of rows that can still block a re-invitation, still be
+        cleaned up, or still be pointed at by a refusal — nothing in this
+        product ever sweeps an expired invitation, so a row hidden here is one
+        no administrator can clear and one no future refusal can explain. That
+        is a property of the list rather than a fact about expiry: whatever
+        predicate is added to the invitations table next, what this endpoint
+        returns is everything an administrator can still act on.
+
+
+        **Accepted invitations are not in it, at all.** They are history rather
+        than a standing grant — the membership row is the live fact and the
+        person appears in `GET /workspaces/{workspaceId}/members` — and a
+        withdraw control offered beside something withdrawal cannot affect
+        would be a lie. Do not expect to find an invitation here after the
+        `DELETE` for it answers `409`.
+
+
+        A row whose stored role cannot be described answers `role: null`
+        **and** `roleId: null` together, and the rest of the list is
+        unaffected: one corrupt row must not empty an administration screen,
+        and emitting the id of a role whose key was withheld would hand the
+        name back by proxy.
+      operationId: listWorkspaceInvites
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK — the unaccepted invitations, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/WorkspaceInviteResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [Workspaces]
       summary: Invite a member by email
@@ -1303,6 +1523,105 @@ paths:
         roles. The legacy `role` **key** still works and is now deprecated;
         **exactly one of the two must be present**, and neither or both is a
         `422`, as is a role reference this instance cannot assign.
+
+
+        **The invited address must have an ASCII local part — a `400`, and a
+        delivery rule rather than a style rule.** The invitation is stored
+        under, and *mailed to*, the address case-folded (`Locale.ROOT`
+        lower-case), and the recipient ceilings derive their key from that same
+        value, so the address that is bound is the address that is written to.
+        That fold is also what makes a non-ASCII local part dangerous:
+        lower-casing collapses U+212A KELVIN SIGN onto a plain `k`, so such an
+        address would deliver a workspace name and a *live join token* to a
+        different real person — the one who owns the ASCII spelling, and whose
+        account address therefore matches the folded invitation exactly, so
+        they could accept it. Refusing at the boundary takes away nothing that
+        was ever deliverable: there is no SMTPUTF8 path here, so the address
+        could not have been sent as typed.
+
+
+        **Non-ASCII is refused *before* the `@` and accepted *after* it, and
+        the halves differ because the transformations do.** Folding a local
+        part changes *which mailbox* receives the message. The only thing that
+        happens to an internationalised domain is punycode, and only inside the
+        throttle key: the `xn--` form and the Unicode spelling are one domain
+        to a resolver, so that is a normalisation onto the same host rather
+        than a fold onto somebody else's mailbox, and the message itself is
+        addressed to the domain as sent. The check is anchored on the **last**
+        `@`, so a quoted local part containing one of its own
+        (`"a@b"@example.com`, which the format rule accepts) still passes. The
+        refusal is an ordinary validation `400` keyed `email`, answered before
+        anything else the endpoint does — it spends no invitation allowance and
+        does not depend on rate limiting being enabled.
+
+
+        **One standing invitation per address per workspace — a second is a
+        `409` carrying `errorType: "DUPLICATE_INVITE"`.** While this workspace
+        holds an *unaccepted* invitation to the same address (compared
+        case-insensitively), inviting it again is refused rather than
+        replacing, re-sending or extending the standing one: withdrawing a
+        grant is a security-relevant act with an endpoint, an audit line and a
+        confirmation of its own, and `invite` does not perform it silently
+        under another verb. To change the role or send a fresh link, withdraw
+        the standing invitation and invite again — two calls, against a row
+        that is listed on the screen the form sits on.
+
+
+        **An expired invitation still blocks, and only a withdrawal clears
+        it.** Nothing in this product sweeps invitations, and the uniqueness
+        rule cannot exclude expired rows even in principle — a database index
+        can only enforce a condition that does not change with the clock, and
+        "not yet expired" does. So a lapsed row keeps the address reserved
+        until somebody withdraws it
+        (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`, which accepts
+        expired rows and needs the permission the refused caller just proved),
+        and `GET /workspaces/{workspaceId}/invites` lists it carrying
+        `status: "EXPIRED"` for exactly that reason: **the rows that can block
+        an invitation and the rows an administrator can see are one set.** This
+        is the rule labels, components, versions and sprints already follow — a
+        dead row keeps its slot until somebody clears it, and the refusal's job
+        is to say who clears it and where.
+
+
+        **Two refusals now share this `409`, and `errorType` is what tells them
+        apart — not the status, and never the wording.** A duplicate carries
+        `errorType: "DUPLICATE_INVITE"`, in one of two wordings chosen by
+        whether the blocking invitation has lapsed. The older refusal — the
+        invitee is **already a member** — carries no `errorType` and **wins
+        when both apply**: a person can be both a member and the addressee of a
+        leftover unaccepted row, and being in the workspace is the more useful
+        answer. Per the API-wide rule, read an absent `errorType` as "not this
+        refusal" rather than as an unrecognised one.
+
+
+        **A duplicate is refused *above* the ceilings, so it spends no
+        invitation allowance.** Retrying one costs neither the caller's hourly
+        nor their daily budget and does not touch the recipient's cooldown,
+        exactly as a `400`, a `403` or a `422` here does not. See the `429`
+        response for the whole order.
+
+
+        **Uniqueness and the ceilings normalise the address differently, on
+        purpose, and the difference is visible from the client.** Uniqueness is
+        about the **offer**, which is redeemed by an exact match against the
+        account that accepts it — so it compares the address as written, and an
+        extra match there would refuse an invitation to a genuinely different
+        person. A ceiling is about the **delivery**, so it counts one
+        destination inbox however the address is spelled, and an extra match
+        there merely refuses sooner. Each folds as far as its own harm points.
+        Hence `victim@x.com` and `victim+a@x.com` are two invitations and one
+        inbox: the second is never refused as a duplicate and may well be
+        refused as a `429`.
+
+
+        **Throttled — and this `429` is spent after the `404`.** Past one of the
+        invitation ceilings (a per-(sender, address) cooldown, a per-address
+        daily cap, and a per-sender hourly/daily volume budget) the answer is
+        `429` with `Retry-After`, and nothing is sent or written when it
+        refuses. Unlike the report and search budgets, the ceilings are spent
+        **after** the workspace has been resolved, so a workspace the caller is
+        not a member of answers `404` even when the caller is over every
+        ceiling. See the `429` response below.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -1317,14 +1636,94 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '409':
-          description: User is already a member
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '409': { $ref: '#/components/responses/InviteConflict' }
         '422': { $ref: '#/components/responses/UnknownRole' }
+        '429': { $ref: '#/components/responses/InviteThrottled' }
+
+  /workspaces/{workspaceId}/invites/{inviteId}:
+    delete:
+      tags: [Workspaces]
+      summary: Withdraw an invitation
+      description: |
+        Withdraws an invitation this workspace issued: the row is **deleted**,
+        so the emailed link and `POST /invites/{id}/accept` both answer `404`
+        immediately afterwards and the invitee's own `GET /invites` stops
+        listing it. `204`, with no body.
+
+
+        Requires `workspace.member.manage` — and deliberately **not** the grant
+        ceiling that `POST /workspaces/{workspaceId}/invites` and
+        `PATCH /workspaces/{workspaceId}/members/{userId}` apply. A ceiling
+        stops somebody handing out authority they do not hold; a withdrawal is
+        subtraction and hands out nothing, so anyone who may administer
+        membership may withdraw any invitation here, including one they did not
+        send and one carrying a role wider than their own.
+
+
+        **An expired invitation is withdrawable too** (`204`). The list offers
+        the control on every row it shows, so it works on every row it shows.
+
+
+        **Withdrawal is how an address is freed for a fresh invitation, and
+        that is the load-bearing half of this operation rather than a side
+        effect.** A workspace holds at most one unaccepted invitation per
+        address, and an unaccepted one blocks a new one **even after it has
+        expired**, so this `DELETE` is the only way to re-offer access at a
+        different role or with a fresh link —
+        `POST /workspaces/{workspaceId}/invites` sends the reader of its
+        `DUPLICATE_INVITE` refusal here by name. Two obligations follow, and
+        they are why the paragraph above and the list's treatment of expired
+        rows are not details: this operation must keep working on expired
+        invitations, and the list must keep showing them.
+
+
+        **A `404` here means the invitation is already gone, and a client
+        should render it as success.** Because withdrawal deletes, "already
+        withdrawn" is physically identical to "never existed" and to "belongs
+        to another workspace", so all three answer `404` — as do an unknown
+        workspace and a caller who is not a member. The caller's goal is
+        already true, and nothing was left half-done. **Branch on the status,
+        never on the message:** the `detail` on this `404` is deliberately the
+        same string as the workspace-level one, so no wording distinguishes
+        "this invitation is gone" from "this workspace is not yours", and none
+        ever will.
+
+
+        **The `409` is the opposite and must not be swallowed with it** — the
+        invitee accepted the invitation in the meantime, the row is really
+        there, and withdrawing it would change nothing. It is the one refusal
+        on this operation that names a remedy, so it carries
+        `errorType: "INVITE_ALREADY_ACCEPTED"` and a `detail` that names the
+        new member and sends the reader to the People screen — a remedy needing
+        exactly the permission they just proved. Render `detail` verbatim and
+        match on `errorType`; the sentence is prose and may be reworded.
+
+
+        **Withdrawing frees nothing measured over time.** The invitation
+        ceilings documented under `POST /workspaces/{workspaceId}/invites` are
+        keyed on a destination inbox, on a sender, or on both, and they live
+        independently of the invitation row, so a withdrawal touches none of
+        them: `invite → withdraw → invite` is refused with `429` exactly as
+        `invite → invite` would be. The rule behind that, which holds for any
+        revocation this API grows: a revocation frees only a resource whose
+        count it actually reduces — outstanding rows, a uniqueness slot, a
+        stock cap — never one measured over time. Deleting the record of an
+        offer does not delete the record of a delivery. What a withdrawal
+        *does* free is exactly such a count — the uniqueness slot above — so
+        the retry meets a ceiling rather than a `DUPLICATE_INVITE`.
+      operationId: revokeWorkspaceInvite
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+        - $ref: '#/components/parameters/inviteId'
+      responses:
+        '204':
+          description: Withdrawn — no body. Also the answer for an expired invitation
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/InviteAlreadyAccepted' }
 
   /workspaces/{workspaceId}/roles:
     get:
@@ -1744,13 +2143,26 @@ paths:
         - name: token
           in: query
           required: true
-          schema: { type: string }
+          schema: { type: string, maxLength: 64 }
+          description: >-
+            The invite token from the emailed link. Bounded from its generator
+            (43 Base64url characters), like every token this API accepts —
+            over-long is a `400`.
       responses:
         '200':
           description: Joined the workspace
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '400':
+          description: >-
+            `token` is longer than its bound — a `ValidationProblemDetail` with
+            `token` in the `errors` map, exactly as a body field's bound is
+            reported. A *missing* `token` reached no constraint and is a plain
+            problem body with no map.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Already a member
@@ -1766,6 +2178,12 @@ paths:
         Pending, non-expired workspace invites sent to the signed-in user's
         email — the onboarding "join a team" surface. Accept/decline by id
         without needing the emailed token link.
+
+
+        An invitation can also leave this list without the caller doing
+        anything: an administrator of the workspace that sent it may withdraw
+        it (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`), and it is
+        then simply gone on the next fetch, with no notification.
       operationId: listMyInvites
       responses:
         '200':
@@ -1785,6 +2203,12 @@ paths:
         The role the invite carries is re-validated before it is written onto
         the new membership; an invite whose stored role is no longer usable in
         that workspace is refused with the same `404`.
+
+
+        The same `404` also covers an invitation an administrator of that
+        workspace **withdrew** in the meantime — a withdrawal deletes the row,
+        so it is indistinguishable from one that never existed. Re-read
+        `GET /invites` rather than treating it as a transient failure.
       operationId: acceptInviteById
       parameters: [ { $ref: '#/components/parameters/adminId' } ]
       responses:
@@ -2530,7 +2954,15 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422':
-          description: Select field without options / option missing id or label
+          description: >-
+            `config` cannot be stored as sent. A select field with no options,
+            or an option missing its `id` or `label`; a `config` whose compact
+            serialization exceeds 20 000 characters (checked for **every** field
+            type, not only selects); more than 100 options; or an option whose
+            `id` or `label` exceeds 100 characters. `detail` says which, and
+            names the measured size against its limit where there is one. The
+            same refusals apply on `PATCH /admin/fields/{id}` and on the
+            delegated workspace- and project-scoped mirrors.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -2729,6 +3161,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/AdminUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [Admin]
@@ -2739,6 +3172,11 @@ paths:
         valid 7 days) the admin hands over so the person can set a password.
         On DC this is the primary way to onboard users — public
         self-registration is disabled there.
+
+
+        The address is matched case-insensitively, exactly as on
+        `POST /auth/register`: `Ivan@example.com` and `ivan@example.com`
+        cannot both be accounts, and the second is a `409`.
       operationId: adminCreateUser
       requestBody:
         required: true
@@ -3172,7 +3610,11 @@ paths:
           description: >-
             Unknown `labelMatch` value, more than
             `app.classification.max-labels-per-issue` distinct `labelId` values,
-            or `sprintId` and `noSprint` sent together.
+            or `sprintId` and `noSprint` sent together. Those three are service
+            rules and carry a plain problem body with **no** `errors` map. A
+            parameter that breaks a bound declared on it — `page` above its
+            maximum — is the other kind: a `ValidationProblemDetail` naming the
+            parameter, refused before the handler runs.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -3458,6 +3900,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/IssueHistoryResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments:
@@ -3520,6 +3963,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/CommentResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments/{commentId}:
@@ -4599,6 +5043,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/SprintResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [Sprints]
@@ -6856,12 +7301,21 @@ paths:
             described under that
             response: a name that resolves to nothing reads differently from a
             name that resolves to a field with no value picklist.
-          schema: { type: string }
+
+
+            Capped at **100 characters**, which is twice the widest name that
+            could ever resolve (a custom field's `key` is at most 50). Longer is
+            a `400` refused while the request is bound, before the workspace is
+            resolved — the bound refuses the absurd, not the mistaken, so an
+            unknown name that fits still gets the `422` below with its "did you
+            mean …?" hint.
+          schema: { type: string, maxLength: 100 }
         - name: q
           in: query
           required: false
           description: >-
-            Text to match (max 100 chars). `%` and `_` are treated literally.
+            Text to match (max 100 chars — longer is a `400`). `%` and `_` are
+            treated literally.
           schema: { type: string, maxLength: 100 }
       responses:
         '200':
@@ -6869,6 +7323,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SuggestResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
@@ -7230,6 +7685,17 @@ components:
         that holds no membership in this workspace is a `404` about the
         membership — it reveals nothing about whether the account exists.
       schema: { type: string, format: uuid }
+    inviteId:
+      name: inviteId
+      in: path
+      required: true
+      description: >-
+        The invitation to withdraw. An id that belongs to another workspace,
+        one that was never issued and one that has already been withdrawn are
+        the same `404` — the id is not an existence oracle, and a withdrawal
+        deletes, so "already withdrawn" has nothing left to tell apart from
+        "never existed".
+      schema: { type: string, format: uuid }
     issueNumber:
       name: number
       in: path
@@ -7291,8 +7757,15 @@ components:
     pageParam:
       name: page
       in: query
-      description: Zero-based page index (default 0)
-      schema: { type: integer, minimum: 0, default: 0 }
+      description: >-
+        Zero-based page index (default 0). Above `21474836` the request is
+        **refused, not clamped**: the offset has to fit a 32-bit integer at the
+        maximum page size, and `21474836 × 100` is the largest product that
+        does. The refusal is a field-anchored `400` with `page` in the `errors`
+        map, raised while the request is bound — before any query runs and
+        before membership is resolved, so it is identical for a member and a
+        stranger. A negative index is coerced to 0 rather than refused.
+      schema: { type: integer, minimum: 0, maximum: 21474836, default: 0 }
     sizeParam:
       name: size
       in: query
@@ -7505,9 +7978,11 @@ components:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     ValidationError:
       description: >-
-        Failed validation — `detail` names the offending fields and the `errors`
-        map repeats them keyed by JSON field path (capped at 10 entries, English
-        messages). See `ValidationProblemDetail`.
+        A declared constraint refused the request — `detail` names the offending
+        items and the `errors` map repeats them keyed by the name of each
+        refused item, whether that item is a body field (a JSON path) or a
+        request parameter (its own name). Capped at 10 entries, English
+        messages. See `ValidationProblemDetail`.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
@@ -8100,9 +8575,12 @@ components:
         whatever an operator has configured, so lowering *either* property lowers
         the panel. **A panel refresh therefore competes with report fetches *and*
         with searches.** The per-principal budgets — this one and the search
-        budget — are therefore **the one place in this API where `429` precedes
-        `404`**: an over-budget caller is refused even for a project they cannot
-        see. Keying
+        budget — are therefore **the only `429`s in this API spent before the
+        resource is resolved**: an over-budget caller is refused even for a
+        project they cannot see. The invitation ceilings on
+        `POST …/workspaces/{workspaceId}/invites` are the deliberate
+        counter-case — spent **after** the workspace is resolved, so that
+        refusal can never precede a `404` (see `InviteThrottled`). Keying
         on the caller rather than the project is what keeps that refusal free of
         tenancy information — and it means the budget bounds one **user**, not
         one workspace: aggregate report load still scales with the number of
@@ -8206,6 +8684,173 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    InviteThrottled:
+      description: >-
+        Past one of the invitation ceilings on
+        `POST /workspaces/{workspaceId}/invites`: `429` with `Retry-After`
+        (seconds). A retryable throttle, not a fault — **no mail was sent and no
+        invitation row was written**, so the identical request is safe to repeat
+        once the wait has passed, and invitations already sent are unaffected.
+
+
+        **This `429` is spent AFTER tenancy and authorization, the deliberate
+        opposite of the report and search budgets.** The order is: workspace
+        resolved (`404` for an unknown workspace and for a non-member alike) →
+        `workspace.member.manage` (`403`) → the role reference and the grant
+        ceiling (`422` / `403`) → already a member (`409`) → a standing
+        unaccepted invitation to the same address (`409 DUPLICATE_INVITE`) →
+        these ceilings (`429`). **A workspace the caller cannot see answers `404` even when the
+        caller is over every ceiling**, and a `429` here is only ever seen by a
+        proven member who may invite. Do not carry the reports/search sentence
+        ("the budget is spent before the workspace is resolved") across to this
+        endpoint: a recipient-keyed refusal spent that early would answer a
+        cross-tenant question to a non-member. One corollary worth relying on:
+        no refusal above spends any allowance.
+
+
+        **Several ceilings answer with this one status and are not
+        distinguishable by it**: a cooldown before the same sender may invite the
+        same address again — across every workspace on the instance
+        (`app.invites.recipient-cooldown-minutes`, 60 minutes by default); a cap
+        on invitations one address may receive per day from the whole instance,
+        whoever sends them (`app.invites.max-per-recipient-per-day`, 5); and a
+        per-sender volume budget over two independent windows
+        (`app.invites.max-per-sender-per-hour` and
+        `app.invites.max-per-sender-per-day`, 20 and 100). The `detail` wording
+        differs per ceiling — it names the address for the cooldown and stays
+        terse for the per-address cap, which would otherwise describe another
+        tenant's activity — so **branch on the status and `Retry-After`, never on
+        the text**. None of them carries an `errorType`.
+
+
+        **Withdrawing an invitation resets none of this**
+        (`DELETE /workspaces/{workspaceId}/invites/{inviteId}`). Every ceiling
+        above is keyed on a sender, on a destination inbox, or on both, and each is counted
+        independently of the invitation row, so deleting the row frees nothing:
+        `invite → withdraw → invite` is refused exactly as `invite → invite`
+        would be. The general rule, which holds for any revocation this API
+        grows: a revocation frees only a resource whose count it reduces —
+        outstanding rows, a uniqueness slot, a stock cap — never one measured
+        over time. Deleting the record of an offer does not delete the record
+        of a delivery. What a withdrawal *does* free is a count it actually
+        reduces — the uniqueness slot behind `DUPLICATE_INVITE` — which is why
+        the retry reaches these ceilings at all instead of being refused one
+        step earlier as a duplicate.
+
+
+        `Retry-After` is a real wait, and on one ceiling it is deliberately
+        coarse. For the cooldown and the per-sender budget it is the exact
+        seconds until the caller's own slot frees; for the per-address daily cap
+        it is the moment the oldest send in that window ages out **rounded up to
+        the next 15-minute boundary** — an absolute deadline rather than a
+        rounded-off countdown, so `now + Retry-After` names the same instant
+        however often it is asked and only that 15-minute bucket is disclosed.
+        That deadline comes from a send the caller may not be able to see, which
+        is why it is coarsened at all; it removes the cheap single-request
+        version of that question rather than putting the instant out of reach,
+        since a caller who keeps retrying until the refusal lifts learns it
+        anyway. It never under-states the wait, on a daily ceiling it can be
+        hours, and it is never `0`. The two recipient-keyed
+        ceilings count in PostgreSQL, so they are exact and instance-wide and are
+        unaffected by a restart, a redeploy, which node served the request, or
+        the invitee declining; the per-sender budget counts in memory per app
+        node like every other budget here, so a multi-node deployment allows up
+        to one budget per node. Counting is per accepted attempt rather than per
+        delivered message, so an address that bounces still consumes a slot.
+        `app.rate-limit.enabled=false` disables all of them, and the endpoint
+        then never answers `429` at all.
+
+
+        **The two recipient-keyed ceilings count the destination inbox, never
+        the spelling of the address.** Spellings a mail provider delivers to one
+        mailbox are one key, so re-spelling an address buys neither a fresh
+        cooldown nor a fresh daily slot, and a caller can meet a `429` that the
+        address as typed would not predict. Which spellings a provider folds
+        together is a property of the destination and is refined over time, so
+        rely on "one inbox, one slot" rather than on a list of transformations —
+        with one boundary that is not going to move: **look-alike characters are
+        never folded**. What gets folded is a published fact about how a provider
+        delivers mail, whereas whether two characters look alike to a human is a
+        guess about who somebody is, and two addresses differing by one Cyrillic
+        letter are two people.
+        Mail is delivered to the address as submitted apart from **case** — it
+        is lower-cased first, and the invitation records that lower-cased
+        spelling — but nothing beyond that: the inbox folding above is a
+        throttle key and never a recipient. That one case fold is why the
+        endpoint refuses a non-ASCII local part with a `400`; the operation
+        description carries the argument.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+    InviteConflict:
+      description: >-
+        `POST /workspaces/{workspaceId}/invites` refused by the state of the
+        workspace rather than by the caller's permissions. **Two refusals share
+        this status and are told apart by `errorType`** — never by the status
+        and never by the wording of `detail`.
+
+
+        **The invitee is already a member** — no `errorType` at all, and this
+        one **wins when both apply**: a person can be both a member and the
+        addressee of a leftover unaccepted invitation, and being in the
+        workspace is the more useful answer to the more important question.
+
+
+        **A standing unaccepted invitation to the same address** —
+        `errorType: "DUPLICATE_INVITE"`. One offer per address per workspace;
+        the standing one is left exactly as it is, neither replaced nor
+        re-sent nor extended, and **an expired invitation counts** (the
+        operation description says why it must). The remedy `detail` names is
+        `DELETE /workspaces/{workspaceId}/invites/{inviteId}`, which needs the
+        permission the caller has already proved.
+
+
+        Both are `409` rather than `403` for the usual reason: the permissions
+        are fine, a state invariant is what refuses, and the identical request
+        succeeds once the state is cleared — by withdrawing the standing
+        invitation, or by removing the member. Neither carries `Retry-After`,
+        and **neither spends any invitation allowance**: both are checked above
+        the ceilings, so retrying either costs nothing (see `InviteThrottled`
+        for the full order).
+      content:
+        application/problem+json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/DuplicateInviteProblemDetail'
+
+    InviteAlreadyAccepted:
+      description: >-
+        `DELETE /workspaces/{workspaceId}/invites/{inviteId}` on an invitation
+        the invitee has **accepted**. Reachable only as a race — they accepted
+        between the list being rendered and the button being pressed — and
+        nothing is written.
+
+
+        **This is the one refusal on that operation that names a remedy**, and
+        it is why the accepted state does not share the `404` the withdrawn one
+        gets. The invitation is really there, it is in this workspace, and the
+        problem it describes ("that person now has access") is exactly the one
+        withdrawal was aimed at — so `detail` names the new member and points
+        at the People screen, i.e. removing them, which needs
+        `workspace.member.manage`: the permission the caller proved to reach
+        this at all. That door has guards of its own (the grant ceiling, the
+        last-owner invariant, stranded projects), each with its own actionable
+        refusal; this `409` promises a door, not that nothing lies behind it.
+
+
+        A client that renders the `404` from this operation as success — as it
+        should — **must not** extend that to this status. `errorType` is how
+        the two are told apart; the sentence is prose and may be reworded.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/InviteAlreadyAcceptedProblemDetail' }
   headers:
     ReportCsvDisposition:
       description: >-
@@ -8242,13 +8887,24 @@ components:
 
     ValidationProblemDetail:
       description: >-
-        The `400` body of a request that fails bean validation. `detail` names
-        every offending field and `errors` carries the same failures keyed by
-        JSON field path — both are rendered from one sorted list capped at 10
-        entries, so the two halves never disagree; an overflow is appended to
-        `detail` as `"; … and N more"`. Constraint messages are always English
-        regardless of `Accept-Language`, and are human-readable text: match on
-        the `errors` keys instead.
+        The `400` body of **every refusal raised by a declared constraint** —
+        one shape whichever door the constraint is written on: a `@Valid`
+        request body, or a bound written on a query parameter, path variable,
+        header or cookie. `detail` names every offending item and `errors`
+        carries the same failures keyed by the name of the refused item — both
+        are rendered from one sorted list capped at 10 entries, so the two
+        halves never disagree; an overflow is appended to `detail` as
+        `"; … and N more"`. Constraint messages are always English regardless of
+        `Accept-Language`, and are human-readable text: match on the `errors`
+        keys instead.
+
+
+        Two `400`s deliberately fall outside this and carry **no** `errors` map,
+        so read it defensively: a body that could not be parsed or bound at all
+        (nothing was ever bound, so nothing can be named), and a rule enforced
+        in a service rather than declared on the input — a cross-field
+        agreement check, a range a handler checks for itself. Those explain
+        themselves in `detail` alone.
       allOf:
         - $ref: '#/components/schemas/ProblemDetail'
         - type: object
@@ -8264,11 +8920,14 @@ components:
             errors:
               type: object
               description: >-
-                Failed fields keyed by JSON path, nested paths included
-                (`delivery.preset`, `items[3].fieldId`). A cross-field
-                (class-level) rule has no field of its own and lands under the
-                empty-string key `""`; its message is rendered bare in `detail`.
-                One message per field — the first failed constraint wins.
+                Failed items keyed by their own name: a body field by its JSON
+                path, nested paths included (`delivery.preset`,
+                `items[3].fieldId`); a request parameter by the name it is sent
+                under (e.g. `page`, `q`, `field`, `token`). A rule that belongs to no
+                single item — a class-level body constraint, or one written
+                across two parameters — lands under the empty-string key `""`
+                and its message is rendered bare in `detail`. One message per
+                key — the first failed constraint wins.
               additionalProperties: { type: string }
               example:
                 key: Key must be uppercase letters and digits only
@@ -8363,6 +9022,39 @@ components:
               type: string
               enum: [REFERENCE_CONSTRAINT_VIOLATION]
 
+    ValueTooLongProblemDetail:
+      description: >-
+        The `400` body of a write the database refused because a string was
+        longer than the column that had to hold it. It belongs to the API rather
+        than to a list of paths — it is the backstop that keeps a missing length
+        bound from surfacing as a `500` on any write, including one added later
+        — so it is defined here and attached to no operation.
+
+
+        The refusal a caller normally meets is the bound at the door, which
+        knows which field is at fault and names it. This one knows neither the
+        field nor the column, and says so rather than guessing.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 400 }
+            detail:
+              type: string
+              description: >-
+                Names no field, and carries nothing from the database — not the
+                width, not the column, not the statement. That is an honest
+                omission rather than a terse one: the request body is gone by
+                the time this is raised and PostgreSQL reported only how wide
+                the column was. There is deliberately **no `errors` map**, which
+                is how this `400` is told from a field-anchored validation
+                failure. The column and table go to the server log instead,
+                which is the operator's copy of this refusal.
+              example: Some of the text you submitted is too long.
+            errorType:
+              type: string
+              enum: [VALUE_TOO_LONG]
+
     HqlProblemDetail:
       description: >-
         The `422` body for an invalid HQL query. Beyond the standard problem
@@ -8399,6 +9091,75 @@ components:
                 case where the winner could not be re-read (e.g. it was deleted
                 between the failed insert and the lookup).
 
+    DuplicateInviteProblemDetail:
+      description: >-
+        The `409` body of an invitation refused because this workspace already
+        holds an unaccepted invitation to the same address. See the
+        `InviteConflict` response for the other `409` the same operation
+        answers and for why that one wins when both apply.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [DUPLICATE_INVITE]
+              description: >-
+                Always present on this body, and the supported way to tell it
+                from the already-a-member `409` on the same operation, which
+                carries none. Per the API-wide rule, read an **absent**
+                `errorType` as "not this refusal" rather than as an
+                unrecognised one.
+              example: DUPLICATE_INVITE
+            detail:
+              type: string
+              description: >-
+                A sentence to render verbatim: it names the address just
+                submitted and points at the control that frees the slot —
+                Workspace settings → People, i.e.
+                `DELETE /workspaces/{workspaceId}/invites/{inviteId}`. There
+                are **two wordings, one `errorType`**, chosen by whether the
+                blocking invitation has lapsed; the lapsed one says it is still
+                on file rather than still in flight, since an expired
+                invitation blocks just the same. Prose for a human — do not
+                parse it and do not match on it. The blocking row's role is
+                deliberately not carried: it can be `null` on a row whose role
+                cannot be described, and the list beside the form already
+                shows it.
+
+    InviteAlreadyAcceptedProblemDetail:
+      description: >-
+        The `409` body of a withdrawal refused because the invitation was
+        already accepted. See the `InviteAlreadyAccepted` response for when it
+        is reachable and why this state does not answer the `404` an
+        already-withdrawn invitation gets.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [INVITE_ALREADY_ACCEPTED]
+              description: >-
+                Always present on this body, and the supported way to tell it
+                from the `404` the same operation answers for an invitation
+                that is simply gone — the one a client renders as success.
+                Per the API-wide rule, read an **absent** `errorType` as "not
+                this refusal" rather than as an unrecognised one.
+              example: INVITE_ALREADY_ACCEPTED
+            detail:
+              type: string
+              description: >-
+                A sentence to render verbatim: it names the person who is now a
+                member, says that withdrawing would change nothing, and points
+                at the People screen for removing them. Prose for a human — do
+                not parse it and do not match on it. The name falls back to the
+                invited address, which the caller submitted and can read on the
+                very row they clicked.
+              example: >-
+                That invitation was accepted — Olga Ivanova is now a member of
+                this workspace. Withdrawing it would change nothing. Remove
+                them from People if that was not intended.
     StrandedProjectsProblemDetail:
       description: >-
         The `409` body of a change refused because it would leave one or more
@@ -8637,7 +9398,19 @@ components:
       required: [email, password, displayName]
       properties:
         email: { type: string, format: email, maxLength: 255 }
-        password: { type: string, minLength: 8, maxLength: 100 }
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          description: >-
+            Bounded in two units, and for a non-Latin passphrase the second one
+            binds first. Above 72 **characters** the answer is a field-anchored
+            `400`; a value that fits in 72 characters but costs more than 72
+            **UTF-8 bytes** is a `422` (see that response). The password hash
+            this application writes is BCrypt, which hashes at most 72 bytes,
+            and a character count cannot see that cost: Latin letters cost 1
+            byte each, accented Latin, Greek and Cyrillic 2, most other scripts
+            3, and emoji 4.
         displayName: { type: string, minLength: 2, maxLength: 100 }
         termsAccepted:
           type: boolean
@@ -8647,14 +9420,14 @@ components:
       type: object
       required: [token]
       properties:
-        token: { type: string, description: One-time token from the verification email }
+        token: { type: string, maxLength: 64, description: 'One-time token from the verification email. Bounded from the generator that makes it — 43 Base64url characters — not from the column behind it, which stores a fixed-width hash and so can never be the thing that refuses' }
 
     LoginRequest:
       type: object
       required: [email, password]
       properties:
         email: { type: string, format: email, maxLength: 255 }
-        password: { type: string }
+        password: { type: string, maxLength: 1024, description: 'Deliberately generous, and deliberately carrying no minimum: this door verifies a password rather than storing one, so a length rule here would answer 400 where the endpoint must answer 401 and would tell an attacker which submissions were too short to be anybody''s password. The bound''s whole job is that the field is finite' }
 
     AuthResponse:
       type: object
@@ -9257,7 +10030,7 @@ components:
       required: [name, statusIds]
       properties:
         name: { type: string, maxLength: 100 }
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         statusIds:
           type: array
           description: Board-column order
@@ -9389,16 +10162,29 @@ components:
     FieldConfig:
       type: object
       nullable: true
-      description: '`options` for selects; `min`/`max` for numbers'
+      description: >-
+        `options` for selects; `min`/`max` for numbers.
+
+
+        **The document is bounded, and so are the options inside it** — both as
+        `422`s from the upsert, whatever the field's type. Serialized compactly
+        the whole `config` may be at most **20 000 characters**; a select may
+        carry at most **100 options**; and an option's `id` and `label` may each
+        be at most **100 characters**. The document ceiling is the binding one
+        at the extreme: 100 options each carrying a 100-character `id` *and*
+        `label` is about 23 KB and is refused before the option checks run.
+        This config is re-served to every project member on every board load,
+        which is what the ceilings protect.
       properties:
         options:
           type: array
+          maxItems: 100
           items:
             type: object
             required: [id, label]
             properties:
-              id: { type: string, example: critical, description: Referenced by stored values — stable once used }
-              label: { type: string, example: Critical }
+              id: { type: string, maxLength: 100, example: critical, description: Referenced by stored values — stable once used }
+              label: { type: string, maxLength: 100, example: Critical }
               color: { type: string, nullable: true, example: '#B91C1C' }
         min: { type: number, nullable: true }
         max: { type: number, nullable: true }
@@ -9470,7 +10256,15 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        slug: { type: string, example: acme-inc }
+        slug:
+          type: string
+          maxLength: 100
+          example: acme-inc
+          description: >-
+            Derived server-side from the name on create, never accepted from a
+            client and never regenerated on rename. It is **clipped to 100
+            characters**, so a long name yields a short slug rather than a
+            failure; the full name is always beside it in `name`.
         name: { type: string, example: Acme Inc }
         projectAccessMode:
           allOf:
@@ -9852,6 +10646,73 @@ components:
             entry with no role rather than guessing one.
         joinedAt: { type: string, format: date-time }
 
+    WorkspaceInviteResponse:
+      type: object
+      description: >-
+        One unaccepted invitation of a workspace, as its administrators see it
+        (`GET /workspaces/{workspaceId}/invites`).
+
+
+        **Deliberately not the same shape as `PendingInvite`**, which is the
+        *invitee's* view of their own invitations across every workspace: that
+        one carries a `workspaceName`, no address and no inviter id, because
+        its audience is somebody who is not yet a member of the workspace that
+        owns the row. Different audience, different disclosure — sharing one
+        shape would put a workspace's submitted addresses one field away from
+        the onboarding screen.
+      properties:
+        id: { type: string, format: uuid }
+        email:
+          type: string
+          format: email
+          description: >-
+            The invited address, as it is stored and as it was mailed —
+            lower-cased (`Locale.ROOT`) by `POST …/invites`, so it may differ
+            in case from what was typed.
+        roleId:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The invited role's **identity** — the id of a row in
+            `GET /workspaces/{workspaceId}/roles`. `null` exactly when `role`
+            is `null`, and never on its own: the two are withheld together, so
+            the id cannot hand back a name the server refused to give.
+        role:
+          allOf:
+            - $ref: '#/components/schemas/WorkspaceRole'
+          nullable: true
+          description: >-
+            The invited role's **key**. `null` means the server refused to
+            describe this row's role, which the list survives rather than
+            failing the whole screen over one row. Render such an entry with no
+            role rather than guessing one. An invitation can never carry the
+            built-in `OWNER`.
+        invitedById: { type: string, format: uuid }
+        invitedByName:
+          type: string
+          description: >-
+            The inviter's display name, rendered even if that account has since
+            left the workspace or been deactivated — historical attribution
+            stays, as it does on every other surface here.
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [PENDING, EXPIRED]
+          example: PENDING
+          description: >-
+            Whether this invitation can still be accepted. **Server-computed on
+            purpose**, though a client could compare `expiresAt` with its own
+            clock: expiry is decided by the server, and a browser whose clock is
+            skewed must not disagree with the endpoint that will accept or
+            refuse the acceptance.
+
+
+            **`EXPIRED` is a label, not a filter.** Such a row is listed and is
+            withdrawable (`204`) exactly like a `PENDING` one, because nothing
+            in this product ever removes it on its own. There is no `ACCEPTED`
+            value: an accepted invitation leaves this list entirely.
     InviteMemberRequest:
       type: object
       required: [email]
@@ -9860,7 +10721,21 @@ components:
         both are alike a `422`. See `roleId` for why both fields exist and why
         "both" is refused rather than resolved by precedence.
       properties:
-        email: { type: string, format: email, maxLength: 255 }
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          pattern: '^[\u0000-\u007F]*@[^@]*$'
+          description: >-
+            **The local part must be ASCII** — everything before the last `@`.
+            A non-ASCII character there is a `400`, because the invitation is
+            stored under, and *mailed to*, this address case-folded, and that
+            fold collapses U+212A KELVIN SIGN onto a plain `k`: the message
+            would go to whoever owns the ASCII spelling. **The domain half is
+            deliberately unrestricted** — an internationalised domain is only
+            ever carried to its punycode wire form, and only inside the
+            throttle key, which picks the same host rather than a different
+            mailbox. See the operation description.
         roleId:
           type: string
           format: uuid
@@ -9930,7 +10805,7 @@ components:
           minLength: 1
           maxLength: 10
           example: DEMO
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         delivery:
           allOf:
             - $ref: '#/components/schemas/DeliveryRequest'
@@ -10058,7 +10933,7 @@ components:
       description: Partial project update — omitted fields are left unchanged
       properties:
         name: { type: string, minLength: 2, maxLength: 255 }
-        description: { type: string }
+        description: { type: string, maxLength: 10000 }
         boardMode:
           allOf:
             - $ref: '#/components/schemas/BoardMode'
@@ -10469,7 +11344,7 @@ components:
       required: [title, typeId, statusId]
       properties:
         title: { type: string, maxLength: 500 }
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
         statusId: { type: string, format: uuid, description: Must belong to the project's workflow }
         priorityId: { type: string, format: uuid, nullable: true, description: Omitted = the project's default priority }
@@ -10573,7 +11448,7 @@ components:
       description: Partial update — omitted fields are left unchanged
       properties:
         title: { type: string, minLength: 1, maxLength: 500 }
-        description: { type: string }
+        description: { type: string, maxLength: 10000 }
         typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
         statusId: { type: string, format: uuid, description: Validated against workflow transition rules }
         priorityId: { type: string, format: uuid, description: Must be offered by the project's priority set }
@@ -10793,7 +11668,27 @@ components:
             visible issues, default sort. Over 2000 chars is rejected at binding
             (`400`).
           example: status = "In Progress" AND assignee = currentUser() ORDER BY priority DESC
-        page: { type: integer, minimum: 0, default: 0, description: 'Zero-based page index (null/negative → 0)' }
+        page:
+          type: integer
+          minimum: 0
+          maximum: 21474836
+          default: 0
+          description: >-
+            Zero-based page index (null/negative → 0). Above `21474836` the
+            request is **refused, not clamped** — the same ceiling the `page`
+            query parameter carries, for the same reason: the offset has to fit
+            a 32-bit integer at the maximum page size. The refusal is a
+            field-anchored `400` with `page` in the `errors` map, raised while
+            the body is bound, so **no query runs** — not even the count query
+            this endpoint would otherwise pay for first.
+
+
+            This endpoint computes its own offset, so it also carries a backstop
+            for the day the ceiling is loosened: an offset that still would not
+            fit a 32-bit integer answers the same `400` with
+            `detail: "Page index is too large"` and, being a service check
+            rather than a declared bound, **no** `errors` map. Unreachable while
+            the ceiling above stands.
         size: { type: integer, minimum: 1, maximum: 100, default: 50, description: 'Page size (null → 50, clamped 1..100)' }
 
     SearchResultRow:
@@ -11383,7 +12278,7 @@ components:
       type: object
       required: [body]
       properties:
-        body: { type: string, description: '`@DisplayName` mentions notify workspace members' }
+        body: { type: string, maxLength: 10000, description: '`@DisplayName` mentions notify workspace members' }
 
     CommentResponse:
       type: object

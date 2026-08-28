@@ -12,6 +12,8 @@ Self-hosted, zero-external-SaaS view of the running system: centralized logs (Lo
 
 **Highest-risk assumption (flagged):** a single small EC2 instance (t3.small, 2 GB) may not fit app+Postgres+Caddy **plus** ~600–800 MB of observability without OOM. Mitigation: the stack is opt-in/separable and every obs service gets a `mem_limit`; recommend validating on the real box and/or moving prod to t3.medium (4 GB) before enabling Phase 2+.
 
+> **Validated on the real box 2026-08-28 (HD-189) — and the risk turned out to point the other way.** All seven observability containers reported a non-zero `HostConfig.Memory` and lived inside it, totalling **466 MiB** of actual RSS against ~1 GB of declared ceilings. On the same box `app`, `postgres` and `caddy` each reported `HostConfig.Memory = 0` — **no limit at all** — so the *only* bounded part of the deployment was the part this assumption was worried about, and the app's JVM was sizing a 956 MB heap ceiling against host RAM. The mitigation ("every obs service gets a `mem_limit`") worked exactly as designed; what was missing was the same discipline on the services that carry the workload. Numbers: `docs/ops-prod-hardening.md` §5. The instance is still 2 GB and has still never been under load (HD-186), so this is a measurement at idle and not an all-clear.
+
 ## 2. Architecture
 - Public traffic: `Internet → Caddy :443 → app :8080` only.
 - Management/actuator on `app :9090` — internal docker network only, never via Caddy, never published.

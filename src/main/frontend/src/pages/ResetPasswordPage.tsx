@@ -1,12 +1,26 @@
 import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { apiResetPassword, ApiResponseError } from '../api'
+import { passwordLengthError } from '../lib/limits'
 import { Button, Input } from '../components/ui'
 
 /**
  * Sets a password from a one-time token. Serves both the password-reset email
  * link and admin-generated account setup links (both land on
  * /reset-password?token=). After success the user signs in normally.
+ *
+ * <p><strong>No `maxLength` on either password field</strong>, for the reason
+ * spelled out on `RegisterPage`: the server's bound is 72 UTF-8 bytes, which
+ * `maxLength` cannot count, and a browser silently truncates a *paste* to fit
+ * `maxLength` — inside a field that renders dots, so nothing tells the owner
+ * their password manager's value was clipped. {@link passwordLengthError}
+ * refuses in bytes instead, next to the field, and never shortens anything.
+ *
+ * <p><strong>The 400 rewrite below is keyed on which field the server named.</strong>
+ * A 400 here used to mean exactly one thing — a bad token — so it was rendered
+ * as "this link is invalid or has expired". Since HD-171 the same status also
+ * answers an over-long `newPassword`, and telling that user their link expired
+ * sends them to fetch a new one that will fail identically.
  */
 export default function ResetPasswordPage() {
   const navigate = useNavigate()
@@ -16,10 +30,13 @@ export default function ResetPasswordPage() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
+  const [passwordFieldError, setPasswordFieldError] = useState('')
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
 
   const mismatch = confirm.length > 0 && password !== confirm
+  const tooLong = passwordLengthError(password)
+  const passwordError = tooLong ?? passwordFieldError
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -28,16 +45,25 @@ export default function ResetPasswordPage() {
       return
     }
     setError('')
+    setPasswordFieldError('')
     setLoading(true)
     try {
       await apiResetPassword(token, password)
       setDone(true)
     } catch (err: unknown) {
-      setError(
-        err instanceof ApiResponseError && err.status === 400
-          ? 'This link is invalid or has expired. Ask your administrator for a new one.'
-          : err instanceof Error ? err.message : 'Could not set your password',
-      )
+      // The server names the field it refused. A 400 naming `newPassword` is a
+      // property of what was typed and belongs beside the input; a 400 that
+      // names nothing (or names `token`) is the expired/garbled link.
+      const named = err instanceof ApiResponseError ? err.errors?.newPassword : undefined
+      if (named) {
+        setPasswordFieldError(named)
+      } else {
+        setError(
+          err instanceof ApiResponseError && err.status === 400
+            ? 'This link is invalid or has expired. Ask your administrator for a new one.'
+            : err instanceof Error ? err.message : 'Could not set your password',
+        )
+      }
     } finally {
       setLoading(false)
     }
@@ -103,6 +129,7 @@ export default function ResetPasswordPage() {
           minLength={8}
           required
           autoFocus
+          error={passwordError}
         />
         <Input
           label="Confirm password"
@@ -119,7 +146,7 @@ export default function ResetPasswordPage() {
           type="submit"
           variant="primary"
           loading={loading}
-          disabled={!password || !confirm || mismatch}
+          disabled={!password || !confirm || mismatch || !!tooLong}
           className="w-full justify-center mt-1"
         >
           Set password

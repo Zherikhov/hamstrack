@@ -7,7 +7,7 @@ import WorkspacePeoplePage from './WorkspacePeoplePage'
 import { ApiResponseError } from '../../api'
 import { useAuthStore } from '../../auth'
 import { WORKSPACE_ADMIN_PERMISSIONS } from '../../test/permissions'
-import type { Role, User, WorkspaceMember } from '../../types'
+import type { Role, User, WorkspaceInvite, WorkspaceMember } from '../../types'
 
 /**
  * **HD-123 S6 — Workspace People, and the removal flow.**
@@ -73,8 +73,12 @@ const CORRUPT: WorkspaceMember = {
 let members: WorkspaceMember[] = [ME_MEMBER, MIA]
 let workspacePermissions: string[] = WORKSPACE_ADMIN_PERMISSIONS
 
+/** No pending invitations by default: this file is about the roster. */
+let invites: WorkspaceInvite[] = []
+
 const removeMock = vi.fn()
 const patchRoleMock = vi.fn()
+const revokeInviteMock = vi.fn()
 
 vi.mock('../../api', async importOriginal => ({
   ...(await importOriginal<Record<string, unknown>>()),
@@ -86,6 +90,13 @@ vi.mock('../../api', async importOriginal => ({
   apiUpdateWorkspaceMemberRole: (...a: unknown[]) => patchRoleMock(...a),
   apiRemoveWorkspaceMember: (...a: unknown[]) => removeMock(...a),
   apiInviteWorkspaceMember: vi.fn(async () => ({ message: 'ok' })),
+  // HD-158 added a second section to this page, and the spread above leaves anything not named
+  // here as the REAL function: an admin fixture mounts the pending-invitations query, which then
+  // runs a real fetch, fails, and renders the section's error line. Every assertion in this file
+  // still passed — none of them looks at that section — so the only symptom was noise in a suite
+  // that is supposed to be silent. Named here, it returns the empty state instead.
+  apiListWorkspaceInvites: vi.fn(async () => invites),
+  apiRevokeWorkspaceInvite: (...a: unknown[]) => revokeInviteMock(...a),
   rolesApi: { list: vi.fn(async () => roleCatalog) },
 }))
 
@@ -112,8 +123,10 @@ beforeEach(() => {
   members = [ME_MEMBER, MIA]
   roleCatalog = [OWNER, ADMIN, MEMBER]
   workspacePermissions = WORKSPACE_ADMIN_PERMISSIONS
+  invites = []
   removeMock.mockReset()
   patchRoleMock.mockReset()
+  revokeInviteMock.mockReset()
   useAuthStore.setState({ user: ME, accessToken: 'test-token', initialized: true })
 })
 

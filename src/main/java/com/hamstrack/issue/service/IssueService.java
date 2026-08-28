@@ -1195,6 +1195,15 @@ public class IssueService {
                 .toList();
     }
 
+    /**
+     * <strong>{@code field} is truncated to {@code issue_history.field}'s own width, and the
+     * truncation is NOT here</strong> (HD-171 §4.2). Most callers of this method pass a literal
+     * ({@code "title"}, {@code "status"}…), but the custom-field listener passes
+     * {@code field_defs.name}, bounded at 100 — the same 100 V24 widened the column to. The belt
+     * lives on {@link IssueHistory#setField}, because this is one of four writers of that column
+     * and a rule about a class of values does not hold when it is installed at one member of the
+     * class; see that setter for the full reasoning and for why the clip is surrogate-exact.
+     */
     private IssueHistory makeHistory(Issue issue, User actor, String field, String oldVal, String newVal) {
         var h = new IssueHistory();
         h.setIssue(issue);

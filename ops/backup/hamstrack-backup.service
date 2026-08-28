@@ -1,0 +1,96 @@
+[Unit]
+Description=Hamstrack database backup (HD-187)
+Documentation=https://github.com/Zherikhov/hamstrack/blob/main/docs/design/production-backups-proposal.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/hamstrack/backup.env
+ExecStart=/usr/local/bin/hamstrack-backup
+
+# The metric of last resort. The script writes its .prom from an EXIT trap, and a trap does
+# not run for SIGKILL — a cgroup OOM kill, `systemctl kill -s KILL`, or the ungraceful half
+# of the timeout below. In those cases the file would keep the PREVIOUS run's
+# `last_status 1`, BackupRunFailed would stay silent, and the only remaining signal would be
+# BackupStale 26 hours later. systemd outlives a SIGKILL of the main process, so it stamps
+# the failure itself. (This corrects spec §10 case 8, which claimed "unit fails → metrics
+# stale → alert": the metric is not stale after a kill, it is confidently wrong.)
+#
+# LAST RESORT IS THE WHOLE POINT — it fires on ANY non-success result, including an ordinary
+# `exit 1`, and what it can say is coarse: both stages failed, size 0. On the flagship
+# failure (dump fine, upload failed) the trap's answer is truthful and specific, so the
+# script stands down here when its own EXIT trap already published for this run — it
+# compares a marker cleanup writes as its last act against the recorded run start. Without
+# that, this line silently inverted the first move of an incident: "failed at stage dump"
+# while a valid dump sat in /var/backups/hamstrack.
+ExecStopPost=/usr/local/bin/hamstrack-backup --stop-post
+
+# Type=oneshot has NO start timeout by default. A pg_dump blocked behind an ACCESS
+# EXCLUSIVE lock, or a wedged dockerd, would otherwise run forever holding the lock file —
+# and every later firing would take the `flock -n` loser branch, which exits 0 without
+# touching the metrics, while the unit sat in `active (start)` rather than failed. 30
+# minutes is ~60x the expected run. Exceeding it sends SIGTERM, which the script traps and
+# turns into an ordinary exit — so cleanup runs, the partial dump is removed and the metrics
+# say the run failed. (Bash runs no EXIT trap for an untrapped fatal signal, so without that
+# trap the timeout left a partial, unverified dump behind stale metrics.)
+TimeoutStartSec=1800
+
+# What this cgroup actually bounds, which is NOT the dump: `docker exec` runs pg_dump inside
+# the POSTGRES CONTAINER's cgroup, and that container declares no mem_limit at all. What
+# lives here is bash, the docker CLI, md5sum and the AWS CLI — and AWS CLI v2 is a
+# PyInstaller bundle with a 120-180 MB baseline RSS, so the old MemoryHigh=192M put the one
+# process that needs memory into continuous reclaim. These numbers are still a guess:
+# measure with `systemctl show -p MemoryPeak hamstrack-backup.service` after the first
+# manual run (runbook §6.3 step d) and set them from that. The box has 1909 MB and no swap
+# (docs/ops-prod-hardening.md §5), so a ceiling here is still worth having: exceeding
+# MemoryMax fails the unit, which is loud, contained, and not an outage.
+MemoryHigh=384M
+MemoryMax=512M
+TasksMax=64
+
+# Not set, and deliberately: the default TimeoutStopSec (90s in systemd's own default) is
+# what separates the SIGTERM above from the SIGKILL that follows. The script traps TERM and
+# exits through its normal cleanup, so the graceful half publishes real metrics and removes
+# a partial dump; only if that cleanup itself hangs does SIGKILL land, and ExecStopPost is
+# what covers that. Setting TimeoutStopSec=0 would remove the graceful half entirely.
+#TimeoutStopSec=
+
+# A runaway write dies instead of filling the volume PostgreSQL lives on. Generous against
+# an expected dump of a few MB; revisit against hamstrack_backup_size_bytes once it has
+# history. Exceeding it is SIGXFSZ, which ExecStopPost above turns into a reported failure.
+LimitFSIZE=2G
+
+# Be the first thing to yield: this runs while the product is meant to be serving.
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+# Honest accounting of the sandbox below: this unit talks to the DOCKER SOCKET, which is
+# root-equivalent by construction — anything that can run this script can start a container
+# with the host filesystem mounted. None of these settings reduce an attacker's capability;
+# they reduce the blast radius of a MISTAKE (a typo'd path, a runaway write, a rogue
+# child), and they make an unexpected write show up as an error instead of a modified host.
+NoNewPrivileges=yes
+PrivateTmp=yes
+# read-only, NOT yes: `yes` hides /root/.aws, which is invisible on Cloud (the instance
+# role comes from IMDS) and fatal for a self-hoster using MinIO/B2 keys — and a hand-run
+# outside systemd would still work, which is the worst diagnostic shape there is.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+UMask=0077
+# Everything read-only except the four directories the job writes. Two ways to trip over
+# this, both with a one-line remedy:
+#   * every path listed here must EXIST before the unit starts, or systemd refuses to set
+#     up the namespace and the unit fails before the script runs. The install steps create
+#     all three (docs/self-hosting.md#on-a-schedule, ops-prod-hardening.md §6.3) — including
+#     the textfile directory, which is created even if you do not run the observability
+#     stack, because the script always publishes its metrics.
+#   * if you repoint BACKUP_LOCAL_DIR / BACKUP_STATE_DIR / BACKUP_TEXTFILE_DIR in
+#     backup.env, add the new path here with a drop-in (`systemctl edit
+#     hamstrack-backup.service`) or the run fails with "Read-only file system".
+# /run/lock is /var/lock (the flock file), and always exists.
+ProtectSystem=strict
+ReadWritePaths=/var/backups/hamstrack /var/lib/hamstrack-backup /var/lib/node_exporter/textfile_collector /run/lock

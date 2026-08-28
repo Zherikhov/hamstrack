@@ -32,7 +32,18 @@ import { Select } from './ui'
 // ── Conflict classification ─────────────────────────────────────────────────
 
 export type ConflictKind =
-  /** Lost row-lock race. Re-send the IDENTICAL request. Carries no `errorType`. */
+  /**
+   * **Any refusal carrying `Retry-After`**, whatever its status — a 409 from a
+   * lost row-lock race, or a 429 from a budget (the invite ceilings, HD-190).
+   * They share the one property a caller acts on: nothing was changed, and the
+   * IDENTICAL request re-sent after the wait is the whole remedy. None carries
+   * an `errorType`, and which ceiling or which lock refused is legible only from
+   * `detail` — so render that and never branch on its wording.
+   *
+   * `seconds` is the raw header value. A screen whose `detail` already names the
+   * wait in prose should print the sentence and leave `seconds` alone rather
+   * than round a second countdown that can disagree with it.
+   */
   | { kind: 'retry'; seconds: number; detail: string }
   /** Removing this member would leave `projects` with no administrator. Adoption clears it. */
   | { kind: 'stranded'; projects: ProjectRef[]; detail: string }
@@ -67,6 +78,26 @@ export type ConflictKind =
   /** The workspace is at its custom-role cap. Do not retry. */
   | { kind: 'roleLimit'; detail: string }
   /**
+   * **An unaccepted invitation to this address already stands in this
+   * workspace** (HD-133) — one standing offer per address per workspace, so a
+   * second one is refused rather than queued or silently replacing the first.
+   *
+   * The identical request will fail identically, so there is no retry: the
+   * remedy `detail` names is to withdraw the blocking invitation on Workspace
+   * settings → People and invite again. Two wordings arrive under this one code
+   * — the blocking row is still live, or it has lapsed and is merely on file
+   * (an expired invitation occupies the slot, because the constraint cannot
+   * read a clock). That difference is the useful part and lives ONLY in
+   * `detail`, so render the sentence and never branch on its wording.
+   *
+   * Named separately from `plain` for one reason: the screen that shows this
+   * refusal also lists the blocking invitation, and it must refresh that list —
+   * a stale copy is how an administrator concludes the refusal is wrong. The
+   * "already a member" 409 carries **no** `errorType` on purpose and wins when
+   * both apply, so it lands on `plain` and moves no list.
+   */
+  | { kind: 'duplicateInvite'; detail: string }
+  /**
    * A plain conflict — the last Owner, the last project administrator, a built-in
    * role, a stale `version`, a taken name — **or an `errorType` this build does
    * not recognise**, which is deliberately treated the same way: render `detail`,
@@ -75,15 +106,18 @@ export type ConflictKind =
   | { kind: 'plain'; detail: string }
 
 /**
- * Read a refusal in the one documented order. Non-409s (403 ceiling refusals,
- * 422 unusable role ids) fall through to `plain`, whose `detail` is exactly the
- * server's sentence — which for a ceiling refusal *names the offending
- * permission*, so it must be rendered rather than replaced with "Forbidden".
+ * Read a refusal in the one documented order. It is keyed on what the response
+ * CARRIES, not on its status: a body with `Retry-After` is `retry` whether it is
+ * a 409 lock race or a 429 budget refusal (the invite ceilings, HD-190).
+ * Anything with no discriminator at all (403 ceiling refusals, 422 unusable role
+ * ids) falls through to `plain`, whose `detail` is exactly the server's sentence
+ * — which for a ceiling refusal *names the offending permission*, so it must be
+ * rendered rather than replaced with "Forbidden".
  */
 export function classifyConflict(err: unknown): ConflictKind {
   const detail = err instanceof Error ? err.message : 'Something went wrong.'
   if (!(err instanceof ApiResponseError)) return { kind: 'plain', detail }
-  // 1. Retry-After FIRST, before any look at `errorType`.
+  // 1. Retry-After FIRST, on ANY status, before any look at `errorType`.
   if (err.retryAfter !== undefined) {
     return { kind: 'retry', seconds: err.retryAfter, detail }
   }
@@ -97,6 +131,7 @@ export function classifyConflict(err: unknown): ConflictKind {
     case 'ROLE_IN_USE': return { kind: 'roleInUse', usage: err.usage, detail }
     case 'SELF_HELD_ROLE': return { kind: 'selfHeld', detail }
     case 'ROLE_LIMIT_REACHED': return { kind: 'roleLimit', detail }
+    case 'DUPLICATE_INVITE': return { kind: 'duplicateInvite', detail }
     // An unrecognised (or absent) errorType is "no retry available".
     default: return { kind: 'plain', detail }
   }

@@ -23,6 +23,7 @@ import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { useProjectPermissions } from '../hooks/usePermissions'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
+import { PROSE_MAX_LENGTH } from '../lib/limits'
 import { projectIssuesKeyPrefix } from '../lib/queryKeys'
 import type {
   Issue, IssueType, Status, PriorityOption, ProjectField, FieldValue, FieldType, TransitionRule,
@@ -1506,6 +1507,7 @@ export default function IssueDetail({
                       else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); commitDesc() }
                     }}
                     rows={4}
+                    maxLength={PROSE_MAX_LENGTH}
                     placeholder="Add a description… (Markdown supported)"
                     className="w-full text-sm rounded-md border px-3 py-2 outline-none resize-none"
                     style={{ color: 'var(--color-text)', borderColor: 'var(--color-brand)', background: 'white' }}
@@ -1795,6 +1797,7 @@ export default function IssueDetail({
                   onChange={handleCommentChange}
                   placeholder="Add a comment… Use @Name to mention"
                   rows={2}
+                  maxLength={PROSE_MAX_LENGTH}
                 />
               )}
               {!commentPreview && filteredMembers.length > 0 && (

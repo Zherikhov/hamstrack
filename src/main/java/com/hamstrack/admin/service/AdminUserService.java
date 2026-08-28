@@ -9,10 +9,12 @@ import com.hamstrack.auth.exception.EmailAlreadyUsedException;
 import com.hamstrack.auth.repository.PasswordResetRepository;
 import com.hamstrack.auth.repository.RefreshTokenRepository;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.auth.service.EmailUniqueness;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.util.TokenUtils;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -51,8 +53,13 @@ public class AdminUserService {
 
     @Transactional
     public CreatedUserResponse create(CreateUserRequest req) {
+        // Locale.ROOT, never the JVM default — the fold IS the account identity (HD-120).
         var email = req.email().toLowerCase(Locale.ROOT);
-        if (userRepository.existsByEmail(email)) {
+        // Folded in SQL, with the same expression users_email_lower_uk is built from (V23), for
+        // the reason UserRepository.existsByFoldedEmail states: an exact check can say "free"
+        // where the index says "taken", which puts an ordinary create through a doomed INSERT —
+        // a 409 only because the catch below translates it, and a 500 once it stops matching.
+        if (userRepository.existsByFoldedEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
         var user = new User();
@@ -63,7 +70,17 @@ public class AdminUserService {
         // Active immediately — the admin vouches for the address; email is not verified
         user.setStatus(UserStatus.ACTIVE);
         user.setSystemRole(req.roleOrDefault());
-        userRepository.save(user);
+        // saveAndFlush and the catch are the same contract AuthService.register carries, for the
+        // same two constraints, and the flush is what makes the catch reachable at all: a bare
+        // save() defers the INSERT to commit, past this method. Translating here also keeps the
+        // admin console's refusal identical to the pre-check's, so an administrator who loses a
+        // race sees "Email is already registered" rather than an unexplained 500.
+        try {
+            userRepository.saveAndFlush(user);
+        } catch (DataIntegrityViolationException e) {
+            if (!EmailUniqueness.isDuplicateEmail(e)) throw e;
+            throw new EmailAlreadyUsedException();
+        }
 
         return new CreatedUserResponse(AdminUserResponse.of(user), generateSetupLink(user));
     }

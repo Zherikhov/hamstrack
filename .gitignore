@@ -69,3 +69,9 @@ qa/
 ### If you are here because that pointer names a directory you cannot see in a clone —
 ### this line is why, and it is meant to go.
 docs/adr
+
+### HD-187: hand-written node-exporter textfile metrics used to exercise the backup alert
+### rules in the DEV observability stack (docker-compose.observability.dev.yml). The
+### directory is tracked (via .gitkeep) because the bind mount needs it to exist; the
+### samples people drop in it are throwaway.
+observability/textfile/*.prom

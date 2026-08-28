@@ -6,6 +6,7 @@ import com.hamstrack.workspace.service.ProjectAccessService;
 import com.hamstrack.workspace.service.WorkspaceMemberService;
 import com.hamstrack.workspace.service.WorkspaceService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -18,12 +19,51 @@ import java.util.UUID;
 
 /**
  * Workspace management: create/list/get workspaces, list members, invite by
- * email and accept invites, and — since HD-132 — administer an existing
- * membership (change a role, remove a member). The workspace is the tenant
+ * email and accept invites, since HD-132 administer an existing membership
+ * (change a role, remove a member), and since HD-158 see and withdraw the
+ * invitations this workspace has issued and not had accepted. The workspace is the tenant
  * boundary — every nested resource is resolved through the caller's membership,
  * and a non-member gets 404 (never 403) so workspace existence is not revealed.
  * Creating a workspace makes the caller OWNER; taxonomy is the global catalog
  * (since M1), so workspace creation no longer seeds any issue types or statuses.
+ *
+ * <p><strong>Inviting is throttled AFTER tenancy and authorization</strong> (HD-190), unlike the
+ * report and search budgets, which are interceptors spent before anything is resolved.
+ * {@code POST /{id}/invites} answers 429 + {@code Retry-After} past any of the invitation
+ * ceilings ({@code InviteThrottle} — a per-(sender, address) cooldown, a per-address daily
+ * cap, and a per-sender hourly/daily volume budget), and a refusal sends no mail and writes
+ * no invite. Unlike the report and search budgets, which are interceptors spent before
+ * anything is resolved, these run inside the service <em>after</em> tenancy and
+ * authorization: an unknown workspace and a non-member alike still answer 404 even when the
+ * caller is over every ceiling. Inverting that would answer a recipient-keyed question to a
+ * non-member — a 429 where this project requires a 404.
+ *
+ * <p><strong>One standing invitation per address, and it is refused ABOVE the ceilings</strong>
+ * (HD-133). {@code POST /{id}/invites} answers <strong>409 {@code DUPLICATE_INVITE}</strong> when an
+ * unaccepted invitation to the same address already exists in this workspace — including an
+ * <em>expired</em> one, because {@code workspace_invites_pending_email_uk} is
+ * {@code WHERE accepted_at IS NULL} and an index predicate cannot depend on the clock. The remedy
+ * the refusal names is a withdrawal, which is why it is only a performable refusal since HD-158.
+ * Two different 409s share this endpoint and are told apart by {@code errorType}, not by status:
+ * already-a-member carries none and wins.
+ *
+ * <p>That check sits <em>above</em> {@code inviteThrottle.requireRecipientCeilings}, so a duplicate
+ * spends no <em>recipient</em> allowance — and, more importantly, a violation raised BELOW it would
+ * roll back the recorded send event and hand callers a free probe of another tenant's ceilings. It
+ * sits <em>below</em> {@code inviteThrottle.requireSenderVolume}, so the duplicate 409 still costs
+ * the caller a unit of their own hourly and daily volume: an endpoint with no principal throttle
+ * interceptor cannot afford a refusal that is free to repeat. Both 429s are therefore possible on
+ * this endpoint and they mean different things — over your own volume, versus this recipient has
+ * had enough mail — and both are only ever seen by a proven member.
+ *
+ * <p><strong>Withdrawing an invitation frees nothing measured over time</strong> (HD-158 §5).
+ * {@code DELETE /{id}/invites/{inviteId}} deletes the row and touches no
+ * {@code mail_send_events} row, so the invite cooldown and the per-inbox daily cap survive it
+ * intact and {@code invite → revoke → invite} is refused exactly as {@code invite → invite}
+ * would be. The rule this instance of it obeys, stated as a property because a list of paths
+ * goes stale one path before it does: <em>a revocation may free only a resource whose count it
+ * actually reduces — outstanding rows, a uniqueness slot, a stock cap — and never one measured
+ * over time. Deleting the record of an offer does not delete the record of a delivery.</em>
  *
  * <p><strong>Member administration</strong> ({@code PATCH}/{@code DELETE
  * /{id}/members/{userId}}) requires {@code workspace.member.manage} — the same
@@ -236,9 +276,101 @@ public class WorkspaceController {
         return Map.of("message", "Invite sent to " + req.email());
     }
 
+    /**
+     * <strong>Every invitation this workspace has issued and not had accepted</strong>
+     * (HD-158 §4.1) — the administrator's view, and the counterpart to
+     * {@code GET /api/invites}, which is the <em>invitee's</em>.
+     *
+     * <p>Gate: {@code workspace.member.manage}. <strong>200</strong> a JSON array, newest
+     * first, no envelope and no pagination — consistent with {@code GET /{id}/members},
+     * which is unbounded over the same population · <strong>403</strong> a proven member
+     * without the permission, naming it · <strong>404</strong> unknown workspace or
+     * non-member, indistinguishably.
+     *
+     * <p>Two properties of the array worth stating on the wire contract, because a client
+     * would otherwise guess wrong about both. <strong>Expired rows are included</strong>,
+     * carrying {@code status: "EXPIRED"} — nothing in this product sweeps one, a member
+     * removal deletes one, and HD-133's uniqueness will refuse a re-invite over one, so a
+     * row hidden here is a row no admin can clear and no future refusal can point at.
+     * <strong>Accepted rows are excluded</strong> — they are history, the membership row is
+     * the live fact, and a withdraw control beside something withdrawal cannot affect is a
+     * lie.
+     *
+     * <p>{@code role} and {@code roleId} are {@code null} <em>together</em> on a row whose
+     * {@code role_id} fails the scope/ownership assertion; the rest of the list is
+     * unaffected. Emitting the id of a role whose key was withheld would hand the name back
+     * by proxy.
+     */
+    @GetMapping("/{id}/invites")
+    public List<WorkspaceInviteResponse> invites(@AuthenticationPrincipal User user,
+                                                 @PathVariable UUID id) {
+        return workspaceService.listInvites(user, id);
+    }
+
+    /**
+     * <strong>Withdraw an invitation</strong> (HD-158 §4.2) — a hard delete, so the emailed
+     * token link and {@code POST /api/invites/{id}/accept} both answer 404 immediately
+     * afterwards and the invitee's own list stops showing it, with nothing else written.
+     *
+     * <p>Gate: {@code workspace.member.manage}, and deliberately <em>not</em> the grant
+     * ceiling — withdrawing is subtraction and grants the revoker nothing, so anyone who may
+     * administer membership may withdraw any invitation here, including ones they did not
+     * send.
+     *
+     * <p><strong>204</strong> withdrawn, including for an expired invitation (the list offers
+     * the control on every row it shows, so it works on every row it shows) ·
+     * <strong>403</strong> · <strong>404</strong> unknown workspace, non-member, an id
+     * belonging to another workspace, or <strong>an invitation already withdrawn</strong> ·
+     * <strong>409 {@code INVITE_ALREADY_ACCEPTED}</strong> the invitee accepted it in the
+     * meantime.
+     *
+     * <p><strong>The 404 and the 409 are different states with different remedies, and a
+     * client must branch on them.</strong> Because withdrawal deletes, "already withdrawn"
+     * is physically identical to "never existed", so it is a plain 404 — the same answer a
+     * second DELETE of an already-removed member gets — and <strong>the client renders it as
+     * success</strong>: the caller's goal ("this invitation must not be acceptable") is
+     * already true, and the API states the truth about the resource while the client states
+     * the truth about the intent. It must <em>not</em> extend that to the 409, which is why
+     * that one carries an {@code errorType} and a detail naming the member and the People
+     * screen.
+     *
+     * <p><strong>Withdrawing frees nothing measured over time.</strong> No
+     * {@code mail_send_events} row is touched, so the per-(sender, inbox) invite cooldown and
+     * the per-inbox daily cap survive a withdrawal intact and {@code invite → revoke →
+     * invite} is refused exactly as {@code invite → invite} would be (HD-190, ADR-0015).
+     * What it does free is stock — HD-133's uniqueness slot — and that needs no code: the row is
+     * gone, so the partial unique index has nothing left to collide with. Since an unaccepted
+     * invitation blocks a fresh one to the same address even after it expires, this DELETE is the
+     * only way to re-offer access at a different role or with a new link, and the duplicate 409
+     * sends its reader here by name.
+     */
+    @DeleteMapping("/{id}/invites/{inviteId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void revokeInvite(@AuthenticationPrincipal User user,
+                             @PathVariable UUID id,
+                             @PathVariable UUID inviteId) {
+        workspaceService.revokeInvite(user, id, inviteId);
+    }
+
+    // The FOURTH token door, bounded for the reason the other three were and for no reason of its
+    // own (HD-171 §4.4): same TokenUtils.generateRawToken, same 43 Base64url characters, and A RULE
+    // ON ONE OF TWO DOORS IS NOT A RULE. What it is exposed to is genuinely small — the value is
+    // SHA-256'd and looked up by hash, the caller is authenticated, and nothing builds a header out
+    // of it, so this is the category and not an incident. 64 is the generator's width with room to
+    // spare.
+    //
+    // It fires because this class carries NO @Validated: Spring MVC's built-in method validation
+    // raises HandlerMethodValidationException, which GlobalExceptionHandler renders as a 400
+    // naming `token` in an errors map (HD-214 — Boot's own advice rendered a bare "Validation
+    // failure" until then). @Validated on the class would make
+    // HandlerMethod.shouldValidateArguments() return false and defer to the AOP proxy, whose
+    // jakarta.validation.ConstraintViolationException now reaches a backstop handler rather than
+    // escaping as a 500 — so the cost is no longer a crash, but the annotation is still forbidden
+    // on every bean MVC dispatches to (ADR-0018): the backstop logs at ERROR because reaching it
+    // means the codebase is misconfigured, not that the caller sent something bad. Do not add it.
     @PostMapping("/accept-invite")
     public WorkspaceResponse acceptInvite(@AuthenticationPrincipal User user,
-                                          @RequestParam String token) {
+                                          @RequestParam @Size(max = 64) String token) {
         return workspaceService.acceptInvite(user, token);
     }
 }

@@ -1,7 +1,9 @@
 name: Deploy to production
 
-# Owner-only: continuous deploy of the rolling `latest` image to the
-# hamstrack.com EC2 instance via AWS SSM (SSH port 22 is closed — see
+# Owner-only: continuous deploy of the rolling `latest` image AND of the
+# repository-owned configuration for the built commit (HD-199 — what is synced is
+# ops/deploy/synced-paths.txt, how it is applied is ops/deploy/apply-config.sh) to
+# the hamstrack.com EC2 instance via AWS SSM (SSH port 22 is closed — see
 # docs/ops-prod-hardening.md §3). Fires after a successful Build on main AND
 # after a successful Build of a release tag (HD-115) — a tag build carries the
 # same code but a different LABEL, and the label is baked into the image, so
@@ -58,23 +60,84 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: eu-north-1
 
+      # Fetch the repository tree for the commit that was BUILT, then hand it to the
+      # applier that ships in that same tree (HD-199 / HD-122). Until this existed the
+      # command was `pull` + `up -d` and copied nothing, so every file in /opt/hamstrack
+      # was whatever a human last put there — on 2026-08-26 that was an 11 July compose
+      # file, and two features released in 0.17.0 had never run.
+      #
+      # Four properties are load-bearing, and none of them is a preference:
+      #   * BY COMMIT SHA, never a branch or a tag. A codeload tarball addressed by sha is
+      #     content-addressed: a moved tag, a force-push or a repository rename cannot
+      #     change what that URL returns. It is the same commit whose build produced the
+      #     `latest` image this deploy pulls — but that is a statement about THIS run, not
+      #     an invariant: APP_IMAGE_TAG in the box's .env can pin the image to an older
+      #     tree, and the tag is mutable. The applier refuses that combination when the pin
+      #     has MOVED since the last apply (a rollback in progress) unless it is given
+      #     --allow-pinned (that run only, no re-stamp) or --adopt-pin (and re-stamp);
+      #     THIS PIPELINE PASSES NEITHER, and must not — an unattended run is exactly the
+      #     reader step 2b exists to stop. A pin that has held still is a steady state and
+      #     proceeds. That check is where "config and image agree" is actually enforced —
+      #     it was never enforced by fetching a sha.
+      #   * --strip-components=1 flattens the tarball's top directory. NEVER hardcode its
+      #     name — it is <repo>-<sha>/ and this repository has been renamed once already.
+      #   * The staging directory is under /opt/hamstrack (same filesystem, so the
+      #     applier's swap can be a rename) and PER INVOCATION via mktemp -d, not the fixed
+      #     .sync it used to be: the fetch happens BEFORE apply-config.sh takes its flock,
+      #     so a pipeline run and a hand run on a shared path would race — one `rm -rf
+      #     .sync` deleting the tree the other was mid-copy from. The sweep removes staging
+      #     directories a day old, which can only be the residue of a run that was killed.
+      #   * THIS STRING CARRIES NO FILE LIST AND NO COMPOSE INVOCATION. What is synced is
+      #     ops/deploy/synced-paths.txt; how it is applied is ops/deploy/apply-config.sh —
+      #     both reviewable, both diffable, both from the tree being applied. That is what
+      #     lets docs/ops-prod-hardening.md stop describing this command in prose.
+      #
+      # The repository is public, so codeload needs no token. If it is ever made private
+      # this answers 404 and every deploy fails opaquely — the remedy is a PAT in the URL.
       - name: Deploy via SSM
+        # The ref name goes through the environment and is NEVER interpolated into the
+        # runner's shell: `${{ }}` is textual substitution, a ref may contain a quote, a
+        # `$` or a backtick, and this runner holds the deploy credentials. The sha and the
+        # repository below are interpolated because their character sets cannot express a
+        # shell metacharacter; the ref name's can.
+        env:
+          HEAD_REF: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "hamstrack deploy ${{ github.event.workflow_run.head_branch }} ${{ github.event.workflow_run.head_sha }}" \
-            --parameters 'commands=["cd /opt/hamstrack && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml pull && docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d --remove-orphans && docker image prune -f"]' \
+            --comment "hamstrack deploy $HEAD_REF $HEAD_SHA" \
+            --parameters 'commands=["set -euo pipefail",
+          "cd /opt/hamstrack",
+          "find /opt/hamstrack -maxdepth 1 -name \".sync-*\" -mtime +1 -exec rm -rf {} +",
+          "SYNC=$(mktemp -d /opt/hamstrack/.sync-XXXXXX)",
+          "curl -fsSL --proto =https --tlsv1.2 https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.event.workflow_run.head_sha }} | tar xz -C $SYNC --strip-components=1",
+          "bash $SYNC/ops/deploy/apply-config.sh $SYNC /opt/hamstrack ${{ github.event.workflow_run.head_sha }}",
+          "rm -rf $SYNC"]' \
             --query 'Command.CommandId' --output text)
           echo "Command: $CMD_ID"
           # `wait` polls until the command finishes; it exits non-zero on failure
           aws ssm wait command-executed \
             --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" || FAILED=1
-          aws ssm get-command-invocation \
+          # THIS LOG IS PUBLIC. The repository is public, so Actions logs are world-readable,
+          # and root's stdout/stderr from the box is a continuous feed of production
+          # filesystem state: the /opt/hamstrack layout, backup timestamps, the names of
+          # drifted files. No secret is in that set today, and keeping it that way would
+          # depend on every future line of two scripts printing only names — so on SUCCESS
+          # this prints the status and nothing else. On FAILURE the bodies are printed,
+          # because a red deploy nobody can read is a worse trade.
+          STATUS=$(aws ssm get-command-invocation \
             --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-            --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
-            --output json
-          [ -z "$FAILED" ]
+            --query 'Status' --output text)
+          echo "Status: $STATUS"
+          if [ -n "${FAILED:-}" ]; then
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
+              --output json
+          fi
+          [ -z "${FAILED:-}" ]
 
       # What prod actually reports once it is back up. The HD-115 bug was a
       # WRONG LABEL on a right deployment, which nothing in this pipeline ever

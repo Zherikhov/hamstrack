@@ -457,7 +457,19 @@ A release can be in both categories, one, or neither. The two costs are separate
 1. **Snapshot the database first.** Once `V15` has run, rollback is a *restore*,
    not a re-deploy — the old image cannot read the new schema, and `latest` only
    moves forward anyway. Take the snapshot between the tag push and the deploy,
-   or immediately before running `docker compose up -d` by hand.
+   or immediately before running `docker compose up -d` by hand. **And take a
+   `manual/` backup before any migration that rewrites `flyway_schema_history`**
+   — `sudo BACKUP_S3_PREFIX=manual BACKUP_LABEL=pre-hd188-squash /usr/local/bin/hamstrack-backup`
+   on the box (the label is what tells two hand-taken copies apart later; the
+   environment deliberately beats `/etc/hamstrack/backup.env`, so this really does
+   write to `manual/`);
+   no lifecycle rule expires anything in `manual/`, and the instance can neither
+   delete nor overwrite it, so unlike the nightly `daily/` copy it is still there
+   in a month — and still the bytes you uploaded
+   ([ops-prod-hardening.md §6](ops-prod-hardening.md#6-backups)). The staged copy
+   it leaves in `/var/backups/hamstrack` is a different thing: bounded by
+   `BACKUP_KEEP_LOCAL_DAYS`, because a plaintext dump of the whole database left
+   on the root volume rides into every disk snapshot taken afterwards.
 2. **Deploy stop-the-world, not rolling.** Flyway runs on the *new* container's
    startup while any *old* container is still serving; from that moment the old
    one is querying columns that no longer exist, and every request it handles
@@ -734,7 +746,72 @@ Independent of git, and easy to forget:
 
 `latest` only ever moves forward, so a bad release is rolled back by moving
 forward, not by re-tagging an old commit (the guard above will refuse it):
-revert on `main` and tag the revert. For an emergency, pin `app.image` in
-`/opt/hamstrack/docker-compose.prod.yml` to the previous `X.Y.Z` and
-`docker compose up -d` on the box — but remember to un-pin, or the next deploy
-silently does nothing.
+revert on `main` and tag the revert.
+
+**For an emergency, the lever is one line in `/opt/hamstrack/.env`:**
+
+```bash
+sudo sed -i 's/^APP_IMAGE_TAG=.*/APP_IMAGE_TAG=0.17.0/' /opt/hamstrack/.env   # or append it
+cd /opt/hamstrack && sudo docker compose \
+  -f docker-compose.prod.yml -f docker-compose.observability.yml up -d
+```
+
+`.env` is the one file no deploy touches, so the pin **survives every subsequent deploy by
+construction** rather than by the deploy declining to overwrite it. Un-pinning is not a
+memory task either — while the value is anything other than `latest`, the
+`DeployImagePinned` alert says so after six hours, which is long enough for the pin to be
+either forgotten or deliberate.
+
+**Once you move the tag, every deploy goes red until you un-pin *or* adopt the pin, on
+purpose.** `apply-config.sh` compares the `.env` pin against
+`/opt/hamstrack/.deployed-image-tag` — the last tag anybody *adopted*, i.e. the one a
+stamping run placed configuration beside; `--allow-pinned` applies without stamping, so it
+deliberately does not become this — and refuses when the two disagree, *before* replacing
+anything, so production keeps both halves of the state it was rolled back to. Nothing but
+an adoption re-stamps, so the disagreement persists and so do the red deploys. The reason
+is the failure that would otherwise be silent: the tag pins the image and **nothing pins
+the config**, so the next merge would sync a newer tree onto the held-back image — and if the incident was *caused* by
+a configuration change, that re-applies within minutes the very thing the pin was rolling
+back. The red deploys are the reminder; un-pin to end them. What is refused is the tag
+*moving*, not the tag *existing*: re-applying onto a pin that has not changed since the last
+apply proceeds, which is why a self-hosted box that pins by policy is not blocked for ever.
+
+**Two hand-run overrides, and picking the wrong one is how the guard gets disarmed.**
+`--adopt-pin` applies *and* re-stamps: use it when you moved the tag as a planned version
+bump, and the flag is needed once and not again. `--allow-pinned` applies **this run only**
+and leaves the stamp alone, so the very next unattended deploy refuses again: use it when a
+configuration fix has to go out *while* the rollback stands. If the second one re-stamped,
+an urgent fix at hour six of an incident would quietly tell the next merge that the
+rolled-back image is the intended one — no flag, no refusal, and a log line saying
+everything is normal.
+
+**Pin in `/opt/hamstrack/.env`, never as an exported variable.** Compose gives the process
+environment precedence over `--env-file`, so `APP_IMAGE_TAG=… sudo -E …` would run a tag
+that nothing else on the box can see — and the applier refuses that combination rather than
+deploying it.
+
+Lines that belong to the same boundary and are easy to meet at the wrong moment:
+
+- **A new `${VAR:?…}` in a compose file is an operator step *before* the deploy.** Set it in
+  `/opt/hamstrack/.env` when the change merges. The deploy's validate step is the backstop,
+  not the mechanism: it resolves every compose file it will run against the box's real `.env` before
+  replacing anything, so an unsatisfied variable turns into a red deploy naming it, with the
+  running stack untouched.
+- **A new refusal in the APPLICATION is the same step with no backstop at all.** A release
+  that starts rejecting a value at startup — a length or range check, a published-credential
+  denylist (`JWT_SECRET`, `SEED_ADMIN_PASSWORD`) — is invisible to `docker compose config
+  -q`, which only resolves interpolation: the deploy exits 0, the container exits during
+  boot, and the site goes dark behind a green pipeline. Check the box's `.env` against the
+  new refusal **before** merging, exactly as for a compose guard, and prefer proving it
+  rather than remembering it (for `JWT_SECRET` we compared a hash of the live value against
+  the placeholder). If the refusal names an operator action beyond editing `.env` — the
+  seeded-admin one does, because the account outlives the variable — that action is part of
+  this step too, not of the follow-up.
+- **Editing a file under `/opt/hamstrack` is a temporary measure, never a rollback.** A
+  synced file is replaced at the next deploy, and `ConfigDrift` will point at it in the
+  meantime. `.env` for durable, the file for temporary, a commit for permanent.
+
+**Any release that touches the compose files, the edge path or the rate limiter ends with
+[`docs/ops-prod-hardening.md` §7](ops-prod-hardening.md#7-verifying-the-deployed-configuration)** —
+including the two-address probe, which is the only check there that a single machine cannot
+make.

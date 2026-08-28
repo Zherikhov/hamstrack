@@ -102,18 +102,25 @@ import java.sql.Statement;
  * <p><strong>A cancellation adds a cause, never a class.</strong> A bounded transaction that has
  * already published an effect <em>outside</em> the database can be left half-done by the
  * cancellation exactly as it can by any other rollback. The category is <strong>any effect
- * published before commit</strong>, and it has two members' worth of shape today: a blob written
- * to storage ahead of the row that names it ({@code AttachmentService}, which already logs the
- * orphan it can leave), and <strong>every {@code @Async} hand-off made from inside a live
- * transaction</strong> — the mail sends are the ones that exist, queued to the executor before the
- * token row they describe is flushed, so a rollback of any kind delivers a link whose row never
- * existed. Both fail closed, both predate this class, and neither is created by it; what this adds
- * is one more <em>cause</em> of a rollback. The mail hand-offs are open work — <strong>HD-181</strong>,
- * which defers them to after commit using the shape
- * {@code AttachmentService.deleteFromStorageAfterCommit} already uses — so the category above
- * points at a ticket rather than implying there is nothing to do. Stated as the category on
- * purpose: the previous wording named the blob write as "the one such path today" and was already
- * wrong when written, which is the failure mode this file argues against everywhere else.
+ * published before commit</strong>: a blob written to storage ahead of the row that names it, a
+ * message handed to an executor before the token row it describes is flushed, a peer's cache
+ * evicted, a live stream closed. A cancellation is one more <em>cause</em> of the rollback that
+ * makes any of them wrong; it creates none of them. Stated as the category on purpose — an earlier
+ * wording named the blob write as "the one such path today" and was already wrong when written,
+ * which is the failure mode this file argues against everywhere else.
+ *
+ * <p>The category now has a name to be handled by: {@code com.hamstrack.common.tx.AfterCommit},
+ * which is where a new effect of this shape goes, and which carries the reasoning in full. The
+ * {@code @Async} mail hand-offs were the outstanding members and were moved onto it by
+ * <strong>HD-181</strong>, which also took {@code AttachmentService}'s hand-rolled blob delete with
+ * it — a named rule with a surviving copy of itself next door is two answers, not one. The SSE and
+ * role-cache paths reach the same ordering through
+ * {@code @TransactionalEventListener(AFTER_COMMIT)}. What survives every such move is the
+ * mirror-image failure — committed row, effect never published — which is a log line and, where the
+ * effect is account-critical, durability inside the effect ({@code MailService} retries, and
+ * dead-letters through a transaction of its own: <em>after</em> the commit is not yet
+ * <em>outside</em> the transaction, so a dead-letter write that merely joined what is bound would be
+ * discarded in silence — see {@code FailedEmailWriter}).
  *
  * <p><strong>And nothing below the exception advice may catch the cancellation and carry on.</strong>
  * After SQLSTATE {@code 57014} the transaction is aborted, so the next statement on it fails with

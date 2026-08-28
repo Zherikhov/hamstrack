@@ -100,7 +100,11 @@ public class SearchService {
                 .getSingleResult();
 
         List<Issue> issues = em.createQuery(compiler.buildPageQuery(query, actor, ws, ctx))
-                .setFirstResult(page * size)
+                // Paging.offsetOf, not `page * size`: setFirstResult takes an int, so the
+                // multiplication has to be checked somewhere, and the @Max on
+                // SearchRequest.page is the only thing that would otherwise stand between a
+                // caller and an overflow (400 either way — see PageOffsetTooLargeException).
+                .setFirstResult(Paging.offsetOf(page, size))
                 .setMaxResults(size)
                 .getResultList();
 
@@ -115,7 +119,13 @@ public class SearchService {
         }
 
         int totalPages = size == 0 ? 0 : (int) ((total + size - 1) / size);
-        boolean hasNext = (long) (page + 1) * size < total;
+        // `(long) page + 1`, not `(long) (page + 1)`: the cast has to happen BEFORE the
+        // addition or the increment overflows in int first and the widening preserves a
+        // negative. Unreachable now that SearchRequest.page carries @Max(Paging.MAX_PAGE)
+        // (HD-163) — kept correct anyway. This is arithmetic on the RESULT, not a guard on
+        // the offset: the offset is bounded above by Paging.offsetOf, which is the line that
+        // refuses.
+        boolean hasNext = ((long) page + 1) * size < total;
         return new PageResponse<>(rows, page, size, total, totalPages, hasNext);
     }
 

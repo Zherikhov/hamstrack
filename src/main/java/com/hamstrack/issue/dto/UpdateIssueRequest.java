@@ -11,7 +11,14 @@ import java.util.UUID;
 
 public record UpdateIssueRequest(
         @Size(min = 1, max = 500) String title,
-        String description,
+        // Same bound and same reasoning as CreateIssueRequest.description (HD-171 §4.3):
+        // a payload guard agreeing with FieldValueService.MAX_TEXTAREA_LENGTH, spelled as a
+        // bare literal so that a FUTURE column-width scanner CAN read it — no scanner reads
+        // this field today (EmailLengthBoundTest's `max\s*=\s*(\d+)` regex is only ever
+        // applied to declarations it reaches from an @Email). What is meant to police the
+        // VALUE is a behavioural test (§5.3), not a source scan. This is the door
+        // where the history amplification actually happens.
+        @Size(max = 10000) String description,
         UUID typeId,
         UUID statusId,
         UUID priorityId,

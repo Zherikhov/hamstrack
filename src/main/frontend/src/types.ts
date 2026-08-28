@@ -756,6 +756,47 @@ export interface WorkspaceMember {
   joinedAt?: string;
 }
 
+/**
+ * One of a **workspace's own** outstanding invitations (`GET …/workspaces/{ws}/invites`, HD-158).
+ *
+ * Deliberately **not** {@link PendingInvite}, which is the *invitee's* view of
+ * their own invitations across every workspace: that record carries
+ * `workspaceName` and no address at all. This one is the administrator's view of
+ * one workspace's rows and its whole content is email addresses, so sharing a
+ * record would put a tenant's addresses one field-addition away from the
+ * onboarding screen. Only a holder of `workspace.member.manage` may read it.
+ */
+export interface WorkspaceInvite {
+  id: string;
+  /** The address the invitation is bound to. */
+  email: string;
+  /**
+   * The role the invitation carries, by id — **null together with `role`** on a
+   * row whose stored role could not be resolved, for the same reason as
+   * {@link WorkspaceMember.roleId}: emitting the id alone hands back the
+   * withheld name by proxy. Render a placeholder, never a guess.
+   */
+  roleId: string | null;
+  /** The same role's key — display only. */
+  role: string | null;
+  invitedById: string;
+  /**
+   * The inviter's display name, kept even if that account has since left the
+   * workspace or been deactivated — historical attribution stays.
+   */
+  invitedByName: string;
+  createdAt: string;
+  expiresAt: string;
+  /**
+   * **Server-computed, never derived here.** A browser with a skewed clock must
+   * not disagree with the endpoint that will accept or refuse the acceptance,
+   * so `expiresAt` is rendered and `status` is obeyed. An `EXPIRED` row is
+   * returned on purpose: nothing sweeps it, HD-133's uniqueness will refuse a
+   * re-invite over it, and a row nobody can see is a row nobody can clear.
+   */
+  status: 'PENDING' | 'EXPIRED';
+}
+
 /** A project membership row (`GET …/projects/{p}/members`); both fields null together, as above. */
 export interface ProjectMember {
   userId: string;

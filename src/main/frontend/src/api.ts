@@ -11,6 +11,7 @@ import type {
   Role, RoleScope, RolePermissionEntry, RoleAssignmentView, RoleUsage,
   PermissionCatalogEntry, ProjectRef, ProjectMember, MemberRemovalResult,
   ProjectAccessMode, ProjectAccessSettings, ProjectAccessImpact, ProjectDefaultRoleSettings,
+  WorkspaceInvite,
   FlowReport, ReportInterval, CycleTimeReport, AgingReport,
   SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
   InsightsDimension, InsightsMeasure, InsightsResponse,
@@ -70,6 +71,24 @@ function hqlErrorOf(body: unknown): HqlError | undefined {
     token: typeof b.token === 'string' ? b.token : null,
     field: typeof b.field === 'string' ? b.field : undefined,
   }
+}
+
+/**
+ * The `errors` ProblemDetail extension a validation 400 carries — a
+ * `{field: message}` map built by `GlobalExceptionHandler.handleValidation`
+ * (HD-171 §11). Every non-string value is dropped rather than coerced: this map
+ * is rendered to a user, and `String(someObject)` next to an input field is
+ * worse than no message at all.
+ */
+function fieldErrorsOf(body: unknown): Record<string, string> | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const raw = (body as Record<string, unknown>).errors
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [field, message] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof message === 'string') out[field] = message
+  }
+  return Object.keys(out).length > 0 ? out : undefined
 }
 
 // FormData bodies must NOT get a JSON Content-Type — the browser sets
@@ -137,7 +156,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!detail) detail = `Request failed (${res.status})`
     // Conflict discriminators (HD-123 S6). Read off the HEADERS as well as the
     // body, because the one retryable 409 is identified by `Retry-After` alone.
-    throw new ApiResponseError(res.status, detail, hql, existingId, conflictOf(body, res))
+    throw new ApiResponseError(
+      res.status, detail, hql, existingId, conflictOf(body, res), fieldErrorsOf(body),
+    )
   }
 
   return res.status === 204 ? (undefined as T) : res.json()
@@ -904,6 +925,28 @@ export async function apiListWorkspaceMembers(wsId: string): Promise<WorkspaceMe
  * — and exactly one of the two must be present (neither and both are alike a
  * 422). Refusals: 403 for the grant ceiling (the detail names the offending
  * permission) and for OWNER, which is never invitable, not even by an owner.
+ *
+ * **429 — a throttle, not a fault (HD-190).** The invite mailer carries ceilings
+ * of its own (per-sender volume, a per-recipient cooldown, a global per-recipient
+ * daily cap — and whatever a later release adds), and **which one refused is
+ * legible only from the `detail` sentence**: there is no `errorType`, no distinct
+ * status, nothing machine-readable that tells them apart. So branch on the status
+ * and on `ApiResponseError.retryAfter` (seconds, off the `Retry-After` header),
+ * and **never on the wording** — it is prose the server rewrites freely, and a
+ * client that pattern-matches it breaks on a copy edit. Render `detail` verbatim:
+ * every one of these refusals already names the wait in words, so recomputing a
+ * duration from `retryAfter` can only contradict the sentence beside it.
+ *
+ * A refused invite **sends no mail and writes no invitation row**, so re-sending
+ * the identical request after `Retry-After` is safe and is the entire remedy —
+ * nothing has to be undone first, and the address the caller typed is the one
+ * thing the refusal is asking them to send again, so a form must keep it.
+ *
+ * Unlike the search and report budgets, this one is spent **after** the workspace
+ * is resolved (404 for a non-member, then 403/422/409, then the ceilings), so a
+ * 429 from THIS endpoint does imply the caller is a member of the workspace it
+ * names. Do not carry that reading to a budget spent before resolution — it is a
+ * property of where the check sits, not of the status code.
  */
 export async function apiInviteWorkspaceMember(
   wsId: string,
@@ -913,6 +956,62 @@ export async function apiInviteWorkspaceMember(
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+/**
+ * **The workspace's own outstanding invitations** (HD-158) — every row of
+ * `workspace_invites` for this workspace that has not been accepted, newest
+ * first. A bare array; no envelope and no pagination, exactly like
+ * `GET …/members`.
+ *
+ * Expired rows are **included**, carrying `status: 'EXPIRED'`, and must be
+ * rendered rather than filtered out here: nothing in the product sweeps them,
+ * they are withdrawable, and an invisible row is one no administrator can clear
+ * and no future refusal can point at. Accepted rows never appear — the person is
+ * in the roster and withdrawal could not affect them.
+ *
+ * **Gated on `workspace.member.manage`, which the caller must check BEFORE
+ * calling.** The list is nothing but addresses, so a member without the
+ * permission gets a 403 and must be shown no section at all — not an empty list
+ * (a falsehood rendered on their screen) and not a count (disclosure with no
+ * matching ability). Hold the query with `enabled: canManage` so that 403 is
+ * never provoked; it exists for the API's sake, not the UI's.
+ *
+ * 404 for a non-member and for an unknown workspace alike — the usual tenancy
+ * posture; 403 only for a *proven* member missing the permission.
+ */
+export async function apiListWorkspaceInvites(wsId: string): Promise<WorkspaceInvite[]> {
+  return request(`/workspaces/${wsId}/invites`)
+}
+
+/**
+ * Withdraw one invitation — **204**, and the row is hard-deleted. The emailed
+ * link and accept-by-id then answer 404 by construction, and the invitee's own
+ * list stops carrying it. Withdrawing an already-expired row is allowed (the
+ * list offers the control on every row it shows, so it must work on every row it
+ * shows).
+ *
+ * Two refusals, and they are **not** interchangeable:
+ *
+ *  • **404 — the invitation is already gone**, whether another administrator
+ *    withdrew it a second ago, a member removal deleted it (HD-132), or the id
+ *    never existed. Because withdrawal deletes, that state is physically
+ *    identical to "never existed", so the API answers 404 rather than inventing
+ *    a tombstone to make a second DELETE feel nicer. **The caller renders it as
+ *    success**: the intent ("this invitation must not be acceptable") is already
+ *    true, so there is nothing to report. Refetch the list and show nothing.
+ *  • **409 `INVITE_ALREADY_ACCEPTED`** — lost the race against the invitee. The
+ *    row is there and is not withdrawable, but its reader *can* act: the detail
+ *    names the new member and points at People, which needs exactly the
+ *    permission they just proved. Render `detail` verbatim.
+ *
+ * **Branch on the STATUS, never on the message.** The 404's `detail` is
+ * deliberately the same sentence as the workspace-level 404 ("Workspace not
+ * found") — an id is not an existence oracle — so the wording cannot tell the
+ * two apart and was never meant to.
+ */
+export async function apiRevokeWorkspaceInvite(wsId: string, inviteId: string): Promise<void> {
+  return request(`/workspaces/${wsId}/invites/${inviteId}`, { method: 'DELETE' })
 }
 
 /**
@@ -1677,9 +1776,10 @@ export const savedFilters = {
 //   • 429 — past this caller's report budget (`app.reports.requests-per-minute`).
 //     A retryable throttle, not a fault: nothing was computed and a retry after
 //     `Retry-After` succeeds (`ApiResponseError.retryAfter` carries it). It is
-//     spent per principal BEFORE the project is resolved, which makes it the one
-//     place on this API where 429 precedes 404 — so a 429 says nothing about
-//     whether the caller can see the project, and no UI may imply otherwise.
+//     spent per principal BEFORE the project is resolved — a budget of that shape
+//     answers 429 ahead of 404, so a 429 says nothing about whether the caller
+//     can see the project, and no UI may imply otherwise. Budgets spent AFTER
+//     resolution exist too and read the other way (see `apiInviteWorkspaceMember`).
 //
 // Unknown/foreign filter ids are NOT an error: the queries are project-scoped
 // first, so an id that does not exist here simply matches nothing and yields an

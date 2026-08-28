@@ -37,7 +37,14 @@ import jakarta.validation.constraints.Size;
 public record UpdateProjectRequest(
         @Size(min = 2, max = 255) @Pattern(regexp = DisplayText.SINGLE_LINE,
                 message = "Name must not contain control characters") String name,
-        String description,
+        // Same bound as CreateProjectRequest.description and as
+        // FieldValueService.MAX_TEXTAREA_LENGTH (HD-171 §4.3) — the two project doors must
+        // agree, or an update refuses what a create accepted. Bare literal so that a FUTURE
+        // column-width scanner CAN read it — no scanner reads this field today
+        // (EmailLengthBoundTest's `max\s*=\s*(\d+)` regex is only ever applied to declarations
+        // it reaches from an @Email). What is meant to police the VALUE, and the agreement
+        // with the create door, is a behavioural test (§5.3), not a source scan.
+        @Size(max = 10000) String description,
         @Deprecated BoardMode boardMode,
         @Valid DeliveryRequest delivery
 ) {}

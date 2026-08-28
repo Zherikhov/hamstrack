@@ -6,18 +6,23 @@ import com.hamstrack.auth.exception.*;
 import com.hamstrack.auth.repository.*;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.config.JwtProperties;
+import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
 import com.hamstrack.common.observability.ProductMetrics.LoginReason;
 import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
+import com.hamstrack.common.seed.DataSeeder;
 import com.hamstrack.common.security.JwtService;
+import com.hamstrack.common.security.PasswordLimits;
+import com.hamstrack.common.tx.AfterCommit;
 import com.hamstrack.common.util.TokenUtils;
 import jakarta.servlet.http.Cookie;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.ResponseCookie;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -58,6 +63,8 @@ public class AuthService {
         if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {
             throw new TermsNotAcceptedException();
         }
+        rejectPublishedPassword(req.password());
+        rejectUnencodablePassword(req.password());
         // Locale.ROOT, never the JVM default. This fold IS the account identity: users.email
         // carries a byte-exact UNIQUE and every lookup is an exact match, so a fold that varies
         // with the container locale varies which address a person owns - a Turkish JVM stores
@@ -66,7 +73,13 @@ public class AuthService {
         // not this line: any fold whose result is stored, mailed, or used as a lookup key names
         // its locale (HD-120).
         var email = req.email().toLowerCase(Locale.ROOT);
-        if (userRepository.existsByEmail(email)) {
+        // Folded in SQL, with the same expression users_email_lower_uk is built from (V23) —
+        // NOT existsByEmail. The fold above and PostgreSQL's lower() are different functions, and
+        // this DTO bounds nothing: where they disagree an exact check says "free" while the index
+        // says "taken", so an ordinary signup goes through a doomed INSERT — answered 409 only
+        // because the catch below translates it, and a 500 the day that catch stops matching.
+        // UserRepository states the rule.
+        if (userRepository.existsByFoldedEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
         var user = new User();
@@ -78,7 +91,50 @@ public class AuthService {
             // recorded whenever the box was ticked, even when not required
             user.setTermsAcceptedAt(Instant.now());
         }
-        userRepository.save(user);
+        // saveAndFlush, and the flush is the contract rather than a style choice: a bare save()
+        // defers the INSERT to commit, where the violation is raised AFTER this method has
+        // returned and the catch below cannot see it — leaving today's 500. Two constraints can
+        // fire here and the caller must not be able to tell which, but they fire for ONE reason
+        // and it is not the one this comment used to give: the pre-check above and the index ask
+        // the SAME PostgreSQL lower() of the same two values, so they cannot disagree about a
+        // stored row — a mixed-case squatter is refused by the pre-check, measured, with no INSERT
+        // attempted. What they differ by is the WINDOW between them, and a window is a race: two
+        // concurrent registrations of one address, losing on users_email_key (a 500 before this
+        // ticket) or on users_email_lower_uk (the same race under the new name). Anything else is
+        // a real fault and keeps its 500.
+        //
+        // No lock is added for the race: the window is a single INSERT, there is no transactional
+        // side effect to unwrite on this path, and an advisory lock on every signup would be a
+        // real cost bought to improve a status code in a race. The verification mail is sent
+        // below, after the row exists, so a rolled-back loser mails nothing.
+        try {
+            userRepository.saveAndFlush(user);
+        } catch (DataIntegrityViolationException e) {
+            if (!EmailUniqueness.isDuplicateEmail(e)) throw e;
+            // THE RESPONSES ARE IDENTICAL, DELIBERATELY — same status, same sentence, no
+            // errorType. A caller who could tell the two apart from the BODY would learn whether
+            // the occupying row's spelling matches theirs, which is a property of somebody else's
+            // account.
+            //
+            // THE CLOCK IS NOT IDENTICAL, AND THAT IS RECORDED RATHER THAN FIXED — BUT IT NO
+            // LONGER RECORDS WHAT IT ONCE DID. The pre-check above returns before
+            // passwordEncoder.encode, and bcrypt at strength 12 is ~370 ms on this project's own
+            // measurement, so a fast 409 means "the address was already taken when you asked" and
+            // a slow one means "you lost a race with another registration of the same address".
+            // That residual needs no mixed-case row: with the pre-check folded it exists on a
+            // perfectly clean database. And the distinction an earlier draft of this comment
+            // recorded — canonical occupant versus non-canonical one — is GONE, because the folded
+            // pre-check answers both of them fast; the two are indistinguishable on the clock as
+            // well as in the body. What the clock still separates (a fast 409 from a slow 201) is
+            // already carried by the status code, which register discloses by construction.
+            //
+            // The trade stays anyway: hashing before the pre-check to flatten the race would hand
+            // every unauthenticated caller a bcrypt-12 per request, which is a worse deal than
+            // disclosing that a race happened. login has the same shape for the same reason. If
+            // the pre-check is ever removed, this comment goes with it rather than becoming true
+            // by accident — a slow 409 would then mean something about somebody else's row again.
+            throw new EmailAlreadyUsedException();
+        }
         metrics.userRegistered();
 
         sendVerificationEmail(user);
@@ -181,12 +237,27 @@ public class AuthService {
             reset.setExpiresAt(Instant.now().plusSeconds(3600)); // 1 hour
             passwordResetRepository.save(reset);
             metrics.passwordReset(PasswordResetPhase.REQUESTED);
-            mailService.sendPasswordResetEmail(user.getEmail(), raw);
+            // HD-181 — a link is promised only once the row it resolves to is durable. The send is
+            // @Async, but @Async leaves this transaction OPEN behind it: the executor can be
+            // holding the message while the transaction can still roll back, and the recipient then
+            // has a reset link whose password_resets row never existed. Deferring costs nothing —
+            // it is still a hand-off to the executor, made a few microseconds later. The address is
+            // read into a local because the lambda must not touch the EntityManager at all — the
+            // context is closing and, worse, still claims to be transactional (see AfterCommit).
+            //
+            // The DESCRIPTION carries the domain only, never the address: it is written verbatim
+            // into a shipped log, and that is the rule RecipientMailThrottle already applies to its
+            // own send line. Nothing is lost — a user who never gets a reset mail re-requests one.
+            var recipient = user.getEmail();
+            AfterCommit.run("password-reset email to a " + MailAddresses.domainOf(recipient) + " address",
+                    () -> mailService.sendPasswordResetEmail(recipient, raw));
         });
     }
 
     @Transactional
     public void resetPassword(ResetPasswordRequest req) {
+        rejectPublishedPassword(req.newPassword());
+        rejectUnencodablePassword(req.newPassword());
         var hash = sha256(req.token());
         var reset = passwordResetRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidTokenException::new);
@@ -206,6 +277,57 @@ public class AuthService {
     }
 
     // --- helpers ---
+
+    /**
+     * <strong>The two places a password can enter {@code users} through the running
+     * application</strong> — register, and completing a reset — refuse the value this project
+     * published in its own {@code .env.prod.example} (HD-200).
+     *
+     * <p>Both bounded it only with {@code @Size(min = 8, max = 100)} and the literal is 19
+     * characters, so an administrator could set their own password to it: the next boot then
+     * refuses to start with a message about a template they never edited, and until that
+     * restart the instance is administrable by anyone who can read the repository. This is
+     * the same predicate the two startup guards use — {@code DataSeeder.isPublishedPassword},
+     * over {@code DataSeeder.PUBLISHED_PASSWORDS} — so the three cannot disagree, and it is
+     * emphatically NOT a strength check: what justifies the one entry is that we published
+     * it, under that variable's own name.
+     *
+     * <p>Refused before the reset token is marked used, so a caller who hits this can retry
+     * on the same link.
+     */
+    private void rejectPublishedPassword(String password) {
+        if (DataSeeder.isPublishedPassword(password)) {
+            throw new PublishedPasswordException();
+        }
+    }
+
+    /**
+     * <strong>The same two doors, refusing what the encoder cannot hash</strong> (HD-171 §4.4).
+     *
+     * <p>{@code passwordEncoder.encode} is BCrypt and throws above
+     * {@value com.hamstrack.common.security.PasswordLimits#MAX_PASSWORD_BYTES} UTF-8 bytes, with
+     * nothing translating that {@code IllegalArgumentException} — so both doors answered
+     * <strong>500</strong> to a password a person could plausibly have chosen, and register is
+     * unauthenticated. The two DTOs now carry {@code @Size(max = 72)}, and <strong>that annotation
+     * is not enough, which is the whole reason this check exists beside it</strong>: {@code @Size}
+     * counts UTF-16 units and BCrypt counts bytes, so 72 characters of Cyrillic is 144 bytes,
+     * passes validation, and still cannot be hashed. See {@link PasswordLimits} for the unit.
+     *
+     * <p>Placed beside {@link #rejectPublishedPassword} and refused in the same shape — a 422
+     * {@code AppException} — because both are the same kind of statement: the body is well-formed
+     * and the value is one this application will not store. It is <em>not</em> a strength check
+     * either.
+     *
+     * <p>Ordered before the reset token is marked used, exactly as the published-password refusal
+     * is, so a caller who trips it can retry on the same link. (Register was never at risk of a
+     * partial write — {@code encode} precedes the INSERT — but the reset path is only safe because
+     * this runs first.)
+     */
+    private void rejectUnencodablePassword(String password) {
+        if (PasswordLimits.exceedsEncoderLimit(password)) {
+            throw new PasswordTooLongException(PasswordLimits.byteLength(password));
+        }
+    }
 
     private AuthResponse issueTokens(User user, HttpServletResponse response) {
         var accessToken = jwtService.generateAccessToken(user);
@@ -230,7 +352,15 @@ public class AuthService {
         verification.setTokenHash(sha256(raw));
         verification.setExpiresAt(Instant.now().plusSeconds(86400)); // 24 hours
         emailVerificationRepository.save(verification);
-        mailService.sendVerificationEmail(user.getEmail(), raw);
+        // HD-181, same reasoning as forgotPassword. Both callers — register and
+        // resendVerification — are @Transactional, and being the last statement in register is not
+        // protection: the INSERTs are still unflushed here, so a concurrent signup losing the race
+        // on the users.email unique index fails at the commit that follows, after the confirmation
+        // link has already left for the executor.
+        // Domain only in the description, for the reason given in forgotPassword.
+        var recipient = user.getEmail();
+        AfterCommit.run("verification email to a " + MailAddresses.domainOf(recipient) + " address",
+                () -> mailService.sendVerificationEmail(recipient, raw));
     }
 
     private String extractRefreshCookie(HttpServletRequest request) {

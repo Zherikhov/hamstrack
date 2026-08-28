@@ -27,7 +27,7 @@ public class MailService {
     private final AppProperties appProperties;
     private final ProductMetrics metrics;
     private final MailAsyncProperties mailAsyncProperties;
-    private final FailedEmailRepository failedEmailRepository;
+    private final FailedEmailWriter failedEmailWriter;
 
     // Account-critical mail (verification + reset): a lost one leaves a user unable
     // to complete signup/recovery, so these retry then dead-letter. INVITE is
@@ -55,6 +55,24 @@ public class MailService {
                 + "\n\nThis link expires in 1 hour.");
     }
 
+    /**
+     * <strong>What kept an SMTP round trip out of a cross-tenant lock is no longer this
+     * {@code @Async}</strong> (HD-181, correcting what this javadoc used to claim). Its only caller
+     * is {@code WorkspaceService.inviteMember}, which takes
+     * {@code pg_advisory_xact_lock(hashtext(recipient_key))} in {@code RecipientMailThrottle} and
+     * holds it until commit; a recipient address is something two tenants legitimately share, so a
+     * send performed inside that section is a wait one tenant can impose on another simply by
+     * inviting the same person. This annotation was said to prevent that, and it does not: the
+     * {@code mailExecutor} pool is bounded with {@code CallerRunsPolicy}, so once its queue fills —
+     * under precisely the load that makes the lock matter — the "async" dispatch runs the send
+     * inline on the caller's thread, inside the lock, retries and all.
+     *
+     * <p>The ordering does it instead. The caller registers this send on
+     * {@code AfterCommit}, so it is dispatched after the commit that releases the advisory lock, and
+     * a caller-runs send then costs that one request its own latency rather than costing every
+     * tenant queued on the same recipient key. Keep {@code @Async} — it is worth a request's
+     * latency — but do not restore an argument that rests on it.
+     */
     @Async("mailExecutor")
     public void sendWorkspaceInviteEmail(String to, String workspaceName, String token) {
         var link = appProperties.baseUrl() + "/accept-invite?token=" + token;
@@ -150,8 +168,18 @@ public class MailService {
      * backoff; on final failure it writes a {@code failed_email} dead-letter row (no
      * raw token) + ERROR log so the {@code EmailFailures} alert fires. Best-effort
      * mail (invite) records the FAILURE metric and logs — no retry, no dead-letter,
-     * unchanged behaviour. Runs on the {@code mailExecutor}; the exception is
-     * observed and swallowed at the end (nothing awaits the async result).
+     * unchanged behaviour.
+     *
+     * <p>Runs on the {@code mailExecutor}, <strong>or on the calling thread when the queue is
+     * full</strong> — {@code CallerRunsPolicy} makes an {@code @Async} dispatch synchronous under
+     * exactly the load that fills the queue, so this loop and its retries can cost a request its
+     * own latency (HD-181, the same correction applied to {@code sendWorkspaceInviteEmail} and to
+     * {@code AsyncConfig}). The exception is observed and swallowed at the end on both paths, and
+     * "nothing awaits the async result" is the weaker half of why: on the caller-runs path there is
+     * a thread but no caller left to tell, because every send is dispatched from an
+     * {@code AfterCommit} effect, after the transaction it announces has already committed. Which
+     * is what makes {@link FailedEmailWriter} the record of a critical failure rather than the
+     * return value.
      */
     private void sendWithDurability(EmailType type, String to, String subject, SendAttempt attempt) {
         boolean critical = isCritical(type);
@@ -191,7 +219,11 @@ public class MailService {
             row.setSubject(truncate(subject, 255));
             row.setLastError(error == null ? null : truncate(String.valueOf(error.getMessage()), 1000));
             row.setAttempts(attempts);
-            failedEmailRepository.save(row);
+            // Its OWN transaction, never the caller's — see FailedEmailWriter. On the caller-runs
+            // path this runs inside an AfterCommit effect, where a PROPAGATION_REQUIRED save joins
+            // an already-committed transaction and is discarded at cleanup without throwing: no
+            // row, and not even the catch below to say so.
+            failedEmailWriter.write(row);
         } catch (RuntimeException persistError) {
             // A dead-letter write failure must not propagate onto the async executor
             // (nothing awaits it); the ERROR log above + metric already captured it.

@@ -68,6 +68,15 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>What it does NOT assert: how big a budget is. One interceptor of that type in the chain is the
  * property, plus the ORDER when a path carries two — {@code InsightsThrottleTest} and
  * {@code SearchThrottleTest} own the behaviour of each pot.
+ *
+ * <p><strong>Nor does it assert anything about limiters that are not path bindings, and there is
+ * now one.</strong> HD-190's invitation ceilings are keyed on the <em>recipient</em> and are spent
+ * inside {@code WorkspaceService.inviteMember}; they register no path pattern, so
+ * {@link #theThrottledPathSetIsSealed()} stays green across that whole feature — correctly, because
+ * a recipient-keyed refusal spent in an interceptor would answer a cross-tenant question to a
+ * non-member. Their seal is {@code com.hamstrack.common.mail.MailThrottleCoverageTest}, which asks
+ * the same kind of question on the axis of <em>mailers</em> rather than paths. The
+ * {@link #PROPAGATION_CHECKLIST} says which question to ask when.
  */
 @SpringBootTest(properties = {
         "app.rate-limit.enabled=false",
@@ -148,6 +157,31 @@ class ThrottleCoverageTest {
             Two claims to re-check rather than copy, because both have been false in this tree \
             already: "the whole X surface" (insights is a report OUTSIDE .../reports/**) and "the \
             only bound" (insights is inside BOTH budgets — the lower configured value binds).
+
+            AND THE CLAIM THIS TEST'S OWN NAME MAKES: it seals ONE axis. "The throttled path set \
+            is sealed" is true and is not the same sentence as "everything expensive is behind a \
+            budget" — a limiter can be correct and be invisible here, because it is not a path \
+            binding at all. One already is. The invitation ceilings (HD-190) are keyed on the \
+            RECIPIENT and are spent inside WorkspaceService.inviteMember, deliberately, and they \
+            register no path pattern — which is why the assertion above stays green across that \
+            whole feature and is not weakened by it.
+
+            The reason they cannot live on this axis is tenancy, not convenience. A \
+            PrincipalThrottleInterceptor is spent before the controller resolves anything, and \
+            PerPrincipalMinuteBudget argues that this is safe precisely because the key is the \
+            CALLER: "the 429 is identical for a real workspace, a nonexistent one and somebody \
+            else's". A recipient-keyed refusal does not have that property — spent early it would \
+            answer, to a caller who is not a member of the workspace in the path, a question about \
+            mail traffic elsewhere in the instance, i.e. a 429 where this project requires a 404.
+
+            So the failure message below ("do not add a check inside the service, which is the \
+            line the next endpoint forgets") is advice about PATH-SHAPED, PRINCIPAL-KEYED budgets \
+            and is wrong about victim-keyed ones. The sibling seal for those is \
+            com.hamstrack.common.mail.MailThrottleCoverageTest, which inverts the axis from PATH \
+            to MAILER: every ProductMetrics.EmailType is either recipient-throttled or exempt with \
+            a written reason, so a fourth kind of outbound mail fails one test that names what to \
+            do. If you are adding an expensive surface, ask BOTH questions — is it a path that \
+            needs a budget, and does it send mail to an address the caller chose?
             """;
 
     @Autowired

@@ -5,6 +5,7 @@ import { apiCreateIssue, apiGetProjectConfig, apiListIssues, apiListProjects, ap
 import type { CreateIssuePreset } from '../uiStore'
 import type { BoardIssues, FieldValue } from '../types'
 import { boardIssuesKey, projectIssuesKeyPrefix } from '../lib/queryKeys'
+import { PROSE_MAX_LENGTH } from '../lib/limits'
 import { FieldInput } from './fields'
 import { LabelPicker } from './labels'
 import { ComponentSelect, useProjectComponents } from './projectComponents'
@@ -485,6 +486,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
             onChange={e => setDescription(e.target.value)}
             placeholder="Add a description…"
             rows={4}
+            maxLength={PROSE_MAX_LENGTH}
           />
 
           {createFields.map(f => (

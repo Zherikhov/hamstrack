@@ -233,6 +233,232 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
+      # ---------------------------------------------------------------------------
+      # HD-189 — HOST memory. Two rules, naming two different failures: approaching
+      # the wall, and already past it. Neither has ever fired; both are new signals
+      # on a box that has never been under load, so each summary says what to DO.
+      #
+      # WHY THIS EXISTS AT ALL, given JVMHeapPressure above. That rule watches a
+      # RATIO the JVM reports about itself, and it is blind to the failure that
+      # actually threatens a small box: a heap ceiling larger than the machine. An
+      # app container with NO mem_limit takes -XX:MaxRAMPercentage against HOST RAM,
+      # so the JVM is entitled to a heap it can never be given, the kernel SIGKILLs a
+      # victim (exit 137, no stack trace, nothing in any application log) long before
+      # the ratio reaches 90%, and JVMHeapPressure stays green through the whole
+      # thing — a rule watching heap used/max has nothing to say about a ceiling
+      # the machine cannot honour. The measured figures behind this are deliberately
+      # NOT restated in a shipped file: paired with the box they describe they read
+      # as how much to force and how much room there is, and this repository is
+      # public. They live in docs/ops-prod-hardening.md §5 and in the two design
+      # docs that reason from them. A container limit is what CLOSES that gap (APP_MEMORY_LIMIT
+      # / mem_limit, HD-199); these two rules are what SEE it, before and after.
+      # Which state a box is in is a question for the box and never for a file:
+      # `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` — `0` is
+      # no limit, and a variable present in .env is not a limit until a container
+      # reports one.
+      #
+      # 137 IS ANY SIGKILL (128 + 9), not the signature of an OOM kill: a docker stop
+      # whose grace period expired and escalated, a docker kill, a kill -9 and a daemon
+      # or Docker Desktop shutdown all produce it, and the kernel's OOM killer is one
+      # member of that class rather than its identifier. The discriminator is
+      # `docker inspect <container> --format '{{.State.OOMKilled}}'`; read 137 as proof
+      # on its own and the cost is a false alarm — a box resized because it restarted,
+      # or a memory leak hunted that does not exist. It is also why HostKernelOOMKill
+      # below, which counts the kernel's own event, is the one rule here that no other
+      # kind of kill can fake. Long form: docs/ops-prod-hardening.md §5.3.
+      #
+      # BYTES, NOT A PERCENTAGE, and that is the load-bearing choice. A percentage
+      # stops meaning anything the moment the instance is resized: 90% of 1909 MB
+      # and 90% of 4096 MB are different amounts of danger, and a resize is exactly
+      # what HD-189 intends. The buffer a Linux box needs — GC headroom plus enough
+      # page cache to keep Postgres off the disk — is roughly ABSOLUTE and does not
+      # scale with the machine, so an absolute threshold survives the resize without
+      # being re-derived. Same category-over-member rule the rest of the project
+      # follows: a claim about what a box needs outlives a claim about what this box
+      # has.
+      #
+      # Unaggregated on purpose, so a second host raises its own instance and the
+      # `instance` label names it. DiskFilling's min() is aggregated for a different
+      # reason — many filesystems per host, one memory figure per host.
+      #
+      # IDENTICAL IN dc AND cloud, as every rule in this file is: how much memory a
+      # box has left is a property of the box, not of the plan, and node-exporter is
+      # in the same optional stack either way. Two things in the summaries are
+      # hosted-layout SPECIFICS rather than universals — the container name
+      # `hamstrack-app-1` and the path `/opt/hamstrack/.env` — kept because a refusal
+      # that names no command is one an operator cannot act on, and matching the
+      # convention DeployImagePinned and ConfigDrift already set. A self-hoster
+      # substitutes their own compose project name and env file; nothing here is
+      # gated on a profile. Both thresholds are PROVISIONED, not environment-driven:
+      # if 200 MiB or 128 MiB is wrong for your host, change it in this file — there
+      # is no variable to set (same as MailDailyVolumeHigh below).
+      - uid: hamstrack-host-memory-low
+        title: HostMemoryLow
+        condition: B
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: "Less than 200 MiB of host memory has been available for 10m - the kernel is close to choosing an OOM victim, and its victim dies silently on SIGKILL (exit 137, no stack trace, nothing in any application log). 137 is any SIGKILL, so on a container that has already exited it is `docker inspect <container> --format '{{.State.OOMKilled}}'`, not the exit code, that says the kernel chose it. THRESHOLD DERIVATION, so it is not tuned away by the next person: 200 MiB is BELOW the 227 MiB 7-day minimum measured on production 2026-08-28, so this rule would not have fired once in that week and only fires when the box is worse than it has ever been. It is an absolute buffer rather than a percentage, so it still means the same thing after a resize. FIRST MOVES: `free -m` and `docker stats --no-stream` on the box to see what grew; then `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` - `0` means the app container has no ceiling and its JVM sized its heap from HOST RAM, which is the shape of this failure, and setting APP_MEMORY_LIMIT in /opt/hamstrack/.env followed by `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d` fixes it with no deploy and no merge. If the container limit is already set and honoured, the box is simply too small: resize it (HD-189) rather than shaving ceilings"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'node_memory_MemAvailable_bytes'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [209715200] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The other half of the pair: not "approaching the wall" but "already past it".
+      # Swap here is an emergency buffer and not a tier of memory — vm.swappiness=10,
+      # so the kernel reaches for it reluctantly and sustained usage means RAM was
+      # genuinely gone, not that a page was cold. That is also why this is a CAPACITY
+      # signal rather than an incident one: the box SURVIVES, which is what the
+      # swapfile was added for (production 2026-08-28: 1023 MB, persisted in
+      # /etc/fstab and /etc/sysctl.d/99-hamstrack-swap.conf; ops-prod-hardening §5),
+      # so it degrades instead of dying and the honest action is to resize rather
+      # than to wake anybody. severity: warning for exactly that reason — a machine
+      # that no longer fits its job is not an outage, and treating it as one trains
+      # an operator to mute a folder that also carries AppDown.
+      #
+      # ~128 MiB rather than > 0: a Linux box parks a few MB of genuinely idle
+      # anonymous pages in swap and never touches them again, and a rule that fires
+      # on that is muted within a week. 15m rather than 10m because one burst — a
+      # backup run, a deploy — can push pages out and recover on its own.
+      #
+      # THE ONE THING THIS RULE DEPENDS ON THAT IS NOT UNIVERSAL: how eagerly the
+      # kernel swaps. "Sustained swap means RAM is gone" holds at a LOW swappiness —
+      # the hosted box runs 10 — and weakens at the distro default of 60, where a
+      # box with plenty of free memory will still page out cold anonymous pages and
+      # sit above 128 MiB indefinitely. If `sysctl vm.swappiness` on your host says
+      # 60, either lower it or raise the threshold in this file; do not leave a rule
+      # standing that your kernel's normal behaviour keeps firing. The threshold is
+      # provisioned, not environment-driven — this file is where it changes.
+      #
+      # An install with NO swap reports SwapTotal = SwapFree = 0, so the expression
+      # is 0 and this rule is silently inert. That is correct and worth knowing: on
+      # such a box HostMemoryLow above is the only rule watching this failure, and it
+      # is also the only warning that box will ever get, because without swap the
+      # same pressure arrives as a kill instead of as a slowdown.
+      - uid: hamstrack-host-swap-in-use
+        title: HostSwapInUse
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 128 MiB of swap has been in use for 15m. Swap is meant to be an emergency buffer here and not a memory tier, so at a low vm.swappiness (the hosted box runs 10) sustained use means RAM is already gone and the machine is trading latency to stay alive - it is not dying (that is HostMemoryLow), it no longer fits its job. Check `sysctl vm.swappiness` first: at the distro default of 60 a healthy box pages out cold anonymous memory too, and then this rule is mis-tuned rather than right. Expect slower p95 and longer GC pauses while this is true. FIRST MOVES: `free -m` and `docker stats --no-stream` to see which container grew, then choose between giving the app container a memory limit it may not currently have (APP_MEMORY_LIMIT in /opt/hamstrack/.env - an unlimited container sizes its JVM heap from HOST RAM, check with `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'`) and resizing the instance (HD-189). Do NOT turn swap off to make this quiet: without it the same pressure arrives as an OOM kill instead of as a warning"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [134217728] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The third of the host-memory set, and the only one that reports the failure
+      # itself. HostMemoryLow PREDICTS an OOM kill and HostSwapInUse describes the
+      # state that precedes one; nothing else in this file says one HAPPENED. The
+      # kernel's victim dies on SIGKILL and leaves exit 137 and NO stack trace, nothing
+      # in any application log, no Java exception and no Loki line to search for — the
+      # process is simply gone and Docker restarts it — so an alert on this counter
+      # is the only thing that will ever tell an operator it occurred. Without it,
+      # the evidence is a restarted container and a gap, which reads like a deploy.
+      # And 137 alone would not settle it either way: EVERY SIGKILL exits 137, so a
+      # stop that escalated or a kill -9 looks identical. That is exactly why this rule
+      # reads node_vmstat_oom_kill — a counter of the kernel's own decision — instead of
+      # an exit code, and why the summary sends the operator to .State.OOMKilled.
+      #
+      # THRESHOLD-FREE, which is the point: `> 0` on a counter of an event the
+      # kernel already decided. There is no number here to tune away and none to
+      # re-derive after a resize, and — unlike HostSwapInUse — it does not depend on
+      # how eagerly the kernel swaps, so it is immune to the vm.swappiness caveat
+      # documented on that rule. On a healthy box node_vmstat_oom_kill never moves
+      # (production reads 0), so the rule is inert by construction rather than by
+      # tuning.
+      #
+      # `for: 0m` DELIBERATELY, and the reasoning is different from every level-based
+      # rule above. `for:` exists to require that a LEVEL persists, so that a spike is
+      # not paged; this is a COUNTER OF A PAST EVENT, and an event does not become
+      # more or less true by lasting. The 15m range window already provides the
+      # persistence — the condition stays true for 15 minutes after the kill and then
+      # clears itself — so a non-zero `for:` would only delay the notification of
+      # something that is already over, and on the box that just OOM-killed something
+      # it would be worse than that: a scrape gap (node-exporter is not immune to the
+      # OOM killer either) resets a pending alert, so the one rule that must not miss
+      # its event would be the one waiting for an uninterrupted run of evaluations.
+      #
+      # Unaggregated, like the two above: one counter per host, and the `instance`
+      # label names which. Note the counter is HOST-WIDE and does not name the
+      # victim; on current kernels a container killed at its OWN cgroup limit lands
+      # in it too, which is wanted — once HD-199 delivers mem_limit, a limit set too
+      # low reports itself here instead of as an unexplained restart loop.
+      #
+      # IDENTICAL IN dc AND cloud. Nothing here is layout-specific: no container
+      # name, no env path, no threshold.
+      - uid: hamstrack-host-kernel-oom-kill
+        title: HostKernelOOMKill
+        condition: B
+        for: 0m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: "The kernel OOM-killed at least one process on this host in the last 15m. This is not a prediction (that is HostMemoryLow) - it already happened, and it is invisible everywhere else: the victim dies on SIGKILL and leaves exit 137, no stack trace and no application log line, so a restarted container is the only trace. 137 by itself proves nothing - every SIGKILL exits 137 - which is why this rule counts the kernel's own event rather than an exit code, and why the checks below ask for OOMKilled. FIRST MOVES: `dmesg -T | grep -i -E 'killed process|out of memory'` names the victim and the moment; `docker ps -a` and `docker inspect <container> --format '{{.State.OOMKilled}} {{.State.ExitCode}}'` say whether it was ours. THEN: if the victim was the app container and it has no memory limit, its JVM sized its heap from HOST RAM and the box cannot honour that - set APP_MEMORY_LIMIT (see HostMemoryLow's summary for the exact apply step). If the limit IS set and the app was killed at it, the limit is too low for the workload rather than too high for the box: raise it, or resize (HD-189). If the victim was postgres or the observability stack, the box is oversubscribed and shaving one ceiling only moves the victim"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'increase(node_vmstat_oom_kill[15m])'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       # A database statement was cancelled at DB_STATEMENT_TIMEOUT_MS (HD-151). This is the
       # ONLY rule that can surface the condition: the refusal is a deliberate 422, not a
       # fault, so HighErrorRate — which watches the 5xx ratio — stays green while an instance
@@ -276,6 +502,128 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
+      # HD-187. The backup job is a HOST systemd timer, not a container, so it emits nothing
+      # to Loki and nothing to the app's metrics: its only channel to a person is the
+      # node-exporter textfile it writes. Two rules, because a backup has two failures and only
+      # one of them is loud — a dump that fails is over in seconds, while a dump that SUCCEEDS
+      # and then fails to upload leaves a perfectly good file on the volume that is about to be
+      # lost, with every local check green.
+      #
+      # BackupRunFailed is the fast one: the last run reported a stage failure, visible within
+      # an hour. BackupStale is the slow, load-bearing one: nothing has landed off-box in 26
+      # hours — which is the only rule that can see the run NOT HAPPENING AT ALL (a stopped
+      # timer, a hung flock, a box that was down), a condition BackupRunFailed cannot detect
+      # because a job that does not run reports nothing.
+      #
+      # BackupStale is deliberately NOT scoped to stage="upload". That series is never
+      # written when the job runs with BACKUP_TARGET=local — the mode docs/self-hosting.md
+      # offers a reader with no object store — so scoping to it left the entire DC
+      # configuration with no rule that could see the timer stop, while that page promised
+      # both rules "start working with no extra configuration". Unaggregated and per-stage,
+      # so Grafana raises one instance per stage and the annotation can name which; on Cloud
+      # the only change is that a fully stopped timer raises two instances instead of one.
+      #
+      # noDataState: OK is deliberate and has a cost. It keeps the rules dormant on an
+      # install that runs the observability stack without the backup timer (the metric simply
+      # does not exist there). The price is that DELETING the .prom file — or losing the
+      # node-exporter bind mount — silences the alert instead of firing it. The installer
+      # writes zero-timestamp sentinel STATE files, so the first run to execute at all
+      # publishes a series that is instantly stale rather than a healthy-looking one; note
+      # that the series itself appears only once the script has run once and emitted a .prom,
+      # which is why installing the job ends with a manual run (ops-prod-hardening §6.3d) and
+      # why confirming the series exists is a step of the restore drill.
+      #
+      # AN ANNOTATION IS RENDERED PER INSTANCE, SO IT MUST DESCRIBE EXACTLY ONE. These two
+      # rules are unaggregated, so `stage` is already decided by the time the text renders.
+      # The summary below used to interpolate the stage correctly and then append a legend
+      # covering BOTH stages — the reader was told the right stage and then handed a
+      # two-branch key to apply to themselves, the other branch guaranteed irrelevant to the
+      # message it appeared in. Grouping makes that worse rather than redundant: policies.yml
+      # groups by `alertname`, so a fully stopped timer puts BOTH stage instances in ONE
+      # email and the legend was printed twice, once beside each stage it half-applied to.
+      # Do not restate the reason as "one notification per instance" — that is a property of
+      # the notification policy, not of this rule, and that policy already makes it false;
+      # what holds is that the TEXT is expanded per instance. Found by HD-187's acceptance
+      # test on a deliberately fired BackupStale; `if`/`eq`/`$labels` confirmed to expand
+      # (not render literally) on the pinned grafana:11.5.2, one branch per stage. Branch on
+      # $labels inside the template; never enumerate cases the instance has already settled.
+      # The `else` makes the branch total, which is only truthful while `stage` has exactly
+      # the two values hamstrack-backup.sh emits: a third one would be described as a missing
+      # dump. If you add a stage to the .prom, add its arm here in the same commit.
+      - uid: hamstrack-backup-stale
+        title: BackupStale
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Backup stage {{ $labels.stage }} has not succeeded in over 26 hours — {{ if eq $labels.stage "upload" }}nothing has landed off-box{{ else }}the job is not running at all{{ end }}; see journalctl -u hamstrack-backup on the host'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - hamstrack_backup_last_success_timestamp_seconds'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [93600] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The `stage` label is the whole value of this alert — it is what tells "no dump was
+      # taken" from "a good dump is on the box and only the upload failed", and those have
+      # opposite first moves during an incident. It is only as truthful as the .prom, which
+      # is why hamstrack-backup.sh's ExecStopPost handler stands down when the run's EXIT
+      # trap already published: the handler can only say "both stages failed, size 0", and
+      # it fires on every non-success result, so it used to relabel exactly the failure this
+      # rule exists to distinguish.
+      #
+      # Its summary names the one stage its instance carries and stops there — the per-
+      # instance rule above applies here too, and this text is what it looks like satisfied.
+      - uid: hamstrack-backup-run-failed
+        title: BackupRunFailed
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "The last Hamstrack backup run failed at stage {{ $labels.stage }} — see journalctl -u hamstrack-backup on the host"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_backup_last_status'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       # A stored role_id failed the scope/ownership assertion (HD-127). No request can
       # create such a row — every write door resolves role ids through
       # RoleRepository.findAssignable(id, workspaceId, scope) — so any non-zero value is a
@@ -309,6 +657,264 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # HD-199. The two rules below watch the DELIVERY of configuration rather than the
+      # application: they are the only thing that proves the sync worked and keeps working.
+      # The metrics come from the host systemd unit hamstrack-config-drift.service (and
+      # from the tail of every apply-config.sh run) through node-exporter's textfile
+      # collector, so they arrive under the Prometheus job `node`, exactly like the backup
+      # metrics above and for the same reason: a deploy is not something the JAR can see.
+      #
+      # A drifted box is usually a DELIBERATE incident edit, so these are `warning` and not
+      # `critical`: the job of the alert is to make sure the edit is un-done, not to wake
+      # anybody. `.env` for durable, the file for temporary, a commit for permanent — and
+      # this is what remembers the middle one.
+      #
+      # noDataState: OK has the same shape and the same price as the backup rules: it keeps
+      # the pair dormant on an install that runs this stack without the drift timer, and it
+      # means that DELETING the .prom silences the alert instead of firing it. The distinct
+      # gap here is that apply-config.sh publishes at every deploy even when the timer is
+      # NOT installed — so the series exists, looks healthy, and is only as fresh as the
+      # last deploy. hamstrack_config_check_timestamp_seconds is what tells those two
+      # states apart, and it is the whole reason that metric exists.
+      #
+      # AN ANNOTATION IS RENDERED PER INSTANCE, SO IT MUST DESCRIBE EXACTLY ONE. The query
+      # is deliberately UNAGGREGATED, and it must stay that way: the summary branches on
+      # $labels.scope, and any aggregation that drops the label — a max(), a sum(), a
+      # count() — would render the branch against an instance with no scope and hand the
+      # reader the wrong first move, or none. The scope is the only label that makes this
+      # alert actionable. Each scope has a different first move, so the summary names one
+      # and never a legend covering all three. The `else` makes the branch total, which is
+      # truthful only while `scope` has exactly the three values hamstrack-config-drift.sh
+      # emits: a fourth would be described as an uninstalled ops artefact. If you add a
+      # scope to the .prom, add its arm here in the same commit. WHAT differs is in the
+      # journal and in the script's stdout, never in a label.
+      - uid: hamstrack-config-drift
+        title: ConfigDrift
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ if eq $labels.scope "files" }}A synced file in /opt/hamstrack differs from the commit that was deployed — an edit made on the box, which the next deploy will overwrite. Re-deploy to restore it, or commit it{{ else if eq $labels.scope "containers" }}A container is running a service definition that is not the one on disk in /opt/hamstrack — the file was replaced and the stack was never brought up. Run the deploy again{{ else }}An ops artefact installed under /usr/local/bin or /etc/systemd/system differs from the copy in /opt/hamstrack/ops — a deploy places files and never installs them, so the install step in docs/ops-prod-hardening.md §6.3 is what closes this{{ end }}; journalctl -u hamstrack-config-drift names what differs'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_config_drift'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The un-pin reminder, as a mechanism rather than as a sentence in a checklist. An
+      # emergency rollback is `APP_IMAGE_TAG=<version>` in /opt/hamstrack/.env — a file no
+      # deploy touches, so the pin survives by construction and therefore cannot be undone
+      # by forgetting. `for: 6h` is the point: a pin still in place after six hours is
+      # either forgotten or has become the intended version, and both deserve a sentence to
+      # a person. Unaggregated so the instance carries `tag` and the summary can name it.
+      #
+      # This metric says the tag is not `latest`; it does NOT say the deploy is blocked.
+      # apply-config.sh refuses on the pin having MOVED (`.env` versus `.deployed-image-tag`),
+      # so a box that pins by policy fires this rule while deploying perfectly happily. The
+      # summary therefore gives BOTH outcomes an action — un-pin, or adopt the version with
+      # one `--adopt-pin` run — because "it has become the intended version" left alone is
+      # the state where deploys stay red for ever and nothing else says so.
+      #
+      # NOT `--allow-pinned`, and the difference is why there are two flags: that one
+      # proceeds for a single run and deliberately leaves `.deployed-image-tag` alone, so an
+      # operator who reaches for it at hour six — an urgent config fix during the very
+      # incident this pin is holding — does not thereby tell the next unattended deploy that
+      # a rolled-back image is the intended one. Adoption is the deliberate act, and this
+      # summary is read by somebody tired.
+      - uid: hamstrack-deploy-image-pinned
+        title: DeployImagePinned
+        condition: B
+        for: 6h
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Production has been pinned to image tag {{ $labels.tag }} for six hours — APP_IMAGE_TAG is set in /opt/hamstrack/.env. Config delivery is refused while the pin disagrees with .deployed-image-tag, so every deploy is red until you un-pin OR adopt the pin. Un-pin it (set it to latest or remove the line) and `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d`; or, if this version is now the intended one, adopt it by running the applier once by hand with --adopt-pin, which re-stamps the tag and lets deploys resume. If the rollback is still in progress and you only need one configuration change applied now, use --allow-pinned instead: it applies this run and does NOT re-stamp, so the next unattended deploy still refuses (docs/ops-prod-hardening.md §3)"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_deploy_image_pinned'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # ---------------------------------------------------------------------------
+      # HD-190 — the invitation mailer. THREE RULES, RANKED BY VALUE, which is the
+      # reverse of the order they would naturally be written in.
+      #
+      # The ranking is the finding, so read it before adding a fourth: a rule built on
+      # THROTTLE REFUSALS can only see an attacker who HITS a ceiling. An attacker who
+      # reads the configured numbers and stays beneath them trips no RateLimitedException
+      # and is invisible to InviteThrottleTripping below. What is always true, whichever
+      # ceiling did or did not fire, is the VOLUME of mail leaving the box and the
+      # PROPORTION of invitations anybody accepts. Those are rules 1 and 2.
+      #
+      # None is `critical`. None of this is "the product is down", and paging an operator
+      # for abuse trains them to mute the folder that also carries AppDown.
+      # ---------------------------------------------------------------------------
+
+      # RULE 1, the most valuable: the direct measurement of the loss, independent of
+      # every ceiling. 500/day is a sixth of Hamstrack Cloud's 3000/month provider quota
+      # (Resend's free tier), i.e. the month is gone in six days. THAT NUMBER IS OURS, NOT
+      # YOURS: a self-hosted install on its own SMTP relay may have a far larger quota or
+      # none at all, and 500/day may be an ordinary Tuesday there. If it is, edit the
+      # threshold in this file (observability/grafana/provisioning/alerting/rules.yml) —
+      # Grafana thresholds in this stack are provisioned, not environment-driven, so this
+      # is the file to change and there is no variable to set.
+      # A real onboarding week can approach it, which is exactly why
+      # this is a warning that says GO AND LOOK rather than one that says act: the
+      # domain-only INFO line ("mail send allowed: ... recipientDomain=") separates one
+      # abuser mailing four hundred domains from one customer onboarding four hundred
+      # colleagues at one domain, and Prometheus cannot, because no metric here may carry
+      # an address or an id.
+      - uid: hamstrack-mail-daily-volume-high
+        title: MailDailyVolumeHigh
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 500 emails sent in 24h - at Hamstrack Cloud's 3000/month provider quota that consumes the month in six days (self-hosted on your own relay, your quota may differ - the threshold lives in observability/grafana/provisioning/alerting/rules.yml), and the first symptom of running out is that new users silently stop receiving verification links. Do not change a ceiling yet: search the app logs for the line 'mail send allowed' and group by recipientDomain. Many unrelated domains with a low acceptance ratio is a spam run (see InviteVolumeUnaccepted); one domain is a customer onboarding, and the action there is to RAISE INVITE_MAX_PER_SENDER_PER_DAY, not to lower anything. The mail_send_events table answers 'which account' for the last INVITE_EVENT_RETENTION_DAYS days"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_email_sent_total{outcome="success"}[24h]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 86400, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [500] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 2, the discriminator - and the only rule here that sees an abuser who stays
+      # under every ceiling. Real invitations get accepted; spam does not, and nothing
+      # else in the metric surface separates the two.
+      #
+      # The `and on()` guard is what keeps it quiet: below 200 invitations in six hours
+      # the expression returns no data and noDataState: OK holds, so a small instance
+      # where two invitations went unanswered never fires.
+      #
+      # THE KNOWN FALSE POSITIVE, STATED SO IT IS NOT DISCOVERED: a genuine 300-person
+      # onboarding started at 17:00 on a Friday shows a low acceptance ratio for hours.
+      # The six-hour window and `for: 30m` absorb the ordinary version of that; the
+      # Friday-evening version WILL fire, and the summary says so. A rule with a named,
+      # explained false positive survives; one whose false positive is a surprise gets
+      # muted within a week, which is the failure this rule exists to avoid.
+      - uid: hamstrack-invite-volume-unaccepted
+        title: InviteVolumeUnaccepted
+        condition: B
+        for: 30m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 200 invitations in 6h with under 10% accepted - a spam run looks exactly like this and a real onboarding does not, because real invitations get accepted. KNOWN FALSE POSITIVE: a genuine large onboarding started on a Friday evening also looks like this for a few hours, so check before acting. The check is one query - search the app logs for the line 'mail send allowed' and group by recipientDomain: many unrelated domains is abuse, one customer domain is an onboarding. The mail_send_events table names the account. If it is abuse, lower INVITE_MAX_PER_SENDER_PER_DAY and disable the account; if it is an onboarding, raise it"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: '(sum(increase(hamstrack_invites_accepted_total[6h])) / clamp_min(sum(increase(hamstrack_invites_sent_total[6h])), 1)) and on() (sum(increase(hamstrack_invites_sent_total[6h])) > 200)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [0.1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 3, least valuable and still worth having: it catches the LOUD abuser, and
+      # only the loud one. Listed last on purpose - anyone who builds only this rule has
+      # built a monitor for the incompetent. The kind label is what makes it actionable,
+      # because the three kinds mean three different things.
+      - uid: hamstrack-invite-throttle-tripping
+        title: InviteThrottleTripping
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Invitation ceilings refused more than 20 requests in 15m. READ THE kind LABEL: invite_sender_volume is bulk-shaped (one account sending a lot - check whether it is a customer onboarding before lowering anything); invite_recipient_cooldown is harassment-shaped (one account pressing invite at one address across workspaces); invite_recipient_daily is the sharpest, one address hit from SEVERAL accounts, which costs the attacker a mailbox per account and is almost never innocent. This rule cannot see an attacker who stays under the ceilings - MailDailyVolumeHigh and InviteVolumeUnaccepted are the ones that can"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_ratelimit_hit_total{kind=~"invite_.*"}[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [20] }
                   operator: { type: and }
                   query: { params: [] }
                   reducer: { type: last, params: [] }

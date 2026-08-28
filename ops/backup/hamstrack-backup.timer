@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily Hamstrack database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 UTC
+# Spread the load and avoid a thundering herd if this is ever more than one host.
+RandomizedDelaySec=600
+# If the box was down at 03:15, run at the next boot rather than skipping the day. The
+# 26h alert threshold in the spec (§8.3) is sized to absorb exactly this catch-up.
+Persistent=true
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

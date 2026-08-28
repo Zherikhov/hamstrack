@@ -1,9 +1,33 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router'
-import { apiRegister } from '../api'
+import { ApiResponseError, apiRegister } from '../api'
 import { useConfigStore } from '../config'
+import { passwordLengthError } from '../lib/limits'
 import { Button, Checkbox, Input } from '../components/ui'
 
+/** The request fields this form has an inline slot for; anything else falls to the banner. */
+const SHOWN_FIELDS = ['displayName', 'email', 'password']
+
+/**
+ * <strong>The password field carries no `maxLength`, deliberately</strong>
+ * (HD-171 §11).
+ *
+ * The server's bound is 72 UTF-8 **bytes**, and `maxLength` counts UTF-16 code
+ * units — so a `maxLength={72}` is simultaneously too loose (a Cyrillic
+ * passphrase of 72 characters is 144 bytes and still refused, with 422) and
+ * dangerous: a browser truncates a *paste* to fit `maxLength`, so a 90-character
+ * password pasted from a password manager would be silently clipped, invisibly,
+ * inside a field that renders dots. The account would then hold a password its
+ * owner never chose and cannot see. A password is the one value that may never
+ * be quietly shortened.
+ *
+ * So the value is kept whole and {@link passwordLengthError} refuses it in the
+ * right unit, next to the field, before the request is sent. That check is
+ * strictly stronger than the server's `@Size(max = 72)` (72 bytes implies at
+ * most 72 units), so a submitted password can only fail the server's byte check
+ * if this one was bypassed — and if it is, the 422's `detail` says so and the
+ * banner below renders it.
+ */
 export default function RegisterPage() {
   const navigate = useNavigate()
   const termsRequired = useConfigStore((s) => s.config.termsAcceptanceRequired)
@@ -12,18 +36,32 @@ export default function RegisterPage() {
   const [password, setPassword] = useState('')
   const [termsAccepted, setTermsAccepted] = useState(false)
   const [error, setError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
+
+  // Local, in the server's own unit (bytes), so the refusal arrives while typing
+  // rather than after submitting. A server-named `password` error is shown in
+  // the same place, so one field has one error slot no matter who refused.
+  const passwordError = passwordLengthError(password) ?? fieldErrors.password
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setError('')
+    setFieldErrors({})
     setLoading(true)
     try {
       await apiRegister(email, displayName, password, termsAccepted)
       setDone(true)
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Registration failed')
+      // A validation 400 names its fields; render those beside the inputs. The
+      // banner still fires for anything this form has no slot for (a class-level
+      // rule, `termsAccepted`, a 409, a 422, a network failure) — a refusal with
+      // nowhere to land must never become an empty screen.
+      const named = err instanceof ApiResponseError ? err.errors : undefined
+      setFieldErrors(named ?? {})
+      const allShown = named && Object.keys(named).every(f => SHOWN_FIELDS.includes(f))
+      setError(allShown ? '' : err instanceof Error ? err.message : 'Registration failed')
     } finally {
       setLoading(false)
     }
@@ -77,7 +115,9 @@ export default function RegisterPage() {
               onChange={e => setDisplayName(e.target.value)}
               placeholder="Your name"
               autoComplete="name"
+              maxLength={100}
               required
+              error={fieldErrors.displayName}
             />
             <Input
               label="Email"
@@ -86,7 +126,9 @@ export default function RegisterPage() {
               onChange={e => setEmail(e.target.value)}
               placeholder="you@company.com"
               autoComplete="email"
+              maxLength={255}
               required
+              error={fieldErrors.email}
             />
             <Input
               label="Password"
@@ -97,6 +139,7 @@ export default function RegisterPage() {
               autoComplete="new-password"
               minLength={8}
               required
+              error={passwordError}
             />
             {termsRequired && (
               <Checkbox
@@ -123,7 +166,8 @@ export default function RegisterPage() {
               type="submit"
               variant="primary"
               loading={loading}
-              disabled={!email || !displayName || !password || (termsRequired && !termsAccepted)}
+              disabled={!email || !displayName || !password || !!passwordLengthError(password)
+                        || (termsRequired && !termsAccepted)}
               className="w-full justify-center mt-1"
             >
               Create account

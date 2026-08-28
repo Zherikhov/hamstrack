@@ -1,10 +1,25 @@
 services:
   app:
     # The owner's prod tracks `latest` on purpose (continuous deploy). If you are
-    # self-hosting, pin a release line instead — `:0.4` — or an exact version.
-    # `latest` moves on every main build AND on every stable release tag
+    # self-hosting, pin a release line instead — `APP_IMAGE_TAG=0.4` in .env — or an
+    # exact version. `latest` moves on every main build AND on every stable release tag
     # (HD-115), so it can jump mid-upgrade. See docs/self-hosting.md#upgrading.
-    image: ghcr.io/${GITHUB_OWNER}/hamstrack:latest
+    #
+    # THE PIN LIVES IN .env, NOT HERE (HD-122). Set APP_IMAGE_TAG=0.17.0 in .env and
+    # `docker compose up -d`: because .env is never synced by a deploy, that pin survives
+    # every subsequent deploy BY CONSTRUCTION rather than by the deploy declining to touch
+    # a file. Editing this line instead works until the next deploy replaces the file, and
+    # then stops working silently — which is the trap docs/release-checklist.md used to
+    # send an operator into mid-incident. An empty or absent value falls back to `latest`:
+    # Compose reads this, not Spring, so it cannot stop the boot.
+    # GITHUB_OWNER carries a `:?` guard for the same reason DB_USERNAME below does, plus
+    # one this line alone has: it is the variable that COMPOSES THE IMAGE NAME. Unset,
+    # compose only WARNs, `config -q` still exits 0, and the string resolves to
+    # `ghcr.io//hamstrack:latest` — so a deploy's validate step PASSES, the applier
+    # replaces files and stamps the sha, and the run first fails at `pull`, with the box
+    # already changed. That is HD-197's failure class, reached through the one
+    # interpolation here that had no guard.
+    image: ghcr.io/${GITHUB_OWNER:?set GITHUB_OWNER in .env}/hamstrack:${APP_IMAGE_TAG:-latest}
     # All operator-facing config comes from .env — see .env.prod.example for the
     # full list. Defaults live in the app's application-{cloud,dc}.properties.
     env_file: .env
@@ -16,8 +31,25 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/hamstrack
       # Prod always sits behind Caddy, which strips client-supplied X-Forwarded-For,
       # so the rightmost XFF entry is the real peer — trust it for per-IP rate-limit
-      # keying. Set explicitly (not from .env) so this security posture always wins.
-      RATE_LIMIT_TRUST_FORWARDED_FOR: "true"
+      # keying. Declared HERE rather than left to .env so it is the DEFAULT of this
+      # deployment: an operator who never sets the variable gets `true`.
+      #
+      # `${VAR:-true}` and not a bare `"true"`, because a literal under `environment:`
+      # wins over `env_file:` and therefore CANNOT be turned off from .env — and this
+      # is a setting a self-hoster legitimately has to turn off. This project's own
+      # recipe (docs/self-hosting.md) fronts the stack with somebody else's proxy by
+      # publishing `ports: - "8080:8080"`; the app port is then directly reachable, every
+      # request carries an attacker-chosen X-Forwarded-For, the filter keys on the
+      # rightmost entry, and login / registration / forgot-password / resend-verification
+      # become effectively unbounded. .env.prod.example tells that reader to set the
+      # variable `false`, and against a hard-coded literal that instruction was inert.
+      #
+      # The default form is still a seal (ProdComposeContractTest): delete the line and
+      # the value falls back to the APP's default, which is `false` — one auth budget
+      # for every visitor behind Caddy. What must not be deletable is the deployment's
+      # opinion, not the literal. Quoted, because compose rejects a non-string
+      # environment value and YAML would read a bare `true` as a boolean.
+      RATE_LIMIT_TRUST_FORWARDED_FOR: "${RATE_LIMIT_TRUST_FORWARDED_FOR:-true}"
     # Memory ceiling for the app container (HD-152). This is the other half of the
     # image's -XX:MaxRAMPercentage=50: the JVM sizes its heap against the CONTAINER
     # limit, so without this line the percentage is taken against HOST RAM and the
@@ -45,8 +77,23 @@ services:
     # and capping it turns a tuning problem into a kill), so the observability file's
     # "every service has a mem_limit, so the stack can't OOM the box" is an invariant
     # of THAT file and not of this deployment. Under host memory pressure the kernel
-    # still chooses a victim, and the app — now the one process with a declared
+    # still chooses a victim, and the app — the one process here with a declared
     # ceiling — is not thereby protected from being it.
+    #
+    # AND THIS LINE IS A CEILING ONLY ON A BOX THAT IS ACTUALLY RUNNING THIS FILE.
+    # Measured on production 2026-08-28 (HD-189): the app, postgres and caddy all
+    # reported HostConfig.Memory = 0 — no limit anywhere — because the box's copy of
+    # this file predated the line, while APP_MEMORY_LIMIT=1g sat in its .env being
+    # read by nothing. With no cgroup limit the image's -XX:MaxRAMPercentage=50 is
+    # taken against HOST RAM, so on a small box the JVM claims a heap ceiling the
+    # machine could never hand it and gets OOM-killed (exit 137, no stack trace)
+    # long before JVMHeapPressure notices. A limit is a property of a running
+    # container, never of a file and never of a variable: read it back with
+    # `docker inspect "$(docker compose ps -q app)" --format '{{.HostConfig.Memory}}'`
+    # — resolve the container rather than naming it, since the name is
+    # <compose-project>-app-1 and that follows your directory. The HostMemoryLow /
+    # HostSwapInUse / HostKernelOOMKill rules in observability/grafana/provisioning/
+    # alerting/rules.yml are what watch the host side of this either way.
     mem_limit: ${APP_MEMORY_LIMIT:-1g}
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local

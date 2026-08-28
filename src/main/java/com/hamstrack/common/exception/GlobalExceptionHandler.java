@@ -5,6 +5,8 @@ import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
+import com.hamstrack.workspace.exception.DuplicateInviteException;
+import com.hamstrack.workspace.exception.InviteAlreadyAcceptedException;
 import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
 import com.hamstrack.workspace.exception.RoleInUseException;
 import com.hamstrack.workspace.exception.RoleLimitReachedException;
@@ -14,6 +16,8 @@ import com.hamstrack.search.parser.HqlParseException;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.MessageSourceResolvable;
+import org.springframework.core.MethodParameter;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -24,10 +28,12 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
-import org.springframework.validation.ObjectError;
+import org.springframework.validation.FieldError;
+import org.springframework.validation.method.ParameterValidationResult;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.method.annotation.HandlerMethodValidationException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 import org.springframework.web.servlet.HandlerMapping;
 
@@ -51,15 +57,23 @@ import java.util.stream.Collectors;
  * handlers actually run.
  *
  * <p><strong>What else the precedence change moved.</strong> Boot's advice extends
- * {@code ResponseEntityExceptionHandler}, which declares 20 exceptions — and
- * {@link MaxUploadSizeExceededException} is one of them, so {@link #handleMaxUploadSize}
- * was dead in exactly the same way and now wins too. Benign: the status is 413 either
- * way, only {@code detail} changes from Spring's {@code "Maximum upload size exceeded"}
- * to our {@code "File is too large"}. Everything else declared here is a Hamstrack
- * exception type that Boot's advice knows nothing about. <strong>Before adding a handler,
- * check that list</strong> ({@code ResponseEntityExceptionHandler}'s class-level
- * {@code @ExceptionHandler}) — anything on it now answers from here instead of Boot, and
- * that is a response-body change, not a no-op.
+ * {@code ResponseEntityExceptionHandler}, which declares 20 exceptions, and this class
+ * takes over <em>every one of them it also declares</em> — so a handler added here for a
+ * type on that list is an <strong>app-wide response-body change</strong>, never a
+ * search-local or upload-local one. Two such handlers exist today and both are deliberate:
+ * {@link #handleMaxUploadSize} ({@link MaxUploadSizeExceededException} — status 413 either
+ * way, only {@code detail} changes from Spring's {@code "Maximum upload size exceeded"} to
+ * our {@code "File is too large"}) and {@link #handleParameterValidation}
+ * ({@code HandlerMethodValidationException} — the status never diverges from Boot's, on
+ * either of Spring's two branches: 400 for an argument violation, 500 for a return-value
+ * one, which {@link #handleParameterValidation} honours explicitly. But every parameter
+ * refusal in the app gains a {@code detail} naming the parameter and an {@code errors} map
+ * where Boot rendered a bare {@code "Validation failure"}). Everything else declared here
+ * is a Hamstrack exception type, or one Boot's advice knows nothing about.
+ * <strong>Before adding a handler, check that list</strong>
+ * ({@code ResponseEntityExceptionHandler}'s class-level {@code @ExceptionHandler}) — and
+ * note that this paragraph is a count, so it goes stale one handler before the list does:
+ * if you take over a third, name it here.
  *
  * <p>Ordered at {@code HIGHEST_PRECEDENCE + 100} rather than the bare minimum: it beats
  * Boot's order-0 advice just as reliably while leaving room for an advice that ever needs
@@ -194,6 +208,42 @@ public class GlobalExceptionHandler {
      */
     @ExceptionHandler(RoleLimitReachedException.class)
     public ResponseEntity<ProblemDetail> handleRoleLimitReached(RoleLimitReachedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason (HD-158 §8.2): {@code DELETE /api/workspaces/{ws}/invites/{id}}
+     * answers <strong>404</strong> for an invitation that is gone and <strong>409</strong> for one
+     * that was accepted, and the client's behaviour on the two is <em>opposite</em> — it renders
+     * the 404 as success and must render this one as a refusal. A discriminator is the only thing
+     * that lets it tell them apart without parsing prose. No payload: the detail names the member,
+     * and the caller can already read both the roster and the invitation list.
+     */
+    @ExceptionHandler(InviteAlreadyAcceptedException.class)
+    public ResponseEntity<ProblemDetail> handleInviteAlreadyAccepted(
+            InviteAlreadyAcceptedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * Same shape, same reason (HD-133 §8): {@code POST /api/workspaces/{ws}/invites} answers
+     * <strong>409</strong> for two entirely different states — the invitee is already a member
+     * ({@code AlreadyWorkspaceMemberException}, no discriminator, nothing for the client to do but
+     * show it) and this one, where the remedy is a control the client owns. A client that cannot
+     * tell them apart cannot refresh the pending list so the blocking row is on screen beside the
+     * sentence naming it, and a stale list is exactly how an administrator concludes the refusal
+     * is wrong.
+     *
+     * <p>No payload. The detail echoes the address the caller just submitted, and the blocking
+     * row itself is already readable in full through {@code GET /api/workspaces/{ws}/invites} by
+     * the permission this caller proved to be refused at all.
+     */
+    @ExceptionHandler(DuplicateInviteException.class)
+    public ResponseEntity<ProblemDetail> handleDuplicateInvite(DuplicateInviteException ex) {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         problem.setProperty("errorType", ex.getErrorType());
         return ResponseEntity.status(ex.getStatus()).body(problem);
@@ -630,6 +680,21 @@ public class GlobalExceptionHandler {
     private static final String SQLSTATE_FOREIGN_KEY_VIOLATION = "23503";
 
     /**
+     * The discriminator for "a value was longer than the column that had to hold it", in the
+     * shape {@link #REFERENCE_CONSTRAINT_ERROR_TYPE} and {@link #STATEMENT_BUDGET_ERROR_TYPE}
+     * already use — one convention for "which failure is this", not three.
+     *
+     * <p>It names no field, and that omission is honest rather than lazy: by the time a
+     * {@code 22001} reaches this class the request body is gone and PostgreSQL has said only how
+     * wide the column was, never which one. A client may branch on this string; it must not be
+     * given one that promises a field the server cannot supply.
+     */
+    static final String VALUE_TOO_LONG_ERROR_TYPE = "VALUE_TOO_LONG";
+
+    /** PostgreSQL {@code string_data_right_truncation} — a value longer than its column. */
+    private static final String SQLSTATE_STRING_TOO_LONG = "22001";
+
+    /**
      * <strong>A row the database refuses to orphan is a 409, not a crash</strong> (HD-13).
      *
      * <p>This is the <em>fourth</em> instance of one defect in one release, and the pattern is
@@ -649,8 +714,11 @@ public class GlobalExceptionHandler {
      * database owns. {@link #sqlStateOf} finds the state by walking the cause chain, so it does
      * not matter how deeply the {@link java.sql.SQLException} that carries it is nested.
      *
-     * <p><strong>Only {@code 23503} changes behaviour.</strong> Everything else keeps exactly
-     * today's outcome — logged at ERROR with the full throwable, answered {@code 500}. Folding
+     * <h4>The gate translates two states, and the rest is untouched on purpose</h4>
+     * {@code 23503} is a 409 (this handler's original job) and {@code 22001} is a 400 (HD-171
+     * §8, below). <strong>Everything else keeps exactly today's outcome</strong> — logged at
+     * ERROR with the full throwable, answered {@code 500} — and the two that are translated are
+     * translated because each is unambiguous about <em>whose</em> fault it is. Folding
      * {@code 23505} into a {@code 409} here would silently change the outcome of
      * {@code issues_project_id_number_key} and several admin unique constraints at once, each of
      * which wants its own message; that is a separate decision with a separate ticket. Note that
@@ -670,13 +738,22 @@ public class GlobalExceptionHandler {
      * {@code 23503} is raised in <strong>two opposite directions</strong>, and this handler can
      * tell them apart only by reading PostgreSQL's message, which the rule above forbids:
      * <ul>
-     *   <li><strong>Parent delete refused</strong> — {@code DETAIL: Key (id)=(…) is still
-     *       referenced from table "issues"}. Something exists that points at the row being
-     *       deleted. Remap or archive are real actions here.</li>
-     *   <li><strong>Child write refused</strong> — {@code DETAIL: Key (status_id)=(…) is not
-     *       present in table "statuses"}. The referenced row does <em>not</em> exist, nothing is
-     *       being deleted, and neither remap nor archive is anything the caller could do.</li>
+     *   <li><strong>Parent delete refused</strong> — {@code update or delete on table "statuses"
+     *       violates foreign key constraint … on table "issues"}. Something exists that points at
+     *       the row being deleted. Remap or archive are real actions here.</li>
+     *   <li><strong>Child write refused</strong> — {@code insert or update on table "issues"
+     *       violates foreign key constraint …}. The referenced row does <em>not</em> exist,
+     *       nothing is being deleted, and neither remap nor archive is anything the caller could
+     *       do.</li>
      * </ul>
+     * <strong>Quoted from the PRIMARY message, not from {@code DETAIL}</strong>, and that is a
+     * statement about this application rather than about PostgreSQL. The server also spells the
+     * direction in {@code DETAIL} — {@code Key (id)=(…) is still referenced from table "issues"} /
+     * {@code Key (status_id)=(…) is not present in table "statuses"} — and this list quoted that
+     * pair until HD-133 set {@code logServerErrorDetail=false} on the datasource to keep
+     * {@code DETAIL}'s key VALUES out of the logs. Those two sentences are still what PostgreSQL
+     * emits and are no longer what this process can read, so the discriminator to reason about,
+     * to log and to test against is the primary-message pair above.
      * The <em>second</em> is the reachable one. The three catalog deletes all pre-check, so
      * direction one needs a path that bypasses them; direction two needs only a TOCTOU on an
      * ordinary issue write — {@code IssueService} resolves a status, a concurrent
@@ -714,8 +791,18 @@ public class GlobalExceptionHandler {
      * <p><strong>Nothing from the database reaches the wire.</strong> Not the constraint name, not
      * the SQL, not the parameters, not the key values — PostgreSQL's {@code DETAIL} carries the
      * offending key in both directions, and that is an id belonging to whichever tenant owns it.
-     * All of it goes in the log line with the request method and the mapped pattern, in the shape
-     * {@link #handlePessimisticLock} uses; the client gets a sentence.
+     * What is left of it goes in the log line with the request method and the mapped pattern, in
+     * the shape {@link #handlePessimisticLock} uses; the client gets a sentence.
+     *
+     * <p><strong>"All of it" is no longer accurate about the LOG either, and the difference is the
+     * point of this paragraph.</strong> Since HD-133 the datasource runs
+     * {@code logServerErrorDetail=false} (see {@code application.properties}), so {@code DETAIL},
+     * {@code HINT} and {@code POSITION} never reach {@code getMessage()} and therefore never reach
+     * the log line below — the key values are gone from both destinations, not merely from the
+     * response. The constraint name, the two table names and the direction all live in the PRIMARY
+     * message and survive, which is why the 409 translation, the direction hint in the WARN and
+     * every constraint-name test still work. An operator who needs the key back has one variable,
+     * {@code DB_LOG_SERVER_ERROR_DETAIL}, and it is documented as a one-session tool.
      *
      * <h4>Two bindings, because Spring's DAO hierarchy only exists on translated paths</h4>
      * The same trap {@link #handlePessimisticLock} and {@link #handleQueryTimeout} each fell into
@@ -769,6 +856,35 @@ public class GlobalExceptionHandler {
      * nothing from {@code org.springframework.dao} and nothing from {@code org.hibernate}, so for
      * {@code 23503} the only behaviour that changes is 500 to 409, and for everything else only
      * the body shape.
+     *
+     * <h4>{@code 22001} is the second state, and it is a 400 (HD-171 §8)</h4>
+     * {@code string_data_right_truncation} means the database was handed a value longer than the
+     * column. Unlike {@code 23503} there is <strong>no second direction to guess at</strong> and
+     * no reading under which the caller supplied nothing wrong — even a value the <em>server</em>
+     * derived over-long is derived from something a request supplied — so the translation can be
+     * confident where the 409 has to be careful. It arrives as
+     * {@link DataIntegrityViolationException} because {@code HibernateJpaDialect} maps
+     * {@code org.hibernate.exception.DataException} to it, and {@link #sqlStateOf} finds the
+     * state in either spelling.
+     *
+     * <p><strong>This one is a backstop for a bound that is missing, and it is logged like a
+     * fault even though it answers like a client error.</strong> The authoritative refusal is the
+     * {@code @Size} at the door (which names the field) or a service's post-normalisation length
+     * check (which names the limit); this handler names neither, because it knows neither. HD-171
+     * removed the two reachable ways to get here — {@code WorkspaceService.generateSlug} and
+     * {@code issue_history.field} — so a {@code 22001} arriving now is by definition a path
+     * nobody bounded, and answering a clean 400 without an ERROR line would delete the only
+     * signal an operator gets that one exists. Same doctrine as {@link #handleDateTime} and
+     * {@link #handleQueryTimeout}.
+     *
+     * <p><strong>It must not widen.</strong> {@code 23505}, {@code 23502} and {@code 23514}
+     * arrive as the same Spring type and each means the application believed a write was valid
+     * when it was not — a server fault whose remedy is a fix, not a retry. They keep the 500.
+     * And this cannot live in a service: a {@code catch} around {@code save()} never fires,
+     * because {@code save()} only queues the persist and Hibernate flushes at commit, after the
+     * {@code @Transactional} method has returned. There is nothing to translate <em>into</em>
+     * either — no domain status the way {@code DUPLICATE_INVITE} has one — so even the
+     * {@code saveAndFlush} escape hatch would buy nothing.
      */
     @ExceptionHandler({DataIntegrityViolationException.class,
             org.hibernate.exception.ConstraintViolationException.class})
@@ -778,11 +894,65 @@ public class GlobalExceptionHandler {
         Object route = pattern == null ? request.getRequestURI() : pattern;
         String sqlState = sqlStateOf(ex);
 
+        if (SQLSTATE_STRING_TOO_LONG.equals(sqlState)) {
+            // ERROR, not WARN, and deliberately louder than the status suggests: a 22001 that
+            // reaches this handler means some path accepted a value no column could hold, and the
+            // clean 400 below would otherwise be the whole of the record. The two paths that used
+            // to arrive here are fixed at the source (HD-171 §4.1/§4.2), so a line here is a
+            // report of a NEW missing bound rather than a known one recurring.
+            //
+            // The mapped PATTERN, never the URI — the URI carries workspace and project ids, and
+            // this is the one branch whose log line is expected to be read by whoever then goes
+            // looking for the unbounded field. The 'route' local above falls back to the URI for
+            // the 23503 path (where it predates this rule); this branch does not take it and
+            // says so instead, because a pattern is always present on a request that reached a
+            // handler at all.
+            //
+            // ex.toString(), not the throwable — and what that string CONTAINS was overstated
+            // here for one review round, so it is now written from the actual output. It is
+            // SPRING'S TRANSLATED message, and AbstractFallbackSQLExceptionTranslator.buildMessage
+            // folds Hibernate's statement text into it, so the line reads roughly:
+            //   could not execute statement [ERROR: value too long for type character varying(100)]
+            //   [insert into issue_history (changed_by,created_at,field,issue_id,…) values (?,?,?,?,…)]
+            // So THE PARAMETERISED SQL ARRIVES: table and column NAMES do reach the log — what
+            // does not is any VALUE, because every parameter is a `?` (ids and row data included),
+            // and logServerErrorDetail=false (HD-133) keeps PostgreSQL's DETAIL out at the driver.
+            // That is not a leak and it is arguably better for the operator this line is written
+            // for: it names the table whose column is too narrow, which is the first thing they
+            // need. Stated exactly because this sentence is what a later reader will trust when
+            // deciding whether this log line is safe — the frames, by contrast, are Hibernate's
+            // and identify no caller.
+            log.error("Value too long for its column on {} {} (SQLSTATE {}): {} — answering 400 "
+                      + "{}. A request path is missing a length bound: validation accepted a "
+                      + "value the column refused, so find the field and bound it at the door.",
+                    request.getMethod(), pattern == null ? "(no mapped pattern)" : pattern,
+                    sqlState, ex.toString(), VALUE_TOO_LONG_ERROR_TYPE);
+            // Names no field, because this handler genuinely cannot know which one: the body is
+            // long gone and the database reported a width, not a column. Nothing from the
+            // database reaches the wire — not the width, not the SQL, not the column name.
+            var tooLong = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                    "Some of the text you submitted is too long.");
+            tooLong.setProperty("errorType", VALUE_TOO_LONG_ERROR_TYPE);
+            return ResponseEntity.badRequest().body(tooLong);
+        }
+
         if (!SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
             // Unchanged outcome, deliberately: a 23505/23502/23514 that reaches here is a genuine
             // fault with no sentence written for it yet, and inventing one would be worse than a
             // 500. ERROR with the throwable, because unlike its lock neighbours this is not
             // normal contention — it means a write the application believed was valid was not.
+            //
+            // Logging the WHOLE throwable is only safe because of a setting made elsewhere: a
+            // 23505 arriving here would otherwise carry PostgreSQL's DETAIL, and DETAIL spells the
+            // colliding key VALUES — on the invite path, a third party's email address.
+            // logServerErrorDetail=false on the datasource (application.properties, HD-133) masks
+            // it at the driver, which is the only layer that can: Hibernate's SqlExceptionHelper
+            // has already logged the same message at ERROR before this handler is reached, so
+            // redacting here would suppress nothing. If that property is ever removed — or set
+            // back to true, which an operator may legitimately do for one debugging session via
+            // DB_LOG_SERVER_ERROR_DETAIL — this line and every SQL log in the application start
+            // emitting row values again. That is why the variable is documented as temporary and
+            // why the default lives in application.properties rather than in a deployment file.
             log.error("Unhandled data integrity violation on {} {} (SQLSTATE {}) — answering 500",
                     request.getMethod(), route, sqlState, ex);
             var problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR,
@@ -794,16 +964,27 @@ public class GlobalExceptionHandler {
         // request was refused rather than half-applied. It is still worth a line, for the reason
         // handlePessimisticLock logs — turning the 500 into a clean 409 removes the only signal an
         // operator had that a delete path is missing its pre-check. ex.toString() rather than the
-        // throwable: the message carries the constraint name and PostgreSQL's DETAIL, which is the
+        // throwable: the message carries the constraint name and the two table names, which is the
         // whole of what an operator needs, and the frames are Hibernate's.
-        // The log line is where the DIRECTION lives, because the message the client must not see
-        // is exactly what distinguishes them: "is still referenced from table X" (a parent delete
-        // that bypassed its pre-check — a bug in that path) versus "is not present in table X" (a
+        //
+        // The log line is where the DIRECTION lives, because the message the client must not see is
+        // exactly what distinguishes them: "update or delete on table X" (a parent delete that
+        // bypassed its pre-check — a bug in that path) versus "insert or update on table X" (a
         // child write racing a concurrent delete — expected, and the caller should retry). An
         // operator needs to know which; nobody else can be told without leaking the key.
-        log.warn("Foreign key violation on {} {}: {} — answering 409 {}. \"still referenced\" means "
-                 + "a delete path is missing its pre-check; \"is not present\" means a write raced "
-                 + "a concurrent delete and the retry will normally succeed.",
+        //
+        // THOSE PHRASES ARE THE PRIMARY MESSAGE, DELIBERATELY, AND THE PAIR THIS USED TO NAME WAS
+        // NOT. PostgreSQL also states the direction in its DETAIL line — "is still referenced from
+        // table X" / "is not present in table X" — and this comment quoted that pair until HD-133
+        // set logServerErrorDetail=false on the datasource to keep DETAIL's KEY VALUES out of the
+        // logs (see application.properties). DETAIL no longer reaches getMessage(), so a log line
+        // keyed on those words would now match nothing while still reading correct. The primary
+        // message survives the mask and carries the same distinction, so the signal is intact and
+        // it is the half to key on. Verified against PostgreSQL, both directions, both settings.
+        log.warn("Foreign key violation on {} {}: {} — answering 409 {}. \"update or delete on "
+                 + "table\" means a delete path is missing its pre-check; \"insert or update on "
+                 + "table\" means a write raced a concurrent delete and the retry will normally "
+                 + "succeed.",
                 request.getMethod(), route, ex.toString(), REFERENCE_CONSTRAINT_ERROR_TYPE);
         var problem = ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT,
                 "This change conflicts with a related record, so it was not applied. Something "
@@ -851,10 +1032,15 @@ public class GlobalExceptionHandler {
      *
      * <p><strong>Not covered, deliberately and worth knowing:</strong>
      * {@code jakarta.validation.ConstraintViolationException} shares a simple name with
-     * Hibernate's and is a completely unrelated type carrying no SQLSTATE. It would fall to the
-     * unchanged 500. No entity in the tree carries Bean Validation annotations today, so it is
-     * latent rather than live — but the two names differ only by import, so if a Bean Validation
-     * failure ever needs a status, give it its own handler rather than widening this one.
+     * Hibernate's and is a completely unrelated type carrying no SQLSTATE. It has its own
+     * handler now — {@link #handleBeanValidation}, added by HD-214, which answers 400 and logs
+     * at ERROR — so it no longer escapes as a 500, and the advice on this method held: it got
+     * its own handler rather than a widening of this one. The collision is therefore <em>live
+     * in both directions</em> and matters more than when it was hypothetical: the two names
+     * differ only by import, so a bare {@code import …ConstraintViolationException} in this
+     * class silently rebinds one handler to the other's type, with no compile error and no
+     * failing happy path. Both bindings are written fully qualified for that reason and must
+     * stay that way.
      */
     private static String sqlStateOf(Throwable ex) {
         Throwable t = ex;
@@ -909,7 +1095,162 @@ public class GlobalExceptionHandler {
         // so the first cross-field rule anyone adds would fail invisibly.
         binding.getGlobalErrors()
                 .forEach(oe -> collected.putIfAbsent(GLOBAL_ERROR_KEY, messageOf(oe)));
+        return validationRefusal(collected);
+    }
 
+    /**
+     * The same refusal for a constraint written on a <em>parameter</em> — a
+     * {@code @RequestParam}, {@code @PathVariable}, {@code @RequestHeader} or
+     * {@code @CookieValue} — as {@link #handleValidation} gives one written on a body
+     * field (HD-163/HD-214, ADR-0019). Both render through {@link #validationRefusal},
+     * so the guarantee is a category rather than a coincidence: <strong>every 400 raised
+     * by a declared constraint carries an {@code errors} map keyed by the name of the
+     * thing that was refused, whichever door the constraint is written on.</strong> That
+     * is what the SPA branches on since HD-171; a refusal that names nothing forces a
+     * client back to pattern-matching English.
+     *
+     * <p><strong>This overrides Boot's advice for an exception it declares.</strong>
+     * {@code HandlerMethodValidationException} is on {@code ResponseEntityExceptionHandler}'s
+     * list, so — per this class's precedence note — adding it here changes that exception's
+     * body <em>app-wide</em>, not only on the endpoints this ticket was filed about. Every
+     * parameter constraint in the tree gains a named field and an {@code errors} map where
+     * Boot rendered a bare {@code "Validation failure"}. The status never diverges from
+     * Boot's: {@code initHttpStatus} answers 400 for an argument violation and 500 for a
+     * return-value one, and both branches are honoured below.
+     *
+     * <p>Keys come from {@link MethodParameter#getParameterName()}, which needs
+     * {@code -parameters} — {@code spring-boot-starter-parent} sets it, and this project
+     * uses that parent. {@link #nameOf} falls back to a positional key rather than letting
+     * a nameless parameter silently drop out of the map: a 400 whose {@code errors} is
+     * {@code {}} is the failure mode this handler exists to remove.
+     *
+     * <p><strong>Both statuses Spring can mean by this exception are honoured.</strong>
+     * {@code HandlerMethodValidationException} extends {@code ResponseStatusException} with a
+     * status chosen at construction, and that status is <em>not</em> fixed at {@code BAD_REQUEST}:
+     * {@code initHttpStatus} (spring-web 7.0.8) returns {@code INTERNAL_SERVER_ERROR} when the
+     * violation is on the handler's <strong>return value</strong> and {@code BAD_REQUEST} for
+     * everything else. A return-value violation is the server failing its own contract, so
+     * rendering it through {@link #validationRefusal} would blame a caller for a fault they
+     * cannot fix — and would hand them a constraint message describing data they never sent.
+     * The branch below answers an opaque 500 and logs at ERROR; every other shape is a 400,
+     * which is Boot's own status for it and not a widening.
+     *
+     * <p>That branch is unreachable today, because return-value validation only runs when the
+     * bean carries {@code @Validated} and ADR-0018 forbids that on anything MVC dispatches to.
+     * It is written anyway: <em>unreachable</em> is a claim about the current call graph, and a
+     * claim about the call graph is exactly the kind this codebase keeps outliving. One
+     * {@code if} is cheaper than the guarantee it would otherwise stand in for.
+     */
+    @ExceptionHandler(HandlerMethodValidationException.class)
+    public ResponseEntity<ProblemDetail> handleParameterValidation(HandlerMethodValidationException ex) {
+        if (ex.isForReturnValue()) {
+            // The caller's request was accepted and the handler then produced a value its own
+            // constraints reject. Nothing here is client-fixable, and a message about a return
+            // value describes server-side data — so the response says nothing beyond the status,
+            // and the detail goes to the log with the throwable.
+            log.error("Method validation failed on the RETURN VALUE of {} — answering 500, not 400: "
+                            + "the caller is not at fault. Return-value validation only runs when "
+                            + "the bean carries @Validated, which ADR-0018 forbids on anything "
+                            + "Spring MVC dispatches to, so this line also means that annotation "
+                            + "is back on a web bean.",
+                    ex.getMethod(), ex);
+            var problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Something went wrong");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(problem);
+        }
+        Map<String, String> collected = new LinkedHashMap<>();
+        for (ParameterValidationResult result : ex.getParameterValidationResults()) {
+            String parameterKey = nameOf(result.getMethodParameter());
+            for (MessageSourceResolvable error : result.getResolvableErrors()) {
+                // A cascaded parameter object (@Valid on a @ModelAttribute, a validated
+                // container) reports FieldErrors describing fields INSIDE it. Key those by
+                // the field, exactly as a body refusal does, so a nested failure degrades to
+                // the same {name: message} shape instead of being reported under the
+                // container's name — or, worse, dropped for not being a plain parameter.
+                String key = (error instanceof FieldError fieldError) ? fieldError.getField() : parameterKey;
+                collected.putIfAbsent(key, messageOf(error));
+            }
+        }
+        // A cross-parameter constraint (one written on the METHOD, relating two arguments)
+        // belongs to no single parameter, so it takes the same empty key a class-level body
+        // constraint takes and renders bare.
+        for (MessageSourceResolvable error : ex.getCrossParameterValidationResults()) {
+            collected.putIfAbsent(GLOBAL_ERROR_KEY, messageOf(error));
+        }
+        return validationRefusal(collected);
+    }
+
+    /**
+     * Backstop for {@code jakarta.validation.ConstraintViolationException} — the same
+     * doctrine as {@link #handleDateTime} and {@link #handleQueryTimeout}: <strong>a
+     * backstop, not the mechanism.</strong> After ADR-0018 nothing in the tree should be
+     * able to raise this, so an occurrence is a fact about the codebase rather than about
+     * the request, and it is logged at ERROR for that reason. A clean 400 with no line
+     * deletes the only signal an operator would get (HD-151).
+     *
+     * <p><strong>Fully qualified, deliberately and permanently.</strong>
+     * {@link #handleDataIntegrityViolation} binds
+     * {@code org.hibernate.exception.ConstraintViolationException}, an unrelated type
+     * sharing this one's simple name. A bare import here would silently rebind that handler
+     * to the wrong class — a one-character way to break data-integrity handling with no
+     * compile error. {@link #sqlStateOf}'s javadoc records the collision from the other
+     * side.
+     *
+     * <p><strong>Trade-off worth knowing.</strong> No {@code @Entity} in the tree carries
+     * Bean Validation annotations today. If one ever does, Hibernate's pre-insert listener
+     * raises this same type for a <em>server-side</em> failure and this handler would report
+     * it as a client error. The right response then is a dedicated handler for that path,
+     * not widening or narrowing this one — and the ERROR line below is what will make it
+     * visible in the first place.
+     *
+     * <p><strong>The ERROR line carries names, not submitted values — and that is a property
+     * of this codebase's constraint messages, not of the line.</strong> It logs
+     * {@code collected.keySet()} plus the throwable, so it says <em>which</em> things were
+     * refused; it stays free of what was in them only because no message template here
+     * interpolates <code>{@literal $}{validatedValue}</code>. A template that does puts the
+     * rejected value into {@code violation.getMessage()}, from where it reaches this log line,
+     * the {@code errors} map and {@code detail} alike — every one of them, in one edit. So a
+     * constraint guarding a secret-shaped field (password, token, e-mail, invite code) must
+     * not use that placeholder: a refusal states the rule, never the submission. Same rule for
+     * {@link #handleValidation} and {@link #handleParameterValidation}, which render the same
+     * messages.
+     */
+    @ExceptionHandler(jakarta.validation.ConstraintViolationException.class)
+    public ResponseEntity<ProblemDetail> handleBeanValidation(
+            jakarta.validation.ConstraintViolationException ex) {
+        Map<String, String> collected = new LinkedHashMap<>();
+        var violations = ex.getConstraintViolations();
+        if (violations != null) {
+            for (var violation : violations) {
+                // The LAST node of the path, so a client sees `q` rather than `suggest.q`.
+                collected.putIfAbsent(lastNodeOf(violation.getPropertyPath()),
+                        violation.getMessage() != null ? violation.getMessage() : "");
+            }
+        }
+        log.error("Bean Validation escaped to the advice: {}. Answered 400, but nothing should be "
+                        + "able to raise this — either a bean Spring MVC dispatches to has acquired "
+                        + "@Validated (forbidden by ADR-0018; parameter constraints then go through "
+                        + "the AOP proxy instead of MVC's own method validation), or an @Entity has "
+                        + "gained Bean Validation annotations, in which case this is a SERVER fault "
+                        + "being reported to a client as a 400. Check which before assuming the "
+                        + "caller is at fault.",
+                collected.keySet(), ex);
+        return validationRefusal(collected);
+    }
+
+    /**
+     * The one rendering both validation refusals share — extracted rather than copied on
+     * purpose. The sort, the {@link #MAX_REPORTED_ERRORS} cap, the {@code "; … and N more"}
+     * overflow line and {@link #render}'s prefix rule are a contract the API docs describe in
+     * four bullets; two copies of it would drift, and the drift would be invisible because
+     * both copies produce a 400. Any new handler that refuses a declared constraint calls
+     * this — it does not reimplement it.
+     *
+     * @param collected failed items in insertion order, keyed by the name of the refused
+     *                  thing (a body field path, a parameter name, or
+     *                  {@link #GLOBAL_ERROR_KEY} for a rule belonging to no single one)
+     */
+    private static ResponseEntity<ProblemDetail> validationRefusal(Map<String, String> collected) {
         // Sorted for a deterministic body, then capped — detail and errors report the same
         // entries in the same order, so the two halves of the response never disagree.
         List<Map.Entry<String, String>> ordered = collected.entrySet().stream()
@@ -939,8 +1280,40 @@ public class GlobalExceptionHandler {
         return ResponseEntity.badRequest().body(problem);
     }
 
-    private static String messageOf(ObjectError error) {
+    /**
+     * Widened to {@link MessageSourceResolvable} so one implementation serves a body error
+     * ({@code ObjectError}/{@code FieldError}, which implement it) and a parameter error
+     * (which is only ever the interface). Null message → "": a null value would NPE the map
+     * it goes into, turning a 400 into a 500.
+     */
+    private static String messageOf(MessageSourceResolvable error) {
         return error.getDefaultMessage() != null ? error.getDefaultMessage() : "";
+    }
+
+    /**
+     * The parameter's own name, or a positional key when the class was compiled without
+     * {@code -parameters}. Never null and never empty, because an empty key is
+     * {@link #GLOBAL_ERROR_KEY} and would render the message as if it belonged to no
+     * parameter at all.
+     */
+    private static String nameOf(MethodParameter parameter) {
+        String name = parameter.getParameterName();
+        return (name != null && !name.isBlank()) ? name : "arg" + parameter.getParameterIndex();
+    }
+
+    /**
+     * The last named node of a violation's property path, so a client is told {@code q}
+     * rather than {@code suggest.q} — the parameter it sent, not the method it happened to
+     * reach. A path with no named node falls to {@link #GLOBAL_ERROR_KEY} and renders bare.
+     */
+    private static String lastNodeOf(jakarta.validation.Path path) {
+        String last = GLOBAL_ERROR_KEY;
+        for (var node : path) {
+            if (node.getName() != null) {
+                last = node.getName();
+            }
+        }
+        return last;
     }
 
     /**

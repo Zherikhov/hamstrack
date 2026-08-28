@@ -2,6 +2,7 @@ package com.hamstrack.workspace.dto;
 
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 import java.util.UUID;
@@ -20,6 +21,26 @@ import java.util.UUID;
  * its own: {@code workspace_invites.email} is {@code VARCHAR(255)} while {@code @Email}
  * accepts roughly 320 characters, so the overflow would surface as a 500 rather than the
  * 400 it is. See {@code EmailLengthBoundTest}.
+ *
+ * <p><strong>{@code email}'s local part must be ASCII, and that is a delivery rule rather
+ * than a style rule.</strong> The invitation is mailed to the address <em>as folded</em> —
+ * the same value the throttle counted and {@code workspace_invites.email} stores — so that
+ * the address we bind is the address we write to (HD-190). But that fold is
+ * {@code toLowerCase(Locale.ROOT)}, which collapses U+212A KELVIN SIGN onto plain {@code k}
+ * and U+212B ANGSTROM SIGN onto {@code å}. Pasting such a local part would therefore send a
+ * workspace name and a <em>live join token</em> to a different real person — one whose own
+ * account email is folded the same way, matches exactly, and who can accept. A 400 at the
+ * boundary costs nobody a deliverable address, because this application has no SMTPUTF8
+ * path and such an address was never deliverable as typed; a silent redirect to a stranger
+ * has no upside at all. Do <strong>not</strong> "fix" the same hazard by mailing
+ * {@code req.email()} instead — counting one address and writing to another is the worse
+ * bug, and it is the one this constraint exists to avoid reintroducing.
+ *
+ * <p>The <em>domain</em> is deliberately left unrestricted: an internationalised domain is
+ * carried to its wire form by punycode ({@code MailAddresses.throttleKey}), which is a
+ * normalisation rather than a fold onto somebody else's mailbox. So the pattern says only
+ * "everything before the last {@code @} is ASCII", and a quoted local part that contains an
+ * {@code @} of its own ({@code "a@b"@example.com}, which {@code @Email} accepts) still passes.
  *
  * @param roleId the assignable role's id — <strong>the only way to name a custom
  *               role</strong>, since {@code role} resolves built-ins only. Resolved through
@@ -44,7 +65,10 @@ import java.util.UUID;
  *               never have to rely on who can send it.
  */
 public record InviteMemberRequest(
-        @Email @NotBlank @Size(max = 255) String email,
+        @Email @NotBlank @Size(max = 255)
+        @Pattern(regexp = "\\p{ASCII}*@[^@]*",
+                message = "Email must not contain non-ASCII characters before the @")
+        String email,
         UUID roleId,
         @Size(max = 40) String role
 ) {}

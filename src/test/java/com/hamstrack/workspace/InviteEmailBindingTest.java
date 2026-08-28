@@ -34,14 +34,37 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>{@code acceptInvite} and {@code declineInvite} compared the invited address to the
  * caller's with {@code equalsIgnoreCase}, which does not fold the way anything else in this
  * system folds. It compares character by character through
- * {@code Character.toUpperCase}/{@code toLowerCase}, and those collapse dotless i
- * ({@code U+0131}), dotted capital I ({@code U+0130}), long s ({@code U+017F}) and the Kelvin
- * sign ({@code U+212A}) onto plain ASCII {@code i}, {@code s} and {@code k}. Nothing else
- * agrees: {@code toLowerCase(Locale.ROOT)} leaves every one of them alone, so does the UNIQUE
- * index on {@code users.email}, and so does Postgres {@code lower()}. Two addresses the
- * database calls two different accounts were therefore one address to this guard - and the
- * guard's whole job is to stop a leaked or forwarded invitation being redeemed by somebody it
- * was not addressed to, at a role it was never offered to them at.
+ * {@code Character.toUpperCase} and, failing that, {@code Character.toLowerCase} - and
+ * between them those two collapse dotless i ({@code U+0131}), dotted capital I
+ * ({@code U+0130}) and long s ({@code U+017F}) onto plain ASCII {@code i} and {@code s}.
+ * Nothing else agrees. {@code toLowerCase(Locale.ROOT)} leaves {@code U+0131} and
+ * {@code U+017F} untouched and turns {@code U+0130} into {@code i} plus a combining dot,
+ * which is still not {@code i}; the UNIQUE index on {@code users.email} and Postgres
+ * {@code lower()} draw the same three lines. Two addresses the database calls two different
+ * accounts were therefore one address to this guard - and the guard's whole job is to stop a
+ * leaked or forwarded invitation being redeemed by somebody it was not addressed to, at a
+ * role it was never offered to them at.
+ *
+ * <p><strong>The Kelvin sign ({@code U+212A}) is NOT a fourth member of that list, and this
+ * file used to claim it was - in both directions at once.</strong> The claim was that
+ * {@code Character.toUpperCase}/{@code toLowerCase} collapse it while {@code Locale.ROOT}
+ * does not; the truth is the reverse on each half. {@code Character.toUpperCase(U+212A)}
+ * returns {@code U+212A} unchanged - only {@code Character.toLowerCase} maps it to
+ * {@code k}, which is why {@code equalsIgnoreCase} still matches - and
+ * {@code String.toLowerCase(Locale.ROOT)} maps it to {@code k} as well. Both directions are
+ * asserted in {@link #theKelvinSignFoldsAtTheBoundaryAndIsThereforeNotAConfusableHere()}
+ * rather than described, because this is the fifth correction of a claim about these code
+ * points and prose has now been wrong about them more often than it has been right.
+ *
+ * <p><strong>Redemption is safe against Kelvin, but for a different mechanism than the three
+ * above.</strong> It is not that the two spellings stay apart - they do not; they fold to the
+ * same string at every boundary. It is that {@code AuthService} folds every {@code users.email}
+ * write with the same {@code Locale.ROOT}, so the Kelvin spelling and the ASCII spelling insert
+ * the <em>same</em> string against the UNIQUE and the second registration is refused. There is
+ * no second account for a wrong person to be. What that character does carry is a SENDING-side
+ * hazard - the same fold silently retargets an invitation at the ASCII person's real inbox -
+ * and that is closed at the boundary instead, by {@code InviteMemberRequest} refusing a
+ * non-ASCII local part ({@code InviteLocalPartAsciiTest}).
  *
  * <p><strong>Why exact comparison loses nothing.</strong> Both operands are canonicalised
  * before they are ever stored - {@code inviteMember} folds with {@code Locale.ROOT}, and so
@@ -92,6 +115,50 @@ class InviteEmailBindingTest {
                 .isNotEqualTo(other);
         assertThat(invited.toLowerCase(Locale.ROOT))
                 .isNotEqualTo(other.toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * <strong>The correction, pinned in the two directions the prose kept getting backwards.</strong>
+     * U+212A is the one code point in this discussion that does <em>not</em> survive the boundary
+     * fold, so it is not a confusable this guard has to catch, and any comment saying otherwise
+     * has the mechanism wrong.
+     *
+     * <p>It is asserted rather than described because it has been described wrongly repeatedly:
+     * {@code Character.toUpperCase} leaves it alone (the fold in {@code equalsIgnoreCase} comes
+     * from {@code Character.toLowerCase}), and {@code Locale.ROOT} folding - the one that decides
+     * which {@code users} row exists - collapses it. Both halves matter to a reader, and each was
+     * stated backwards.
+     */
+    @Test
+    void theKelvinSignFoldsAtTheBoundaryAndIsThereforeNotAConfusableHere() {
+        // Written as escapes on purpose: U+212A is indistinguishable from ASCII K in a diff,
+        // and which of the two is on which side of an assertion is the entire subject here.
+        var kelvinSign = "\u212A";
+        var asciiK = "k";
+
+        assertThat(Character.toUpperCase('\u212A'))
+                .as("Character.toUpperCase does NOT touch the Kelvin sign. equalsIgnoreCase "
+                        + "tries toUpperCase first and toLowerCase second, so it is the SECOND "
+                        + "half that folds this character - a comment naming toUpperCase has "
+                        + "the mechanism backwards")
+                .isEqualTo('\u212A');
+        assertThat(Character.toLowerCase('\u212A'))
+                .as("this is the half of equalsIgnoreCase that folds it")
+                .isEqualTo('k');
+
+        assertThat(kelvinSign.toLowerCase(Locale.ROOT))
+                .as("and Locale.ROOT folds it too - so unlike U+0131 / U+0130 / U+017F, the two "
+                        + "spellings never reach this comparison as two different strings. A "
+                        + "comment claiming Locale.ROOT keeps them apart is describing a "
+                        + "mechanism that does not exist")
+                .isEqualTo(asciiK);
+
+        assertThat("\u212Aelvin@example.com".toLowerCase(Locale.ROOT))
+                .as("so both spellings of an ACCOUNT address insert the SAME users.email, the "
+                        + "UNIQUE refuses the second registration, and there is no second "
+                        + "account for a wrong person to be. That - not this guard, and not any "
+                        + "property of Locale.ROOT - is what makes redemption safe against U+212A")
+                .isEqualTo("kelvin@example.com");
     }
 
     /**
