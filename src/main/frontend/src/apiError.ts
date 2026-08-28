@@ -83,16 +83,37 @@ export class ApiResponseError extends Error implements ConflictInfo {
   errorType?: string
   projects?: ProjectRef[]
   usage?: RoleUsage
+  /**
+   * The `{field: message}` ProblemDetail extension a **validation 400** carries
+   * (`GlobalExceptionHandler.handleValidation`), keyed by the request field's
+   * own name — `password`, `newPassword`, `description`, `body`.
+   *
+   * `detail` already joins the same entries into one sentence, so a caller that
+   * renders `detail` loses nothing. This map exists so a form can put the
+   * message **next to the field** instead of in a banner, and so a page can ask
+   * *which* field was refused without pattern-matching English (HD-171 §11):
+   * `ResetPasswordPage` rewrites a 400 into "this link expired", which is right
+   * for the `token` field and wrong for `newPassword`, and the only structural
+   * way to tell them apart is this map.
+   *
+   * Absent on every non-validation error, including a 422 — a business-rule
+   * refusal such as `PasswordTooLongException` is a whole sentence in `detail`
+   * and names no field, so a reader must fall back to `detail` and never treat
+   * an empty map as "nothing was wrong".
+   */
+  errors?: Record<string, string>
   constructor(
     public status: number,
     public detail: string,
     hql?: HqlError,
     existingId?: string,
     conflict?: ConflictInfo,
+    errors?: Record<string, string>,
   ) {
     super(detail)
     this.hql = hql
     this.existingId = existingId
+    this.errors = errors
     this.retryAfter = conflict?.retryAfter
     this.errorType = conflict?.errorType
     this.projects = conflict?.projects

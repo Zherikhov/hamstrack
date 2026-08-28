@@ -930,20 +930,72 @@ public class WorkspaceService {
         userRepository.markOnboarded(actor.getId(), Instant.now());
     }
 
+    /**
+     * <strong>Server-generated, never accepted from a client</strong> — lowercase the name,
+     * substitute everything outside {@code [a-z0-9]}, truncate to
+     * {@code workspaces.slug VARCHAR(100)}, and suffix {@code -<6 random chars>} on collision.
+     *
+     * <p><strong>The 100 is the column width, not a preference</strong> (HD-171 §4.1).
+     * {@code CreateWorkspaceRequest.name} is bounded at 255, so a name of 101+ slug-safe
+     * characters used to produce a slug the column could not hold, and
+     * {@code POST /api/workspaces} answered <strong>500</strong> — on the first-run
+     * "Create a team" path, reachable by any authenticated user. Clipping is the fix rather
+     * than a wider column: a slug is a URL identifier and the full name is stored beside it in
+     * {@code workspaces.name}, so nothing a reader can act on is lost, while widening would
+     * only move the same overflow to a new width.
+     *
+     * <p><strong>The suffix comes out of the 100 rather than on top of it</strong>, and the
+     * truncation happens <em>before</em> the uniqueness loop so the loop tests the value that
+     * will actually be stored. A 95-character name that collides once would otherwise yield a
+     * 102-character slug — the near miss that leaves a "fixed" generator still 500-ing
+     * occasionally.
+     *
+     * <p>{@code RoleService.generateKey} is this same function for {@code roles.key
+     * VARCHAR(40)} — substitute the disallowed class, truncate, suffix on collision inside the
+     * width rather than beyond it — and the two are deliberately alike; that is where this
+     * shape was already written, and for a long time it was the only one of the pair that
+     * truncated at all.
+     */
     private String generateSlug(String name) {
         var base = name.toLowerCase(Locale.ROOT)
                 .replaceAll("[^a-z0-9]+", "-")
                 .replaceAll("^-|-$", "");
         if (base.isBlank()) base = "workspace";
+        if (base.length() > 100) {
+            base = base.substring(0, 100);
+        }
         var slug = base;
         // Random suffix instead of a counter: two concurrent creates of the same name
         // would both compute "name-1" with a counter; random suffixes diverge
         while (workspaceRepository.existsBySlug(slug)) {
-            slug = base + "-" + randomSuffix();
+            var suffix = "-" + randomSuffix();
+            var head = base.length() + suffix.length() > 100
+                    ? base.substring(0, 100 - suffix.length())
+                    : base;
+            slug = head + suffix;
         }
         return slug;
     }
 
+    /**
+     * Six lowercase alphanumerics, appended (inside the width — see {@link #generateSlug}) when a
+     * slug is already taken. Random rather than a counter because two concurrent creates of the
+     * same name would both compute {@code name-1}.
+     *
+     * <p><strong>{@code ThreadLocalRandom} is correct here only because the slug is not a
+     * capability, and that is a condition rather than a property of the method.</strong>
+     * {@code WorkspaceRepository.findBySlug} has <em>zero</em> callers today and every workspace
+     * route is UUID-based, so the suffix is decoration on a column nothing resolves by: guessing
+     * it grants nothing.
+     *
+     * <p><strong>If {@code findBySlug} ever gains a caller — vanity URLs, {@code /w/{slug}},
+     * per-tenant subdomains — this must move to {@code SecureRandom} in that same change.</strong>
+     * {@code ThreadLocalRandom} is a linear generator whose internal state is recoverable from a
+     * handful of observed outputs, so once a slug addresses anything, an attacker who has seen a
+     * few can predict the next — and a predictable identifier on a route that resolves is an
+     * enumeration primitive. Written here rather than only in the design doc because this is the
+     * line the next person edits.
+     */
     private String randomSuffix() {
         var chars = "abcdefghijklmnopqrstuvwxyz0123456789";
         var sb = new StringBuilder(6);

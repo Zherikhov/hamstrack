@@ -668,6 +668,21 @@ public class GlobalExceptionHandler {
     private static final String SQLSTATE_FOREIGN_KEY_VIOLATION = "23503";
 
     /**
+     * The discriminator for "a value was longer than the column that had to hold it", in the
+     * shape {@link #REFERENCE_CONSTRAINT_ERROR_TYPE} and {@link #STATEMENT_BUDGET_ERROR_TYPE}
+     * already use — one convention for "which failure is this", not three.
+     *
+     * <p>It names no field, and that omission is honest rather than lazy: by the time a
+     * {@code 22001} reaches this class the request body is gone and PostgreSQL has said only how
+     * wide the column was, never which one. A client may branch on this string; it must not be
+     * given one that promises a field the server cannot supply.
+     */
+    static final String VALUE_TOO_LONG_ERROR_TYPE = "VALUE_TOO_LONG";
+
+    /** PostgreSQL {@code string_data_right_truncation} — a value longer than its column. */
+    private static final String SQLSTATE_STRING_TOO_LONG = "22001";
+
+    /**
      * <strong>A row the database refuses to orphan is a 409, not a crash</strong> (HD-13).
      *
      * <p>This is the <em>fourth</em> instance of one defect in one release, and the pattern is
@@ -687,8 +702,11 @@ public class GlobalExceptionHandler {
      * database owns. {@link #sqlStateOf} finds the state by walking the cause chain, so it does
      * not matter how deeply the {@link java.sql.SQLException} that carries it is nested.
      *
-     * <p><strong>Only {@code 23503} changes behaviour.</strong> Everything else keeps exactly
-     * today's outcome — logged at ERROR with the full throwable, answered {@code 500}. Folding
+     * <h4>The gate translates two states, and the rest is untouched on purpose</h4>
+     * {@code 23503} is a 409 (this handler's original job) and {@code 22001} is a 400 (HD-171
+     * §8, below). <strong>Everything else keeps exactly today's outcome</strong> — logged at
+     * ERROR with the full throwable, answered {@code 500} — and the two that are translated are
+     * translated because each is unambiguous about <em>whose</em> fault it is. Folding
      * {@code 23505} into a {@code 409} here would silently change the outcome of
      * {@code issues_project_id_number_key} and several admin unique constraints at once, each of
      * which wants its own message; that is a separate decision with a separate ticket. Note that
@@ -826,6 +844,35 @@ public class GlobalExceptionHandler {
      * nothing from {@code org.springframework.dao} and nothing from {@code org.hibernate}, so for
      * {@code 23503} the only behaviour that changes is 500 to 409, and for everything else only
      * the body shape.
+     *
+     * <h4>{@code 22001} is the second state, and it is a 400 (HD-171 §8)</h4>
+     * {@code string_data_right_truncation} means the database was handed a value longer than the
+     * column. Unlike {@code 23503} there is <strong>no second direction to guess at</strong> and
+     * no reading under which the caller supplied nothing wrong — even a value the <em>server</em>
+     * derived over-long is derived from something a request supplied — so the translation can be
+     * confident where the 409 has to be careful. It arrives as
+     * {@link DataIntegrityViolationException} because {@code HibernateJpaDialect} maps
+     * {@code org.hibernate.exception.DataException} to it, and {@link #sqlStateOf} finds the
+     * state in either spelling.
+     *
+     * <p><strong>This one is a backstop for a bound that is missing, and it is logged like a
+     * fault even though it answers like a client error.</strong> The authoritative refusal is the
+     * {@code @Size} at the door (which names the field) or a service's post-normalisation length
+     * check (which names the limit); this handler names neither, because it knows neither. HD-171
+     * removed the two reachable ways to get here — {@code WorkspaceService.generateSlug} and
+     * {@code issue_history.field} — so a {@code 22001} arriving now is by definition a path
+     * nobody bounded, and answering a clean 400 without an ERROR line would delete the only
+     * signal an operator gets that one exists. Same doctrine as {@link #handleDateTime} and
+     * {@link #handleQueryTimeout}.
+     *
+     * <p><strong>It must not widen.</strong> {@code 23505}, {@code 23502} and {@code 23514}
+     * arrive as the same Spring type and each means the application believed a write was valid
+     * when it was not — a server fault whose remedy is a fix, not a retry. They keep the 500.
+     * And this cannot live in a service: a {@code catch} around {@code save()} never fires,
+     * because {@code save()} only queues the persist and Hibernate flushes at commit, after the
+     * {@code @Transactional} method has returned. There is nothing to translate <em>into</em>
+     * either — no domain status the way {@code DUPLICATE_INVITE} has one — so even the
+     * {@code saveAndFlush} escape hatch would buy nothing.
      */
     @ExceptionHandler({DataIntegrityViolationException.class,
             org.hibernate.exception.ConstraintViolationException.class})
@@ -834,6 +881,48 @@ public class GlobalExceptionHandler {
         var pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
         Object route = pattern == null ? request.getRequestURI() : pattern;
         String sqlState = sqlStateOf(ex);
+
+        if (SQLSTATE_STRING_TOO_LONG.equals(sqlState)) {
+            // ERROR, not WARN, and deliberately louder than the status suggests: a 22001 that
+            // reaches this handler means some path accepted a value no column could hold, and the
+            // clean 400 below would otherwise be the whole of the record. The two paths that used
+            // to arrive here are fixed at the source (HD-171 §4.1/§4.2), so a line here is a
+            // report of a NEW missing bound rather than a known one recurring.
+            //
+            // The mapped PATTERN, never the URI — the URI carries workspace and project ids, and
+            // this is the one branch whose log line is expected to be read by whoever then goes
+            // looking for the unbounded field. The 'route' local above falls back to the URI for
+            // the 23503 path (where it predates this rule); this branch does not take it and
+            // says so instead, because a pattern is always present on a request that reached a
+            // handler at all.
+            //
+            // ex.toString(), not the throwable — and what that string CONTAINS was overstated
+            // here for one review round, so it is now written from the actual output. It is
+            // SPRING'S TRANSLATED message, and AbstractFallbackSQLExceptionTranslator.buildMessage
+            // folds Hibernate's statement text into it, so the line reads roughly:
+            //   could not execute statement [ERROR: value too long for type character varying(100)]
+            //   [insert into issue_history (changed_by,created_at,field,issue_id,…) values (?,?,?,?,…)]
+            // So THE PARAMETERISED SQL ARRIVES: table and column NAMES do reach the log — what
+            // does not is any VALUE, because every parameter is a `?` (ids and row data included),
+            // and logServerErrorDetail=false (HD-133) keeps PostgreSQL's DETAIL out at the driver.
+            // That is not a leak and it is arguably better for the operator this line is written
+            // for: it names the table whose column is too narrow, which is the first thing they
+            // need. Stated exactly because this sentence is what a later reader will trust when
+            // deciding whether this log line is safe — the frames, by contrast, are Hibernate's
+            // and identify no caller.
+            log.error("Value too long for its column on {} {} (SQLSTATE {}): {} — answering 400 "
+                      + "{}. A request path is missing a length bound: validation accepted a "
+                      + "value the column refused, so find the field and bound it at the door.",
+                    request.getMethod(), pattern == null ? "(no mapped pattern)" : pattern,
+                    sqlState, ex.toString(), VALUE_TOO_LONG_ERROR_TYPE);
+            // Names no field, because this handler genuinely cannot know which one: the body is
+            // long gone and the database reported a width, not a column. Nothing from the
+            // database reaches the wire — not the width, not the SQL, not the column name.
+            var tooLong = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+                    "Some of the text you submitted is too long.");
+            tooLong.setProperty("errorType", VALUE_TOO_LONG_ERROR_TYPE);
+            return ResponseEntity.badRequest().body(tooLong);
+        }
 
         if (!SQLSTATE_FOREIGN_KEY_VIOLATION.equals(sqlState)) {
             // Unchanged outcome, deliberately: a 23505/23502/23514 that reaches here is a genuine

@@ -1,0 +1,53 @@
+-- ---------------------------------------------------------------------------
+-- HD-171 (Request field length bounds -- the constraint belongs to the column)
+-- ---------------------------------------------------------------------------
+-- issue_history.field holds THE NAME OF THE THING THAT CHANGED, and for a custom
+-- field that name is copied straight out of field_defs.name VARCHAR(100) by
+-- IssueService.makeHistory. The column was VARCHAR(50), i.e. HALF its own widest
+-- declared source, so a custom field named 51-100 characters made EVERY value
+-- change to that field answer 500 on PATCH .../issues/{number}. Two actors were
+-- needed to reach it -- an admin names the field, then any project member edits
+-- an issue -- and the create path did NOT fail (it passes a no-op history
+-- listener), so the defect presented as "create works, update crashes", which is
+-- the hardest shape to diagnose from a bug report.
+--
+-- WIDEN THE COLUMN, DO NOT NARROW THE SOURCE. UpsertFieldRequest.name is bounded
+-- at 100 because field_defs.name is 100; narrowing it to 50 would refuse
+-- legitimate input to protect an unrelated column and would do nothing for field
+-- definitions that already carry a 51-100 character name. Matching this column to
+-- its own widest source is the honest fix.
+--
+-- REJECTED: storing field_defs.key (VARCHAR(50), an exact fit) instead of the
+-- name. Stable across renames and otherwise attractive, but existing rows already
+-- hold NAMES with no discriminator, so the history feed would render
+-- "story_points" for new rows and "Story points" for old ones with no way to tell
+-- which is which.
+--
+-- A widen of a varchar's length takes NO TABLE REWRITE in PostgreSQL (>= 9.2) --
+-- it is a catalog change under a brief ACCESS EXCLUSIVE lock. No data is written,
+-- folded or deleted, and every existing row stays valid because the new width is
+-- strictly larger.
+--
+-- The widen is only half of the fix. IssueHistory.setField -- a hand-written setter
+-- that Lombok's @Setter yields to, so it covers all four writers of this column --
+-- truncates the name to this same 100, because a widen alone re-creates the defect
+-- the day a longer source appears. The rule the sweep established:
+-- A VALUE DERIVED FROM ANOTHER COLUMN IS EITHER BOUNDED BY THAT COLUMN'S WIDTH OR
+-- TRUNCATED AT THE WRITE SITE.
+--
+-- ENTITY PARITY IS CONVENTION HERE, NOT ENFORCEMENT, and this header said otherwise
+-- for one review round. IssueHistory.field must be @Column(nullable = false,
+-- length = 100) -- but ddl-auto=validate DOES NOT CHECK THAT. Hibernate's schema
+-- validator compares JDBC TYPE CODES (ColumnDefinitions.hasMatchingType);
+-- hasMatchingLength exists but is referenced only from StandardTableMigrator, i.e.
+-- from ddl-auto=update (verified against hibernate-core 7.4.1 and 7.2.12). So a
+-- VARCHAR(50) column against length = 100 boots perfectly clean and 500s at INSERT
+-- -- exactly the bug this migration exists to fix. A header that promises a safety
+-- net which is not there is worse than one that promises nothing, because it makes
+-- the next reader stop checking: what actually catches a drift is the behavioural
+-- test (a PATCH changing a custom field whose name is 100 characters), so keep the
+-- two numbers equal BY HAND.
+--
+-- Full design: docs/design/request-field-length-bounds-proposal.md (§4.2, §9).
+-- ---------------------------------------------------------------------------
+ALTER TABLE issue_history ALTER COLUMN field TYPE VARCHAR(100);

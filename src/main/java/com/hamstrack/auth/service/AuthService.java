@@ -15,6 +15,7 @@ import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.seed.DataSeeder;
 import com.hamstrack.common.security.JwtService;
+import com.hamstrack.common.security.PasswordLimits;
 import com.hamstrack.common.tx.AfterCommit;
 import com.hamstrack.common.util.TokenUtils;
 import jakarta.servlet.http.Cookie;
@@ -63,6 +64,7 @@ public class AuthService {
             throw new TermsNotAcceptedException();
         }
         rejectPublishedPassword(req.password());
+        rejectUnencodablePassword(req.password());
         // Locale.ROOT, never the JVM default. This fold IS the account identity: users.email
         // carries a byte-exact UNIQUE and every lookup is an exact match, so a fold that varies
         // with the container locale varies which address a person owns - a Turkish JVM stores
@@ -255,6 +257,7 @@ public class AuthService {
     @Transactional
     public void resetPassword(ResetPasswordRequest req) {
         rejectPublishedPassword(req.newPassword());
+        rejectUnencodablePassword(req.newPassword());
         var hash = sha256(req.token());
         var reset = passwordResetRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidTokenException::new);
@@ -295,6 +298,34 @@ public class AuthService {
     private void rejectPublishedPassword(String password) {
         if (DataSeeder.isPublishedPassword(password)) {
             throw new PublishedPasswordException();
+        }
+    }
+
+    /**
+     * <strong>The same two doors, refusing what the encoder cannot hash</strong> (HD-171 §4.4).
+     *
+     * <p>{@code passwordEncoder.encode} is BCrypt and throws above
+     * {@value com.hamstrack.common.security.PasswordLimits#MAX_PASSWORD_BYTES} UTF-8 bytes, with
+     * nothing translating that {@code IllegalArgumentException} — so both doors answered
+     * <strong>500</strong> to a password a person could plausibly have chosen, and register is
+     * unauthenticated. The two DTOs now carry {@code @Size(max = 72)}, and <strong>that annotation
+     * is not enough, which is the whole reason this check exists beside it</strong>: {@code @Size}
+     * counts UTF-16 units and BCrypt counts bytes, so 72 characters of Cyrillic is 144 bytes,
+     * passes validation, and still cannot be hashed. See {@link PasswordLimits} for the unit.
+     *
+     * <p>Placed beside {@link #rejectPublishedPassword} and refused in the same shape — a 422
+     * {@code AppException} — because both are the same kind of statement: the body is well-formed
+     * and the value is one this application will not store. It is <em>not</em> a strength check
+     * either.
+     *
+     * <p>Ordered before the reset token is marked used, exactly as the published-password refusal
+     * is, so a caller who trips it can retry on the same link. (Register was never at risk of a
+     * partial write — {@code encode} precedes the INSERT — but the reset path is only safe because
+     * this runs first.)
+     */
+    private void rejectUnencodablePassword(String password) {
+        if (PasswordLimits.exceedsEncoderLimit(password)) {
+            throw new PasswordTooLongException(PasswordLimits.byteLength(password));
         }
     }
 

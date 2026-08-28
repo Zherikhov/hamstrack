@@ -35,6 +35,26 @@ public class FieldValueService {
     private final WorkspaceMemberRepository workspaceMemberRepository;
     private final UserRepository userRepository;
 
+    /**
+     * <strong>The bound on "a block of prose this product stores"</strong>, and since HD-171
+     * §4.3 it is <em>the</em> number rather than one of two: the issue/project/workflow
+     * description and comment-body {@code @Size(max = 10000)} bounds were chosen to agree with
+     * this one, so a TEXTAREA custom field and an issue description — the same kind of value,
+     * in the same database, rendered in the same panel — refuse at the same length.
+     *
+     * <p>The DTOs spell it as the numeric literal {@code 10000} rather than referencing this
+     * constant, so that a <em>future</em> column-width scanner can read them: to a scan in the
+     * shape {@code EmailLengthBoundTest} already uses ({@code max\s*=\s*(\d+)}, which that test
+     * applies only to declarations it reaches from an {@code @Email}, so it does not read any of
+     * these), a symbolic reference reads as "no bound at all" and {@code 10_000} reads as 10.
+     *
+     * <p><strong>Raising one must raise all of them, and nothing enforces that yet.</strong> That
+     * is the requirement (HD-171 AC 14), not an accomplished fact — the behavioural test that
+     * pins the five prose bounds to this constant is §5.3's, and until it exists this agreement
+     * is maintained by hand. Do not read this paragraph as a seal.
+     */
+    static final int MAX_TEXTAREA_LENGTH = 10_000;
+
     @Transactional(readOnly = true)
     public FieldSet effectiveFieldSet(Project project) {
         if (project.getFieldSet() != null) return project.getFieldSet();
@@ -152,7 +172,8 @@ public class FieldValueService {
 
     private void validate(Issue issue, FieldDef field, JsonNode value) {
         switch (field.getType()) {
-            case TEXT, TEXTAREA -> requireText(field, value, field.getType() == FieldType.TEXT ? 500 : 10_000);
+            case TEXT, TEXTAREA -> requireText(field, value,
+                    field.getType() == FieldType.TEXT ? 500 : MAX_TEXTAREA_LENGTH);
             case URL -> {
                 requireText(field, value, 2000);
                 var s = value.asText();

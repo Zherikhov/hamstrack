@@ -28,6 +28,14 @@ public record CreateProjectRequest(
         @NotBlank @Size(min = 2, max = 255) @Pattern(regexp = DisplayText.SINGLE_LINE,
                 message = "Name must not contain control characters") String name,
         @NotBlank @Size(min = 1, max = 10) @Pattern(regexp = "[A-Z0-9]+", message = "Key must be uppercase letters and digits only") String key,
-        String description,
+        // 10000 = FieldValueService.MAX_TEXTAREA_LENGTH, the one bound for a block of prose
+        // (HD-171 §4.3). projects.description is TEXT, so this is a payload guard — and this
+        // one is also unbounded EGRESS without it: the description ships in every project list
+        // response. Bare literal so that a FUTURE column-width scanner CAN read it — no
+        // scanner reads this field today (EmailLengthBoundTest's `max\s*=\s*(\d+)` regex is
+        // only ever applied to declarations it reaches from an @Email). Keeping the form it
+        // reads costs nothing; 10_000 would read as 10 and a constant reference as no bound at
+        // all. What is meant to police the VALUE is a behavioural test (§5.3), not a scan.
+        @Size(max = 10000) String description,
         @Valid DeliveryRequest delivery
 ) {}

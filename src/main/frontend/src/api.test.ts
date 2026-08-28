@@ -148,6 +148,37 @@ describe('request() error normalization', () => {
     expect(err.detail).not.toBe('')
     expect(err.detail).toContain('500')
   })
+
+  // HD-171 §11: a validation 400 names the field it refused, in an `errors`
+  // ProblemDetail extension. Dropping it leaves a form with nothing but a
+  // banner, i.e. "something was wrong" for a refusal that said exactly what.
+  it('carries the validation 400 errors map through as {field: message}', async () => {
+    globalThis.fetch = vi.fn<FetchFn>(async () =>
+      jsonResponse(400, {
+        detail: 'newPassword: size must be between 8 and 72',
+        errors: { newPassword: 'size must be between 8 and 72' },
+      }),
+    )
+
+    await expect(apiMe()).rejects.toMatchObject({
+      status: 400,
+      errors: { newPassword: 'size must be between 8 and 72' },
+    })
+  })
+
+  it('leaves errors undefined when the body has none, and never coerces a non-string', async () => {
+    globalThis.fetch = vi.fn<FetchFn>(async () =>
+      // A 422 business-rule refusal names no field; and a value that is not a
+      // string must be dropped rather than rendered as "[object Object]" under
+      // an input.
+      jsonResponse(422, { detail: 'That password is 84 bytes…', errors: { bad: { nested: 1 } } }),
+    )
+
+    const err = await apiMe().then(() => null, (e: unknown) => e as ApiResponseError)
+    expect(err).toBeInstanceOf(ApiResponseError)
+    expect(err?.status).toBe(422)
+    expect(err?.errors).toBeUndefined()
+  })
 })
 
 // HD-22 §4.4: `sprintId` (move into a sprint) and `clearSprint` (return to the

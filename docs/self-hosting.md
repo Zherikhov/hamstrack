@@ -34,6 +34,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
   - [Account addresses become case-insensitive in 0.18.0](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
+  - [Free text is bounded from 0.18.0](#free-text-is-bounded-from-0180)
 - [Backups](#backups)
   - [By hand](#by-hand)
   - [On a schedule](#on-a-schedule)
@@ -279,6 +280,18 @@ container that exits during startup, with the reason in `docker compose logs app
   one is the *first*, by construction) plus whichever account `SEED_ADMIN_EMAIL` names
   today. If you have more than 25, a startup WARN says so rather than letting a partial
   check read as a complete one
+- `SEED_ADMIN_PASSWORD` **longer than 72 UTF-8 bytes** — the ceiling BCrypt itself enforces,
+  not a policy this project chose, so it bounds **every** password the application stores:
+  registration and password reset refuse a longer one with a `422`. Count bytes, not
+  characters — plain Latin letters cost 1 each, accented, Greek and Cyrillic 2, most other
+  scripts 3, emoji 4 — so a 40-character Cyrillic passphrase is already 80 bytes and refused,
+  while 72 ASCII characters fit exactly. The refusal fires only when the value **would be used
+  to create the administrator account**: `SEED_ADMIN_EMAIL` set, the value over the limit, and
+  no account occupying that address yet. An install that seeded its administrator once and
+  later rotated this variable to an `openssl rand -base64 96` value therefore keeps booting —
+  seeding is idempotent, so nothing ever encodes the new value. Without the guard the boot
+  fails anyway, inside the encoder, saying only `password cannot be more than 72 bytes` and
+  naming neither the variable nor a remedy
 
 `SEED_ADMIN_PASSWORD` left **empty** has no fail-fast at all — a blank one logs a WARN and
 skips seeding — so the symptom is that **nobody can log in**. That is deliberately the louder
@@ -427,7 +440,7 @@ Full reference:
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
 | `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search, report and invitation ceilings; see the rate-limiting section |
-| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required |
+| `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required. `SEED_ADMIN_PASSWORD` is capped at **72 UTF-8 bytes** — BCrypt's own ceiling, so it is the cap on every password the application stores, and bytes are not characters (Cyrillic costs 2 each, CJK 3, emoji 4). A longer value **aborts startup** rather than being truncated, but only where it would actually create the account: email set, over the limit, and nobody at that address yet |
 
 Every variable the **application** reads is wired to a Spring property via a
 placeholder in `application.properties` (e.g. `DB_URL` → `spring.datasource.url`,
@@ -559,6 +572,17 @@ ever published under that variable name (see [An unedited template is refused, b
 design](#an-unedited-template-is-refused-by-design)) — and because seeding is idempotent,
 that refusal is also the *only* notice an already-seeded install ever gets: changing the
 variable later does not change the account.
+
+**And keep it to 72 UTF-8 bytes.** That is the ceiling **BCrypt** enforces, not a limit this
+project chose, so it is the limit on every password the application stores — registration and
+password reset refuse a longer one too, with a `422`. Count bytes, not characters: plain Latin
+letters cost 1 each, accented, Greek and Cyrillic 2, most other scripts 3, emoji 4 — so a
+40-character Cyrillic passphrase is already 80 bytes, while 72 ASCII characters fit exactly and
+`openssl rand -base64 48` gives you 64 of them. An over-long `SEED_ADMIN_PASSWORD` is refused
+when it would actually be used to **create** the administrator account — `SEED_ADMIN_EMAIL` set
+and no account at that address yet — and then the application does not start at all: it neither
+truncates the value nor warns about it. An install whose administrator already exists goes on
+booting whatever this variable says, for the same idempotence reason as the paragraph above.
 
 > **Upgrading from before 0.16.0 on a Turkish, Azeri or Lithuanian locale?** The
 > "or promoted" half of that sentence depends on the address matching, and 0.16.0
@@ -946,6 +970,20 @@ SELECT count(*) FILTER (WHERE email <> lower(email)) AS mixed_case_removed,
  WHERE accepted_at IS NULL;
 SQL
 ```
+
+**Run those two knowing the order the migrations run in, because an upgrade that stops halfway is
+not a no-op.** The invitation cleanup applies and **commits** before the account check is
+attempted, and the account check aborting does **not** roll it back — Flyway wraps each migration,
+not the upgrade as a whole. So an upgrade halted by the duplicate-address refusal has already
+deleted the invitations described above, while every later schema change in 0.18.0 never ran at
+all. Nothing is lost that cannot be re-sent, but "the upgrade failed" does not mean "nothing
+changed": clear the address problem, pull again, and re-invite anyone whose link stopped working.
+
+**The same release also bounds free text, and that one is retroactive on rows you already have:**
+[Free text is bounded from 0.18.0](#free-text-is-bounded-from-0180). No migration is involved and
+nothing is rewritten, but a description or comment already longer than the new bound refuses
+**every** save of that record — including one that changes something else — until somebody
+shortens it. There is a query there too, and on an ordinary install it returns zeros.
 
 **Also new in 0.17.0, and this one wants a check before you pull rather than after:**
 [Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
@@ -1676,6 +1714,67 @@ variable alone changes nothing, because seeding skips a user that already exists
 Both rows in that pair are usually administrators, which is why "keep the one with
 history" is the rule rather than "keep the active one".
 
+### Free text is bounded from 0.18.0
+
+**Read this if your instance holds long descriptions or comments** — a pasted stack trace, a
+migrated wiki page, a specification somebody kept in an issue. On an ordinary install nothing
+changes and there is nothing to do: the bound is roughly four pages of text.
+
+Before 0.18.0 the free-text fields on the API were unbounded; the only ceiling anywhere was the
+database column. From 0.18.0 each one is bounded, and an over-long value answers `400` naming the
+field that was too long:
+
+| Field | Where you meet it | Bound |
+|---|---|---|
+| Issue description | issue create and update | 10 000 characters |
+| Comment body | issue comments | 10 000 characters |
+| Project description | project create and update, project settings | 10 000 characters |
+| Workflow description | Admin console → Workflows | 10 000 characters |
+| A custom field of type *text area* | issue fields | 10 000 characters |
+| A field definition's `config` | Admin console → Fields | 20 000 characters serialized (`422`) |
+
+**The bounds apply to rows you already have, and that is the part worth reading.** They are checked
+on the way in, so a record whose stored text is already longer than the bound refuses **every**
+save until it is shortened — including a save that changes something else entirely, because the
+editor submits the whole record. In practice: a 15 000-character description means that issue's
+status, assignee and due date cannot be changed through the UI either, and the message names
+`description` even though nobody touched it.
+
+**Nothing is lost and nothing is rewritten.** There is no migration behind this. No row is
+truncated, no text is deleted, no column is narrowed. Every existing value stays exactly as it is
+and is read back in full — on the board, in the issue view, through the API, in a database dump.
+The only thing that changed is that a *write* carrying an over-long value is refused.
+
+**It is self-healing.** Shorten the text once, below the bound, and that record saves normally from
+then on. If the content is worth keeping — a log, a dump, a long specification — attach it as a
+file and leave a line in the description instead.
+
+**Size it before you upgrade.** Nothing here is destructive, so this is for planning rather than
+safety:
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT 'issues' AS t, count(*) FROM issues WHERE length(description) > 10000
+UNION ALL SELECT 'issue_comments', count(*) FROM issue_comments WHERE length(body) > 10000
+UNION ALL SELECT 'projects', count(*) FROM projects WHERE length(description) > 10000
+UNION ALL SELECT 'workflows', count(*) FROM workflows WHERE length(description) > 10000;
+SQL
+```
+
+**Treat that number as a floor, not as an answer.** PostgreSQL's `length()` counts characters; the
+server counts UTF-16 code units, and anything outside the Basic Multilingual Plane — emoji, the
+rarer CJK ranges — costs two units and one character. An emoji-heavy 8 000-character description is
+around 14 000 units: it will be refused, and the query above counts it as fine. Ordinary Latin,
+Cyrillic or Greek prose is one unit per character, so for most instances the count is exact. If you
+want a result where **zero really means zero**, run the same query with `octet_length(...) > 10000`
+in place of `length(...) > 10000` — a UTF-16 unit is never more than a UTF-8 byte, so nothing can
+hide under it. That one errs the other way (Cyrillic costs 2 bytes per character, CJK 3), so a
+non-zero answer from it is a list to re-check with the first query, not a list of problems.
+
+Text-area custom field values and field-definition `config` are deliberately not in the query:
+they are stored inside JSONB documents rather than in a prose column. Both behave the same way —
+refused on save, unchanged in storage, fixed by shortening once.
+
 ## Backups
 
 Two things to back up: the **PostgreSQL database** and **attachments**. They
@@ -1927,6 +2026,7 @@ Most S3-compatible stores expose the same two settings under different names.
 | App exits at startup saying `JWT_SECRET` is "a value published in Hamstrack's own documentation" | The secret is one of the placeholders this repository has shipped (they pass the length check, which is why they are refused by name). It is not newly unsafe — the upgrade only started saying so. Replace it with `openssl rand -base64 48`. That rejects every access token signed with the old key immediately but does **not** sign anyone out — clients re-issue from their refresh cookie — so if you think the published value was used against you, [there are two more steps](#what-rotating-jwt_secret-does-and-what-it-does-not). See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design). |
 | App exits at startup saying `SEED_ADMIN_PASSWORD` is "the value this project published" | Your `.env` carries the password the template used to ship, so the administrator account it seeded — named in the message — is signable-into by anyone who can read this repository. **Clearing the variable does not fix it**: seeding is idempotent, the account already exists and keeps that password. Reset or delete that user first, then set your own value or none — [step by step](#if-your-instance-has-the-published-admin-account). |
 | App exits at startup saying a **system administrator HAS** the published password | Read from the database, not from `.env` — so it fires even when your configuration mentions no seeding at all, and it keeps firing after you change `SEED_ADMIN_PASSWORD`, because seeding never re-passwords an existing user. The account named in the message is signable-into by anyone who can read this repository. The app is down, so start from SQL: `UPDATE users SET password_hash = NULL WHERE email = '<the address named>';` — then boot and set a new password via **Forgot password** or another administrator. [Step by step](#if-your-instance-has-the-published-admin-account). |
+| App exits at startup saying `SEED_ADMIN_PASSWORD` is *N* bytes and the maximum is 72 | The value is over **BCrypt's** 72-UTF-8-byte ceiling, which is the cap on every password the application stores — not a rule this project chose, and not one you can raise. Bytes are not characters: accented, Greek and Cyrillic letters cost 2 each, most other scripts 3, emoji 4, so a 40-character Cyrillic passphrase is 80 bytes. Shorten it (`openssl rand -base64 48` is 64 ASCII characters and stronger than BCrypt can use), or clear `SEED_ADMIN_EMAIL` if you did not mean to seed an administrator. It only fires where the value would actually **create** the account, so it cannot be triggered by an install whose administrator already exists. |
 | Registration never completes / no email arrives | SMTP misconfigured. Check `MAIL_*` and your provider; test locally with MailHog (`http://localhost:8025`). |
 | Logged out immediately / can't stay signed in | `APP_BASE_URL` scheme doesn't match how users reach the app. The `refresh_token` cookie is `Secure` only with an `https` base — serve HTTPS end-to-end (https base) or use an `http` base for plain HTTP. |
 | `502` right after `up` | The app is still starting (Spring Boot needs ~30–40 s; it has a healthcheck). Wait, or check `docker compose logs app`. |

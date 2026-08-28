@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.security.PasswordLimits;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -116,7 +117,9 @@ public class DataSeeder implements ApplicationRunner {
      * and fully usable here (the {@code EntityManagerFactory} already depends on Flyway),
      * which is why both halves fit in one place.
      *
-     * <p>Configuration first, because it is free and names the file the operator edits; the
+     * <p>Configuration first, because it names the file the operator edits and costs nothing on a
+     * healthy boot ({@link #rejectOverLongPassword} does ask the database, but only after two
+     * free checks have already said the value is both configured and over-length); the
      * stored-hash probe costs bcrypt and reaches the installations whose configuration has
      * nothing left to say. Sealed by {@code SeedGuardStartupOrderingTest}, which asserts the
      * MOMENT and not only the message: one earlier round moved the configuration guard into
@@ -126,7 +129,101 @@ public class DataSeeder implements ApplicationRunner {
     @PostConstruct
     void refusePublishedCredentials() {
         rejectPublishedPassword(adminPassword, adminEmail);
+        rejectOverLongPassword(adminPassword, adminEmail);
         rejectPublishedAdminHash();
+    }
+
+    /**
+     * The longest {@code seed.admin.password} this installation can seed, <strong>in UTF-8 bytes,
+     * because that is the unit the encoder refuses in</strong> (HD-171 §4.4). It is
+     * {@link PasswordLimits#MAX_PASSWORD_BYTES} by reference and not by transcription — this is a
+     * property of BCrypt, shared with the two writing DTOs ({@code RegisterRequest.password},
+     * {@code ResetPasswordRequest.newPassword}, both {@code @Size(max = 72)}) and with
+     * {@code AuthService}'s refusal on those paths.
+     *
+     * <p><strong>It is NOT paired with {@code LoginRequest.password}, and an earlier round said it
+     * was.</strong> That pairing was justified by a member claim — a seeded administrator holding a
+     * 128-character password whom a tight login bound would lock out — and no such account can
+     * exist: {@link #run} hashes with the same BCrypt, which refuses to <em>create</em> a
+     * hash above 72 bytes, so the boot below would have thrown first. The reading door only has to
+     * be finite (it says so itself); the writing doors have to agree with the encoder, and this
+     * constant is one of those.
+     */
+    static final int MAX_SEED_PASSWORD_BYTES = PasswordLimits.MAX_PASSWORD_BYTES;
+
+    /**
+     * Refused at boot, with a sentence, rather than as a bare
+     * {@code IllegalArgumentException("password cannot be more than 72 bytes")} thrown by
+     * {@code passwordEncoder.encode} in {@link #run} — which names neither the variable at
+     * fault nor anything the operator can do about it. Without this guard the failure is real
+     * either way; what the guard buys is a message.
+     *
+     * <p><strong>The unit is bytes and the message has to say so</strong>, because 72 is not a
+     * number an operator can check by looking: {@code openssl rand -base64 96} is 128 characters
+     * and refused, a 40-character Cyrillic passphrase is 80 bytes and also refused, and a
+     * 72-character ASCII one is fine. A refusal may only prescribe an action its reader can
+     * perform, so it reports the byte count of the value they actually set.
+     *
+     * <p><strong>The gate is "will this value actually be ENCODED?", deliberately unlike
+     * {@link #rejectPublishedPassword}.</strong> Both run from {@code @PostConstruct}, i.e. before
+     * {@link #run} has decided anything, and the published-password guard has a reason to ignore
+     * that: a published password is a compromise whether or not seeding happens, because an
+     * earlier boot may already have created the account. A <em>length</em> guard inherits no such
+     * reason — an over-long value that is never encoded never created anything — so it may only
+     * refuse a boot whose {@link #run} would reach {@code passwordEncoder.encode}. Three
+     * configurations reach it and every other one must boot:
+     * <ul>
+     *   <li>no {@code seed.admin.email} — {@link #run} returns before encoding, so a leftover long
+     *       {@code SEED_ADMIN_PASSWORD} is inert;</li>
+     *   <li>the value is within the encoder's limit — nothing to refuse;</li>
+     *   <li><strong>a row already occupies the folded address</strong> — seeding is idempotent, so
+     *       {@link #run} promotes or refuses that row and returns <em>before</em> encoding. This
+     *       is the case an email-only gate got wrong: an operator who rotates
+     *       {@code SEED_ADMIN_PASSWORD} to an {@code openssl rand -base64 96} value after a
+     *       successful first seed, or who points {@code SEED_ADMIN_EMAIL} at an account created by
+     *       registration or the admin console, changes nothing that is ever read — and would have
+     *       been refused a boot over it.</li>
+     * </ul>
+     * The existence question is asked with {@link UserRepository#existsByFoldedEmail}, and the
+     * argument is folded the way every site in this class folds a configured address -
+     * {@code strip().toLowerCase(Locale.ROOT)}, the SQL side of which is the expression
+     * {@code users_email_lower_uk} is built from. {@link #run} asks {@code findByFoldedEmail} the
+     * same question about the same string, so this gate and the early return it models cannot
+     * disagree about which row counts. (They did while {@link #run} folded without stripping: a
+     * trailing space survives {@code env_file} and {@code @Value} does not trim, so the guard saw
+     * the row, stepped aside, and the boot died inside the encoder anyway.) Reading the
+     * repository here is safe for the reason {@link #rejectPublishedAdminHash} already relies
+     * on: this is a {@code @PostConstruct} on an eager bean, so both the repository and Flyway
+     * are done, and it is asked last so the two free checks short-circuit it on every healthy
+     * boot.
+     *
+     * <p>Takes the address only to NAME the account, for the same reason
+     * {@link #rejectPublishedPassword} does; it is an instance method rather than a static one
+     * only because of the existence check.
+     */
+    void rejectOverLongPassword(String password, String email) {
+        if (email == null || email.isBlank()) {
+            return;
+        }
+        if (!PasswordLimits.exceedsEncoderLimit(password)) {
+            return;
+        }
+        String account = email.strip().toLowerCase(Locale.ROOT);
+        if (userRepository.existsByFoldedEmail(account)) {
+            return;
+        }
+        throw new IllegalStateException(
+                "seed.admin.password (SEED_ADMIN_PASSWORD) is " + PasswordLimits.byteLength(password)
+                + " bytes long; the maximum is " + MAX_SEED_PASSWORD_BYTES + " bytes. That is the "
+                + "ceiling BCrypt itself enforces, so seeding this value cannot create the "
+                + "administrator it names (" + account + ") — the boot would fail inside the password "
+                + "encoder instead, saying only \"password cannot be more than 72 bytes\". Count in "
+                + "BYTES, not characters: plain Latin letters cost 1 each, accented, Greek and "
+                + "Cyrillic 2, most other scripts 3, emoji 4 — so a 40-character passphrase in "
+                + "Cyrillic is already 80 bytes. Shorten SEED_ADMIN_PASSWORD to "
+                + MAX_SEED_PASSWORD_BYTES + " bytes or fewer, or clear SEED_ADMIN_EMAIL if you did "
+                + "not mean to seed an administrator at all. A random 64-character ASCII password is "
+                + "far stronger than anything BCrypt can use, so nothing is lost by shortening.");
     }
 
     /**
@@ -406,7 +503,19 @@ public class DataSeeder implements ApplicationRunner {
         // ApplicationRunner. Adding @Transactional to run() later moves where that lands.
         // (Optional is safe only because the index exists - Flyway runs to completion before this
         // class can be called.)
-        var email = adminEmail.toLowerCase(Locale.ROOT);
+        //
+        // AND IT STRIPS BEFORE IT FOLDS, which is not tidiness. Every other site that folds the
+        // configured address folds it with strip().toLowerCase(Locale.ROOT), and one of them -
+        // rejectOverLongPassword - RETURNS on the strength of the row that fold finds. A trailing
+        // space survives env_file and @Value does not trim it, so an unstripped fold here would ask
+        // about a different key than that guard cleared: the guard would see the existing row and
+        // step aside, this lookup would miss it, and the boot would die inside
+        // passwordEncoder.encode with the bare "password cannot be more than 72 bytes" the guard
+        // exists to replace. The exact comparison below reads this same stripped value, so an
+        // address configured with stray whitespace still matches the row it names instead of being
+        // refused as somebody else's. A whitespace-only value never reaches here: the isBlank()
+        // branch above returned.
+        var email = adminEmail.strip().toLowerCase(Locale.ROOT);
         var existing = userRepository.findByFoldedEmail(email).orElse(null);
         if (existing != null && !existing.getEmail().equals(email)) {
             // No address in the message, by the same rule the rest of this class follows - the id

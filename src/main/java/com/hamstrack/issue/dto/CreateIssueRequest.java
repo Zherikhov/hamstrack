@@ -13,7 +13,20 @@ import java.util.UUID;
 
 public record CreateIssueRequest(
         @NotBlank @Size(max = 500) String title,
-        String description,
+        // A payload guard, not a column guard: issues.description is TEXT and overflows
+        // nothing. 10000 is FieldValueService.MAX_TEXTAREA_LENGTH — one number for a block of
+        // prose, deliberately, so a TEXTAREA custom field and a description refuse alike
+        // (HD-171 §4.3). Written as a bare literal so that a FUTURE column-width scanner CAN
+        // read it — no scanner reads this field today. The one that exists,
+        // EmailLengthBoundTest, applies its `max\s*=\s*(\d+)` regex only to declarations it
+        // reaches from an @Email, so it never looks here. Keeping the form it reads costs
+        // nothing and is what makes the field scannable later; 10_000 would read as 10 and a
+        // constant reference as no bound at all. What is meant to police the VALUE is a
+        // behavioural test (§5.3), not a source scan.
+        // What makes the absence expensive here is amplification
+        // — every edit copies the old and new description verbatim into issue_history, so one
+        // unbounded field is stored three times after a single edit.
+        @Size(max = 10000) String description,
         @NotNull UUID typeId,
         @NotNull UUID statusId,
         // Null = the default priority of the project's priority set

@@ -39,6 +39,30 @@ public class AdminFieldService {
     /** The HQL vocabulary, consulted only to refuse a key it has claimed — see requireUnreservedKey. */
     private final com.hamstrack.search.FieldRegistry fieldRegistry;
 
+    /**
+     * Options in one SELECT/MULTI_SELECT field — a ceiling on a picker, not on content
+     * (see {@link #requireSelectOptions}).
+     */
+    private static final int MAX_OPTIONS = 100;
+
+    /** Max length of one option's id or label, matching {@code field_defs.name VARCHAR(100)}. */
+    private static final int MAX_OPTION_TEXT = 100;
+
+    /**
+     * The whole {@code config} document, serialised, for <strong>every</strong> field type
+     * (see {@link #requireConfigSize}).
+     *
+     * <p><strong>It overlaps the two option ceilings and is deliberately the tighter of the
+     * two constraints at the extreme.</strong> A theoretical maximum SELECT — {@link #MAX_OPTIONS}
+     * options each carrying a {@link #MAX_OPTION_TEXT}-character id <em>and</em> label — is about
+     * 23 KB of JSON and is refused here, before {@link #requireSelectOptions} ever runs. That is
+     * intended rather than an accident of arithmetic: 100 dropdown entries labelled with 100
+     * characters each is not a picker anyone can use, and the realistic maximum is an order of
+     * magnitude under this. Said out loud so the interaction is read as a decision, not
+     * discovered later as a bug.
+     */
+    private static final int MAX_CONFIG_LENGTH = 20000;
+
     // ---------- field defs ----------
 
     @Transactional(readOnly = true)
@@ -62,6 +86,7 @@ public class AdminFieldService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "A field named '" + req.name() + "' already exists or is inherited — reuse it instead of duplicating");
         }
+        requireConfigSize(req);
         requireSelectOptions(req.type(), req);
         var f = new FieldDef();
         scope.stamp(f);
@@ -87,6 +112,7 @@ public class AdminFieldService {
             throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                     "Field type cannot change once created — stored values depend on it");
         }
+        requireConfigSize(req);
         requireSelectOptions(f.getType(), req);
         f.setName(req.name());
         f.setConfig(req.config());
@@ -233,6 +259,49 @@ public class AdminFieldService {
         }
     }
 
+    /**
+     * <strong>The whole {@code config} document, bounded once for every field type</strong>
+     * (HD-171 §4.3, round 2). {@code config} is a {@code JsonNode}, so no {@code @Size} on the
+     * DTO reaches inside it, and {@code field_defs.config JSONB} has no width to overflow — so
+     * bean validation genuinely cannot bound it and a service check must.
+     *
+     * <p><strong>Why this exists on top of the two option ceilings, which is the whole lesson:
+     * those bound two <em>leaves</em>, and this bounds the <em>document</em>.</strong> Round 1
+     * bounded {@code options[].id} and {@code options[].label} and then described {@code config}
+     * as bounded, which it was not:
+     * {@code {"options":[{"id":"a","label":"b","color":"<20 M characters>"}]}} passed, so did any
+     * unrelated top-level key, and so did the entire config of every non-SELECT type, which never
+     * enters that branch at all. A bound on the members of a set is not a bound on the set.
+     *
+     * <p><strong>And this field is egress.</strong> {@code ProjectConfigController} returns
+     * {@code config} to every project member on the endpoint the SPA fetches for every board and
+     * every issue form — so an unbounded document is not a stored blob, it is hundreds of
+     * megabytes re-served on every page load, plantable by any workspace admin (contained to
+     * their own tenant, which is what keeps it Low rather than High).
+     *
+     * <p>422 rather than 400, like every other refusal on this path: the request is well-formed
+     * and the product declines it. Measured on the compact serialisation, which is what is stored
+     * and what is re-served, not on the request's own whitespace.
+     */
+    private void requireConfigSize(UpsertFieldRequest req) {
+        var cfg = req.config();
+        if (cfg == null) return;
+        int size = cfg.toString().length();
+        if (size > MAX_CONFIG_LENGTH) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "Field config is " + size + " characters; the maximum is " + MAX_CONFIG_LENGTH
+                    + ". This document is sent to every project member on every board load.");
+        }
+    }
+
+    /**
+     * The two <em>option</em> ceilings — a bound on the leaves, with {@link #requireConfigSize}
+     * bounding the document they live in (HD-171 §4.3). 422 for the same reason.
+     *
+     * <p>The numbers are ceilings on a picker, not on prose: 100 options is far past any usable
+     * dropdown, and an option {@code id} is read back by {@code FieldValueService.optionIds} on
+     * <em>every</em> custom-field write, so an unbounded one is unbounded work on a hot path.
+     */
     private void requireSelectOptions(FieldType type, UpsertFieldRequest req) {
         if (type == FieldType.SELECT || type == FieldType.MULTI_SELECT) {
             var cfg = req.config();
@@ -240,11 +309,21 @@ public class AdminFieldService {
                 throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                         "Select fields need at least one option");
             }
+            if (cfg.get("options").size() > MAX_OPTIONS) {
+                throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                        "A select field can have at most " + MAX_OPTIONS + " options");
+            }
             for (var opt : cfg.get("options")) {
                 if (!opt.hasNonNull("id") || opt.get("id").asText().isBlank()
                         || !opt.hasNonNull("label") || opt.get("label").asText().isBlank()) {
                     throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
                             "Every option needs an id and a label");
+                }
+                if (opt.get("id").asText().length() > MAX_OPTION_TEXT
+                        || opt.get("label").asText().length() > MAX_OPTION_TEXT) {
+                    throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                            "An option id and label must each be at most " + MAX_OPTION_TEXT
+                            + " characters");
                 }
             }
         }

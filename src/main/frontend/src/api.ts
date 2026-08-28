@@ -73,6 +73,24 @@ function hqlErrorOf(body: unknown): HqlError | undefined {
   }
 }
 
+/**
+ * The `errors` ProblemDetail extension a validation 400 carries — a
+ * `{field: message}` map built by `GlobalExceptionHandler.handleValidation`
+ * (HD-171 §11). Every non-string value is dropped rather than coerced: this map
+ * is rendered to a user, and `String(someObject)` next to an input field is
+ * worse than no message at all.
+ */
+function fieldErrorsOf(body: unknown): Record<string, string> | undefined {
+  if (!body || typeof body !== 'object') return undefined
+  const raw = (body as Record<string, unknown>).errors
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [field, message] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof message === 'string') out[field] = message
+  }
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
 // FormData bodies must NOT get a JSON Content-Type — the browser sets
 // multipart/form-data with the boundary itself
 function buildHeaders(init: RequestInit, token: string | null): HeadersInit {
@@ -138,7 +156,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     if (!detail) detail = `Request failed (${res.status})`
     // Conflict discriminators (HD-123 S6). Read off the HEADERS as well as the
     // body, because the one retryable 409 is identified by `Retry-After` alone.
-    throw new ApiResponseError(res.status, detail, hql, existingId, conflictOf(body, res))
+    throw new ApiResponseError(
+      res.status, detail, hql, existingId, conflictOf(body, res), fieldErrorsOf(body),
+    )
   }
 
   return res.status === 204 ? (undefined as T) : res.json()

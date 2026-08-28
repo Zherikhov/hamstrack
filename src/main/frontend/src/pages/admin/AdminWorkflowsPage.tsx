@@ -3,6 +3,7 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import { ArrowRight, X } from 'lucide-react'
 import type { AdminWorkflow, TransitionRule } from '../../types'
 import { Button, Input, Select } from '../../components/ui'
+import { PROSE_MAX_LENGTH } from '../../lib/limits'
 import { AdminTable, ImpactBanner, InheritedBadge, Modal, PageHeader } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 
@@ -138,7 +139,8 @@ function WorkflowForm({ workflow, onClose, onSaved }: {
       <div className="flex flex-col gap-4">
         <ImpactBanner projectsUsing={workflow?.projectsUsing ?? 0} entity="workflow" />
         <Input label="Name" value={name} onChange={e => setName(e.target.value)} autoFocus />
-        <Input label="Description" value={description} onChange={e => setDescription(e.target.value)} />
+        <Input label="Description" value={description} maxLength={PROSE_MAX_LENGTH}
+               onChange={e => setDescription(e.target.value)} />
 
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>

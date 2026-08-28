@@ -137,6 +137,26 @@ info:
     known bound — and nothing here is a schedule to key on. See
     `ReferenceConstraintProblemDetail`.
 
+
+    **A value longer than the column that had to hold it is a `400`, not a
+    crash.** Where the database refuses a write because a string overflowed its
+    column, the refusal reaches the caller as `400` with
+    `errorType: "VALUE_TOO_LONG"` and
+    `detail: "Some of the text you submitted is too long."` Nothing is
+    half-applied. **This is a property of the API rather than of a set of
+    endpoints** — it is applied where the database reports the overflow, not at
+    chosen handlers, so any write may answer it and no operation below lists
+    it. **A caller should not normally meet it**: a request field that is too
+    long is refused at the door by a field-anchored `400` that names it (see
+    `ValidationProblemDetail`), or by a service check that names the limit, and
+    those are the refusals to code against. This one is the backstop under them
+    and **names no field**, because by the time it is raised the body is gone
+    and the database has reported a width rather than a column — so a client
+    may branch on the `errorType` but must not be given a field it cannot be
+    told. Meeting it means some path is missing a bound; the server logs it as
+    a fault even though it answers as a client error. Shorten the longest free
+    text in the request and send it again. See `ValueTooLongProblemDetail`.
+
     **`errorType` says which failure a body is**, wherever one status covers
     more than one. It is a plain string extension on the problem body, stable
     and safe to branch on where the wording of `detail` is not: an invalid HQL
@@ -144,9 +164,10 @@ info:
     refused over project administrators carries `STRANDED_PROJECTS`,
     `ADOPTION_BLOCKED` or `ADOPTION_ROLE_UNREADABLE`, and any request stopped
     for outrunning the server’s time budget carries
-    `STATEMENT_BUDGET_EXCEEDED`, and a write the database refuses because a
+    `STATEMENT_BUDGET_EXCEEDED`, a write the database refuses because a
     reference could not be satisfied carries
-    `REFERENCE_CONSTRAINT_VIOLATION`.
+    `REFERENCE_CONSTRAINT_VIOLATION`, and one it refuses because a string was
+    wider than its column carries `VALUE_TOO_LONG`.
     Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
@@ -472,8 +493,11 @@ paths:
       description: |
         Sends a verification email. `termsAccepted: true` is required when the
         instance has terms acceptance enabled (see `GET /meta`). Returns `403`
-        when the operator disabled public signup, and `422` when `password` is
-        a value this project itself published (see that response).
+        when the operator disabled public signup, and `422` when `password`
+        cannot be stored as sent — because it is a value this project itself
+        published, or because it costs more than 72 UTF-8 bytes (see that
+        response; the byte limit binds well before the character one for any
+        non-Latin script).
 
 
         The address is lower-cased before anything is looked up, and account
@@ -503,7 +527,25 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422':
           description: >-
-            `password` is a value **this project has itself published** as
+            `password` cannot be stored as sent. **More than one refusal shares
+            this status on this endpoint**; branch on the status, then read
+            `detail` to tell them apart. Nothing is created by either.
+
+
+            **It costs more than 72 UTF-8 bytes.** The hash this application
+            writes is BCrypt, which hashes at most 72 bytes, so the real ceiling
+            is on bytes and the `maxLength: 72` on the field only covers the
+            half a character count can see. Latin letters cost 1 byte each,
+            accented Latin, Greek and Cyrillic 2, most other scripts 3, and
+            emoji 4 — so a Cyrillic passphrase is refused at 37 characters and a
+            CJK one at about 25, well inside the character bound, while an
+            ASCII password of 73+ characters is instead a field-anchored
+            `400`. `detail` gives the byte count of what was sent, the limit
+            and that arithmetic, because "72 bytes" is not something a person
+            typing a passphrase can evaluate.
+
+
+            **It is a value this project has itself published** as
             production configuration, so it is known to everyone who can read
             the repository. Today that is the single literal
             `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
@@ -523,6 +565,41 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
 
   /auth/verify-email:
+    get:
+      tags: [Auth]
+      summary: Follow the verification link from the email
+      description: |
+        The address the verification email links to. It reads nothing and
+        verifies nothing — it answers `302` to the SPA's own
+        `/verify-email?token=…` route, which then calls the `POST` below.
+        Documented because it is a public URL an already-sent email can point
+        at, not because a client should call it.
+      operationId: verifyEmailLink
+      security: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string, maxLength: 64 }
+          description: >-
+            The token from the emailed link, bounded from its generator (43
+            Base64url characters). Over-long is a `400`.
+      responses:
+        '302':
+          description: Redirect to the in-app verification screen
+          headers:
+            Location:
+              schema: { type: string }
+              description: '`/verify-email?token=…`, URL-encoded'
+        '400':
+          description: >-
+            `token` is missing or longer than its bound. A refusal on a query
+            parameter carries **no `errors` map** — that map belongs to request
+            *body* validation (see `ValidationProblemDetail`); this one is a
+            plain problem body.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
     post:
       tags: [Auth]
       summary: Verify email with the one-time token
@@ -654,10 +731,12 @@ paths:
       tags: [Auth]
       summary: Set a new password with the emailed token
       description: |
-        Revokes all active sessions on success. Returns `422` when `newPassword`
-        is a value this project itself published; that refusal happens **before
-        the token is consumed**, so the same link can be re-used with a
-        different password (see that response).
+        Revokes all active sessions on success. Returns `422` when
+        `newPassword` cannot be stored as sent — because it is a value this
+        project itself published, or because it costs more than 72 UTF-8 bytes.
+        Every refusal on that status happens **before the token is consumed**,
+        so the same link can be re-used with a different password (see that
+        response).
       operationId: resetPassword
       security: []
       requestBody:
@@ -668,8 +747,18 @@ paths:
               type: object
               required: [token, newPassword]
               properties:
-                token: { type: string }
-                newPassword: { type: string, minLength: 8, maxLength: 100 }
+                token: { type: string, maxLength: 64 }
+                newPassword:
+                  type: string
+                  minLength: 8
+                  maxLength: 72
+                  description: >-
+                    Bounded in two units, exactly as `RegisterRequest.password`
+                    is: above 72 **characters** a field-anchored `400`, and
+                    above 72 **UTF-8 bytes** a `422` (see that response). A
+                    Cyrillic passphrase reaches the byte limit at 37 characters.
+                    The `422` runs before the reset row is consumed, so the
+                    link survives it.
       responses:
         '200':
           description: Password reset
@@ -683,7 +772,23 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422':
           description: >-
-            `newPassword` is a value **this project has itself published** as
+            `newPassword` cannot be stored as sent. **More than one refusal
+            shares this status on this endpoint**; branch on the status, then
+            read `detail` to tell them apart. **The reset token survives either
+            one** — both are checked before the reset row is consumed, so the
+            caller retries on the same link.
+
+
+            **It costs more than 72 UTF-8 bytes** — the ceiling BCrypt hashes
+            to, which a character count cannot see. Latin letters cost 1 byte
+            each, accented Latin, Greek and Cyrillic 2, most other scripts 3,
+            and emoji 4, so a Cyrillic passphrase is refused at 37 characters
+            while an ASCII one of 73+ characters is instead a field-anchored
+            `400`. `detail` gives the byte count, the limit and that
+            arithmetic.
+
+
+            **It is a value this project has itself published** as
             production configuration, so it is known to everyone who can read
             the repository. Today that is the single literal
             `SEED_ADMIN_PASSWORD`, which shipped in `.env.prod.example` as the
@@ -2037,13 +2142,25 @@ paths:
         - name: token
           in: query
           required: true
-          schema: { type: string }
+          schema: { type: string, maxLength: 64 }
+          description: >-
+            The invite token from the emailed link. Bounded from its generator
+            (43 Base64url characters), like every token this API accepts —
+            over-long is a `400`.
       responses:
         '200':
           description: Joined the workspace
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WorkspaceResponse' }
+        '400':
+          description: >-
+            `token` is missing or longer than its bound. A query-parameter
+            refusal carries no `errors` map — that map belongs to request body
+            validation.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: Already a member
@@ -2835,7 +2952,15 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422':
-          description: Select field without options / option missing id or label
+          description: >-
+            `config` cannot be stored as sent. A select field with no options,
+            or an option missing its `id` or `label`; a `config` whose compact
+            serialization exceeds 20 000 characters (checked for **every** field
+            type, not only selects); more than 100 options; or an option whose
+            `id` or `label` exceeds 100 characters. `detail` says which, and
+            names the measured size against its limit where there is one. The
+            same refusals apply on `PATCH /admin/fields/{id}` and on the
+            delegated workspace- and project-scoped mirrors.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -8854,6 +8979,39 @@ components:
               type: string
               enum: [REFERENCE_CONSTRAINT_VIOLATION]
 
+    ValueTooLongProblemDetail:
+      description: >-
+        The `400` body of a write the database refused because a string was
+        longer than the column that had to hold it. It belongs to the API rather
+        than to a list of paths — it is the backstop that keeps a missing length
+        bound from surfacing as a `500` on any write, including one added later
+        — so it is defined here and attached to no operation.
+
+
+        The refusal a caller normally meets is the bound at the door, which
+        knows which field is at fault and names it. This one knows neither the
+        field nor the column, and says so rather than guessing.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 400 }
+            detail:
+              type: string
+              description: >-
+                Names no field, and carries nothing from the database — not the
+                width, not the column, not the statement. That is an honest
+                omission rather than a terse one: the request body is gone by
+                the time this is raised and PostgreSQL reported only how wide
+                the column was. There is deliberately **no `errors` map**, which
+                is how this `400` is told from a field-anchored validation
+                failure. The column and table go to the server log instead,
+                which is the operator's copy of this refusal.
+              example: Some of the text you submitted is too long.
+            errorType:
+              type: string
+              enum: [VALUE_TOO_LONG]
+
     HqlProblemDetail:
       description: >-
         The `422` body for an invalid HQL query. Beyond the standard problem
@@ -9197,7 +9355,19 @@ components:
       required: [email, password, displayName]
       properties:
         email: { type: string, format: email, maxLength: 255 }
-        password: { type: string, minLength: 8, maxLength: 100 }
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          description: >-
+            Bounded in two units, and for a non-Latin passphrase the second one
+            binds first. Above 72 **characters** the answer is a field-anchored
+            `400`; a value that fits in 72 characters but costs more than 72
+            **UTF-8 bytes** is a `422` (see that response). The password hash
+            this application writes is BCrypt, which hashes at most 72 bytes,
+            and a character count cannot see that cost: Latin letters cost 1
+            byte each, accented Latin, Greek and Cyrillic 2, most other scripts
+            3, and emoji 4.
         displayName: { type: string, minLength: 2, maxLength: 100 }
         termsAccepted:
           type: boolean
@@ -9207,14 +9377,14 @@ components:
       type: object
       required: [token]
       properties:
-        token: { type: string, description: One-time token from the verification email }
+        token: { type: string, maxLength: 64, description: 'One-time token from the verification email. Bounded from the generator that makes it — 43 Base64url characters — not from the column behind it, which stores a fixed-width hash and so can never be the thing that refuses' }
 
     LoginRequest:
       type: object
       required: [email, password]
       properties:
         email: { type: string, format: email, maxLength: 255 }
-        password: { type: string }
+        password: { type: string, maxLength: 1024, description: 'Deliberately generous, and deliberately carrying no minimum: this door verifies a password rather than storing one, so a length rule here would answer 400 where the endpoint must answer 401 and would tell an attacker which submissions were too short to be anybody''s password. The bound''s whole job is that the field is finite' }
 
     AuthResponse:
       type: object
@@ -9817,7 +9987,7 @@ components:
       required: [name, statusIds]
       properties:
         name: { type: string, maxLength: 100 }
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         statusIds:
           type: array
           description: Board-column order
@@ -9949,16 +10119,29 @@ components:
     FieldConfig:
       type: object
       nullable: true
-      description: '`options` for selects; `min`/`max` for numbers'
+      description: >-
+        `options` for selects; `min`/`max` for numbers.
+
+
+        **The document is bounded, and so are the options inside it** — both as
+        `422`s from the upsert, whatever the field's type. Serialized compactly
+        the whole `config` may be at most **20 000 characters**; a select may
+        carry at most **100 options**; and an option's `id` and `label` may each
+        be at most **100 characters**. The document ceiling is the binding one
+        at the extreme: 100 options each carrying a 100-character `id` *and*
+        `label` is about 23 KB and is refused before the option checks run.
+        This config is re-served to every project member on every board load,
+        which is what the ceilings protect.
       properties:
         options:
           type: array
+          maxItems: 100
           items:
             type: object
             required: [id, label]
             properties:
-              id: { type: string, example: critical, description: Referenced by stored values — stable once used }
-              label: { type: string, example: Critical }
+              id: { type: string, maxLength: 100, example: critical, description: Referenced by stored values — stable once used }
+              label: { type: string, maxLength: 100, example: Critical }
               color: { type: string, nullable: true, example: '#B91C1C' }
         min: { type: number, nullable: true }
         max: { type: number, nullable: true }
@@ -10030,7 +10213,15 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        slug: { type: string, example: acme-inc }
+        slug:
+          type: string
+          maxLength: 100
+          example: acme-inc
+          description: >-
+            Derived server-side from the name on create, never accepted from a
+            client and never regenerated on rename. It is **clipped to 100
+            characters**, so a long name yields a short slug rather than a
+            failure; the full name is always beside it in `name`.
         name: { type: string, example: Acme Inc }
         projectAccessMode:
           allOf:
@@ -10571,7 +10762,7 @@ components:
           minLength: 1
           maxLength: 10
           example: DEMO
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         delivery:
           allOf:
             - $ref: '#/components/schemas/DeliveryRequest'
@@ -10699,7 +10890,7 @@ components:
       description: Partial project update — omitted fields are left unchanged
       properties:
         name: { type: string, minLength: 2, maxLength: 255 }
-        description: { type: string }
+        description: { type: string, maxLength: 10000 }
         boardMode:
           allOf:
             - $ref: '#/components/schemas/BoardMode'
@@ -11110,7 +11301,7 @@ components:
       required: [title, typeId, statusId]
       properties:
         title: { type: string, maxLength: 500 }
-        description: { type: string, nullable: true }
+        description: { type: string, nullable: true, maxLength: 10000 }
         typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
         statusId: { type: string, format: uuid, description: Must belong to the project's workflow }
         priorityId: { type: string, format: uuid, nullable: true, description: Omitted = the project's default priority }
@@ -11214,7 +11405,7 @@ components:
       description: Partial update — omitted fields are left unchanged
       properties:
         title: { type: string, minLength: 1, maxLength: 500 }
-        description: { type: string }
+        description: { type: string, maxLength: 10000 }
         typeId: { type: string, format: uuid, description: Must be offered by the project's type set }
         statusId: { type: string, format: uuid, description: Validated against workflow transition rules }
         priorityId: { type: string, format: uuid, description: Must be offered by the project's priority set }
@@ -12024,7 +12215,7 @@ components:
       type: object
       required: [body]
       properties:
-        body: { type: string, description: '`@DisplayName` mentions notify workspace members' }
+        body: { type: string, maxLength: 10000, description: '`@DisplayName` mentions notify workspace members' }
 
     CommentResponse:
       type: object

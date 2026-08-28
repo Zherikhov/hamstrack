@@ -6,6 +6,7 @@ import com.hamstrack.workspace.service.ProjectAccessService;
 import com.hamstrack.workspace.service.WorkspaceMemberService;
 import com.hamstrack.workspace.service.WorkspaceService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -351,9 +352,21 @@ public class WorkspaceController {
         workspaceService.revokeInvite(user, id, inviteId);
     }
 
+    // The FOURTH token door, bounded for the reason the other three were and for no reason of its
+    // own (HD-171 §4.4): same TokenUtils.generateRawToken, same 43 Base64url characters, and A RULE
+    // ON ONE OF TWO DOORS IS NOT A RULE. What it is exposed to is genuinely small — the value is
+    // SHA-256'd and looked up by hash, the caller is authenticated, and nothing builds a header out
+    // of it, so this is the category and not an incident. 64 is the generator's width with room to
+    // spare.
+    //
+    // It fires because this class carries NO @Validated: Spring MVC's built-in method validation
+    // raises HandlerMethodValidationException, which Boot renders as a 400. @Validated on the class
+    // would make HandlerMethod.shouldValidateArguments() return false and defer to the AOP proxy,
+    // whose jakarta.validation.ConstraintViolationException nothing here handles — trading this
+    // 400 for a 500. Do not add it.
     @PostMapping("/accept-invite")
     public WorkspaceResponse acceptInvite(@AuthenticationPrincipal User user,
-                                          @RequestParam String token) {
+                                          @RequestParam @Size(max = 64) String token) {
         return workspaceService.acceptInvite(user, token);
     }
 }

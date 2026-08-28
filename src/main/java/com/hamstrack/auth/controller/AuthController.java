@@ -8,6 +8,7 @@ import com.hamstrack.common.seed.DemoDataService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
@@ -55,8 +56,35 @@ public class AuthController {
     // Mail scanners follow GET links and would burn the one-time token, so the
     // email links to the SPA page, which POSTs the token. This redirect keeps
     // links from already-sent emails working.
+    //
+    // THE TOKEN IS BOUNDED HERE FOR THE SAME REASON IT IS BOUNDED ON VerifyEmailRequest, and
+    // it is the ticket's own argument applied to a token instead of a column: A RULE ON ONE OF
+    // TWO DOORS IS NOT A RULE. HD-171 put @Size(max = 64) on the POST body's token and left this
+    // one — the same value, on the same flow, into the same lookup — unbounded, which is the
+    // asymmetry the whole sweep exists to find. Concretely: an ~8 KB token of characters
+    // URLEncoder expands 3x builds a ~24 KB Location header, past Tomcat's 8 KB response-header
+    // limit, so an unauthenticated caller gets a 500 and an ERROR line for free. No injection
+    // risk, since the value is URL-encoded into the header.
+    //
+    // AND THIS PATH IS NOT RATE LIMITED — the @Size IS THE ONLY THING BOUNDING IT. RateLimitConfig
+    // lists /api/auth/verify-email among the per-IP patterns, so it LOOKS covered, but
+    // AuthRateLimitFilter.shouldNotFilter returns true for every non-POST method and its comment
+    // names this endpoint as the reason ("the GET /verify-email legacy redirect and CORS
+    // preflights shouldn't burn it"). That exemption is deliberate and stays. The consequence is
+    // that the only other bound on this handler is Tomcat's 8 KB request line, which is a cap on
+    // the ATTEMPT and not on the number of attempts — so a comment claiming the limiter would be
+    // naming a control that is switched off, which is worse than naming none, because the next
+    // reader stops checking.
+    //
+    // NO @Validated ON THIS CLASS, deliberately: it would move validation from Spring MVC's
+    // built-in method validation (HandlerMethodValidationException -> 400 from Boot's advice) to
+    // the AOP proxy, which throws jakarta.validation.ConstraintViolationException — a type
+    // GlobalExceptionHandler.sqlStateOf's javadoc explicitly records as falling to an UNCHANGED
+    // 500. Adding it would trade one 500 for another. HandlerMethod.shouldValidateArguments()
+    // returns false exactly when the class carries @Validated, so leaving it off is what makes
+    // this @Size fire at all.
     @GetMapping("/verify-email")
-    public ResponseEntity<Void> verifyEmailLink(@RequestParam String token) {
+    public ResponseEntity<Void> verifyEmailLink(@RequestParam @Size(max = 64) String token) {
         var location = "/verify-email?token=" + URLEncoder.encode(token, StandardCharsets.UTF_8);
         return ResponseEntity.status(HttpStatus.FOUND)
                 .header(HttpHeaders.LOCATION, location)
