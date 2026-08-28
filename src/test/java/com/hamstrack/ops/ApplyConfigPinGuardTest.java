@@ -9,7 +9,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributeView;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,9 +42,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code docs/design/config-delivery-proposal.md} §16. What it proves is that the script's
  * reading of a line cannot drift away from the answer that was verified.
  *
- * <p><strong>Skips without a {@code bash}.</strong> CI is Linux, so the gate that turns a
- * regression red always runs it; a Windows developer without Git Bash on {@code PATH} gets a
- * skip rather than a spurious failure.
+ * <p><strong>Where it runs, and why a pass on one platform says nothing about the other.</strong>
+ * These tests run on Linux CI and on a developer's Windows box, and they skip only where there
+ * is no {@code bash} at all (a Windows machine without Git Bash on {@code PATH}). The two
+ * platforms do not agree about the stubs: a shell only executes a file on {@code PATH} that
+ * carries an execute bit, and it silently SKIPS one that does not and keeps searching — so a
+ * stub written at mode 644 is not a stub, it is a hole in {@code PATH} through which the name
+ * resolves to whatever the machine really has. On NTFS there is no execute bit to get wrong and
+ * bash runs the file from its shebang, so Windows passed this class while every stub was
+ * unexecutable; on the first Linux run the same code found the runner's real {@code docker} and
+ * five cases failed with a plausible-looking script error. The stubs are therefore given the
+ * execute bit wherever the filesystem has one, and {@link #assertStubsAreExecutable} refuses to
+ * launch the script if any file on that {@code PATH} lacks it, naming it as a stub problem.
+ * <strong>A green run on a platform that cannot express a permission is not evidence about a
+ * platform that can</strong> — it is the absence of the question, and this class shipped that
+ * mistake once.
  */
 class ApplyConfigPinGuardTest {
 
@@ -611,13 +626,13 @@ class ApplyConfigPinGuardTest {
         // is observed — and answers `ps -q` with a container id so that step 7b has something
         // to restart. `flock` is stubbed because Git Bash has none; each case owns its own
         // directory, so there is nothing to serialise against.
-        write(bin.resolve("docker"), """
+        writeStub(bin.resolve("docker"), """
                 #!/usr/bin/env bash
                 printf '%s\\n' "$*" >> "$DOCKER_LOG"
                 case " $* " in *" ps -q "*) echo fake-cid ;; esac
                 exit 0
                 """);
-        write(bin.resolve("flock"), "#!/usr/bin/env bash\nexit 0\n");
+        writeStub(bin.resolve("flock"), "#!/usr/bin/env bash\nexit 0\n");
 
         return new Deployment(box, src, bin, root.resolve("docker.log"));
     }
@@ -637,6 +652,7 @@ class ApplyConfigPinGuardTest {
                 .withFailMessage("ops/deploy/apply-config.sh was not found at %s — this test drives the "
                         + "repository's own copy, so it must run from the module root", SCRIPT.toAbsolutePath())
                 .isRegularFile();
+        assertStubsAreExecutable(d.bin());
 
         var cmd = new ArrayList<String>();
         cmd.add(bash);
@@ -669,6 +685,71 @@ class ApplyConfigPinGuardTest {
         Files.createDirectories(p.getParent());
         // LF, always: a shebang line ending in CR makes bash report `bash\r: not found`.
         Files.writeString(p, content.replace("\r\n", "\n"), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Writes a file that the script is meant to RUN, rather than read. Every such file needs
+     * the execute bit on any filesystem that has one — {@link Files#writeString} leaves mode
+     * 644 under the usual umask, and PATH lookup skips a file it cannot execute instead of
+     * failing on it. See {@link #assertStubsAreExecutable}, which is what makes forgetting
+     * this loud.
+     */
+    private static void writeStub(Path p, String content) throws IOException {
+        write(p, content);
+        if (!supportsPosixPermissions(p)) {
+            // NTFS and friends: no execute bit exists to set, and bash runs the file from its
+            // shebang. Nothing to do, and nothing this platform can prove either.
+            return;
+        }
+        var perms = new HashSet<>(Files.getPosixFilePermissions(p));
+        perms.add(PosixFilePermission.OWNER_EXECUTE);
+        Files.setPosixFilePermissions(p, perms);
+    }
+
+    /**
+     * <strong>Every file this class puts on the script's {@code PATH} must be executable</strong>
+     * — not the two it happens to put there today. The check is here, at the moment {@code PATH}
+     * is composed, so a stub added later by any route is covered without anyone remembering this
+     * rule; and it is phrased as a category because the failure it stops does not announce which
+     * name it is about.
+     *
+     * <p>What it stops: a shell does not fail on a non-executable file found on {@code PATH}, it
+     * skips it and keeps searching, so the name resolves to whatever the machine really has. A
+     * runner has a real {@code docker}; a scratch directory is not a Compose project; the script
+     * then refuses, correctly, for a reason that reads as a defect in the script. That is a
+     * five-failure red build whose every message points away from the cause, which is why this
+     * fails as a STUB problem before the script is launched at all.
+     */
+    private static void assertStubsAreExecutable(Path bin) throws IOException {
+        if (!supportsPosixPermissions(bin)) {
+            return;
+        }
+        try (var entries = Files.list(bin)) {
+            for (Path stub : entries.toList()) {
+                assertThat(Files.isExecutable(stub))
+                        .withFailMessage("""
+
+                                THIS IS A STUB PROBLEM, NOT A SCRIPT FAILURE. %s is on the PATH this test \
+                                hands to ops/deploy/apply-config.sh, and it is not executable on this \
+                                filesystem (mode %s).
+
+                                A shell SKIPS a non-executable file during PATH lookup and keeps searching, \
+                                so the name resolves to whatever this machine really has -- on CI, the \
+                                runner's real docker, pointed at a scratch directory that is not a Compose \
+                                project. The script then refuses, correctly, and the failure reads as a \
+                                defect in apply-config.sh several steps away from the stub that was never \
+                                run. Every file this class puts on that PATH needs the execute bit wherever \
+                                the filesystem has one: write it with writeStub(...), never with write(...) \
+                                or Files.writeString, which leave mode 644.""",
+                                stub.getFileName(), Files.getPosixFilePermissions(stub))
+                        .isTrue();
+            }
+        }
+    }
+
+    /** True where the store can express an execute bit at all — false on NTFS. */
+    private static boolean supportsPosixPermissions(Path p) throws IOException {
+        return Files.getFileStore(p).supportsFileAttributeView(PosixFileAttributeView.class);
     }
 
     private static String read(Path p) throws IOException {
