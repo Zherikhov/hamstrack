@@ -348,66 +348,66 @@ container, or query them from inside Grafana).
 
 ## 5. Memory: what the box has, and what the app is allowed
 
-> **Correction, measured on the box 2026-08-26 — the machine described below is not
-> the one running. Detail and remediation: HD-199.** Three findings, all taken from
-> the live instance rather than from the repo:
-> - **The app container has no memory limit at all.** `docker inspect hamstrack-app-1
->   --format '{{.HostConfig.Memory}}'` returned `0`, and the box's
->   `/opt/hamstrack/docker-compose.prod.yml` — dated **11 July**, from the six weeks when
->   nothing shipped configuration to this box — carries no `mem_limit` line to read
->   `APP_MEMORY_LIMIT` with. There is no 1024 MB ceiling in production; there is no
->   ceiling.
-> - **The heap is sized against host RAM, not against a limit.** The running JVM does
->   carry `-XX:MaxRAMPercentage=50.0`, and with no cgroup limit that is 50% of the
->   instance's 1909 MB — **about 954 MB of maximum heap**, not the 512 MB this section
->   derives.
-> - **`APP_MEMORY_LIMIT=1g` is present in `/opt/hamstrack/.env` and is read by nothing.**
->
-> The lesson is the correction, not the numbers: **a variable is not a setting until
-> something consumes it, and the only way to know which it is, is to ask the running
-> container.** This section offered the variable's own presence in `.env` as evidence
-> that the limit had been chosen; presence in `.env` is evidence of nothing but
-> presence in `.env`. Read the limit back from `docker inspect` — and the heap from
-> `docker exec hamstrack-app-1 java -XX:+PrintFlagsFinal -version | grep MaxHeapSize`
-> — before believing any paragraph below.
->
-> **The first synced deploy is what makes `mem_limit` real, and it CUTS the heap this box
-> is running on: ~954 MB → 512 MB.** That is not a free correction and it must not arrive
-> as a side effect of a delivery ticket, so it is sequenced (HD-199 §9). **Read the
-> sequencing as "before MERGING HD-199", not "before some later deploy":** `deploy.yml`
-> fires on a green Build of `main` and applies the merged commit, so the merge itself is
-> the first synced deploy and there is no window afterwards to prepare in.
->
-> 1. **Measure first, from data that already exists.** In Grafana → Explore → Prometheus:
->    `max_over_time(sum(jvm_memory_used_bytes{job="hamstrack-app",area="heap"})[7d:5m])`,
->    the same for `area="nonheap"` and for `jvm_memory_committed_bytes`, and
->    `max_over_time(jvm_gc_pause_seconds_max{job="hamstrack-app"}[7d:5m])`. On the box,
->    the number Prometheus does not have — the container's resident set:
->    `docker stats --no-stream --format '{{.Name}} {{.MemUsage}} {{.MemPerc}}'`.
->    **Record the window with the numbers**: retention is 15 days and this stack has not
->    been running long, so a peak over three days is a three-day peak, and saying so is the
->    difference between a measurement and a declaration.
-> 2. **Choose, and write it explicitly in `/opt/hamstrack/.env` BEFORE the merge** — an
->    absent line is not a chosen value. Heap peak ≤ ~350 MB and RSS ≤ ~700 MB → `1g`.
->    Otherwise the larger of `1g` and (RSS peak × 1.5), rounded up; if that lands above
->    ~1200m on this box, the answer is HD-189 (resize, or move observability off), not a
->    value to set. Preserving today's ~954 MB heap would need a container limit near the
->    whole machine, which is not a configuration but the absence of one.
-> 3. **Then merge at a moment you can watch** — the merge is the deploy, so pick the time
->    deliberately instead of scheduling a separate one — and **watch for 48 h**: the app
->    container's exit code (`137` is the kernel, appears in no application log),
->    `jvm_gc_pause_seconds_max`, and the existing `HighLatency` rule. Nothing else is a
->    symptom of this change.
-> 4. **HD-189 first if it is imminent** — on a resized box the limit is a different number,
->    and measuring twice to arrive at it once is wasted. Never apply the limit and the
->    resize in one step: two changes, one symptom, no way to tell which.
->
-> The rollback lever is `.env` plus `docker compose … up -d` — no repository change, no
-> pipeline, no merge, usable at 3 a.m. by the person watching. Replace this blockquote with
-> the measured numbers once step 3 has run: what was read off the box, and when.
+**Re-measured on the running instance 2026-08-28 (HD-189)** — `i-019fe684b25ad831f`,
+`eu-north-1`. Every figure below was read off the box or out of Prometheus, and where a
+number is still a *declaration* rather than an *observation* it is labelled as one. The
+previous version of this section is preserved as the before-state, because the interesting
+part of this measurement is not any single number but that it **inverted a claim this
+document made with confidence**.
 
-Recorded 2026-08-26, when 0.17.0 made the app container's memory limit a real
-setting for the first time (HD-152). Instance `i-019fe684b25ad831f`, `eu-north-1`.
+### 5.1 The claim that was backwards
+
+This section used to say: *"There is no swap, and the app is the only container with a
+limit… `postgres`, `caddy` and the observability containers are deliberately unbounded."*
+
+The two halves failed in different ways, and the difference is the lesson. **"No swap" was
+true when written and is false now** because somebody changed the box — an ordinary stale
+fact. **"The app is the only container with a limit" was false when it was written**, and
+it was false in the direction that matters: it blamed the wrong containers for the pressure
+and it named the app as protected when the app was the least protected thing running. What
+the box actually reported on 2026-08-28:
+
+| Container | `docker inspect … .HostConfig.Memory` | Observed |
+|---|---|---|
+| `app` | **`0` — no limit** | 597 MiB RSS |
+| `postgres` | **`0` — no limit** | — |
+| `caddy` | **`0` — no limit** | — |
+| all seven observability containers | limit **set and honoured** (256m / 128m / 128m / 256m / 64m / 128m / 64m — `grep mem_limit docker-compose.observability.yml`) | **466 MiB total** |
+
+So on that day the observability stack was the only bounded part of the deployment, it
+lived well inside its ceilings, and it is not what is squeezing the box — the containers
+that carry the actual workload are the unbounded ones. **Read that as a reading and not as
+a property**: which containers have a limit is exactly the thing this section got wrong by
+asserting it once, so the durable claim is the category — *whatever the operator has not
+explicitly bounded and verified is unbounded* — and the way to settle it is
+`docker inspect $(docker ps -q) --format '{{.Name}} {{.HostConfig.Memory}}'`, on the box,
+today.
+
+**The general form of the mistake, which is the part worth keeping:** the earlier text was
+a claim about *a member* ("the app is the only one with a limit") standing in for a claim
+about *a category* ("everything the operator did not explicitly bound is unbounded"). The
+member claim inverted the moment the box's compose file diverged from the repository's,
+and nothing in the repository disagreed with it. **A limit is a property of a running
+container, never of a file and never of a variable** — `docker inspect` is the only thing
+that answers it. `APP_MEMORY_LIMIT=1g` has been sitting in `/opt/hamstrack/.env` this whole
+time and is read by nothing, because the box's `docker-compose.prod.yml` (dated 11 July,
+from the six weeks when nothing shipped configuration here) has no `mem_limit` line to read
+it with.
+
+**HD-189 has now made this same mistake three times inside its own corrections**, which
+makes the shape worth more than any of the three fixes: the `mem_limit` claim above; the
+`vm.swappiness=10` sentence, written as though every host ran 10 when it is this box's
+setting and a distro default of 60 makes `HostSwapInUse` mis-tuned rather than right; and
+exit `137` (§5.3), written as the signature of a kernel OOM kill when it is the signature
+of any `SIGKILL`. **A symptom identifies a class, not a cause** — name the class, then name
+the discriminator that picks the member out of it (`docker inspect … .HostConfig.Memory`,
+`sysctl vm.swappiness`, `docker inspect … .State.OOMKilled`). A sentence that names only
+the member reads as a diagnosis to everybody after you, and it is right until the first
+time it is not.
+
+### 5.2 The measurement
+
+Before — recorded 2026-08-26:
 
 ```
 $ free -m
@@ -416,36 +416,182 @@ Mem:            1909        1395          71          22         442         335
 Swap:              0           0           0
 ```
 
-**`APP_MEMORY_LIMIT=1g` is written explicitly in `/opt/hamstrack/.env`** — the same
-value Compose would have defaulted to, and written down anyway. An absent line is not
-a chosen value: it silently stays `1g` the day this instance is resized, while whoever
-resized it believes they gave the application more memory. The line is what makes the
-next person's change take effect.
+After — 2026-08-28, once swap existed. These are the fields that were actually captured,
+listed as fields rather than pasted as a terminal transcript: only part of one was taken,
+and completing it from memory would be a fabrication.
 
-Two facts to carry into any decision here:
+| | 2026-08-26 | 2026-08-28 |
+|---|---|---|
+| memory total | 1909 MB | 1909 MB |
+| memory available | 335 MB | **341 MB** — 7-day **minimum 227 MB** |
+| memory used, as `1 - available/total` | 82.4% | **82.1%** — 7-day **maximum 88.1%** |
+| swap total | **0** | **1023 MB** |
+| root filesystem | 8.0 G, 5.3 G used (**67%**) | **79% used**, 1.7 GB free |
 
-- **The 0.17.0 default was not a reduction on this box.** `-XX:MaxRAMPercentage=50`
-  arrives in that same release, so production before it ran on default JVM ergonomics —
-  a quarter of host RAM, about 477 MB — and moves to 512 MB. The "the new default halves
-  your heap" warning in the release notes applies to hosts **above 2 GB**; this one is
-  below. What is new here is a hard 1024 MB ceiling where there was none.
-- **There is no swap, and the app is the only container with a limit.** Exceeding the
-  limit is a kernel OOM kill (exit `137`, no stack trace), not an `OutOfMemoryError`
-  anybody can read in a log. `postgres`, `caddy` and the observability containers are
-  deliberately unbounded, so a declared ceiling on the app does not protect it from being
-  the kernel's chosen victim under host pressure — it only makes the app the predictable
-  one. HD-180 is the ticket for that asymmetry.
+**Do not read that used-memory row against `free`'s `used` column** — they are different
+quantities and the trap is a two-day-old memory spike that never happened. `free` reported
+**1395 MB used (73%)** on 2026-08-26, which excludes the 442 MB of page cache the kernel
+would hand back on demand; Grafana's host panels and both new alert rules work from
+`MemAvailable`, which counts it. The two rows above are the same definition on both dates,
+and by it **this box has not moved: ~82% either day.** Compare like with like, or a change
+of denominator reads as an incident.
 
-**When to revisit:** on any instance resize. Above 2 GB the guidance is roughly half the
-host (`4g` host → `APP_MEMORY_LIMIT=2g`), and from a `4g` limit upward pair it with an
-explicit `JAVA_TOOL_OPTIONS=-Xmx…` — the 50% split over-reserves at a large limit,
-because most non-heap cost is constant rather than proportional. The worked table lives
-in `docs/self-hosting.md` under the `APP_MEMORY_LIMIT` row; do not re-derive it here.
+**Swap exists as of 2026-08-28** — a 1023 MB file at `vm.swappiness=10`, persisted in
+**`/etc/fstab`** and **`/etc/sysctl.d/99-hamstrack-swap.conf`** so it survives a reboot.
+It is an emergency buffer, not a memory tier: at swappiness 10 the kernel reaches for it
+reluctantly, so *sustained* swap usage means RAM was genuinely gone rather than that a page
+was cold. **It is not free** — it cost 12 points of the root filesystem, 67% → 79%, leaving
+1.7 GB. `DiskFilling` fires below 15% free, so the swapfile moved this box from "far from
+that rule" to "6 points from it", and anything that grows on disk now has less room to do it
+in.
 
-**What has never been measured:** whether 1 GB is enough for this workload. Nothing has
-ever put the instance under load, so every number above is a capacity that was *declared*
-rather than *observed*. HD-186 is the ticket that would replace the declaration with a
-measurement, and until it runs, "1 GB is fine" is a belief.
+Read the swap arrangement back rather than trusting this paragraph — it is two files and a
+runtime state, and the failure mode is a swapfile that exists today and is gone after the
+next reboot:
+
+```bash
+swapon --show                                  # the file, its size, its priority
+sysctl vm.swappiness                           # expect 10
+grep -r swap /etc/fstab /etc/sysctl.d/         # both persistence halves, by name
+```
+
+### 5.3 The heap ceiling is larger than the machine
+
+**An unlimited container sizes its heap against *host* RAM** — `-XX:MaxRAMPercentage` has
+nothing else to be a percentage *of* when there is no cgroup limit — so on a small box the
+JVM is entitled to a ceiling the machine could never hand it. The consequence, stated as
+the property rather than as this week's numbers: **the kernel's OOM killer arrives before
+`OutOfMemoryError` does.** The victim dies on `SIGKILL` — exit `137`, no stack trace,
+nothing in any application log — with `JVMHeapPressure` (heap used/max > 90%) **green
+throughout**, because the ratio it watches never approaches its threshold on a box whose
+real constraint is the machine rather than the heap. That is the failure a small unbounded
+deployment is exposed to, its cause is the **missing** `mem_limit` rather than the
+observability stack, and it is why `HostMemoryLow` exists.
+
+**`137` is any `SIGKILL` (128 + 9), not a diagnosis.** A `docker stop` whose grace period
+expired and escalated, a `docker kill`, a `kill -9`, Docker Desktop or the daemon stopping
+containers on a workstation — every one of them exits `137`, and a kernel OOM kill is one
+member of that class rather than its identifier.
+**`docker inspect <container> --format '{{.State.OOMKilled}} {{.State.ExitCode}}'`** is
+what separates them: `OOMKilled` is the field that answers the question `137` only raises.
+The direction of harm is a false alarm — an operator sees `137` after a routine restart and
+resizes a box that was fine, or spends a day hunting a memory leak that does not exist.
+Demonstrated rather than theorised: while HD-189 was being written a container on the
+owner's workstation recorded `Exited (137)` because Docker Desktop was shut down, and it
+was read here as an out-of-memory event before the field was checked. **This is the long
+form** — the two alert summaries that mention `137` and the matching passage in
+`docs/observability.md` carry the short one plus this same `docker inspect` line. None of
+the first-moves guidance changes: `HostKernelOOMKill` already asked for `OOMKilled`.
+
+The values behind that paragraph were read off the running instance on 2026-08-28 and are
+deliberately **not** restated here. Two reasons, and the first outlives the second: a
+margin measured on one day is the kind of member claim §5.1 watched invert, and while the
+fix below is unmerged this section — the operational runbook — has no use for arithmetic
+that describes one live machine rather than the shape of the failure. They are kept where
+something actually reasons from them, which is
+[`docs/design/config-delivery-proposal.md`](design/config-delivery-proposal.md) §9.1 (the
+size of the cut) and
+[`docs/design/load-capacity-measurement-proposal.md`](design/load-capacity-measurement-proposal.md)
+§1 (why a load run against an unbounded heap measures the wrong configuration), plus
+**HD-189** itself.
+
+It is also why 0.17.0 did not do here what its release notes describe. That release added
+`-XX:MaxRAMPercentage=50` to the image *and* `mem_limit` to the repository's compose file;
+only the image half ever reached this box. Before 0.17.0 the JVM used its own default of
+~25% of host RAM. After it, with no container limit, it takes 50% of host RAM.
+**The release named "bound the container heap" doubled it in production.**
+
+**What closes this is `APP_MEMORY_LIMIT` / `mem_limit: ${APP_MEMORY_LIMIT:-1g}` on the
+`app` service reaching the box — which is HD-199's payload, and HD-199 is still unmerged.**
+Until it lands there is no ceiling to raise or lower; there is no ceiling. Note the
+direction of the step when it does land: with a limit the heap becomes half the **limit**
+instead of half the **host**, so unless the limit is the whole machine it *cuts* the
+ceiling the container has been running on rather than lowering a new one onto it — a `1g`
+limit is a 512 MB heap. So HD-199 sequences it deliberately (measure first, choose the
+value in `.env` *before* the merge, then watch for 48 h) rather than letting it arrive as a
+side effect. Read that sequencing as "before **merging** HD-199": `deploy.yml` fires on a
+green Build of `main`, so the merge *is* the first synced deploy.
+
+The new alert rules in
+[`observability/grafana/provisioning/alerting/rules.yml`](../observability/grafana/provisioning/alerting/rules.yml)
+— **`HostMemoryLow`** (< 200 MiB available for 10m, critical), **`HostSwapInUse`**
+(> 128 MiB of swap for 15m, warning) and **`HostKernelOOMKill`**
+(`increase(node_vmstat_oom_kill[15m]) > 0`, critical) — are what make host pressure
+visible from either side of that change, and each names a different point on the same
+failure: approaching the wall, already past it, and one that has already happened.
+
+The first two are absolute byte thresholds and not percentages **on purpose**: 90% of 1909 MB and
+90% of 4096 MB are different amounts of danger, and the buffer a Linux box needs — GC
+headroom plus enough page cache to keep Postgres off the disk — does not scale with the
+box, so the thresholds survive the resize this ticket intends without being re-derived.
+`HostMemoryLow`'s 200 MiB sits *below* the observed 7-day minimum of 227 MB, so **it would
+not have fired once in the week it was derived from** and fires only when the box is worse
+than it has ever been. `HostSwapInUse` has no such backtest and cannot have one: there was
+no swap during the observation window, so its 128 MiB is reasoned (a Linux box parks a few
+idle MB there and never touches them again) rather than fitted, and it is the one of the
+two to re-check once a week of swap history exists. `HostKernelOOMKill` has nothing to
+tune: it counts an event the kernel already decided, so it is inert on a healthy box, it
+is the only one of the three that does not depend on how eagerly that kernel swaps, and —
+because it reads a counter of the event itself rather than an exit code — it is the only
+one that cannot be confused by a `SIGKILL` that came from somewhere else.
+
+### 5.4 When to revisit, and what is still only declared
+
+**Revisit on any instance resize.** Above 2 GB the guidance is roughly half the host
+(`4g` host → `APP_MEMORY_LIMIT=2g`), and from a `4g` limit upward pair it with an explicit
+`JAVA_TOOL_OPTIONS=-Xmx…` — the 50% split over-reserves at a large limit, because most
+non-heap cost is constant rather than proportional. The worked table lives in
+`docs/self-hosting.md` under the `APP_MEMORY_LIMIT` row; do not re-derive it here.
+
+**Never apply a container limit and a resize in one step** — two changes, one symptom, no
+way to tell which caused it.
+
+**What is now observed:** host memory (total, available, 7-day minimum and maximum), swap,
+disk, the app container's RSS, the JVM's heap ceiling and its 7-day peak usage, every
+container's actual limit, the observability stack's real footprint, peak database
+connections and database size. Those stopped being declarations on 2026-08-28. Observed is
+not the same as printed here: the heap figures live on HD-189 (§5.3) and the database's
+size is stated where it is load-bearing, in
+[`docs/design/load-capacity-measurement-proposal.md`](design/load-capacity-measurement-proposal.md)
+§4.2 — a number stated in more than one document goes stale in all but one of them.
+
+**What is still declared:** whether any of it is *enough*. Every number above was taken
+from an instance whose peak concurrent database connection count over seven days is **1** —
+capacity measured at idle is not capacity. **HD-186** is the load run that would replace
+that last declaration with a measurement, and until it has run, "1 GB is fine" remains a
+belief. The rule this section keeps re-learning: read the limit back from the running
+container, and read the load off a box that has some.
+
+### 5.5 OPEN — the root volume is not encrypted, and that is the control swap raises
+
+**Status: open. Nothing below has been decided or done; the owner has not chosen.**
+
+**Measured 2026-08-28.** The production root volume `vol-02d8251fd45b62472` reports
+`Encrypted: false`, and the account's **default EBS encryption is off**, so anything
+created from that default inherits the same state — including the daily snapshots of
+§6.1's layer 3.
+
+Adding a swapfile put a copy of anonymous process memory on that volume, which is what
+raises the question. It is the wrong end of it. That volume already holds, in plaintext,
+`/opt/hamstrack/.env` — **the only copy of `JWT_SECRET` anywhere**, the database password
+and `MAIL_PASSWORD` — plus every `pg_dump` staged there before upload. **Swap is the
+lowest-yield artefact on the disk**, so `swapoff` before taking a snapshot would sanitise
+one file while the rest of the volume rides along in the same image, and it would do it
+by pulling every swapped page back into the headroom §5.2 measured — trading a real risk
+of the OOM kill §5.3 describes for a partial cleanup of the least valuable thing there.
+
+**So the control is volume encryption, not swap management.** State it as the category:
+*any artefact on an unencrypted volume is exposed to whoever obtains the volume or one of
+its snapshots, and removing artefacts one at a time does not change that.* Encryption
+covers all of them at once, including the ones nobody enumerated.
+
+What is genuinely undecided is the sequencing and the cost: EBS encryption cannot be
+enabled in place, so it means snapshot → copy with encryption → restore, i.e. a stop of
+the instance. **A snapshot is imminent for HD-186**, and that snapshot will be unencrypted
+unless this is settled first — which is the only reason it is written down now rather than
+filed. Also unsettled: turning on the account default (cheap, prevents the *next*
+unencrypted volume, does nothing for this one) and whether the backup bucket's SSE-S3
+(§6.2, already on) changes the priority.
 
 ---
 
@@ -887,8 +1033,11 @@ what proves they still do.
 
 **A backup nobody has restored is a belief.** This is the procedure that converts it.
 
-**Where it runs — and where it cannot.** Not on the production box: ~335 MB available and
-no swap (§5), so a second Postgres plus a second JVM is not a tight fit, it is an outage.
+**Where it runs — and where it cannot.** Not on the production box: 341 MB available and a
+1 GB emergency swapfile that exists to survive a spike, not to host a second database (§5),
+so a second Postgres plus a second JVM is not a tight fit, it is an outage — swap changes
+that from an OOM kill into a box too slow to serve anybody, which is not an improvement
+while it is production.
 Not in CloudShell either — 1 GB of RAM and no Docker daemon. It runs on the **owner's dev
 machine**, in a throwaway container on port **15433**, so the `hamstrack-postgres` dev
 database on 15432 is untouched and the cleanup is one `docker rm`.

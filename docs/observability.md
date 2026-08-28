@@ -52,7 +52,7 @@ Hamstrack ships two things:
 | **Business metrics** (signups, active users, issues/projects created, logins, invites, email, attachments) | app custom Micrometer meters | Product dashboard |
 | **Backup freshness** | host `systemd` job → node-exporter textfile collector | Explore → Prometheus, and the two backup alert rules |
 | **Config drift** (the box versus the commit deployed to it) | host `systemd` job → node-exporter textfile collector | Explore → Prometheus, and the `ConfigDrift` / `DeployImagePinned` rules |
-| **Alerts** (app/DB down, error rate, latency, disk, email failures, heap, backup freshness, config drift…) | Grafana unified alerting | email (+ Grafana UI) |
+| **Alerts** (app/DB down, error rate, latency, disk, host memory/swap, email failures, heap, backup freshness, config drift…) | Grafana unified alerting | email (+ Grafana UI) |
 
 ---
 
@@ -270,6 +270,16 @@ publishes **no public port** (Grafana binds `127.0.0.1:3000` only).
 Budget **~0.7–0.8 GB RAM** for the full stack. On a small host (e.g. a 2 GB
 instance already running app + Postgres + Caddy), validate headroom or size up.
 
+**Measured on the Hamstrack Cloud box 2026-08-28** (HD-189), for whatever one idle
+instance is worth: all seven containers reported a non-zero `HostConfig.Memory` and
+sat inside it, **~466 MiB of actual RSS** against ~1 GB of declared ceilings. On that
+same box the `app`, `postgres` and `caddy` containers each reported
+`HostConfig.Memory = 0` — no limit at all — so this stack was the only *bounded* part
+of the deployment. Read that before blaming the optional stack for host memory
+pressure; it is the part that cannot run away. It is **not** a sizing recommendation
+— that instance has never been under load, and the load run that would produce one is
+HD-186.
+
 ### Dashboards
 
 Auto-provisioned into the **Hamstrack** folder in Grafana:
@@ -368,6 +378,9 @@ row of that rule rather than an exception to it.
 | DiskFilling | host filesystem < 15% free | 10m | critical |
 | EmailFailures | `increase(hamstrack_email_sent_total{outcome="failure"}[15m]) > 0` | 0m | warning |
 | JVMHeapPressure | heap used/max > 90% | 10m | warning |
+| HostMemoryLow | `node_memory_MemAvailable_bytes < 209715200` (200 MiB, per host) | 10m | critical |
+| HostSwapInUse | `node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes > 134217728` (128 MiB, per host) | 15m | warning |
+| HostKernelOOMKill | `increase(node_vmstat_oom_kill[15m]) > 0` (per host) | 0m | critical |
 | RoleScopeViolation | `increase(hamstrack_role_scope_violation_total[15m]) > 0` | 0m | warning |
 | StatementBudgetExceeded | `increase(hamstrack_db_statement_budget_exceeded_total[15m]) > 5` | 5m | warning |
 | BackupStale | `time() - hamstrack_backup_last_success_timestamp_seconds > 93600` (26 h, per `stage`) | 15m | critical |
@@ -390,6 +403,77 @@ else in the metric surface separates the two. `InviteVolumeUnaccepted` has a **n
 positive** — a genuine large onboarding started on a Friday evening — which is written into
 its own annotation, because a rule whose false positive is a surprise gets muted within a
 week and a rule that explains its own survives.
+
+**`HostMemoryLow`, `HostSwapInUse` and `HostKernelOOMKill` watch the host, and they exist
+because `JVMHeapPressure` cannot see the failure that actually threatens a small box**
+(HD-189). An
+app container with **no** `mem_limit` takes `-XX:MaxRAMPercentage` against *host* RAM, so
+the JVM is entitled to a heap the machine can never give it: the kernel picks an OOM victim
+and `SIGKILL`s it (exit `137`, no stack trace, nothing in any application log) long before
+heap used/max reaches 90%, and the heap rule stays green throughout. Which state a given box is in is a
+question for the box, never for a compose file and never for a variable in `.env`:
+
+```bash
+docker inspect "$(docker compose ps -q app)" --format '{{.HostConfig.Memory}}'   # 0 means NO LIMIT
+```
+
+Resolve the container rather than naming it: the container's name is
+`<compose-project>-app-1`, taken from the directory the compose file sits in, so a
+hard-coded `hamstrack-app-1` answers `No such object` on any install that cloned somewhere
+else.
+
+**The two thresholds are absolute bytes rather than percentages, on purpose.** A percentage
+stops meaning anything the moment the instance is resized: 90% of 1909 MB and 90% of
+4096 MB are different amounts of danger, while the buffer a Linux box needs — GC headroom
+plus enough page cache to keep Postgres off the disk — is roughly constant and does not
+scale with the machine. 200 MiB is derived from measurement and the derivation is written
+into the rule's own annotation: it sits *below* the 227 MB 7-day minimum observed on
+production, so it would not have fired once in the week it was taken from, and it fires only
+when the box is worse than it has ever been. **The three rules name three points on one
+failure** — approaching the wall, already past it, and one that has already happened. Swap
+**at a low `vm.swappiness`** is an emergency
+buffer, not a memory tier, so sustained swap usage means RAM is already gone; that is a
+capacity signal (`warning`, go and resize) rather than an outage, because the box survives,
+which is the entire reason the swapfile is there. An install with **no** swap reports
+`SwapTotal = SwapFree = 0`, so `HostSwapInUse` is silently inert there and `HostMemoryLow`
+is the only warning that box will get — without swap the same pressure arrives as a kill
+rather than as a slowdown, and the only rule that speaks after that is `HostKernelOOMKill`.
+
+**`HostSwapInUse` assumes a *low* `vm.swappiness`** — the Hamstrack Cloud box runs `10`, so
+sustained swap use there means RAM is genuinely gone. At the distro default of `60` a
+perfectly healthy Linux box pages out cold anonymous memory and can sit above 128 MiB
+indefinitely, and then this rule is mis-tuned rather than right. Run `sysctl vm.swappiness`
+on your host; if it says 60, either lower it or raise the threshold in
+`observability/grafana/provisioning/alerting/rules.yml`. The rule's own annotation says the
+same thing, but an annotation is only read by somebody who has already been paged — i.e.
+after the false positive, which is one too late.
+
+**`HostKernelOOMKill` reports the event the other two only circle.** One predicts an OOM
+kill and the other describes the state that precedes one; nothing else in the stack says
+one *occurred*. It is the only thing that ever will: the kernel's victim dies on `SIGKILL`
+and leaves **exit `137` and no stack trace** — no Java exception, no application log line,
+no Loki entry to search for — so the evidence an operator is otherwise left with is a
+container that restarted and a gap, which reads exactly like a deploy. **`137` is any
+`SIGKILL`** (a timed-out `docker stop` that escalated, a `docker kill`, a `kill -9`, a
+daemon or Docker Desktop shutdown), so on its own it does not mean the kernel chose the
+victim; `docker inspect <container> --format '{{.State.OOMKilled}}'` is what separates an
+OOM kill from a stop, and the long form of that trap is in
+[`docs/ops-prod-hardening.md`](ops-prod-hardening.md) §5.3. That is a second reason this
+rule is the dependable one: it counts `node_vmstat_oom_kill`, the event itself, and no
+other cause of a `SIGKILL` can move that counter. The rule is threshold-free
+(`> 0` on a counter of an event the kernel already decided), so there is nothing to tune
+away and nothing to re-derive after a resize, it is **independent of `vm.swappiness`** and
+therefore immune to the caveat above, and it is inert by construction on a healthy box —
+the counter never moves. `for: 0m` is deliberate and its reasoning is not the usual one:
+`for:` exists to require that a *level* persists, and this is a **counter of a past
+event**, which does not become truer by lasting. The 15-minute range window already
+carries the persistence, so a longer `for:` would only delay news of something already
+over — and would do it on the one box where a scrape gap is likely, since node-exporter is
+not immune to the OOM killer either, and a gap resets a pending alert. The counter is
+host-wide and does not name the victim; `dmesg -T | grep -i 'killed process'` does, and
+once `mem_limit` is delivered (HD-199) a container killed at its *own* limit lands in the
+same counter — which is wanted, because a limit set too low should report itself rather
+than look like a restart loop.
 
 `MailDailyVolumeHigh`'s threshold of 500/day is calibrated against **Hamstrack Cloud's**
 mail provider quota (3000 messages a month, Resend's free tier) — a sixth of the month's

@@ -475,7 +475,8 @@ correction and must not ride in as a side effect of a delivery ticket.
 | After delivery, `APP_MEMORY_LIMIT=1g` | 50% of 1024 MB = **512 MB** | 1024 MB |
 
 Today's 954 MB is not a capacity anyone chose; it is an artifact of a limit that never arrived. It is
-also more than the machine has: ~330 MB available, no swap. So the current state is a *latent host*
+also more than the machine has: ~330 MB available, and at the time of writing no swap. So the current
+state is a *latent host*
 OOM in which the kernel picks the victim — and the victim may be `postgres`. Applying the limit makes
 the app the bounded, predictable one (exit `137`, no stack trace), which is an improvement in blast
 radius and a reduction in headroom at the same time. Both halves are true and the sequencing exists to
@@ -487,6 +488,31 @@ the figure here — `grep mem_limit docker-compose.observability.yml` — and no
 a 1 GB app exceed 1909 MB before `postgres` has taken anything. It works today only because those
 containers do not use their allowance. That is HD-189's argument, and it is why §9.4 prefers HD-189
 first.
+
+> **Measured 2026-08-28 (HD-189). Two of §9.2's inputs now exist, and they change the risk of this
+> cut without changing its sequencing.** Recorded here so the decision is made against observations
+> rather than against this section's arithmetic; full set in `docs/ops-prod-hardening.md` §5.
+>
+> - **7-day peak heap used: 387 MB.** That is *below* the 512 MB this cut lands on, so the halving
+>   removes headroom the workload has not been using. It is not a guarantee — the peak was taken at
+>   idle, with the caveat that carries stated once in `docs/ops-prod-hardening.md` §5.4 rather than
+>   re-derived here — but it is the difference between cutting a ceiling blind and cutting one with a
+>   floor underneath it.
+> - **App container RSS: 597 MiB**, against the 1024 MB the limit would impose.
+> - **The heap ceiling read back off the box is 956 MB** (`jvm_memory_max_bytes`, Old Gen
+>   `1002438656`), which confirms the ~954 MB row above from the running JVM rather than from
+>   arithmetic.
+> - **Swap now exists** — 1023 MB at `vm.swappiness=10`, persisted in `/etc/fstab` and
+>   `/etc/sysctl.d/99-hamstrack-swap.conf`. It softens the "latent host OOM" above into a slowdown
+>   first, and it is a buffer rather than a fix: it cost 12 points of root filesystem (67% → 79%).
+> - **The host side now has alert rules** — `HostMemoryLow`, `HostSwapInUse` and
+>   `HostKernelOOMKill` in `observability/grafana/provisioning/alerting/rules.yml` — so the
+>   48-hour watch in §9.3 has something watching the *host*, which `JVMHeapPressure`
+>   structurally cannot see. The third one matters most for this cut: if a 512 MB heap turns out
+>   to be too small, the container is killed at its limit and that is the rule that says so.
+>
+> The one thing that has **not** been measured is still the one that matters: none of this was taken
+> under load (HD-186).
 
 ### 9.2 Measure before — from data that already exists, no new tooling
 

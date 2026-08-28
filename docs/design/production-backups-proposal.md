@@ -124,7 +124,16 @@ nothing but backups.
 **Why A.**
 
 1. **Memory.** `docs/ops-prod-hardening.md` §5, measured 2026-08-26: 1909 MB total, ~335 MB
-   available, **no swap**, and only the app container has a `mem_limit`. A compose sidecar costs its
+   available, **no swap**, and only the app container has a `mem_limit`.
+   > **Two of those facts were re-measured 2026-08-28 (HD-189) and one of them was
+   > backwards. The decision is unchanged and better supported.** There was no `mem_limit`
+   > on `app`, `postgres` *or* `caddy` (`HostConfig.Memory = 0` on all three); the only
+   > bounded containers were the seven observability ones. And swap now exists — a 1023 MB
+   > file at `vm.swappiness=10`. Neither correction helps a resident sidecar: an unbounded
+   > `app` means a permanent sidecar competes with a JVM that has *no* ceiling, and swap is
+   > an emergency buffer whose only use here would be to make the box slow instead of dead.
+   > Current numbers: `docs/ops-prod-hardening.md` §5.
+   A compose sidecar costs its
    resident set *permanently* — a cron container idles at 5–30 MB and 24 h a day to do 30 seconds of
    work. A systemd timer costs **nothing** until it fires: `systemd` already runs, and a timer is a
    record in it. The requirement in the ticket is "must be small"; the smallest thing that can
@@ -972,8 +981,10 @@ output is HD-188's step-3 evidence.
 
 ### 15.1 Where it runs — and where it cannot
 
-**Not on the production box.** ~335 MB available, no swap; a second Postgres plus a second JVM is not
-a tight fit, it is an outage. **Not in CloudShell** either: 1 GB of RAM, no Docker daemon.
+**Not on the production box.** 341 MB available and only a 1 GB emergency swapfile (measured
+2026-08-28; see `docs/ops-prod-hardening.md` §5) — a second Postgres plus a second JVM is not a
+tight fit, it is an outage. Swap does not change that: it converts the kill into a box too slow to
+serve anybody, which is not an improvement while it is production. **Not in CloudShell** either: 1 GB of RAM, no Docker daemon.
 
 **It runs on the owner's development machine**, which already has Docker, the Maven wrapper, a
 Postgres image and the repository. The drill uses a **throwaway container on port 15433**, so the
@@ -1304,8 +1315,12 @@ Phrased so that a reviewer can tell a mechanism from a belief.
 
 ## 19. The highest-risk assumption, stated plainly
 
-**That `docker exec … pg_dump` inside a 256 MB cgroup, on a box with 335 MB available and no swap,
-completes without disturbing the running application.**
+**That `docker exec … pg_dump` inside a 256 MB cgroup, on a box with ~340 MB available, completes
+without disturbing the running application.** (As of 2026-08-28 there is also a 1023 MB swapfile at
+`vm.swappiness=10`, which softens the failure mode from an OOM kill into a slowdown and does not make
+the assumption true. The heavier finding from the same measurement: no container on that box except
+the observability seven has a memory limit at all, so nothing bounds what the assumption competes
+with either.)
 
 Everything else here is verifiable from the repository or from an AWS API call. This one is a claim
 about a machine under conditions nobody has measured — and `docs/ops-prod-hardening.md` §5 says so
@@ -1353,9 +1368,10 @@ mechanism has actually shipped and the first drill has run.
   SSM; migrating Postgres to RDS for managed backups.
 - **Trade-off:** we give up Loki log collection (Alloy reads the Docker socket, so journald output is
   invisible in Grafana) and we give up repo-driven delivery (the units must be hand-placed until
-  HD-122 is extended). We gain zero idle memory on a 1909 MB swapless box, a `MemoryMax` cgroup that
-  makes an oversized job kill itself instead of the application, no new image or supply-chain
-  dependency, and a `pg_dump` client that can never drift from its server.
+  HD-122 is extended). We gain zero idle memory on a 1909 MB box that was swapless when this was
+  written (a 1023 MB swapfile was added 2026-08-28; see `docs/ops-prod-hardening.md` §5), a
+  `MemoryMax` cgroup that makes an oversized job kill itself instead of the application, no new
+  image or supply-chain dependency, and a `pg_dump` client that can never drift from its server.
 - **Draft:** `docs/adr/0011-ops-jobs-as-host-systemd-units.md`.
 
 ### 20.2 Backups go to a dedicated bucket the instance may write but never read or delete, with retention enforced by S3 lifecycle

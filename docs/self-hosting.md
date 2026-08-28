@@ -1354,6 +1354,25 @@ JVM that does not inherit the image's startup arguments, so without it you would
 reading the default rather than yours. If you set `JAVA_TOOL_OPTIONS`, that JVM picks
 it up the same way the app does, so the number stays honest.
 
+**Do this even if you are sure**, and the blunt form of the check is
+
+```bash
+docker inspect "$(docker compose ps -q app)" --format '{{.HostConfig.Memory}}'   # 0 means NO LIMIT
+```
+
+Resolve the container instead of naming it: it is called `<compose-project>-app-1`, after
+the directory your compose file sits in, so a hard-coded name works only on the install it
+was written on.
+
+Run it because **a value in `.env` is not a limit until a container reports one**. The
+hosted Hamstrack instance ran for six weeks with `APP_MEMORY_LIMIT=1g` sitting in its
+`.env` and read by nothing — its copy of the compose file predated the `mem_limit` line —
+so the JVM took its 50% against *host* RAM and ran a heap ceiling larger than the memory
+the machine could ever hand it, which the kernel would have ended with an OOM kill (exit
+`137`, no stack trace) long before any heap alert noticed. You can reach the same state by
+editing `.env` and not recreating the container, or by running an older copy of the compose
+file. The command above is the only thing that answers it; a file cannot.
+
 **Running your own compose file rather than the bundled one?** Then nothing has
 capped your container and the percentage is taken against host RAM — which at 50% is
 *more* heap than before, and closer to the host's ceiling than is safe. Add a

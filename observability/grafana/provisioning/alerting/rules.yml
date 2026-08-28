@@ -233,6 +233,232 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
+      # ---------------------------------------------------------------------------
+      # HD-189 — HOST memory. Two rules, naming two different failures: approaching
+      # the wall, and already past it. Neither has ever fired; both are new signals
+      # on a box that has never been under load, so each summary says what to DO.
+      #
+      # WHY THIS EXISTS AT ALL, given JVMHeapPressure above. That rule watches a
+      # RATIO the JVM reports about itself, and it is blind to the failure that
+      # actually threatens a small box: a heap ceiling larger than the machine. An
+      # app container with NO mem_limit takes -XX:MaxRAMPercentage against HOST RAM,
+      # so the JVM is entitled to a heap it can never be given, the kernel SIGKILLs a
+      # victim (exit 137, no stack trace, nothing in any application log) long before
+      # the ratio reaches 90%, and JVMHeapPressure stays green through the whole
+      # thing — a rule watching heap used/max has nothing to say about a ceiling
+      # the machine cannot honour. The measured figures behind this are deliberately
+      # NOT restated in a shipped file: paired with the box they describe they read
+      # as how much to force and how much room there is, and this repository is
+      # public. They live in docs/ops-prod-hardening.md §5 and in the two design
+      # docs that reason from them. A container limit is what CLOSES that gap (APP_MEMORY_LIMIT
+      # / mem_limit, HD-199); these two rules are what SEE it, before and after.
+      # Which state a box is in is a question for the box and never for a file:
+      # `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` — `0` is
+      # no limit, and a variable present in .env is not a limit until a container
+      # reports one.
+      #
+      # 137 IS ANY SIGKILL (128 + 9), not the signature of an OOM kill: a docker stop
+      # whose grace period expired and escalated, a docker kill, a kill -9 and a daemon
+      # or Docker Desktop shutdown all produce it, and the kernel's OOM killer is one
+      # member of that class rather than its identifier. The discriminator is
+      # `docker inspect <container> --format '{{.State.OOMKilled}}'`; read 137 as proof
+      # on its own and the cost is a false alarm — a box resized because it restarted,
+      # or a memory leak hunted that does not exist. It is also why HostKernelOOMKill
+      # below, which counts the kernel's own event, is the one rule here that no other
+      # kind of kill can fake. Long form: docs/ops-prod-hardening.md §5.3.
+      #
+      # BYTES, NOT A PERCENTAGE, and that is the load-bearing choice. A percentage
+      # stops meaning anything the moment the instance is resized: 90% of 1909 MB
+      # and 90% of 4096 MB are different amounts of danger, and a resize is exactly
+      # what HD-189 intends. The buffer a Linux box needs — GC headroom plus enough
+      # page cache to keep Postgres off the disk — is roughly ABSOLUTE and does not
+      # scale with the machine, so an absolute threshold survives the resize without
+      # being re-derived. Same category-over-member rule the rest of the project
+      # follows: a claim about what a box needs outlives a claim about what this box
+      # has.
+      #
+      # Unaggregated on purpose, so a second host raises its own instance and the
+      # `instance` label names it. DiskFilling's min() is aggregated for a different
+      # reason — many filesystems per host, one memory figure per host.
+      #
+      # IDENTICAL IN dc AND cloud, as every rule in this file is: how much memory a
+      # box has left is a property of the box, not of the plan, and node-exporter is
+      # in the same optional stack either way. Two things in the summaries are
+      # hosted-layout SPECIFICS rather than universals — the container name
+      # `hamstrack-app-1` and the path `/opt/hamstrack/.env` — kept because a refusal
+      # that names no command is one an operator cannot act on, and matching the
+      # convention DeployImagePinned and ConfigDrift already set. A self-hoster
+      # substitutes their own compose project name and env file; nothing here is
+      # gated on a profile. Both thresholds are PROVISIONED, not environment-driven:
+      # if 200 MiB or 128 MiB is wrong for your host, change it in this file — there
+      # is no variable to set (same as MailDailyVolumeHigh below).
+      - uid: hamstrack-host-memory-low
+        title: HostMemoryLow
+        condition: B
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: "Less than 200 MiB of host memory has been available for 10m - the kernel is close to choosing an OOM victim, and its victim dies silently on SIGKILL (exit 137, no stack trace, nothing in any application log). 137 is any SIGKILL, so on a container that has already exited it is `docker inspect <container> --format '{{.State.OOMKilled}}'`, not the exit code, that says the kernel chose it. THRESHOLD DERIVATION, so it is not tuned away by the next person: 200 MiB is BELOW the 227 MiB 7-day minimum measured on production 2026-08-28, so this rule would not have fired once in that week and only fires when the box is worse than it has ever been. It is an absolute buffer rather than a percentage, so it still means the same thing after a resize. FIRST MOVES: `free -m` and `docker stats --no-stream` on the box to see what grew; then `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` - `0` means the app container has no ceiling and its JVM sized its heap from HOST RAM, which is the shape of this failure, and setting APP_MEMORY_LIMIT in /opt/hamstrack/.env followed by `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d` fixes it with no deploy and no merge. If the container limit is already set and honoured, the box is simply too small: resize it (HD-189) rather than shaving ceilings"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'node_memory_MemAvailable_bytes'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [209715200] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The other half of the pair: not "approaching the wall" but "already past it".
+      # Swap here is an emergency buffer and not a tier of memory — vm.swappiness=10,
+      # so the kernel reaches for it reluctantly and sustained usage means RAM was
+      # genuinely gone, not that a page was cold. That is also why this is a CAPACITY
+      # signal rather than an incident one: the box SURVIVES, which is what the
+      # swapfile was added for (production 2026-08-28: 1023 MB, persisted in
+      # /etc/fstab and /etc/sysctl.d/99-hamstrack-swap.conf; ops-prod-hardening §5),
+      # so it degrades instead of dying and the honest action is to resize rather
+      # than to wake anybody. severity: warning for exactly that reason — a machine
+      # that no longer fits its job is not an outage, and treating it as one trains
+      # an operator to mute a folder that also carries AppDown.
+      #
+      # ~128 MiB rather than > 0: a Linux box parks a few MB of genuinely idle
+      # anonymous pages in swap and never touches them again, and a rule that fires
+      # on that is muted within a week. 15m rather than 10m because one burst — a
+      # backup run, a deploy — can push pages out and recover on its own.
+      #
+      # THE ONE THING THIS RULE DEPENDS ON THAT IS NOT UNIVERSAL: how eagerly the
+      # kernel swaps. "Sustained swap means RAM is gone" holds at a LOW swappiness —
+      # the hosted box runs 10 — and weakens at the distro default of 60, where a
+      # box with plenty of free memory will still page out cold anonymous pages and
+      # sit above 128 MiB indefinitely. If `sysctl vm.swappiness` on your host says
+      # 60, either lower it or raise the threshold in this file; do not leave a rule
+      # standing that your kernel's normal behaviour keeps firing. The threshold is
+      # provisioned, not environment-driven — this file is where it changes.
+      #
+      # An install with NO swap reports SwapTotal = SwapFree = 0, so the expression
+      # is 0 and this rule is silently inert. That is correct and worth knowing: on
+      # such a box HostMemoryLow above is the only rule watching this failure, and it
+      # is also the only warning that box will ever get, because without swap the
+      # same pressure arrives as a kill instead of as a slowdown.
+      - uid: hamstrack-host-swap-in-use
+        title: HostSwapInUse
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Over 128 MiB of swap has been in use for 15m. Swap is meant to be an emergency buffer here and not a memory tier, so at a low vm.swappiness (the hosted box runs 10) sustained use means RAM is already gone and the machine is trading latency to stay alive - it is not dying (that is HostMemoryLow), it no longer fits its job. Check `sysctl vm.swappiness` first: at the distro default of 60 a healthy box pages out cold anonymous memory too, and then this rule is mis-tuned rather than right. Expect slower p95 and longer GC pauses while this is true. FIRST MOVES: `free -m` and `docker stats --no-stream` to see which container grew, then choose between giving the app container a memory limit it may not currently have (APP_MEMORY_LIMIT in /opt/hamstrack/.env - an unlimited container sizes its JVM heap from HOST RAM, check with `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'`) and resizing the instance (HD-189). Do NOT turn swap off to make this quiet: without it the same pressure arrives as an OOM kill instead of as a warning"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [134217728] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The third of the host-memory set, and the only one that reports the failure
+      # itself. HostMemoryLow PREDICTS an OOM kill and HostSwapInUse describes the
+      # state that precedes one; nothing else in this file says one HAPPENED. The
+      # kernel's victim dies on SIGKILL and leaves exit 137 and NO stack trace, nothing
+      # in any application log, no Java exception and no Loki line to search for — the
+      # process is simply gone and Docker restarts it — so an alert on this counter
+      # is the only thing that will ever tell an operator it occurred. Without it,
+      # the evidence is a restarted container and a gap, which reads like a deploy.
+      # And 137 alone would not settle it either way: EVERY SIGKILL exits 137, so a
+      # stop that escalated or a kill -9 looks identical. That is exactly why this rule
+      # reads node_vmstat_oom_kill — a counter of the kernel's own decision — instead of
+      # an exit code, and why the summary sends the operator to .State.OOMKilled.
+      #
+      # THRESHOLD-FREE, which is the point: `> 0` on a counter of an event the
+      # kernel already decided. There is no number here to tune away and none to
+      # re-derive after a resize, and — unlike HostSwapInUse — it does not depend on
+      # how eagerly the kernel swaps, so it is immune to the vm.swappiness caveat
+      # documented on that rule. On a healthy box node_vmstat_oom_kill never moves
+      # (production reads 0), so the rule is inert by construction rather than by
+      # tuning.
+      #
+      # `for: 0m` DELIBERATELY, and the reasoning is different from every level-based
+      # rule above. `for:` exists to require that a LEVEL persists, so that a spike is
+      # not paged; this is a COUNTER OF A PAST EVENT, and an event does not become
+      # more or less true by lasting. The 15m range window already provides the
+      # persistence — the condition stays true for 15 minutes after the kill and then
+      # clears itself — so a non-zero `for:` would only delay the notification of
+      # something that is already over, and on the box that just OOM-killed something
+      # it would be worse than that: a scrape gap (node-exporter is not immune to the
+      # OOM killer either) resets a pending alert, so the one rule that must not miss
+      # its event would be the one waiting for an uninterrupted run of evaluations.
+      #
+      # Unaggregated, like the two above: one counter per host, and the `instance`
+      # label names which. Note the counter is HOST-WIDE and does not name the
+      # victim; on current kernels a container killed at its OWN cgroup limit lands
+      # in it too, which is wanted — once HD-199 delivers mem_limit, a limit set too
+      # low reports itself here instead of as an unexplained restart loop.
+      #
+      # IDENTICAL IN dc AND cloud. Nothing here is layout-specific: no container
+      # name, no env path, no threshold.
+      - uid: hamstrack-host-kernel-oom-kill
+        title: HostKernelOOMKill
+        condition: B
+        for: 0m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: "The kernel OOM-killed at least one process on this host in the last 15m. This is not a prediction (that is HostMemoryLow) - it already happened, and it is invisible everywhere else: the victim dies on SIGKILL and leaves exit 137, no stack trace and no application log line, so a restarted container is the only trace. 137 by itself proves nothing - every SIGKILL exits 137 - which is why this rule counts the kernel's own event rather than an exit code, and why the checks below ask for OOMKilled. FIRST MOVES: `dmesg -T | grep -i -E 'killed process|out of memory'` names the victim and the moment; `docker ps -a` and `docker inspect <container> --format '{{.State.OOMKilled}} {{.State.ExitCode}}'` say whether it was ours. THEN: if the victim was the app container and it has no memory limit, its JVM sized its heap from HOST RAM and the box cannot honour that - set APP_MEMORY_LIMIT (see HostMemoryLow's summary for the exact apply step). If the limit IS set and the app was killed at it, the limit is too low for the workload rather than too high for the box: raise it, or resize (HD-189). If the victim was postgres or the observability stack, the box is oversubscribed and shaving one ceiling only moves the victim"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'increase(node_vmstat_oom_kill[15m])'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       # A database statement was cancelled at DB_STATEMENT_TIMEOUT_MS (HD-151). This is the
       # ONLY rule that can surface the condition: the refusal is a deliberate 422, not a
       # fault, so HighErrorRate — which watches the 5xx ratio — stays green while an instance

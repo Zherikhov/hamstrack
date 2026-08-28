@@ -11,7 +11,13 @@
 #     is reachable via an SSM port-forward from the host, never from the internet.
 #   * Same compose project as the prod file, so everything shares the default
 #     network and resolves each other by service name (loki, app, postgres…).
-#   * Every service has a mem_limit, so the stack can't OOM the box.
+#   * Every service has a mem_limit, so the stack can't OOM the box. Verified on
+#     production 2026-08-28 (HD-189): all seven containers reported a non-zero
+#     HostConfig.Memory and sat inside it, ~466 MiB of actual RSS against ~1 GB of
+#     declared ceilings. On that same box the app, postgres and caddy each reported
+#     HostConfig.Memory = 0, so this file was the ONLY bounded part of the
+#     deployment — worth knowing before blaming the optional stack for host memory
+#     pressure. The ceilings are per service; do not read the sum as a budget.
 #   * DC self-hosters opt in by adding the second -f; Cloud/prod always runs it.
 services:
   loki:
