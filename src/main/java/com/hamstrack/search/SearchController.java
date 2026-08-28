@@ -10,7 +10,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
@@ -56,11 +55,25 @@ import java.util.UUID;
  * {@code story_points} always wins. The precedence is defined once, in
  * {@link FieldResolver} (HD-114), so it cannot hold on one endpoint and not another.
  * Aliases are compatibility, not vocabulary — {@code /schema} never advertises them.
+ *
+ * <p><strong>No {@code @Validated} on this class — and none on any bean Spring MVC
+ * dispatches to</strong> (ADR-0018, HD-214). It reads as "turn on validation" and does
+ * the opposite: {@code HandlerMethod.shouldValidateArguments()} returns {@code false}
+ * exactly when the bean type carries it, so MVC hands parameter validation to the AOP
+ * proxy, which throws {@code jakarta.validation.ConstraintViolationException} instead of
+ * the {@code HandlerMethodValidationException} {@code GlobalExceptionHandler} renders as
+ * a 400 with an {@code errors} map. This class carried it from HD-3 until HD-214, and
+ * for that whole time the {@code @Size(max = 100)} on {@code q} below answered
+ * <strong>500</strong>. There is a backstop handler now, so the annotation would no
+ * longer crash — it would still be wrong, because it gives one controller a different
+ * refusal shape and an ERROR line for a plain client mistake. Nothing on this class
+ * needs a proxy for any other reason (no {@code @Transactional}, {@code @Cacheable} or
+ * {@code @Async}), and the only capability {@code @Validated} adds over MVC's own method
+ * validation is return-value validation, which no method here declares.
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/search")
 @RequiredArgsConstructor
-@Validated
 public class SearchController {
 
     private final SearchService searchService;
@@ -78,10 +91,25 @@ public class SearchController {
         return searchService.schema(actor, workspaceId);
     }
 
+    // BOTH parameters are bounded, and `field` is the one that was missing (HD-214). An
+    // unknown name is not rejected on sight: FieldResolver falls through to
+    // FieldRegistry.suggest, which runs Levenshtein against every registry entry, so the
+    // input's length is a multiplier on work the caller does not pay for. Tomcat's ~8 KB
+    // request line was the only cap — roughly seven million integer operations for one
+    // authenticated GET, on a surface budgeted per minute — and that is on top of the
+    // workspace resolution and full ResolutionContext build (~8 statements) that
+    // `suggest` performs BEFORE it looks at the name. Bounding it here refuses during
+    // argument resolution, so an over-long name costs neither.
+    //
+    // 100 is derived, not chosen: the widest name that can legitimately resolve is a
+    // tenant custom field's key, and field_defs.key is VARCHAR(50). Every system name in
+    // FieldRegistry is far shorter. A bare numeral, per ADR-0017. An unknown name that
+    // fits still gets the field-anchored 422 with its "did you mean" hint — the bound
+    // refuses the absurd, not the mistaken.
     @GetMapping("/suggest")
     public SuggestResponse suggest(@AuthenticationPrincipal User actor,
                                    @PathVariable UUID workspaceId,
-                                   @RequestParam String field,
+                                   @RequestParam @Size(max = 100) String field,
                                    @RequestParam(required = false) @Size(max = 100) String q) {
         return searchService.suggest(actor, workspaceId, field, q);
     }

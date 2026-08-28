@@ -134,7 +134,9 @@ All endpoints except [Auth endpoints](#auth-endpoints) and [Instance metadata](#
   { "content": [ /* rows */ ], "page": 0, "size": 50, "totalElements": 137, "totalPages": 3, "hasNext": true }
   ```
 
-  Currently paginated: [`GET /admin/users`](#system-administration), issue [comments](#comments) and [history](#issues), and the issue [list](#issues) **when `size` is passed**. The issue list is the deliberate exception — without `size` it returns a `BoardIssuesResponse` object (a server-capped list; the board needs every card, but not an unbounded one), switching to the envelope only when `size` is present.
+  **The two bounds behave differently, deliberately.** `size` is *clamped* — ask for 5000 and you get 100, with no error. `page` is *refused*: above **`21474836`** the request answers a field-anchored `400` with `page` in the [`errors` map](#validation-failures-400), raised while the request is bound and therefore before any query runs and before your membership is resolved. The ceiling is arithmetic rather than editorial — the offset (`page × size`) has to fit a 32-bit integer at the largest `size` the server will ever hand out, and `21474836 × 100` is the largest product that does. It holds **wherever a caller names a page index**, in the query string or in a request body, so an endpoint that starts accepting one carries the ceiling by construction rather than by being added to a list. A *negative* `page` is coerced to `0` rather than refused.
+
+  Every endpoint that returns this envelope accepts both values — in the query string, or in the body where the request has one. Today that is [`GET /admin/users`](#system-administration), issue [comments](#comments) and [history](#issues), the project [sprint list](#sprints--backlog), [`POST …/search`](#search-hql) (in the body), and the issue [list](#issues) **when `size` is passed**. The issue list is the deliberate exception — without `size` it returns a `BoardIssuesResponse` object (a server-capped list; the board needs every card, but not an unbounded one), switching to the envelope only when `size` is present.
 
 ## Errors
 
@@ -151,7 +153,7 @@ Errors follow [RFC 9457 Problem Details](https://www.rfc-editor.org/rfc/rfc9457)
 
 ### Validation failures (`400`)
 
-A request body that fails validation answers with a `detail` naming every offending field **and** an `errors` object keyed by the JSON path of the field:
+A request that breaks a constraint declared on its input — on a body field, or on a query parameter, path variable or header — answers with a `detail` naming every offending item **and** an `errors` object keyed by the name of each one (a JSON path for a body field, the parameter's own name for a parameter):
 
 ```json
 {
@@ -169,11 +171,11 @@ A request body that fails validation answers with a `detail` naming every offend
 Rules worth coding against:
 
 - **`detail` and `errors` always agree** — same entries, same order. `detail` is those entries joined with `"; "`, each rendered as `<field>: <message>`; the field prefix is dropped when the message already starts with the field path, so a full-sentence message isn't stuttered back.
-- **Keys are JSON field paths**, nested ones included: `delivery.preset`, `items[3].fieldId`.
-- **Cross-field (class-level) rules use the empty-string key `""`** — they belong to no single field. Their message is rendered bare in `detail`, without a prefix.
-- **At most 10 entries are reported**, sorted by their rendered line. If more fields failed, `detail` ends with `"; … and 3 more"` (the number of entries not shown); `errors` carries the same 10.
-- **Messages are always English**, whatever the request's `Accept-Language`. Constraint text used to follow the caller's locale; it is now pinned by design, so the wording is stable — but treat it as human-readable text, not a machine-readable code, and match on `errors` keys (field paths) instead.
-- **One message per field** — if a field breaks several constraints, the first failure wins.
+- **Keys are the refused item's own name.** A body field is keyed by its JSON path, nested ones included (`delivery.preset`, `items[3].fieldId`); a request parameter is keyed by the name it is sent under (e.g. `page`, `q`, `field`, `token`).
+- **A rule that belongs to no single item uses the empty-string key `""`** — a class-level body constraint, or one written across two parameters. Its message is rendered bare in `detail`, without a prefix.
+- **At most 10 entries are reported**, sorted by their rendered line. If more items failed, `detail` ends with `"; … and 3 more"` (the number of entries not shown); `errors` carries the same 10.
+- **Messages are always English**, whatever the request's `Accept-Language`. Constraint text used to follow the caller's locale; it is now pinned by design, so the wording is stable — but treat it as human-readable text, not a machine-readable code, and match on `errors` keys instead.
+- **One message per key** — if one field or parameter breaks several constraints, the first failure wins.
 - A body that can't be parsed at all (malformed JSON, a wrong JSON type) is still a `400`, but carries **no** `errors` map: nothing was ever bound.
 - **Not every `400` is a validation failure.** A rule that spans fields and is enforced in the service rather than by a field constraint — sending `boardMode` and a disagreeing [`delivery.board`](#delivery-capabilities), for instance — answers a plain problem detail: `detail` explains it, and there is **no** `errors` map. Read `errors` defensively.
 
@@ -181,7 +183,9 @@ Rules worth coding against:
 
 **Free text is capped too, and the number follows what the field is for rather than which endpoint carries it.** A block of prose this product stores — an issue `description`, a comment `body`, a project `description`, a workflow `description`, and the value of a TEXTAREA [custom field](#project-configuration) — is capped at **10 000 characters**. A short name, key or identifier is capped at whatever its column holds. Either way, over-long is an ordinary field-anchored `400` like any other constraint, and nothing is written. Two categories carry a bound of their own and are described where they live: [passwords](#a-password-longer-than-72-utf-8-bytes--a-422), which are bounded in **bytes** as well as characters, and the one-time tokens in emailed links, which are capped at **64 characters** wherever one is accepted — in a request body or as a query parameter, since a rule that held on only one of two doors into the same value would not be a rule.
 
-**A refusal on a query parameter carries no `errors` map.** That map is built from request *body* validation; a bounded query parameter — the `token` on the verification link and on `POST /workspaces/accept-invite` — answers a plain problem body instead. Read `errors` defensively, as above.
+**Every `400` raised by a declared constraint carries an `errors` map keyed by the name of the refused item — whichever door the value came in through.** A bound written on a request *body* field is keyed by its JSON path; a bound written on a *query parameter*, path variable or header is keyed by the parameter's own name (e.g. `page`, `q`, `field`, `token`). The two are rendered by the same code, so the `detail` wording, the ordering, the 10-entry cap and the `"; … and N more"` overflow line are identical, and a client can key on `errors` without knowing where the server read the value from. This is a change: query-parameter refusals used to answer a bare `"Validation failure"` naming nothing.
+
+**Two kinds of `400` still carry no map, and the distinction is what makes `errors` worth reading.** A body that could not be parsed or bound at all reports nothing, because nothing was ever bound and there is no name to give. And a rule enforced **in a service** rather than declared on the input answers a plain problem detail that explains itself in `detail`: a cross-field agreement check such as [`boardMode` disagreeing with `delivery.board`](#delivery-capabilities), or the [sprint](#sprints--backlog) rules — a name that is empty after normalization, an empty issue list, more than the bulk cap, `sprintId` sent together with `clearSprint`. A *missing* required parameter is the same kind: no constraint was reached. So **read `errors` defensively** — present, it names what was refused and you can put the message beside the control; absent, the reason is in `detail` and only there.
 
 Uploads have two size ceilings and the `413` wording tells them apart: the in-app per-file limit (`ATTACHMENT_MAX_FILE_SIZE`) answers `"File exceeds the 20 MB limit"` — with whatever the configured size is — while the servlet multipart ceiling (`ATTACHMENT_MAX_UPLOAD_SIZE`) answers `"File is too large"`.
 
@@ -2843,11 +2847,11 @@ Search issues across a whole workspace with **HQL** (Hamstrack Query Language) �
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/workspaces/{wsId}/search` | member | Run an HQL query. Paginated ([envelope](#conventions), `size` clamped `1`–`100`) |
+| `POST` | `/workspaces/{wsId}/search` | member | Run an HQL query. Paginated ([envelope](#conventions), `size` clamped `1`–`100`, `page` refused above the [index ceiling](#conventions)) |
 | `GET` | `/workspaces/{wsId}/search/schema` | member | Autocomplete metadata: fields, per-field operators, and value picklists. **Suggestion-only, and [capability-aware](#search-hql)** — a field it omits still resolves |
 | `GET` | `/workspaces/{wsId}/search/suggest?field=&q=` | member | Typeahead for user-valued fields (`assignee`/`reporter` or a USER custom field) and for `label` / `component` / `fixVersion` / `affectsVersion` / `project`, capped at 20 |
 
-**Query** — the body is `{"query", "page?", "size?"}`. `query` is the HQL string (max 2000 chars — a longer one is rejected at binding with `400`); an empty or omitted `query` matches all visible issues in the default sort.
+**Query** — the body is `{"query", "page?", "size?"}`. `query` is the HQL string (max 2000 chars — a longer one is rejected at binding with `400`); an empty or omitted `query` matches all visible issues in the default sort. `page` and `size` follow the [pagination convention](#conventions): `size` is clamped to `1`–`100`, and `page` is **refused** above `21474836` with a field-anchored `400` naming it. That refusal is free — it lands while the body is bound, before the count query this endpoint would otherwise pay for first. Because this endpoint computes its own offset it also carries a backstop for the day that ceiling is loosened: an offset that still would not fit answers the same `400` with `detail: "Page index is too large"` and — being a service check rather than a declared bound — **no** [`errors` map](#validation-failures-400). It is unreachable while the ceiling stands.
 
 ```bash
 curl -X POST $BASE/workspaces/$WS/search \
@@ -2968,6 +2972,8 @@ The same endpoint serves **labels** — `field=label` (or `labels`) returns up t
 ```
 
 **`sprint` is intentionally not served here.** Its `/search/schema` `SPRINT` picklist is already bounded by `AGILE_MAX_OPEN_SPRINTS` per project, so no typeahead was wired — asking for it gets the `422` that any resolvable field with no value picklist gets. `storyPoints` is numeric and has no picklist either.
+
+**Both parameters are length-bounded, and an over-long one is a `400` rather than one of the `422`s below.** `field` and `q` are each capped at **100 characters** — for `field` that is twice the widest name that could ever resolve, since a custom field `key` is at most 50. The refusal names the parameter in the [`errors` map](#validation-failures-400) and is raised before the workspace is even resolved, so it costs nothing; a name that *fits* but resolves to nothing still gets the `422` below with its `did you mean …?` hint. The bound refuses the absurd, not the mistaken.
 
 **There are two ways this endpoint refuses, and they read differently.** Both are `422`s carrying `"errorType": "SEMANTIC_ERROR"` and the offending `field` exactly as you spelled it; the `detail` is what tells you which case you are in:
 

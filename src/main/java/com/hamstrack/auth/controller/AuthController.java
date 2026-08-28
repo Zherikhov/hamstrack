@@ -76,13 +76,17 @@ public class AuthController {
     // naming a control that is switched off, which is worse than naming none, because the next
     // reader stops checking.
     //
-    // NO @Validated ON THIS CLASS, deliberately: it would move validation from Spring MVC's
-    // built-in method validation (HandlerMethodValidationException -> 400 from Boot's advice) to
-    // the AOP proxy, which throws jakarta.validation.ConstraintViolationException — a type
-    // GlobalExceptionHandler.sqlStateOf's javadoc explicitly records as falling to an UNCHANGED
-    // 500. Adding it would trade one 500 for another. HandlerMethod.shouldValidateArguments()
-    // returns false exactly when the class carries @Validated, so leaving it off is what makes
-    // this @Size fire at all.
+    // NO @Validated ON THIS CLASS, and none on any bean Spring MVC dispatches to (ADR-0018,
+    // HD-214): it moves validation from Spring MVC's built-in method validation
+    // (HandlerMethodValidationException -> 400 with an errors map from
+    // GlobalExceptionHandler.handleParameterValidation) to the AOP proxy, which throws
+    // jakarta.validation.ConstraintViolationException instead. That USED to be a 500 outright;
+    // since HD-214 a backstop handler answers 400 for it, so the annotation would no longer
+    // crash — and it is still forbidden, because the backstop logs at ERROR by design (an
+    // occurrence means the codebase is wrong, not the caller) and because one controller
+    // refusing through a different mechanism than its siblings is the asymmetry this whole
+    // sweep exists to delete. HandlerMethod.shouldValidateArguments() returns false exactly
+    // when the class carries @Validated, so leaving it off is what makes this @Size fire at all.
     @GetMapping("/verify-email")
     public ResponseEntity<Void> verifyEmailLink(@RequestParam @Size(max = 64) String token) {
         var location = "/verify-email?token=" + URLEncoder.encode(token, StandardCharsets.UTF_8);

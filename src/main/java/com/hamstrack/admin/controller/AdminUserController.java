@@ -6,6 +6,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.dto.PageResponse;
 import com.hamstrack.common.dto.Paging;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
@@ -29,7 +30,7 @@ public class AdminUserController {
     private final AdminUserService userService;
 
     @GetMapping
-    public PageResponse<AdminUserResponse> list(@RequestParam(required = false) Integer page,
+    public PageResponse<AdminUserResponse> list(@RequestParam(required = false) @Max(Paging.MAX_PAGE) Integer page,
                                                 @RequestParam(required = false) Integer size) {
         return userService.list(Paging.of(page, size, Sort.by("createdAt").ascending()));
     }

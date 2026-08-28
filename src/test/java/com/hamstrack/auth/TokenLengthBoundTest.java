@@ -47,9 +47,12 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <p><strong>The two params are asserted as a status CLASS, and a 500 fails.</strong> Which 4xx a
  * bounded {@code @RequestParam} produces depends on which method-validation mechanism fires, and
  * that is a Spring detail this suite should not pin. A 500 is the outcome the bound exists to
- * remove — and, per §4.4 rule 8, exactly what adding {@code @Validated} to either controller class
- * would reintroduce, by routing the violation to the AOP proxy whose
- * {@code ConstraintViolationException} nothing here handles.
+ * remove. Adding {@code @Validated} to either controller class no longer reintroduces it — HD-214
+ * gave the AOP proxy's {@code jakarta.validation.ConstraintViolationException} a handler, so it
+ * answers 400 — but §4.4 rule 8 still forbids the annotation, and for a reason this assertion
+ * cannot see: the violation would take a different door, so the refusal arrives in a different
+ * shape from its siblings' and drops an ERROR line on every occurrence. The prohibition is about
+ * one refusal shape per declared constraint, not about a crash.
  */
 @SpringBootTest(properties = {
         "app.rate-limit.enabled=false",
@@ -135,9 +138,10 @@ class TokenLengthBoundTest {
                         %s answered a server error to a request the caller got wrong. A bounded \
                         @RequestParam only reaches Spring MVC's built-in method validation while \
                         its controller class carries NO @Validated: adding one defers to the AOP \
-                        proxy, whose jakarta.validation.ConstraintViolationException nothing in \
-                        GlobalExceptionHandler translates — trading this 4xx for the 500 the bound \
-                        was added to remove.""", door)
+                        proxy, whose jakarta.validation.ConstraintViolationException reaches a \
+                        different handler — 400 since HD-214, but a divergent refusal shape and an \
+                        ERROR line per request. So a 500 here is not that: it means the bound is \
+                        gone, or the value reached a layer that could not carry it.""", door)
                 .isLessThan(500);
     }
 

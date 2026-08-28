@@ -84,22 +84,32 @@ export class ApiResponseError extends Error implements ConflictInfo {
   projects?: ProjectRef[]
   usage?: RoleUsage
   /**
-   * The `{field: message}` ProblemDetail extension a **validation 400** carries
-   * (`GlobalExceptionHandler.handleValidation`), keyed by the request field's
-   * own name — `password`, `newPassword`, `description`, `body`.
+   * The `{name: message}` ProblemDetail extension carried by **any 400 raised by a
+   * declared constraint**, keyed by the name of the item that was refused — a
+   * request-body field path (nested ones included) or the name a request parameter
+   * was sent under. Body constraints, parameter constraints and a Bean Validation
+   * backstop all render through one shared path in `GlobalExceptionHandler`, so this
+   * is a **category, not a list**: code against "the key is the refused item's own
+   * name", never against which names can appear — an earlier version of this comment
+   * enumerated four of them and was wrong twice over within two releases. A rule that
+   * belongs to no single item — a class-level or cross-parameter constraint — keys on
+   * the **empty string**.
    *
    * `detail` already joins the same entries into one sentence, so a caller that
-   * renders `detail` loses nothing. This map exists so a form can put the
-   * message **next to the field** instead of in a banner, and so a page can ask
-   * *which* field was refused without pattern-matching English (HD-171 §11):
-   * `ResetPasswordPage` rewrites a 400 into "this link expired", which is right
-   * for the `token` field and wrong for `newPassword`, and the only structural
+   * renders `detail` loses nothing. This map exists so a form can put the message
+   * **next to the field** instead of in a banner, and so a page can ask *which* item
+   * was refused without pattern-matching English (HD-171 §11): `ResetPasswordPage`
+   * rewrites a 400 into "this link expired", which is right when the refused item is
+   * the reset token and wrong when it is the new password, and the only structural
    * way to tell them apart is this map.
    *
-   * Absent on every non-validation error, including a 422 — a business-rule
-   * refusal such as `PasswordTooLongException` is a whole sentence in `detail`
-   * and names no field, so a reader must fall back to `detail` and never treat
-   * an empty map as "nothing was wrong".
+   * **Optional — read defensively, as this class already does.** Not every 400
+   * carries it: a body that could not be parsed bound nothing and so can name
+   * nothing, a *missing* required parameter never reached a constraint at all, and a
+   * cross-field rule enforced inside a service (the delivery/board and sprint checks)
+   * is a whole sentence in `detail` and nothing else. Neither does any non-400 — a
+   * business-rule 422 such as `PasswordTooLongException` names no field either. Fall
+   * back to `detail`, and never read an absent or empty map as "nothing was wrong".
    */
   errors?: Record<string, string>
   constructor(

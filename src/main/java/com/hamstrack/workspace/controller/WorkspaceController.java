@@ -360,10 +360,14 @@ public class WorkspaceController {
     // spare.
     //
     // It fires because this class carries NO @Validated: Spring MVC's built-in method validation
-    // raises HandlerMethodValidationException, which Boot renders as a 400. @Validated on the class
-    // would make HandlerMethod.shouldValidateArguments() return false and defer to the AOP proxy,
-    // whose jakarta.validation.ConstraintViolationException nothing here handles — trading this
-    // 400 for a 500. Do not add it.
+    // raises HandlerMethodValidationException, which GlobalExceptionHandler renders as a 400
+    // naming `token` in an errors map (HD-214 — Boot's own advice rendered a bare "Validation
+    // failure" until then). @Validated on the class would make
+    // HandlerMethod.shouldValidateArguments() return false and defer to the AOP proxy, whose
+    // jakarta.validation.ConstraintViolationException now reaches a backstop handler rather than
+    // escaping as a 500 — so the cost is no longer a crash, but the annotation is still forbidden
+    // on every bean MVC dispatches to (ADR-0018): the backstop logs at ERROR because reaching it
+    // means the codebase is misconfigured, not that the caller sent something bad. Do not add it.
     @PostMapping("/accept-invite")
     public WorkspaceResponse acceptInvite(@AuthenticationPrincipal User user,
                                           @RequestParam @Size(max = 64) String token) {

@@ -14,6 +14,7 @@ import com.hamstrack.issue.dto.UpdateSprintRequest;
 import com.hamstrack.issue.entity.SprintState;
 import com.hamstrack.issue.service.SprintService;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
@@ -88,7 +89,7 @@ public class SprintController {
                                              @PathVariable UUID workspaceId,
                                              @PathVariable UUID projectId,
                                              @RequestParam(required = false) List<SprintState> state,
-                                             @RequestParam(required = false) Integer page,
+                                             @RequestParam(required = false) @Max(Paging.MAX_PAGE) Integer page,
                                              @RequestParam(required = false) Integer size) {
         return sprintService.list(actor, workspaceId, projectId, state,
                 Paging.of(page, size, Sort.unsorted()));

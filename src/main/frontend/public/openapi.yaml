@@ -593,10 +593,11 @@ paths:
               description: '`/verify-email?token=…`, URL-encoded'
         '400':
           description: >-
-            `token` is missing or longer than its bound. A refusal on a query
-            parameter carries **no `errors` map** — that map belongs to request
-            *body* validation (see `ValidationProblemDetail`); this one is a
-            plain problem body.
+            `token` is longer than its bound — a `ValidationProblemDetail` with
+            `token` in the `errors` map, exactly as a body field's bound is
+            reported (a declared constraint is reported the same way whichever
+            door it is written on). A *missing* `token` is the other kind: no
+            constraint was reached, so it is a plain problem body with no map.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -2155,9 +2156,10 @@ paths:
               schema: { $ref: '#/components/schemas/WorkspaceResponse' }
         '400':
           description: >-
-            `token` is missing or longer than its bound. A query-parameter
-            refusal carries no `errors` map — that map belongs to request body
-            validation.
+            `token` is longer than its bound — a `ValidationProblemDetail` with
+            `token` in the `errors` map, exactly as a body field's bound is
+            reported. A *missing* `token` reached no constraint and is a plain
+            problem body with no map.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -3159,6 +3161,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/AdminUser' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '403': { $ref: '#/components/responses/Forbidden' }
     post:
       tags: [Admin]
@@ -3607,7 +3610,11 @@ paths:
           description: >-
             Unknown `labelMatch` value, more than
             `app.classification.max-labels-per-issue` distinct `labelId` values,
-            or `sprintId` and `noSprint` sent together.
+            or `sprintId` and `noSprint` sent together. Those three are service
+            rules and carry a plain problem body with **no** `errors` map. A
+            parameter that breaks a bound declared on it — `page` above its
+            maximum — is the other kind: a `ValidationProblemDetail` naming the
+            parameter, refused before the handler runs.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -3893,6 +3900,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/IssueHistoryResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments:
@@ -3955,6 +3963,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/CommentResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/comments/{commentId}:
@@ -5034,6 +5043,7 @@ paths:
                       content:
                         type: array
                         items: { $ref: '#/components/schemas/SprintResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
     post:
       tags: [Sprints]
@@ -7291,12 +7301,21 @@ paths:
             described under that
             response: a name that resolves to nothing reads differently from a
             name that resolves to a field with no value picklist.
-          schema: { type: string }
+
+
+            Capped at **100 characters**, which is twice the widest name that
+            could ever resolve (a custom field's `key` is at most 50). Longer is
+            a `400` refused while the request is bound, before the workspace is
+            resolved — the bound refuses the absurd, not the mistaken, so an
+            unknown name that fits still gets the `422` below with its "did you
+            mean …?" hint.
+          schema: { type: string, maxLength: 100 }
         - name: q
           in: query
           required: false
           description: >-
-            Text to match (max 100 chars). `%` and `_` are treated literally.
+            Text to match (max 100 chars — longer is a `400`). `%` and `_` are
+            treated literally.
           schema: { type: string, maxLength: 100 }
       responses:
         '200':
@@ -7304,6 +7323,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SuggestResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422':
           description: >-
@@ -7737,8 +7757,15 @@ components:
     pageParam:
       name: page
       in: query
-      description: Zero-based page index (default 0)
-      schema: { type: integer, minimum: 0, default: 0 }
+      description: >-
+        Zero-based page index (default 0). Above `21474836` the request is
+        **refused, not clamped**: the offset has to fit a 32-bit integer at the
+        maximum page size, and `21474836 × 100` is the largest product that
+        does. The refusal is a field-anchored `400` with `page` in the `errors`
+        map, raised while the request is bound — before any query runs and
+        before membership is resolved, so it is identical for a member and a
+        stranger. A negative index is coerced to 0 rather than refused.
+      schema: { type: integer, minimum: 0, maximum: 21474836, default: 0 }
     sizeParam:
       name: size
       in: query
@@ -7951,9 +7978,11 @@ components:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     ValidationError:
       description: >-
-        Failed validation — `detail` names the offending fields and the `errors`
-        map repeats them keyed by JSON field path (capped at 10 entries, English
-        messages). See `ValidationProblemDetail`.
+        A declared constraint refused the request — `detail` names the offending
+        items and the `errors` map repeats them keyed by the name of each
+        refused item, whether that item is a body field (a JSON path) or a
+        request parameter (its own name). Capped at 10 entries, English
+        messages. See `ValidationProblemDetail`.
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
@@ -8858,13 +8887,24 @@ components:
 
     ValidationProblemDetail:
       description: >-
-        The `400` body of a request that fails bean validation. `detail` names
-        every offending field and `errors` carries the same failures keyed by
-        JSON field path — both are rendered from one sorted list capped at 10
-        entries, so the two halves never disagree; an overflow is appended to
-        `detail` as `"; … and N more"`. Constraint messages are always English
-        regardless of `Accept-Language`, and are human-readable text: match on
-        the `errors` keys instead.
+        The `400` body of **every refusal raised by a declared constraint** —
+        one shape whichever door the constraint is written on: a `@Valid`
+        request body, or a bound written on a query parameter, path variable,
+        header or cookie. `detail` names every offending item and `errors`
+        carries the same failures keyed by the name of the refused item — both
+        are rendered from one sorted list capped at 10 entries, so the two
+        halves never disagree; an overflow is appended to `detail` as
+        `"; … and N more"`. Constraint messages are always English regardless of
+        `Accept-Language`, and are human-readable text: match on the `errors`
+        keys instead.
+
+
+        Two `400`s deliberately fall outside this and carry **no** `errors` map,
+        so read it defensively: a body that could not be parsed or bound at all
+        (nothing was ever bound, so nothing can be named), and a rule enforced
+        in a service rather than declared on the input — a cross-field
+        agreement check, a range a handler checks for itself. Those explain
+        themselves in `detail` alone.
       allOf:
         - $ref: '#/components/schemas/ProblemDetail'
         - type: object
@@ -8880,11 +8920,14 @@ components:
             errors:
               type: object
               description: >-
-                Failed fields keyed by JSON path, nested paths included
-                (`delivery.preset`, `items[3].fieldId`). A cross-field
-                (class-level) rule has no field of its own and lands under the
-                empty-string key `""`; its message is rendered bare in `detail`.
-                One message per field — the first failed constraint wins.
+                Failed items keyed by their own name: a body field by its JSON
+                path, nested paths included (`delivery.preset`,
+                `items[3].fieldId`); a request parameter by the name it is sent
+                under (e.g. `page`, `q`, `field`, `token`). A rule that belongs to no
+                single item — a class-level body constraint, or one written
+                across two parameters — lands under the empty-string key `""`
+                and its message is rendered bare in `detail`. One message per
+                key — the first failed constraint wins.
               additionalProperties: { type: string }
               example:
                 key: Key must be uppercase letters and digits only
@@ -11625,7 +11668,27 @@ components:
             visible issues, default sort. Over 2000 chars is rejected at binding
             (`400`).
           example: status = "In Progress" AND assignee = currentUser() ORDER BY priority DESC
-        page: { type: integer, minimum: 0, default: 0, description: 'Zero-based page index (null/negative → 0)' }
+        page:
+          type: integer
+          minimum: 0
+          maximum: 21474836
+          default: 0
+          description: >-
+            Zero-based page index (null/negative → 0). Above `21474836` the
+            request is **refused, not clamped** — the same ceiling the `page`
+            query parameter carries, for the same reason: the offset has to fit
+            a 32-bit integer at the maximum page size. The refusal is a
+            field-anchored `400` with `page` in the `errors` map, raised while
+            the body is bound, so **no query runs** — not even the count query
+            this endpoint would otherwise pay for first.
+
+
+            This endpoint computes its own offset, so it also carries a backstop
+            for the day the ceiling is loosened: an offset that still would not
+            fit a 32-bit integer answers the same `400` with
+            `detail: "Page index is too large"` and, being a service check
+            rather than a declared bound, **no** `errors` map. Unreachable while
+            the ceiling above stands.
         size: { type: integer, minimum: 1, maximum: 100, default: 50, description: 'Page size (null → 50, clamped 1..100)' }
 
     SearchResultRow:
