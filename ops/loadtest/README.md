@@ -223,6 +223,39 @@ principal and asserted to be both **foreign** to the A principal and **real** (t
 principal gets 200 on it). Setting `CANARY_WORKSPACE_ID` is optional and is a *cross-check*:
 a mismatch is fatal.
 
+**Proving the canary can fail — the sabotage that actually exercises it.** A canary nobody
+has ever seen go red is a decoration. **`CANARY_WORKSPACE_ID` is no longer the way to force
+one**: it is a *cross-check*, not an input, so pointing it at a workspace you *are* a member
+of makes `setup()` refuse before a single measured request. The one edit that does exercise
+the canary is in `k6/lib/fixture.js` — in the object `resolveFixture()` returns, change
+
+```js
+    canaryWsId: wsB.id,     // -> wsA.id   TEMPORARY, REVERT IMMEDIATELY
+```
+
+so the canary asks its own workspace for a resource it *is* entitled to see. Run one short
+stage against a **non-production** instance — one with its own fixture and its own minted
+`tokens.json`, never the box — and watch it stop:
+
+```bash
+LADDER=1 RAMP=0s HOLD=1m bash k6/run-ladder.sh browse   # expect: exit 7
+git checkout k6/lib/fixture.js                          # REVERT BEFORE ANYTHING ELSE
+```
+
+**Expect `exit 7`**, the ladder logging `TENANCY CANARY LEAK`, and the stage log treated as
+leaked tenant data (§5.3 condition 5) — here it is only the fixture's own workspace A, which
+is why the sabotage is done on a fixture and never against a real tenant.
+
+**The two failures must not be confused, because they look alike and mean opposite things:**
+
+| what you see | what it means |
+|---|---|
+| **exit 7**, `hs_canary_leak` non-zero | the canary fired. Either the sabotage above, or a **real cross-tenant leak** — and if you did not sabotage anything, it is an incident. |
+| **exit 1**, `setup()` threw `CANARY_WORKSPACE_ID=… does not match the workspace B resolved through the API` | a **stale paste**, refused *before* any measurement. The harness is intact and the server is fine; the canary was never run, so this proves **nothing** about tenancy. Remove the variable — it is resolved, not typed. |
+
+An operator who reads the second as "the canary test failed" has drawn the opposite
+conclusion from the one the refusal states.
+
 Record `LOAD_RUN_ID` in `RESULTS-<date>.md` and put it in **both** machines' configuration —
 it is part of the workspace slugs, so it is how the teardown and the mixes find this fixture.
 
@@ -319,18 +352,36 @@ Three places in this harness used to say otherwise, which made a hurried abort f
 day" makes a re-run a different experiment.
 
 ```bash
-K6_VERSION=v0.54.0        # pin it; record it; change it deliberately
+K6_VERSION=v2.2.0         # pin it; record it; change it deliberately — and re-prove it, see below
 curl -fsSL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
   | tar xz --strip-components=1 -C /usr/local/bin "k6-${K6_VERSION}-linux-amd64/k6"
 k6 version
 ```
+
+**`v2.2.0` is the version this harness was proven on, and the pin says so rather than naming
+a version nobody ran.** The dry run — its whole item list, and both of the exit codes the
+ladder is read by (6 and 7) — was taken on k6 **v2.2.0**; the pin used to read `v0.54.0`,
+which nothing here has ever been run against. Some of what this harness asserts is a
+**property of k6 rather than of the scripts**, and a different version leaves each of those
+unverified until it is re-taken:
+
+* **exit 6** (a vacuous threshold) and **exit 7** (a tenancy leak) as the ladder's outcomes;
+* an **empty Rate sub-metric passes** `rate<0.01`, so a missing-sample defect surfaces through
+  the seal rather than through k6's own exit code;
+* k6 **materialises a sub-metric for every declared threshold key**, which is why the seal's
+  "absent from the summary" branch cannot fire and why every mix must declare a Rate or Trend
+  `{phase:hold}` key (see §6).
+
+If you move the pin, re-run every sabotage in this README that proves one of them (§6, and
+the canary block in §3) before the window, and record the version in the fingerprint either
+way. **Do not run a window on a version the results will not name.**
 
 **Licence, because this project is licence-sensitive.** k6 is **AGPL-3.0**. It is invoked as
 a separate binary and nothing of it is linked into or distributed with Hamstrack, so it
 creates no obligation on Hamstrack's **Elastic License 2.0** terms. The scripts in
 `ops/loadtest/` are ours and carry this repository's licence. **Verify the licence at the
 version you actually pin** rather than trusting this paragraph — it is a statement about
-`v0.54.0` made by someone who was not looking at your tarball.
+`v2.2.0` made by someone who was not looking at your tarball.
 
 ---
 
@@ -480,6 +531,13 @@ pkill -INT -f 'k6 run'
 results, so an aborted stage still produces evidence. A `SIGKILL` discards the stage's
 measurements — a second loss on top of whatever caused the abort.
 
+**The canary's own falsification is a separate exercise, and it is in §3.**
+`CANARY_WORKSPACE_ID` cannot force a leak any more: it is a cross-check, so a value naming a
+workspace you are a member of makes `setup()` refuse and the ladder exit **1** — a harness
+refusal, which is not a tenancy result and must not be recorded as a failed canary. The edit
+that makes the canary go red (**exit 7**) is `canaryWsId: wsB.id` → `wsA.id` in
+`k6/lib/fixture.js`, and it is run against a non-production instance and reverted.
+
 ### Abort conditions (§5.3)
 
 Checked by `capture/watchdog.sh` on the box (1, 2, 3, 4, 6), by a k6 threshold on the
@@ -581,7 +639,8 @@ Two halves, and `run-ladder.sh` only decides the first:
 
 #### A non-zero exit is not automatically a capacity number
 
-Six thresholds can end a stage and **only some of them say anything about the product.**
+A threshold can end a stage without saying anything about the product, and **which one
+failed is what decides that** (no count here: the key set grows with the mixes).
 `run-ladder.sh` parses the stage summary (this is why **`jq` is required** on the generator)
 and branches:
 
@@ -627,6 +686,32 @@ carries only the tags passed to `.add()`, and `record()` built its tag object **
 either a vacuous pass or a spurious no-data failure, and no reader could tell either from a
 real verdict. The fix is in `record()`; the seal is what stops it coming back.
 
+**A seal needs a witness in the mix, and the browse mix had none.** Found by running real k6
+**v2.2.0**, and the mechanism matters: k6 **materialises a sub-metric for every threshold key
+it is *declared***, even when no sample ever carried those tags. So the "absent from the
+summary" case never occurs — a sabotaged summary and a clean one are byte-identical for such
+a key (`{"count":0,"rate":0,"thresholds":{"count==0":false}}`) — and Counters are exempt from
+the sample demand on purpose, because their clean outcome *is* an empty metric. That left the
+browse mix with **only** `http_req_duration{class:browse,phase:hold}`, which is tagged by the
+**request** in `lib/auth.js` and not by `record()`, and the `hs_unexpected_404` counter:
+deleting `phase` from `record()` passed an entire browse ladder (exit 0) while failing the
+write mix (exit 6). **Every class with a latency target now also declares
+`hs_refused_429{class:…,phase:hold}`** — a Rate that `record()` samples on *every* response,
+so a read-only mix carries a witness too. It is a real target as well as a witness: nothing
+in the product budgets ordinary browsing or writing per principal, so a `browse` 429 above 1%
+is a finding about what sits in front of the app.
+
+The sabotage that proves it, on a **non-production** instance, one short stage per mix:
+
+```bash
+# in k6/lib/classes.js, inside record(): drop `phase: phase()` from the tag object
+LADDER=1 RAMP=0s HOLD=1m bash k6/run-ladder.sh browse   # expect: exit 6
+LADDER=1 RAMP=0s HOLD=1m bash k6/run-ladder.sh write    # expect: exit 6
+git checkout k6/lib/classes.js                          # REVERT
+```
+
+Before the per-class `hs_refused_429` key, the first of those exited **0**.
+
 **The seal itself was vacuous for its whole life**, which is the reason it now asks k6
 directly. It used to `sed` the key list out of a `console.log` line in the tee'd stage log,
 and k6 does not print `console.log` verbatim — it goes through logrus, so the line on disk
@@ -651,10 +736,10 @@ all-passing, must find nothing.
 
 | class | p95 | p99 | error budget |
 |---|---|---|---|
-| `browse` | 600 ms | 1500 ms | 5xx = **0**; no unexpected 4xx |
+| `browse` | 600 ms | 1500 ms | 5xx = **0**; no unexpected 4xx; 429 ≤ 1% |
 | `search` | 1500 ms | 4000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
 | `report` | 3000 ms | 8000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
-| `write` | 800 ms | 2500 ms | 5xx = **0**; 409 ≤ 1%; rank-rebalance 429 ≤ 2% |
+| `write` | 800 ms | 2500 ms | 5xx = **0**; 429 ≤ 1%; 409 ≤ 1%; rank-rebalance 429 ≤ 2% |
 | `auth` | 1000 ms | 3000 ms | 5xx = **0** |
 
 **5xx = 0 is not a budget item, it is a finding.** The whole point of the 0.17.0 work is that

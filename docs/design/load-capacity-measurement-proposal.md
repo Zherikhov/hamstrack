@@ -352,10 +352,10 @@ a design document.
 
 | Endpoint class (k6 tag) | p95 | p99 | Error budget |
 |---|---|---|---|
-| `browse` — board list, backlog sections, issue get, comments, history, project config, label/component/version lists | 600 ms | 1500 ms | 5xx = **0**; no unexpected 4xx |
+| `browse` — board list, backlog sections, issue get, comments, history, project config, label/component/version lists | 600 ms | 1500 ms | 5xx = **0**; no unexpected 4xx; 429 ≤ 1% |
 | `search` — `POST …/search`, `/search/schema`, `/search/suggest`, saved-filter CRUD | 1500 ms | 4000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
 | `report` — the project reports, their `.csv` siblings, and insights | 3000 ms | 8000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
-| `write` — issue PATCH, transition, comment, rank, sprint scope change | 800 ms | 2500 ms | 5xx = **0**; 409 ≤ 1%; rank-rebalance 429 ≤ 2% |
+| `write` — issue PATCH, transition, comment, rank, sprint scope change | 800 ms | 2500 ms | 5xx = **0**; 429 ≤ 1%; 409 ≤ 1%; rank-rebalance 429 ≤ 2% |
 | `auth` — login, refresh | 1000 ms | 3000 ms | 5xx = **0** |
 
 Why these numbers and not others:
@@ -372,6 +372,13 @@ Why these numbers and not others:
   **finding**, not a budget item. `HighErrorRate`'s 5% is a paging threshold, not a target.
 - **409 ≤ 1% on writes.** A retryable refusal is a correct answer at low rates; above about one in a
   hundred the product is asking users to retry more often than they will tolerate.
+- **429 ≤ 1% on EVERY class that has a latency target, including `browse` and `write`.** Nothing in
+  the product budgets ordinary browsing or writing per principal — the per-principal budgets are on
+  search and reports — so a refusal there is a finding about what sits in front of the app rather
+  than an expected cost. It is also what gives the harness's vacuous-threshold seal a witness in a
+  read-only mix: `hs_refused_429` is a Rate that `record()` samples on *every* response, and without
+  a Rate or Trend keyed on `{phase:hold}` a whole browsing ladder can pass with the phase tag
+  missing (measured on k6 v2.2.0 — `ops/loadtest/k6/lib/classes.js`).
 - **The 422 budget is zero at target.** That is what lets the run answer "at what concurrency does
   the statement bound begin to fire" — the *first* 422 is a data point and a stage boundary, not
   noise to be averaged away.

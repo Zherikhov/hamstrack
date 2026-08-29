@@ -417,10 +417,19 @@ check_thresholds_received_samples() {
     # A COUNTER IS NOT ASKED FOR SAMPLES. hs_errors_5xx, hs_canary_leak, hs_auth_failures,
     # hs_unexpected_404 and hs_budget_422 are `count==0` targets whose correct outcome IS an
     # empty metric; demanding a sample from them would fail every clean stage. They are
-    # still checked for ABSENCE, and that is a different test: k6 materialises a sub-metric
-    # for every threshold key it is given, so a key missing from the summary entirely means
-    # the tag set on the threshold and the tag set on the metric do not agree — which is
-    # the defect this seal exists for, in its most complete form.
+    # still checked for ABSENCE, but AN ABSENT KEY IS A BACKSTOP THAT DOES NOT FIRE, AND THE
+    # DRY RUN AGAINST REAL k6 v2.2.0 IS WHERE THAT WAS MEASURED: k6 materialises a sub-metric
+    # for every threshold key it is DECLARED, whether or not any sample ever carried those
+    # tags. A sabotaged summary and a clean one are byte-identical for such a key —
+    # {"count":0,"rate":0,"thresholds":{"count==0":false}} — so for a Counter-only key set
+    # this function cannot tell the two apart at all.
+    #
+    # THE CONSEQUENCE IS A RULE ON THE MIXES, NOT ON THIS FUNCTION. The seal can only witness
+    # a record()-tagging regression through a Rate or Trend key scoped to {phase:hold}, so
+    # every class with a latency target declares hs_refused_429{class:…,phase:hold}
+    # (lib/classes.js) — it takes a sample on every response, in a read-only mix as much as
+    # in a writing one. Before that, deleting `phase` from record() passed an entire browse
+    # ladder here and failed only from the write mix onward.
     #
     # NO `2>/dev/null`, NO `|| true`. A jq that cannot evaluate is the failure mode this
     # whole function was rewritten for.

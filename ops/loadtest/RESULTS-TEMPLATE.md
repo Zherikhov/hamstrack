@@ -21,6 +21,7 @@ section is therefore a **visibly unmet criterion**, not an omission somebody has
 | **Watcher (Grafana + abort command)** | `<TODO>` |
 | **Instance** | `<TODO i-…>` |
 | **Generator instance** | `<TODO type, terminated at …>` |
+| **k6 version** (`k6 version`, on the generator) | `<TODO>` — *the harness's exit codes and the vacuous-threshold seal are properties of k6 and were proven on **v2.2.0**; any other version is unverified until re-proven (README §3b)* |
 | **Fixture seed** | `<TODO>` |
 | **Harness commit** | `<TODO>` |
 | **Snapshot taken before (id)** | `<TODO snap-…>` |
@@ -137,6 +138,16 @@ Response-code mix over time, **every non-2xx class attributed** (429 by `kind`, 
 `route`, 409 to lock contention, any 5xx individually and written up as a finding):
 
 `<TODO>`
+
+> **`http_req_failed` IS NOT THE ERROR RATE HERE, AND ON A CLEAN BROWSE STAGE IT IS ABOUT
+> 20%.** Measured on the dry run: **21.08% (62 of 294)** on a stage where `hs_errors_5xx` and
+> `hs_unexpected_404` were **both 0 throughout**. k6 counts any non-2xx/3xx, and this mix
+> makes two kinds of deliberate non-2xx — the tenancy canary's **asserted 404s** (one every
+> 10 s, and a 200 there would be a security incident) and the held **SSE** stream, whose
+> completion k6 does not score as a success. Do not copy this number into the results as an
+> error rate, and do not compare it with `HighErrorRate`'s 5%. The error signals are the
+> named ones: `hs_errors_5xx`, `hs_unexpected_404`, `hs_budget_422`, `hs_refused_429`,
+> `hs_conflict_409`, `hs_rebalance_429`.
 
 ### 3.2 Reporting & searching
 

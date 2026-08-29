@@ -121,6 +121,14 @@ const LATENCY = {
  * threshold whose sub-metric received no samples in some configurations, and — worse — a
  * threshold on an empty class silently reads as "passed", so a browsing run that emitted
  * the report thresholds would report a report verdict it never measured.
+ *
+ * AND THE CLASS LIST DECIDES WHETHER THE VACUOUS-THRESHOLD SEAL CAN SEE ANYTHING AT ALL.
+ * The seal demands samples only from Rate and Trend sub-metrics (a Counter's clean outcome
+ * is an empty metric), and k6 materialises a sub-metric for every key it is DECLARED, so an
+ * "absent from the summary" branch never fires. A mix whose only {phase:hold} keys are a
+ * Counter and a metric tagged by the REQUEST rather than by record() therefore has no
+ * witness for a record()-tagging regression. Any class added below must keep at least one
+ * Rate or Trend {phase:hold} key that the mix genuinely exercises.
  */
 export function thresholdsFor(classes) {
   const t = {
@@ -175,10 +183,45 @@ export function thresholdsFor(classes) {
     const l = LATENCY[c];
     if (l) {
       t[`http_req_duration{class:${c},phase:hold}`] = [`p(95)<${l.p95}`, `p(99)<${l.p99}`];
+      // EVERY CLASS WITH A LATENCY TARGET ALSO DECLARES ITS REFUSAL RATE, AND THAT KEY DOES
+      // TWO JOBS.
+      //
+      // (1) THE TARGET. Nothing in the product budgets ordinary browsing or ordinary
+      //     writing per principal — the per-principal budgets are on search and reports —
+      //     so a browse or write 429 above 1% at target concurrency is a finding about the
+      //     configuration in front of the app (a limiter, a proxy, the edge) and belongs in
+      //     the results rather than in nobody's number.
+      //
+      // (2) THE SEAL'S WITNESS, AND THIS IS WHY IT IS DECLARED PER CLASS RATHER THAN ONLY
+      //     WHERE A BUDGET EXISTS. run-ladder.sh proves no declared threshold is vacuous by
+      //     demanding that each key resolved to a sub-metric WITH SAMPLES. Two properties
+      //     of that seal decide what it can see:
+      //
+      //       * k6 (measured on v2.2.0) MATERIALISES a sub-metric for every threshold key it
+      //         is DECLARED, even when no sample ever carried those tags — so the "absent
+      //         from the summary" branch cannot fire, and a sabotaged summary is
+      //         byte-identical to a clean one for such a key
+      //         ({"count":0,"rate":0,"thresholds":{"count==0":false}});
+      //       * a Counter is deliberately exempt from the sample demand, because its correct
+      //         outcome IS an empty metric.
+      //
+      //     So only a Rate or a Trend keyed on {phase:hold} can witness the defect the seal
+      //     exists for. Before this line the browse mix had none: its only {phase:hold} keys
+      //     were http_req_duration{class:browse,phase:hold} — tagged by the REQUEST in
+      //     lib/auth.js, not by record() — and the hs_unexpected_404 counter. Deleting
+      //     `phase` from record()'s tag object below therefore gave exit 0 on an entire
+      //     browse ladder and exit 6 on the write mix: the seal worked on some mixes and not
+      //     others, which is worse than not having it, because the ladder that ran first is
+      //     the one that reports it is fine.
+      //
+      //     hs_refused_429 is not a metric manufactured for the seal. record() calls
+      //     refused429.add(false) on EVERY non-429 response, so this sub-metric takes a
+      //     sample from every class a mix exercises, in a read-only mix as much as in a
+      //     writing one — which is exactly the property a witness needs.
+      t[`hs_refused_429{class:${c},phase:hold}`] = ['rate<0.01'];
     }
     if (c === CLASS.SEARCH || c === CLASS.REPORT) {
       t[`hs_budget_422{class:${c}}`] = ['count==0'];
-      t[`hs_refused_429{class:${c},phase:hold}`] = ['rate<0.01'];
     }
     if (c === CLASS.WRITE) {
       t['hs_conflict_409{phase:hold}'] = ['rate<0.01'];
@@ -206,8 +249,12 @@ export function record(res, cls, tags) {
   // Depending on the k6 version that is a vacuous pass or a spurious no-data failure — and
   // it is exactly the trap thresholdsFor() warns about eighteen lines above.
   //
-  // Sealed by a smoke run whose gate is "every threshold key resolved to a sub-metric with
-  // at least one sample", not by this comment.
+  // Sealed by run-ladder.sh's vacuous-threshold seal, not by this comment — and the seal
+  // can only see the defect on a mix that declares a Rate or Trend key scoped to
+  // {phase:hold}. That is why every class with a latency target now declares
+  // hs_refused_429{class:…,phase:hold} as well: with the browse mix's earlier key set,
+  // deleting `phase` from the line below passed a whole browse ladder (exit 0) while
+  // failing the write mix (exit 6). Measured on k6 v2.2.0.
   const t = Object.assign({ class: cls, phase: phase() }, tags || {});
   respBytes.add(res.body ? res.body.length : 0, t);
 
