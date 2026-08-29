@@ -52,11 +52,19 @@ been watched for the 48 h HD-199 §9.3 prescribes, and any imminent resize (HD-1
 happened. Running before measures a configuration that exists in no file and is about to be
 deleted.**
 
-The state of the box today (measured 2026-08-28, `i-019fe684b25ad831f`): the app container has
-`HostConfig.Memory = 0`, so `-XX:MaxRAMPercentage=50` is taken against *host* RAM and the heap
-ceiling is **956 MB on a 1909 MB box with 341 MB available**. `APP_MEMORY_LIMIT=1g` sits in `.env`
-and is read by nothing. HD-199 delivers the `mem_limit` line that makes it real; the heap becomes
-512 MB.
+The state of the box on 2026-08-28, `i-019fe684b25ad831f`: the app container had
+`HostConfig.Memory = 0`, so `-XX:MaxRAMPercentage=50` was taken against *host* RAM and the heap
+ceiling was **956 MB on a 1909 MB box with 341 MB available**. `APP_MEMORY_LIMIT=1g` sat in `.env`
+and was read by nothing. HD-199 delivers the `mem_limit` line that makes it real.
+
+> **SATISFIED, verified on the box 2026-08-29.** `mem_limit = 1073741824` is in force and the JVM's
+> actual heap ceiling is **495 MiB** — not the 512 MB this document estimated, because
+> `MaxRAMPercentage` is taken against the cgroup limit and the JVM rounds down. Use **495 MiB** in
+> the `REPORTS_MAX_ROWS` heap arithmetic (§4.6 P2); the "380 MB of a 512 MB heap" figure below is
+> therefore 380 MB of **495 MiB**, which is a slightly tighter margin than the proposition was
+> originally written against. Flyway is at **24**, and host available memory has gone 341 → ~630 MB.
+>
+> This is the gate in §2's ruling, and it is now open.
 
 Six reasons, in descending weight:
 
@@ -99,6 +107,29 @@ pressure becomes *catastrophic latency* while everything stays alive and every l
 A harness written to look for a dead container will report "no memory problem found" on a box that
 spent the whole window paging the JVM heap to an EBS volume. §4.8 therefore carries swap counters as
 a first-class attribution signal, not as host trivia.
+
+> **This is no longer a prediction. It was measured on 2026-08-29, and the measurement is stronger
+> than the argument was.**
+>
+> A deliberate attempt to push the box below 200 MiB available memory — the threshold `HostMemoryLow`
+> is provisioned at — **largely failed**: the box held under the threshold for **two minutes out of
+> ten** before swap returned the memory and the reading recovered. The pressure was real and the
+> symptom was almost entirely absent.
+>
+> Read what that means carefully, because the comfortable reading is the wrong one. It is *not*
+> "the box has more headroom than we thought". It is **"the signal we would have watched for has been
+> substantially disarmed"**: the same memory pressure that would previously have produced an
+> unmistakable exit `137` now produces a threshold that dips and recovers, on a box that is paging.
+> The failure did not get smaller; it got quieter.
+>
+> Two consequences for the harness, both now built rather than intended:
+>
+> 1. **Swap counters are sampled every 5 s as a first-class signal** (`pswpin`, `pswpout`,
+>    `pgmajfault`, `SwapFree`), not derived afterwards from an alert that may never fire.
+> 2. **A run that reports "no memory problem" is not believed until the swap counters have been
+>    read.** The results template says so at the point where that conclusion would be written down,
+>    because that is where the mistake would be made — not in a section about swap, which whoever is
+>    about to make it has no reason to be reading.
 
 ---
 
@@ -271,15 +302,25 @@ number that is not obvious:
 - **Workspace B exists for two reasons**: it is the foreign target for the tenancy canary (§4.5), and
   it makes "cost versus tenant size" a comparison inside one run instead of a claim.
 
-**The size is bounded by disk, and today the disk cannot take it.** The box is at **79% used with
-1.7 GB free** — after the 1 GB swapfile. `DiskFilling` fires below 15% free. A 300–400 MB fixture
-plus WAL churn plus the run's own writes would approach that, and a full disk is the one failure in
-this whole plan that can damage real data rather than merely producing a bad measurement.
-**Precondition, not a nice-to-have: grow the EBS volume before the window so that free space is at
-least 5 GB and at least 3× the projected fixture.** gp3 grows online with no downtime; the cost is
-about a dollar a month and the box is close to its own disk alert anyway. If the volume is gp2,
-record its burst-balance state as well — that is a second credit bucket that can run out and be
-misread as an application problem (§4.8).
+**The size is bounded by disk.** When this was written the box was at **79% used with 1.7 GB free**
+— after the 1 GB swapfile — against a `DiskFilling` alert that fires below 15% free. A 300–400 MB
+fixture plus WAL churn plus the run's own writes would have approached that, and a full disk is the
+one failure in this whole plan that can damage real data rather than merely producing a bad
+measurement. **Precondition, not a nice-to-have: grow the EBS volume before the window so that free
+space is at least 5 GB and at least 3× the projected fixture.** gp3 grows online with no downtime.
+
+> **RESOLVED 2026-08-29: the volume was grown 8 → 20 GiB and the box is now at 32% used with ~14 GB
+> free.** The precondition is satisfied with a wide margin — but it stays a precondition and the
+> abort condition stays in force, for a reason worth stating: this ticket's fixture is not the last
+> thing that will ever fill this disk, and a gate that is removed once it has been passed is a gate
+> that is not there for the next run. The generator checks free space every time; `run-ladder.sh`
+> re-checks between every stage; the watchdog checks every 5 s.
+>
+> The volume is also **encrypted** and an **Elastic IP** is attached, so the pre-window snapshot and
+> any restart the run provokes are both safe.
+
+If the volume is gp2, record its burst-balance state as well — that is a second credit bucket that
+can run out and be misread as an application problem (§4.8).
 
 **How it is generated: SQL, through `psql`, not through the API.** Hundreds of thousands of rows
 through HTTP on a 2-vCPU box would take longer than the whole window. The cost of SQL generation is
@@ -498,6 +539,22 @@ application; in `unlimited` mode it does not throttle but bills surplus. **Read
 does not know which mode it is in cannot distinguish "the application serialises" from "the CPU was
 taken away", which is the precise confusion this whole ticket exists to end.
 
+> **CORRECTION, measured 2026-08-29.** The instance is in **`unlimited`** mode, with a balance of
+> 576 — not `standard`, which earlier drafts of this document assumed. **It therefore never
+> throttles**, and the "a burstable instance confounds the measurement" concern does not apply to
+> this run at all. Two consequences, and they replace rather than qualify what earlier sections said:
+>
+> 1. **Credit exhaustion is not an abort condition here** (see the corrected §5.3 condition 8). There
+>    is no throttling cliff after which the latency numbers stop being about the application.
+> 2. **What replaces it is a COST note.** In `unlimited` mode surplus CPU is billed. A window that
+>    saturates 2 vCPUs for three hours buys surplus credits for those hours, which is a small and
+>    entirely acceptable charge — but it is a real one, it is the operator's to accept, and it should
+>    appear in the run record rather than on a bill nobody was expecting.
+>
+> The mode is a per-instance setting anyone with the console can change, so **read it in pre-flight
+> rather than trusting this paragraph** — which is the same rule the paragraph above already states,
+> and the reason this correction was possible to make.
+
 ### 4.8 Attribution: the signal → resource table
 
 This table is the deliverable. "The concurrency at which the target is breached" is a number anybody
@@ -516,7 +573,7 @@ that makes the number actionable.
 | Host available memory collapses; **swap-in/out non-zero**; latency degrades with nothing dying | **Host memory** — and note this presents as latency, not death, because swap was added on 2026-08-28 | `node_memory_MemAvailable_bytes`, `node_memory_SwapFree_bytes`, `node_vmstat_pswpin/pswpout` |
 | Some *other* container dies first | **Host memory**, with the kernel choosing the victim. Post-HD-199 the app is the only *workload* container with a declared ceiling — `postgres` and `caddy` have none (the observability seven do) — so a ceiling on the app makes it the predictable victim, never the protected one. Verify rather than assume: `docker inspect $(docker ps -q) --format '{{.Name}} {{.HostConfig.Memory}}'`, which on 2026-08-28 returned `0` for the app as well | container exit codes, `dmesg` |
 | Host CPU idle → 0, run-queue grows, all of the above flat | **Host CPU** | `node_cpu_seconds_total{mode="idle"}`, load average |
-| The above **and** `CPUCreditBalance` at 0 | **Burst credits**, not CPU. Everything measured after this moment is about the credit bucket | CloudWatch `CPUCreditBalance`, `CPUSurplusCreditBalance` |
+| The above **and** `CPUCreditBalance` at 0 **in `standard` mode** | **Burst credits**, not CPU. Everything measured after this moment is about the credit bucket. **Does not apply to this run: the instance is `unlimited` (§4.7 correction) and never throttles — a zero balance there means surplus is being billed, not that CPU was taken away** | CloudWatch `CPUCreditBalance`, `CPUSurplusCreditBalance` |
 | Disk read throughput rises sharply, PG cache-hit ratio falls, latency follows | **Page cache / EBS IOPS** — the fixture no longer fits in RAM | `node_disk_io_time_seconds_total`, `pg_stat_database` hit ratio, CloudWatch volume queue length (and gp2 burst balance, if gp2) |
 | TTFB rises with `hikaricp_connections_pending` = 0, DB idle, `jvm_threads_live_threads` plateaued near 200 + baseline; `http_req_connecting` also rising | **Request threads / accept queue** (Tomcat's 200-thread default, 100-deep backlog) | `jvm_threads_live_threads`, k6's `http_req_connecting` vs `http_req_waiting` |
 | k6 `dropped_iterations` > 0, or generator CPU > 70% | **The harness.** Discard the sample | k6 summary, generator `node_cpu_seconds_total` |
@@ -624,10 +681,13 @@ that kills k6:
    masked by "we were load testing".
 7. **The real-user probe degrades**: a low-rate scripted journey against a *real* workspace, run
    throughout, showing any 5xx or two consecutive minutes above 5 s p95.
-8. **`CPUCreditBalance` below 25% of its starting value** in `standard` mode. Everything measured
-   after that point is about credits; stop, record the balance, and decide whether to continue in a
-   later window or switch the instance to `unlimited` deliberately (a configuration change, hence a
-   new fingerprint).
+8. ~~**`CPUCreditBalance` below 25% of its starting value** in `standard` mode.~~ **WITHDRAWN for
+   this run (2026-08-29): the instance is in `unlimited` mode with a balance of 576, so it never
+   throttles and there is no point after which the numbers stop being about the application.** The
+   condition stands only if the mode is ever changed to `standard`, which pre-flight reads and
+   records. What replaces it is not an abort but a **cost** note in the run record: `unlimited` bills
+   surplus CPU, so a saturating window buys surplus credits and the operator should know that before
+   the bill does. See the §4.7 correction.
 9. **The operator's judgement.** Written down as a condition on purpose, so using it is following the
    procedure rather than departing from it.
 
@@ -667,18 +727,46 @@ above 70% (§4.8, last row) — discard the stage, do not escalate further, note
    table carrying a `workspace_id` and assert zero rows for the load workspace ids in each. A new
    table added later is covered automatically; a hand-written list would be wrong one migration after
    it was written.
-4. `VACUUM (ANALYZE)` the touched tables. Record that the space is returned to PostgreSQL and **not**
+
+   > **CORRECTION, found while building (2026-08-29): that category is too narrow, and the harness
+   > implements a wider one.** Five of the tables the fixture writes most heavily into carry **no
+   > `workspace_id` at all** — `issue_comments`, `issue_history`, `issue_field_values`,
+   > `comment_mentions`, `issue_attachments`. They are tenant data reached through `issues.id`, and
+   > a check over `workspace_id`-carrying tables alone would have returned **zero** while leaving
+   > hundreds of thousands of rows behind. It would have been a clean bill of health, produced by a
+   > category, about a database that was not clean.
+   >
+   > `fixture/completeness.sql` therefore asserts over **three** categories, each derived from the
+   > catalog rather than typed out: every `workspace_id` column, every `issue_id` column, and
+   > **every column in `public` whose foreign key points at `users(id)`** (read from `pg_constraint`,
+   > so `reporter_id`, `changed_by`, `uploaded_by`, `invited_by`, `lead_id`, `actor_id` and anything
+   > added later are covered without the file being edited).
+   >
+   > The lesson is narrower than "categories are good", which this document already believed. It is
+   > that **a category is only as wide as the column it keys on**, and choosing the tenant's *own*
+   > column silently excludes everything that reaches the tenant through a join. The first category
+   > written down here was chosen because `workspace_id` is how tenancy is enforced — which is
+   > exactly why it was the wrong thing to enumerate *deletions* by.
+
+4. **A "nothing offends" check needs a tripwire.** The assertion above is worthless until it has been
+   seen to say "something offends", and both failure modes look identical from the outside: a check
+   that correctly finds nothing and a check that has gone blind both print zero. `fixture/rehearse.sh`
+   therefore runs it three times — on a populated database (must report many rows), after deleting
+   **only** `issue_history` (must still name `issue_comments`, the table the narrow category would
+   have missed), and after the full teardown (must report zero). The middle call is the real test:
+   it fails if the widened category is ever lost.
+5. `VACUUM (ANALYZE)` the touched tables. Record that the space is returned to PostgreSQL and **not**
    to the filesystem — `VACUUM FULL` takes an exclusive lock and is not run on production for this.
    The grown volume from §5.1 absorbs the residual, which is a second reason it is a precondition.
-5. Confirm `hamstrack_config_drift` is 0 for every scope and `.deployed-sha` is unchanged — the run
+6. Confirm `hamstrack_config_drift` is 0 for every scope and `.deployed-sha` is unchanged — the run
    must not have altered any configuration, and this is how that is demonstrated rather than assumed.
-6. A human smoke test: log in as a real account, open a board, open an issue, create and delete a test
+7. A human smoke test: log in as a real account, open a board, open an issue, create and delete a test
    issue, run a report. Plus the two-address rate-limit probe from `docs/ops-prod-hardening.md`.
-7. Confirm the product gauges have returned (`hamstrack_users_total`, `hamstrack_issues_total`) —
+8. Confirm the product gauges have returned (`hamstrack_users_total`, `hamstrack_issues_total`) —
    they jumped by the fixture's size during the run and a reader of the Product dashboard should not
    later mistake that spike for growth. Annotate the window in Grafana.
-8. Take a **post-window snapshot** as the new baseline; retain the pre-window one for 30 days.
-9. Terminate the generator instance.
+9. Take a **post-window snapshot** as the new baseline; retain the pre-window one for 30 days.
+10. Terminate the generator instance.
 
 ### 5.6 If the run damages something
 
@@ -862,10 +950,15 @@ Numbered, individually checkable, each phrased so it can fail.
    fixture is the occasion rather than the cause. It costs about a dollar a month and cannot be
    undone (EBS grows, never shrinks), which is why it is a question and not an assumption.
 6. **`standard` or `unlimited` credit mode for the window?** → **Whatever the box is in today, and
-   record it.** Deliberately switching to `unlimited` for the window would measure a box the owner
-   does not run. If the run aborts on credit exhaustion (§5.3 condition 8), *that is a finding about
-   the instance type* and belongs in the sizing guidance — "a burstable instance cannot sustain this
-   load regardless of its RAM" is exactly the kind of answer this ticket exists to produce.
+   record it.** Deliberately switching for the window would measure a box the owner does not run.
+   **ANSWERED 2026-08-29: it is already `unlimited`, balance 576.** So the interesting branch this
+   question anticipated — "a burstable instance cannot sustain this load regardless of its RAM" — is
+   not available from this run, because this instance does not throttle. That is a *narrowing of what
+   the run can find*, and it is worth stating plainly rather than quietly enjoying: the measurement
+   will describe an instance that always has its full 2 vCPUs, so it says nothing about what a
+   `standard`-mode `t3.small` would do under the same load. **The sizing guidance must say so** —
+   a self-hoster on a burstable instance in the default `standard` mode is not covered by this
+   number.
 7. **Should `ops/loadtest/` be a synced path?** → **Yes**, and note the consequence rather than
    avoiding it: `ops/` is already synced, so the box-side capture scripts arrive with every deploy and
    need no hand-copy — which is the failure mode HD-199 exists to end. The fixture generator being
@@ -904,6 +997,15 @@ load is drawing on a credit bucket, and a run that does not record the credit sp
 balance can report "the application serialises" about a machine that simply had its processor taken
 away. §4.7 and §5.3 make that observable; it earns its place here because it is the one confound that
 would make every other number in the report wrong in the same direction at once.
+
+> **CORRECTION, 2026-08-29: this risk is retired for this run, and a different one takes its place.**
+> The instance is in `unlimited` mode, so it never throttles and the CPU genuinely is CPU. What the
+> reading found instead is that this run **cannot** answer the burstable question at all — an
+> `unlimited` box is not a sample of the `standard` boxes most self-hosters will default to. The
+> risk is no longer "we might misread a throttle as serialisation"; it is "we might publish a number
+> from a box that never throttles as guidance for boxes that do". That is a **documentation**
+> obligation (§11 Q6), not an abort condition, and it is the kind of substitution worth noticing:
+> retiring a risk is not the same as having one fewer.
 
 ---
 

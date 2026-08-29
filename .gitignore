@@ -75,3 +75,47 @@ docs/adr
 ### directory is tracked (via .gitkeep) because the bind mount needs it to exist; the
 ### samples people drop in it are throwaway.
 observability/textfile/*.prom
+
+### HD-186 load harness (ops/loadtest/). Three kinds of file that must never be committed,
+### and the reasoning differs for each:
+###
+###   config.env   holds the load password AND its bcrypt hash. A hash in a source-available
+###                repository whose plaintext is beside it is a credential, not a digest.
+###                The REAL configuration now lives outside the repository entirely
+###                (/opt/hamstrack/.loadtest.env — ops/ is a synced path, so a file here is
+###                copied into deploy backups and raises the drift check). These patterns
+###                stay for a local rehearsal copy, and cover the shapes an editor or a
+###                hand-copy leaves behind: a `.bak` beside a secret is still the secret.
+###   tokens.json  a live credential file for the whole load pool (~227 accounts at the
+###                shipped ladder), minted in pre-flight. It lives on the GENERATOR only,
+###                and its home is now OUTSIDE the repository — $LOAD_RESULTS_DIR, the same
+###                reasoning that moved config.env and results/, applied at last to the one
+###                file that is unambiguously a credential rather than a configuration.
+###                DELETING IT REVOKES NOTHING — it is the client's copy, the refresh tokens
+###                in it live 30 days server-side, the ACCESS tokens in it are accepted on a
+###                signature check alone for another 30 minutes, and the accounts keep
+###                working with the shared password. Revocation is a server-side act:
+###                ops/loadtest/fixture/revoke.sh, run on the box.
+###
+###                The patterns below are the belt to that brace, and they are UNANCHORED on
+###                purpose. `ops/loadtest/**/tokens.json` covered the old default location
+###                and nothing else: a file minted from the repository root — which is where
+###                somebody stands to run `k6 run ops/loadtest/k6/mint-tokens.js` — landed
+###                at ./tokens.json and was NOT ignored. A credential file is not a thing to
+###                ignore by path.
+###   results/     run output: k6 summaries, actuator scrapes, pg samples, fingerprints.
+###                RESULTS-<date>.md is the curated record and IS committed; the raw capture
+###                it was written from is large, and is attached to the ticket instead. The
+###                capture is scrubbed by construction — `url` is out of k6's system tags
+###                (ops/loadtest/k6/lib/config.js) because SSE authenticates by query
+###                parameter, so a default capture would carry live access tokens.
+ops/loadtest/config.env
+ops/loadtest/config.env.*
+!ops/loadtest/config.env.example
+ops/loadtest/**/*.loadtest.env
+tokens.json
+tokens.json.*
+**/tokens.json
+**/tokens.json.*
+ops/loadtest/**/*.bak
+ops/loadtest/results/
