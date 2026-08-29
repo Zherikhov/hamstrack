@@ -89,7 +89,11 @@ services:
     # machine could never hand it and gets OOM-killed (exit 137, no stack trace)
     # long before JVMHeapPressure notices. A limit is a property of a running
     # container, never of a file and never of a variable: read it back with
-    # `docker inspect "$(docker compose ps -q app)" --format '{{.HostConfig.Memory}}'`
+    # `docker inspect "$(docker compose ps -q app)" | grep -i memory` — a `Memory`
+    # line reading `0` (that is `.HostConfig.Memory`) means no ceiling. Deliberately
+    # not the `--format` spelling: a Grafana annotation is a Go template, and this
+    # exact command copied into one broke three alert rules in production on
+    # 2026-08-29 (see the header of observability/grafana/provisioning/alerting/rules.yml)
     # — resolve the container rather than naming it, since the name is
     # <compose-project>-app-1 and that follows your directory. The HostMemoryLow /
     # HostSwapInUse / HostKernelOOMKill rules in observability/grafana/provisioning/

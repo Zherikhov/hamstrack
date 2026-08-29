@@ -1,6 +1,31 @@
 # Provisioned alert rules. Each rule = a Prometheus query (refId A, instant) fed
 # into a threshold expression (refId B, the condition). noDataState=OK keeps them
 # quiet when a metric is absent (e.g. no traffic yet, or the app job is down in dev).
+#
+# EVERY ANNOTATION IS A GO TEMPLATE, `summary:` INCLUDED. Grafana expands each
+# annotation through text/template against its own `template.Data` before it renders
+# or notifies, so a literal `{{` anywhere in the string is read as an expression
+# rather than as text. An example command containing `{{.State.OOMKilled}}` fails
+# with `can't evaluate field State in type template.Data` and THE WHOLE ANNOTATION
+# IS LOST - not the offending fragment, the entire string - so the operator gets a
+# template error at precisely the moment the guidance was meant to arrive, i.e. only
+# ever when the rule fires. Write example commands that contain no `{{` at all
+# (pipe `docker inspect` into `grep` and name the JSON field in prose) rather than
+# escaping the braces into `{{"{{"}}`, which is unreadable in a file whose whole
+# value is being readable under pressure. `{{ $labels.x }}` and `{{ $values.x }}`
+# are the legitimate exception and must not be touched: those are the template's own
+# variables and are meant to expand. YAML `#` comments are not templates and are
+# safe - the braces quoted just above are the bug named, not an example to copy -
+# but example COMMANDS in comments are written in the same no-braces form here
+# anyway, because the way this arrives is a command lifted from a comment into a
+# summary.
+#
+# FOUND IN PRODUCTION, three rules at once, not in review and not in CI:
+# GrafanaProvisioningContractTest parses this YAML but does not render Go templates,
+# so a broken annotation is valid YAML and ships green. The only symptom is one
+# `msg="Error in expanding template"` line per rule per evaluation cycle in the
+# Grafana log under `logger=ngalert.state.manager` - nothing fails, nothing is
+# retried, and the alert still fires with no text.
 apiVersion: 1
 
 groups:
@@ -253,15 +278,16 @@ groups:
       # docs that reason from them. A container limit is what CLOSES that gap (APP_MEMORY_LIMIT
       # / mem_limit, HD-199); these two rules are what SEE it, before and after.
       # Which state a box is in is a question for the box and never for a file:
-      # `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` — `0` is
-      # no limit, and a variable present in .env is not a limit until a container
-      # reports one.
+      # `docker inspect hamstrack-app-1 | grep -i memory` — a `Memory` line (that is
+      # `.HostConfig.Memory`) reading `0` is no limit, and a variable present in .env
+      # is not a limit until a container reports one.
       #
       # 137 IS ANY SIGKILL (128 + 9), not the signature of an OOM kill: a docker stop
       # whose grace period expired and escalated, a docker kill, a kill -9 and a daemon
       # or Docker Desktop shutdown all produce it, and the kernel's OOM killer is one
-      # member of that class rather than its identifier. The discriminator is
-      # `docker inspect <container> --format '{{.State.OOMKilled}}'`; read 137 as proof
+      # member of that class rather than its identifier. The discriminator is the
+      # `.State.OOMKilled` flag, which `docker inspect <container> | grep -i oomkilled`
+      # prints; read 137 as proof
       # on its own and the cost is a false alarm — a box resized because it restarted,
       # or a memory leak hunted that does not exist. It is also why HostKernelOOMKill
       # below, which counts the kernel's own event, is the one rule here that no other
@@ -301,7 +327,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Less than 200 MiB of host memory has been available for 10m - the kernel is close to choosing an OOM victim, and its victim dies silently on SIGKILL (exit 137, no stack trace, nothing in any application log). 137 is any SIGKILL, so on a container that has already exited it is `docker inspect <container> --format '{{.State.OOMKilled}}'`, not the exit code, that says the kernel chose it. THRESHOLD DERIVATION, so it is not tuned away by the next person: 200 MiB is BELOW the 227 MiB 7-day minimum measured on production 2026-08-28, so this rule would not have fired once in that week and only fires when the box is worse than it has ever been. It is an absolute buffer rather than a percentage, so it still means the same thing after a resize. FIRST MOVES: `free -m` and `docker stats --no-stream` on the box to see what grew; then `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'` - `0` means the app container has no ceiling and its JVM sized its heap from HOST RAM, which is the shape of this failure, and setting APP_MEMORY_LIMIT in /opt/hamstrack/.env followed by `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d` fixes it with no deploy and no merge. If the container limit is already set and honoured, the box is simply too small: resize it (HD-189) rather than shaving ceilings"
+          summary: "Less than 200 MiB of host memory has been available for 10m - the kernel is close to choosing an OOM victim, and its victim dies silently on SIGKILL (exit 137, no stack trace, nothing in any application log). 137 is any SIGKILL, so on a container that has already exited it is the `.State.OOMKilled` flag - print it with `docker inspect <container> | grep -i oomkilled` - and not the exit code that says the kernel chose it. THRESHOLD DERIVATION, so it is not tuned away by the next person: 200 MiB is BELOW the 227 MiB 7-day minimum measured on production 2026-08-28, so this rule would not have fired once in that week and only fires when the box is worse than it has ever been. It is an absolute buffer rather than a percentage, so it still means the same thing after a resize. FIRST MOVES: `free -m` and `docker stats --no-stream` on the box to see what grew; then `docker inspect hamstrack-app-1 | grep -i memory`, where a `Memory` line (that is `.HostConfig.Memory`) reading `0` means the app container has no ceiling and its JVM sized its heap from HOST RAM, which is the shape of this failure, and setting APP_MEMORY_LIMIT in /opt/hamstrack/.env followed by `docker compose -f docker-compose.prod.yml -f docker-compose.observability.yml up -d` fixes it with no deploy and no merge. If the container limit is already set and honoured, the box is simply too small: resize it (HD-189) rather than shaving ceilings"
         data:
           - refId: A
             relativeTimeRange: { from: 600, to: 0 }
@@ -364,7 +390,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Over 128 MiB of swap has been in use for 15m. Swap is meant to be an emergency buffer here and not a memory tier, so at a low vm.swappiness (the hosted box runs 10) sustained use means RAM is already gone and the machine is trading latency to stay alive - it is not dying (that is HostMemoryLow), it no longer fits its job. Check `sysctl vm.swappiness` first: at the distro default of 60 a healthy box pages out cold anonymous memory too, and then this rule is mis-tuned rather than right. Expect slower p95 and longer GC pauses while this is true. FIRST MOVES: `free -m` and `docker stats --no-stream` to see which container grew, then choose between giving the app container a memory limit it may not currently have (APP_MEMORY_LIMIT in /opt/hamstrack/.env - an unlimited container sizes its JVM heap from HOST RAM, check with `docker inspect hamstrack-app-1 --format '{{.HostConfig.Memory}}'`) and resizing the instance (HD-189). Do NOT turn swap off to make this quiet: without it the same pressure arrives as an OOM kill instead of as a warning"
+          summary: "Over 128 MiB of swap has been in use for 15m. Swap is meant to be an emergency buffer here and not a memory tier, so at a low vm.swappiness (the hosted box runs 10) sustained use means RAM is already gone and the machine is trading latency to stay alive - it is not dying (that is HostMemoryLow), it no longer fits its job. Check `sysctl vm.swappiness` first: at the distro default of 60 a healthy box pages out cold anonymous memory too, and then this rule is mis-tuned rather than right. Expect slower p95 and longer GC pauses while this is true. FIRST MOVES: `free -m` and `docker stats --no-stream` to see which container grew, then choose between giving the app container a memory limit it may not currently have (APP_MEMORY_LIMIT in /opt/hamstrack/.env - an unlimited container sizes its JVM heap from HOST RAM, check with `docker inspect hamstrack-app-1 | grep -i memory`, where a `Memory` line - that is `.HostConfig.Memory` - reading `0` means no ceiling) and resizing the instance (HD-189). Do NOT turn swap off to make this quiet: without it the same pressure arrives as an OOM kill instead of as a warning"
         data:
           - refId: A
             relativeTimeRange: { from: 900, to: 0 }
@@ -436,7 +462,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "The kernel OOM-killed at least one process on this host in the last 15m. This is not a prediction (that is HostMemoryLow) - it already happened, and it is invisible everywhere else: the victim dies on SIGKILL and leaves exit 137, no stack trace and no application log line, so a restarted container is the only trace. 137 by itself proves nothing - every SIGKILL exits 137 - which is why this rule counts the kernel's own event rather than an exit code, and why the checks below ask for OOMKilled. FIRST MOVES: `dmesg -T | grep -i -E 'killed process|out of memory'` names the victim and the moment; `docker ps -a` and `docker inspect <container> --format '{{.State.OOMKilled}} {{.State.ExitCode}}'` say whether it was ours. THEN: if the victim was the app container and it has no memory limit, its JVM sized its heap from HOST RAM and the box cannot honour that - set APP_MEMORY_LIMIT (see HostMemoryLow's summary for the exact apply step). If the limit IS set and the app was killed at it, the limit is too low for the workload rather than too high for the box: raise it, or resize (HD-189). If the victim was postgres or the observability stack, the box is oversubscribed and shaving one ceiling only moves the victim"
+          summary: "The kernel OOM-killed at least one process on this host in the last 15m. This is not a prediction (that is HostMemoryLow) - it already happened, and it is invisible everywhere else: the victim dies on SIGKILL and leaves exit 137, no stack trace and no application log line, so a restarted container is the only trace. 137 by itself proves nothing - every SIGKILL exits 137 - which is why this rule counts the kernel's own event rather than an exit code, and why the checks below ask for OOMKilled. FIRST MOVES: `dmesg -T | grep -i -E 'killed process|out of memory'` names the victim and the moment; `docker ps -a` shows which container exited and with what code, and `docker inspect <container> | grep -i oomkilled` says whether it was ours: the `.State.OOMKilled` flag is what decides, and a 137 sitting next to `false` was some other SIGKILL. THEN: if the victim was the app container and it has no memory limit, its JVM sized its heap from HOST RAM and the box cannot honour that - set APP_MEMORY_LIMIT (see HostMemoryLow's summary for the exact apply step). If the limit IS set and the app was killed at it, the limit is too low for the workload rather than too high for the box: raise it, or resize (HD-189). If the victim was postgres or the observability stack, the box is oversubscribed and shaving one ceiling only moves the victim"
         data:
           - refId: A
             relativeTimeRange: { from: 900, to: 0 }
