@@ -145,7 +145,21 @@ SELECT ws.slug, s.category,
  GROUP BY ws.slug, s.category ORDER BY ws.slug, s.category;
 
 WITH ws AS (SELECT id, slug FROM workspaces WHERE slug LIKE :'slug_prefix' || '%'),
-     c AS (SELECT i.id, (SELECT count(*) FROM issue_comments x WHERE x.issue_id = i.id) AS n
+     -- `deleted_at IS NULL` is NOT cosmetic and NOT only about which rows to count.
+     -- idx_issue_comments_issue is PARTIAL on exactly that predicate, so a subquery that
+     -- omits it cannot use the index — the planner cannot prove the rows it wants satisfy
+     -- the predicate — and this correlated count degrades to one SEQUENTIAL SCAN of
+     -- issue_comments PER ISSUE. At the §4.2 shape that is 42 000 scans of a 120 000-row
+     -- table. `EXPLAIN` says it in as many words: SubPlan 1 -> Seq Scan on issue_comments,
+     -- total cost 78 782 396. Measured on production 2026-08-30: cancelled while STILL
+     -- RUNNING after 25 minutes without the predicate, 345 ms with it. Do not expect
+     -- `pg_stat_user_tables.seq_scan` to reveal this while it runs — those counters are
+     -- flushed at transaction end, so one long statement leaves them frozen and innocent-
+     -- looking, which is what sent the first diagnosis down the wrong path. It also
+     -- makes the metric agree with the product, whose only comment query carries the same
+     -- predicate (IssueCommentRepository.findForIssueWithAuthor).
+     c AS (SELECT i.id, (SELECT count(*) FROM issue_comments x
+                          WHERE x.issue_id = i.id AND x.deleted_at IS NULL) AS n
              FROM ws JOIN issues i ON i.workspace_id = ws.id)
 SELECT 'comments per issue' AS metric,
        round(avg(n), 2) AS mean,

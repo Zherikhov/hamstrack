@@ -73,7 +73,23 @@ trap 'rm -f "$AUTHRC" "$HOSTRC" "${TMP:-}"' EXIT
 # shellcheck disable=SC2086
 curl_api() { curl -sS -K "$HOSTRC" $LOAD_CURL_OPTS "$@"; }
 # shellcheck disable=SC2086
-curl_auth() { curl -sS -K "$HOSTRC" -K "$AUTHRC" $LOAD_CURL_OPTS "$@"; }
+# Any argument that looks like an API PATH is resolved against the base URL here, so a
+# caller cannot forget it. `req` prepended it and the four callers that reach curl_auth
+# directly did not — every one of them died with curl's "URL rejected: No host part in the
+# URL", and because each was inside a `$(…)` whose empty output was then interpreted, they
+# reported as FIXTURE failures: "issue history is EMPTY", "NO report reached
+# REPORTS_MAX_ROWS". Four call sites got it wrong and one got it right, which is the
+# signature of a rule that belongs in the helper rather than in a convention.
+#
+# `/api/` and not merely a leading slash: curl_auth is also passed `-o /dev/null`, and a
+# blanket "starts with /" would rewrite that into a URL.
+curl_auth() {
+    local a args=()
+    for a in "$@"; do
+        case "$a" in /api/*) args+=("$LOAD_BASE_URL$a") ;; *) args+=("$a") ;; esac
+    done
+    curl -sS -K "$HOSTRC" -K "$AUTHRC" $LOAD_CURL_OPTS "${args[@]}"
+}
 
 # --- log in as the first load account of workspace A -------------------------
 #
@@ -151,8 +167,15 @@ req "backlog section returns ranked issues" 200 \
     '.issues | length > 0' "$B/backlog/sections/backlog"
 req "component catalog" 200 '. | length > 0' "$B/components"
 req "version catalog" 200 '. | length > 0' "$B/versions"
+# `.content[]`, not `.[]`: this endpoint is PAGED and the others in this block are not.
+# `.[]` on the page envelope iterates the object's six VALUES — an array and some numbers —
+# so the select matched nothing and the check failed against a fixture holding 50 sprints
+# here. The neighbouring `. | length > 0` assertions are safe only because components,
+# versions and labels really are bare arrays (verified: 40 / 30 / 400); the same spelling
+# against an envelope would have counted KEYS and passed vacuously. Assert the shape you
+# are actually served, per endpoint.
 req "sprint list carries the open sprints" 200 \
-    '[.[] | select(.state == "FUTURE" or .state == "ACTIVE")] | length >= 5' "$B/sprints"
+    '[.content[] | select(.state == "FUTURE" or .state == "ACTIVE")] | length >= 5' "$B/sprints"
 req "label catalog (workspace-scoped)" 200 '. | length > 50' \
     "/api/workspaces/$WS_A/labels"
 
@@ -167,6 +190,11 @@ req "issue attachments" 200 'type == "array"' "$B/issues/1/attachments"
 # returning 200. Issue 1 may legitimately have few rows; the assertion is about the class.
 HIST_TOTAL=0
 for n in 1 2 3 5 8 13; do
+    # curl_auth passes its arguments STRAIGHT to curl, so it needs an absolute URL — `req`
+    # is what prepends the base. Without it every call here died with curl's
+    # "URL rejected: No host part in the URL", the loop summed six zeros, and the failure
+    # was reported as "issue history is EMPTY" — an accusation against the fixture for a
+    # defect in the caller, one line below a `req` that had just read history successfully.
     c="$(curl_auth "$B/issues/$n/history" \
          | jq -r '(if type=="array" then length else (.content | length) end) // 0' 2>/dev/null || echo 0)"
     HIST_TOTAL=$((HIST_TOTAL + ${c:-0}))
@@ -178,8 +206,13 @@ else fail "issue history is EMPTY across six issues — the flow report will ret
 log "search"
 req "search schema resolves the whole workspace catalog" 200 \
     '(.fields | length) > 0' "/api/workspaces/$WS_A/search/schema"
-req "search suggest" 200 'type == "object"' \
-    "/api/workspaces/$WS_A/search/suggest?field=status"
+# `label`, not `status`. Suggestions exist only for fields with a bounded value lookup
+# behind them; `status`, `priority`, `type` and `version` answer 422 BY DESIGN
+# (SearchService.noSuggestions), so the old spelling asserted 200 on an endpoint that can
+# only refuse — a checker failure dressed as a fixture failure. `label` also makes the
+# check say something: it returns fixture rows, so an empty catalog would fail it.
+req "search suggest" 200 '(.suggestions | length) > 0' \
+    "/api/workspaces/$WS_A/search/suggest?field=label"
 req "search: unfiltered page" 200 '.totalElements > 1000' \
     "/api/workspaces/$WS_A/search" \
     -X POST -H 'Content-Type: application/json' -d '{"query":"","page":0,"size":50}'
@@ -204,13 +237,27 @@ req "flow.csv"      200 ''                 "$B/reports/flow.csv"
 # 25 000-issue project must set meta.truncated, because the capped case is the expensive
 # case and the one the heap costing is about. If this fails, the fixture is too small and
 # probe P2 has nothing to measure.
-CT="$(curl_auth "$B/reports/cycle-time?from=1970-01-01")"
+# A LEGAL window. `from=1970-01-01` asks for 20 696 days against a 365-day maximum
+# (app.reports.max-window-days), so this endpoint answered 400 and never reached the cap
+# question at all — the check could only ever fail, and its message blamed the fixture.
+# 364 days is the widest window the product will accept, i.e. the most rows it can be made
+# to consider.
+CT_FROM="$(date -u -d '364 days ago' +%Y-%m-%d 2>/dev/null || date -u -v-364d +%Y-%m-%d)"
+CT="$(curl_auth "$B/reports/cycle-time?from=$CT_FROM")"
 if printf '%s' "$CT" | jq -e '.meta.truncated == true' >/dev/null 2>&1; then
     pass "a row-level report hits REPORTS_MAX_ROWS and sets meta.truncated"
 else
-    fail "NO report reached REPORTS_MAX_ROWS. The largest project is under the cap (or the
-       window excludes its rows). Probe P2 measures nothing in this state — regenerate at
-       a larger LOAD_SCALE. meta was: $(printf '%s' "$CT" | jq -c '.meta // "absent"')"
+    fail "NO report reached REPORTS_MAX_ROWS. Probe P2 measures the UNCAPPED case in this
+       state. meta was: $(printf '%s' "$CT" | jq -c '.meta // "absent"')
+
+       Sizing the project against the cap directly does NOT work, and 'the big project has
+       25 000 issues and the cap is 20 000' is the reasoning that fails here: every
+       row-level report NARROWS before the cap is consulted. Measured 2026-08-30 against a
+       25 000-issue project — aging 8 769 rows (open only, and the fixture is ~65% done),
+       cycle-time 13 217 (completed WITHIN the window, itself capped at 365 days). So the
+       project must be sized against the report's own filter, not against the cap: roughly
+       cap / (1 - done_share) issues for aging, or cap completions inside one year for
+       cycle time."
 fi
 
 # --- one real attachment, through the real storage backend -------------------
@@ -232,7 +279,12 @@ head -c 65536 /dev/urandom > "$TMP"
 UPLOADED=()
 for n in 1 2 3; do
     body="$(curl_auth -w '\n%{http_code}' -X POST \
-            -F "file=@$TMP;filename=load-probe-$n.bin" "$B/issues/$n/attachments")"
+            # `.zip`, not `.bin`. The product enforces an EXTENSION whitelist
+            # (app.attachments.allowed-extensions) and answers 415 for anything outside it,
+            # so `.bin` made all three uploads fail on policy while the message blamed
+            # storage. Nothing is sniffed, so random bytes under an allowed extension
+            # exercise exactly the path this check is for.
+            -F "file=@$TMP;filename=load-probe-$n.zip" "$B/issues/$n/attachments")"
     code="$(printf '%s' "$body" | tail -n 1)"
     body="$(printf '%s' "$body" | sed '$d')"
     if [[ "$code" == "200" || "$code" == "201" ]]; then
@@ -255,7 +307,11 @@ for u in "${UPLOADED[@]:-}"; do
 done
 if [[ "${#UPLOADED[@]}" -eq 0 ]]; then
     fail "no attachment id came back from an upload, so nothing could be deleted through the
-       API. Three objects are now in storage that the teardown will not remove."
+       API. If any upload above reported 200/201, that many objects are now in storage that
+       the teardown will not remove — check the upload lines and delete those by hand.
+       If every upload FAILED, nothing was stored and there is nothing to clean up: this
+       line used to assert three orphaned objects unconditionally, and said so on a run
+       where all three uploads had been refused 415 before a single byte was written."
 fi
 
 # --- the tenancy canary's premise -------------------------------------------
