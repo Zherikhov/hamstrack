@@ -95,7 +95,12 @@ PIDFILE="/tmp/hd186-capture.pids"
 : "${LOAD_DB_NAME:=${DB_NAME:-hamstrack}}"
 DB_USER="$LOAD_DB_USER"
 DB_NAME="$LOAD_DB_NAME"
-: "${ACTUATOR_URL:=http://localhost:8080/actuator/prometheus}"
+# 9090, not 8080: Hamstrack runs the actuator on a SEPARATE management port
+# (`management.server.port=${MANAGEMENT_PORT:9090}`), so 8080 answered nothing on every
+# install of this product, not just an unusual one. The default now matches the application
+# it ships beside; the probe added below is what makes a future divergence loud instead of
+# silent.
+: "${ACTUATOR_URL:=http://localhost:9090/actuator/prometheus}"
 
 # docker | host. See the header. Defaulted rather than detected: a mode this script GUESSED
 # would silently produce a different capture on a machine that happens to have Docker
@@ -217,6 +222,32 @@ for c in "$APP_CONTAINER" "$PG_CONTAINER"; do
         exit 2
     }
 done
+
+# A NAME THAT RESOLVES IS NOT A SCRAPE THAT ANSWERS.
+#
+# The container-name check above and this one are the same guarantee stated twice, and only
+# the first one existed: docker mode proved the name and then trusted the URL. Host mode had
+# the URL probe and is the mode nothing here uses. So the fail-fast lived on the unexercised
+# path while the used path captured whatever it got — which, measured on production
+# 2026-08-31, was NOTHING: the default said 8080 and this product puts the actuator on 9090
+# (`management.server.port=${MANAGEMENT_PORT:9090}` in application.properties). A whole
+# window of empty app metrics, discovered while reading the results, is precisely the
+# outcome the name check was added to prevent.
+#
+# Same no-early-exiting-reader rule as the host probe: read the body whole, judge it after.
+if [[ "$LOAD_CAPTURE_MODE" == "docker" ]]; then
+    probe="$(scrape_actuator || true)"
+    [[ -n "$probe" ]] || {
+        log "FATAL scraped ZERO bytes from $ACTUATOR_URL inside '$APP_CONTAINER'. The"
+        log "      container exists, so this is the URL, not the name. Hamstrack serves the"
+        log "      actuator on its MANAGEMENT port (default 9090), not on the application"
+        log "      port — check MANAGEMENT_PORT and management.endpoints.web.exposure.include,"
+        log "      then set ACTUATOR_URL. Prometheus's own target list is the fastest place"
+        log "      to read the URL that actually works."
+        exit 2
+    }
+    log "docker mode: actuator answers at $ACTUATOR_URL"
+fi
 
 mkdir -p "$OUT"
 : > "$PIDFILE"
