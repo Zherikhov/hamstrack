@@ -394,6 +394,27 @@ time and is read by nothing, because the box's `docker-compose.prod.yml` (dated 
 from the six weeks when nothing shipped configuration here) has no `mem_limit` line to read
 it with.
 
+**What the repository declares as of HD-180 (2026-09-01), which is still not what any box
+has.** `docker-compose.prod.yml` now carries a `mem_limit` on `postgres`
+(`POSTGRES_MEMORY_LIMIT`, default `512m` — ~2× the ~240 MB peak RSS measured during the
+08-31 load window) and on `caddy` (`CADDY_MEMORY_LIMIT`, default `128m` — ~5× its ~24 MB
+peak, looser on purpose because it is the only container on 80/443 and an OOM kill there is
+a site-wide outage), and it passes PostgreSQL's memory dials explicitly
+(`POSTGRES_SHARED_BUFFERS` 128MB, `POSTGRES_EFFECTIVE_CACHE_SIZE` 512MB,
+`POSTGRES_WORK_MEM` 4MB — HD-225; the image default `effective_cache_size` of 4GB told the
+planner this 1909 MiB box had more than twice its own RAM cached). It also declares
+`shm_size: ${POSTGRES_SHM_SIZE:-64m}` on that container, which changes nothing as shipped —
+64 MB is Docker's own default — and exists so that raising `work_mem` on a bigger host has
+the matching `/dev/shm` dial in `.env` rather than in a file a deploy replaces. Those limits reach a
+container only when a deploy places the file and `docker compose up -d` recreates it, so
+the discriminator above is unchanged and is still the only answer: **read it back from the
+box**. What the limits buy is *containment* — a service that runs away dies and restarts in
+its own cgroup instead of the kernel choosing across the host. They do **not** make the
+deployment fit: app 1024 + postgres 512 + caddy 128 + observability 1024 is **2688 MiB of
+declared ceilings on a 1909 MiB host**, and no arrangement of these numbers makes that sum
+fit while leaving the app a usable heap. That is an argument for the resize, not against
+the ceilings, and it is stated in full at the top of `docker-compose.prod.yml`.
+
 **HD-189 has now made this same mistake three times inside its own corrections**, which
 makes the shape worth more than any of the three fixes: the `mem_limit` claim above; the
 `vm.swappiness=10` sentence, written as though every host ran 10 when it is this box's

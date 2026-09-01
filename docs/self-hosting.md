@@ -31,6 +31,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Applying repository configuration](#applying-repository-configuration)
   - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
   - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
+  - [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180)
   - [Notifications are scoped to a workspace from 0.17.0](#notifications-are-scoped-to-a-workspace-from-0170)
   - [Account addresses become case-insensitive in 0.18.0](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
@@ -62,11 +63,19 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170) for the sizing
   table and for what changes if you are upgrading rather than installing fresh.
   **If you write your own Compose file, set a memory limit on the app service**:
-  with no limit the JVM sizes its heap against *host* RAM. Add the
-  [observability stack](#observability-optional) and the arithmetic tightens
-  sharply — its services' own limits sum to ~1 GB, so app 1 GB + observability
-  ~1 GB + PostgreSQL + Caddy does not fit a 2 GB host; run it on 4 GB. Disk is
-  dominated by attachments — size the `attachments_data` volume (or your S3
+  with no limit the JVM sizes its heap against *host* RAM. The bundled file also
+  caps PostgreSQL (`POSTGRES_MEMORY_LIMIT`, `512m`) and Caddy
+  (`CADDY_MEMORY_LIMIT`, `128m`) — containment, so a runaway service is killed and
+  restarted in its own cgroup instead of the kernel picking a victim across the
+  box. **A ceiling is not a reservation, and bounding everything does not make a
+  small host safe**: app 1 GB + PostgreSQL 512 MB + Caddy 128 MB is ~1.6 GB of
+  ceilings before the operating system and the page cache get anything, and adding
+  the [observability stack](#observability-optional) — whose seven services' limits
+  sum to ~1 GB — takes it to ~2.6 GB, more than a 2 GB box has at all. Those maxima
+  are not reached together, which is why the smaller figure still works in practice;
+  the larger one is why the full stack does not belong on a 2 GB host. Run it on
+  4 GB. Disk
+  is dominated by attachments — size the `attachments_data` volume (or your S3
   bucket) for expected uploads.
 
 ## Quick start
@@ -108,8 +117,10 @@ services:
     ports:
       - "8080:8080"
     # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so
-    # without a limit here it sizes against host RAM. 1g → 512 MB heap.
-    mem_limit: 1g
+    # without a limit here it sizes against host RAM. 1g → 512 MB heap. Spelled as a
+    # variable for the reason the `postgres` service below spells its dials that way —
+    # a literal here is a value your `.env` cannot reach.
+    mem_limit: ${APP_MEMORY_LIMIT:-1g}
     volumes:
       - attachments_data:/app/data/attachments
     healthcheck:
@@ -131,6 +142,30 @@ services:
       # The same variable as the app's DB_PASSWORD above, on purpose: two literals can be
       # edited apart, and then the app cannot log in to its own database.
       POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+    # PostgreSQL's memory dials, spelled as variables for the same reason `APP_IMAGE_TAG`
+    # is: a literal here is a value your `.env` cannot reach, so setting it there later
+    # changes nothing and looks like it did. The image's own defaults are shared_buffers
+    # 128MB, work_mem 4MB and effective_cache_size 4GB — that last one tells the planner a
+    # 2 GB host has more cache than the machine has RAM, and because it is a belief rather
+    # than an allocation nothing ever refuses it. The POSTGRES_* rows under Configuration
+    # size all three from your own host, in both directions.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+    # A ceiling, not a reservation: it contains a runaway inside this container instead of
+    # letting the kernel pick a victim elsewhere. Keep it well above shared_buffers plus
+    # work_mem × sort nodes × connections, or you have converted a tuning value into a kill.
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
+    # Docker gives every container a 64 MB /dev/shm, and PostgreSQL's parallel workers put
+    # their shared segments there — sized from work_mem. The default below is Docker's own,
+    # so this line changes nothing until you raise POSTGRES_WORK_MEM; it exists so that when
+    # you do, the matching dial is in `.env` rather than in a file a `git pull` replaces.
+    shm_size: ${POSTGRES_SHM_SIZE:-64m}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -394,9 +429,15 @@ Full reference:
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and the Quick-start snippet above (default `0.4`). **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
-| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
+| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. **The container limit also chooses the garbage collector, and nothing else here says so.** At `1g` the JVM sits below its "server-class machine" threshold and ergonomically selects **SerialGC** — single-threaded, stop-the-world — where at `2g`, same image and same flags, it selects **G1** (measured 2026-09-01 on `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, 2 CPUs). That is the most likely explanation of the 4.99 s GC pause the 2026-08-31 load run recorded on a `1g` container — the collector was not itself recorded that day, which is why the startup line names it now — so if long pauses rather than `OutOfMemoryError` are your symptom, this is the dial that changes the collector as well as the heap. The application's startup line names the collector it actually got — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
+| `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud` |
+| `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud` |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
-| `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections` |
+| `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections`. **The max is also a memory dial on the database, and `max_connections` is not the bound that bites first**: `POSTGRES_WORK_MEM` is charged per sort or hash node per *backend*, so this number is the `backends` in `work_mem × nodes × backends` — `4MB × ~4 × ~12` (this pool, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB** at the defaults, and `4MB × 4 × 52` ≈ **830 MB** at a pool of 50, against a `POSTGRES_MEMORY_LIMIT` of `512m`. Fifty connections sits comfortably under a stock `max_connections` of 100 and comfortably over that cgroup ceiling, where the failure is an OOM-killed backend — or postmaster, which takes every session with it — rather than a refused connection. **Raise `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit.** `DB_STATEMENT_TIMEOUT_MS` below is the other half of pool sizing: a longer statement bound holds each of these connections for longer |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | `512MB` | What the PostgreSQL **planner believes is cached** — `shared_buffers` plus the OS page cache it can expect to reach. Passed to the server as `postgres -c effective_cache_size=…` by the bundled compose file, so it takes PostgreSQL's units (`512MB`, `2GB`). **It allocates nothing**; it changes which plans look cheap, and a value far above the truth makes the planner prefer index access it will actually have to read off disk. The PostgreSQL image's own default is **4GB**, which is why this row exists: on Hamstrack's 1909 MiB production host that claimed more than twice the machine's entire RAM, on a box measured swapping. The `512MB` default is `shared_buffers` (128 MB) plus the low end of the page cache measured there under load (387 MB). **Set it from your host, in both directions**: roughly `shared_buffers` + the page cache this database can really expect. The usual starting point of ~75% of RAM assumes a *dedicated* database host — a box that also runs the JVM, Caddy and the observability stack is not one. **And under ~1 GB of RAM, lower it — to about `192MB`**: `512MB` on a 512 MB VPS claims the whole machine as cache, which is the image's `4GB` mistake one order of magnitude down. `192MB` is the `64MB` of `shared_buffers` that row recommends plus a small real page cache; confirm the second half with `free -m` rather than copying the figure. That ~1 GB is the same threshold `POSTGRES_SHARED_BUFFERS` and `POSTGRES_WORK_MEM` use — one number for all three dials. A value the server cannot parse makes PostgreSQL refuse to start while `docker compose up -d` still exits `0`, so change one dial at a time and check `docker compose ps`. **Upgrading from before 0.18.0 on a host of 4 GB or more? This default is a planner regression for you** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`: this is host sizing, not a deployment mode |
+| `POSTGRES_SHARED_BUFFERS` | `128MB` | PostgreSQL's own cache, and unlike the row above this one **is** an allocation — it comes out of `POSTGRES_MEMORY_LIMIT`, and on a single-box install it comes out of the JVM's share of the machine. Left at the image default deliberately: the stock advice of 25% of RAM assumes the database owns the host, and this memory is double-buffered against the very page cache `effective_cache_size` just told the planner to count on. Raise it with the host, and raise `effective_cache_size` and `POSTGRES_MEMORY_LIMIT` with it. **Under ~1 GB of RAM, lower it — to `64MB`**: there this allocation comes straight out of the JVM's share, and the page cache is doing the work anyway. Same ~1 GB threshold as `POSTGRES_EFFECTIVE_CACHE_SIZE` and `POSTGRES_WORK_MEM`. Identical in `dc` and `cloud` |
+| `POSTGRES_WORK_MEM` | `4MB` | Memory for one sort or hash — **per node, not per connection**, which is the whole reason this row spells it out. A single query with three sorts and a hash join can take four times this value, and the app opens up to `DB_POOL_MAX_SIZE` (default 10) connections, so the honest worst case is `work_mem × nodes × backends`: even `4MB` is `4MB × ~4 × ~12` ≈ **190 MB** of exposure. **That makes this one of the three dials `POSTGRES_MEMORY_LIMIT` has to be raised with** — doubling it doubles the product that ceiling must contain, without the pool changing at all. Lower spills sorts into temp files (slow); higher swaps a small host, which is slower still and drags the JVM's garbage collector down with it. Raise it on a roomy host, or per session (`SET work_mem`) for one heavy job, rather than globally on a box that is already tight — and under ~1 GB of RAM go **down**, to `2MB`, since the same multiplication happens against less memory (same threshold as the two rows above). **Raising it also wants `POSTGRES_SHM_SIZE` raised**: PostgreSQL's parallel workers allocate their share of a sort in `/dev/shm`, which Docker fixes at 64 MB per container, and running out of it fails with `could not resize shared memory segment … No space left on device` — a message that names neither this variable nor the memory limit. Identical in `dc` and `cloud` |
+| `POSTGRES_SHM_SIZE` | `64m` | Size of `/dev/shm` for the **PostgreSQL container** in the bundled compose file (`shm_size`). Read by Docker Compose, so it takes docker suffixes, and the default **is** Docker's own 64 MB — as shipped this variable changes nothing. It exists because `POSTGRES_WORK_MEM` above tells you to raise `work_mem` on a roomy host, and PostgreSQL's **parallel** workers put their dynamic shared memory segments here, sized from `work_mem`: raise one far enough without the other and queries fail with `could not resize shared memory segment … No space left on device`, against `/dev/shm` rather than against `POSTGRES_MEMORY_LIMIT`. A starting point is `work_mem` × the parallel workers one query may use, with room to spare. Not part of `POSTGRES_MEMORY_LIMIT`'s budget in the way `shared_buffers` is, but not free either — a tmpfs page in use is host RAM. Identical in `dc` and `cloud` |
 | `DB_LOG_SERVER_ERROR_DETAIL` | `false` | Whether PostgreSQL's `DETAIL`, `HINT`, `POSITION`, `WHERE` and `INTERNAL QUERY` lines reach your application log. **Off by default, and that is a privacy floor rather than a tuning default**: the JDBC driver folds `DETAIL` into the exception *message* and Hibernate logs that message before any application code runs, so nothing inside the app can redact it — on a duplicate-key error it would print the colliding **values**, which on the invitation path is a third party's full email address, from a request that person never made. Logs are also the one place data leaves the box (a shipper, a support ticket, a screenshot), so the address you would leak is your own user's. **What being off costs you is wider than the case it was added for**, because it applies to *every* server error on this pool: **Flyway shares this datasource**, so a migration that fails during an upgrade names the index or constraint and **not the rows that collided**, and reports no source position on a syntax error — see the [Troubleshooting](#troubleshooting) row for the one-session procedure. Also lost: trigger context, `Failing row contains (...)` on a not-null violation, and the colliding key on duplicate errors that carry no personal data at all. **Turn it on for one debugging session and remove the line afterwards** — it is not a setting to run with. Setting it via `?logServerErrorDetail=true` on `DB_URL` also works at the driver but does **not** survive: the bundled `docker-compose.prod.yml` sets `DB_URL` itself and is replaced wholesale by an upgrade. **Unlike the two timeouts above, a blank value is harmless here** — it binds as a driver property rather than as an int, and an empty string reads as `false`, so `DB_LOG_SERVER_ERROR_DETAIL=` is simply off. Identical in `dc` and `cloud` |
 | `DB_LOCK_TIMEOUT_MS` | `3000` | How long a transaction may wait for a row lock before giving up, in ms. **From 0.17.0 this applies to every transaction the app opens, not only to the few that lock deliberately** — so an ordinary edit queued behind a long-running change (removing a member with a lot of assigned work is the usual one) now fails after 3 s with a retryable `409` instead of waiting indefinitely. That is the point: it is issued together with `DB_STATEMENT_TIMEOUT_MS` below, because `statement_timeout` counts lock-wait time, and without it a contended write would be cancelled by *that* bound and answered `422` — a refusal that tells the caller not to retry when retrying is exactly what works. Raise it if legitimate edits collide often enough to be noticed. (This row used to name the handful of endpoints that locked on purpose; that list was wrong within one release and is now wrong by design.) Applied with `SET LOCAL` inside each transaction the app opens — **not** as a server-wide PostgreSQL `lock_timeout`, which is why Flyway migrations on the same pool are unaffected and still wait as long as they need: Flyway runs its own transactions and never goes through the app's transaction manager. Exceeding it is a retryable `409` + `Retry-After`, not a failure. Valid range 100–60000; out-of-range, `0` (PostgreSQL reads it as "wait for ever" — the behaviour this setting exists to remove) or **blank** fails startup instead of being clamped, so `DB_LOCK_TIMEOUT_MS=` does not disable the line, it stops the boot — remove the line to get the default. **From 0.17.0 the usable top of that range is lower than 60000**: `DB_STATEMENT_TIMEOUT_MS` must stay at least twice this value, so at its default of `10000` this one may not exceed **5000**. Raising it past that stops the boot naming both properties — raise the statement bound in the same edit |
 | `DB_STATEMENT_TIMEOUT_MS` | `10000` | How long **any one statement** of an application transaction may run before PostgreSQL cancels it, in ms. Applied with `SET LOCAL` to every transaction the app opens — there is no list of covered endpoints, because the cost of a statement is a property of how much data you have and not of which feature issued it. **Flyway is deliberately not covered**: migrations run their own transactions, and an index build or a table rewrite on a large install legitimately takes minutes. Exceeding it answers `422` with `errorType: STATEMENT_BUDGET_EXCEEDED` and **no** `Retry-After` — an identical retry costs identical time — and logs a WARN naming this variable. It does **not** bound how long a *connection* is held: a transaction of many statements, or one that spends its time assembling a response in Java, can outlive this number. **New in 0.17.0, and on a large install it can turn a slow report, search or member removal into an error** — see [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170) for a size-to-value table. Must be at least **2x `DB_LOCK_TIMEOUT_MS`** or the app refuses to start: `statement_timeout` counts lock-wait time too, so a smaller value would fire first and replace the retryable `409` above with a `422` that is not retryable. Valid range 1000-600000 — but the `2x` rule is the binding one in practice: **with the default `DB_LOCK_TIMEOUT_MS` of 3000 the smallest value that boots is 6000**, and `1000` is only reachable if you also lower the lock bound to 500 or less. `0` means "no bound" to PostgreSQL and is refused, and **blank** stops the boot exactly as `DB_LOCK_TIMEOUT_MS` does. **Raising this is not free:** every second you add is a second one request may hold one of your `DB_POOL_MAX_SIZE` connections, so the same pool serves fewer concurrent slow requests — past ~30 s, raise the pool with it. Identical in `dc` and `cloud` |
@@ -446,9 +487,11 @@ Every variable the **application** reads is wired to a Spring property via a
 placeholder in `application.properties` (e.g. `DB_URL` → `spring.datasource.url`,
 `MAIL_HOST` → `spring.mail.host`, `APP_BASE_URL` → `app.base-url`). A variable that
 sizes the **container** rather than the application is read by Docker Compose and
-never reaches the JVM (`APP_MEMORY_LIMIT`); its row says so, and it takes docker
-units rather than Spring ones. The names above are the supported configuration
-surface — prefer them over setting Spring properties directly.
+never reaches the JVM (`APP_MEMORY_LIMIT`, `POSTGRES_MEMORY_LIMIT`,
+`CADDY_MEMORY_LIMIT` and `POSTGRES_SHM_SIZE`, which size containers, plus the three
+`POSTGRES_*` server dials, which Compose passes to the database rather than to Spring);
+those rows say so, and they take docker or PostgreSQL units rather than Spring ones. The names above are the supported
+configuration surface — prefer them over setting Spring properties directly.
 
 ## TLS & reverse proxy
 
@@ -985,6 +1028,16 @@ nothing is rewritten, but a description or comment already longer than the new b
 **every** save of that record — including one that changes something else — until somebody
 shortens it. There is a query there too, and on an ordinary install it returns zeros.
 
+**And the same release bounds and tunes the database container, which is the one change here
+that lands differently depending on how big your host is:**
+[PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180).
+The bundled compose file now caps the `postgres` container at `512m` where it had no cap at
+all, and passes `effective_cache_size=512MB` where the image's own default is `4GB`. On a
+small host both are fixes. **On a host with several gigabytes of page cache the second is a
+planner regression** — the planner stops believing in cache the machine really has and drifts
+towards sequential scans on large tables. There is no error; things simply get slower, the
+same shape as the 0.17.0 heap cut above. One line in `.env` restores it.
+
 **Also new in 0.17.0, and this one wants a check before you pull rather than after:**
 [Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
 The upgrade attributes every existing notification to a workspace and deletes any it cannot
@@ -1341,7 +1394,39 @@ JAVA_TOOL_OPTIONS=-Xmx3g    # with APP_MEMORY_LIMIT=4g: limit minus ~700 MB
 > you would look for is present and says the wrong thing. `-Xmx` is a different flag
 > and does override the percentage.
 
-**Check what you actually got.** The container's limit and the heap it produces:
+**Check what you actually got.** From 0.18.0 the application says so itself, once, at
+startup — ask it before you ask anything else:
+
+```bash
+docker compose logs app | grep "Memory: max heap"
+# Memory: max heap 512 MB = 536870912 bytes (MaxHeapSize; derived from -XX:MaxRAMPercentage=50,
+# no -Xmx); GC SerialGC; container memory limit 1024 MB; app.reports.max-rows=20000
+```
+
+That line is printed by the running JVM about itself, so unlike every other check here
+it cannot be reading a different process. It names:
+
+- **the resolved maximum in bytes**, and *which* maximum it is. `MaxHeapSize` is
+  HotSpot's own figure — the one `-XX:+PrintFlagsFinal` prints below, so the two can be
+  compared digit for digit. If that word instead reads `Runtime.maxMemory`, this JVM
+  would not state `MaxHeapSize` and the number is *usable* heap, which some collectors
+  report a little below the configured maximum (~18 MB below it at `1g`);
+- **whether that maximum came from an explicit `-Xmx` or was derived from a percentage**
+  — which is what settles the `JAVA_TOOL_OPTIONS` trap above, since
+  `Picked up JAVA_TOOL_OPTIONS: …` says a variable was read and not that it was applied;
+- **the garbage collector.** At `APP_MEMORY_LIMIT=1g` the JVM is below its "server-class
+  machine" threshold and picks **SerialGC** — single-threaded, stop-the-world — and at
+  `2g`, same image and same flags, it picks **G1** (measured 2026-09-01 on
+  `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, with 2 CPUs).
+  That is the difference between a 50 ms pause and a multi-second one, and the
+  likeliest explanation of the 4.99 s pause the 2026-08-31 load run measured on a `1g`
+  container. If pauses rather than `OutOfMemoryError` are the symptom, `APP_MEMORY_LIMIT`
+  is the dial that moves the collector;
+- **the container limit the JVM can see** — `none` means no limit, so the percentage is
+  being taken against *host* RAM; `unknown` means there is no cgroup memory file to read;
+- **`REPORTS_MAX_ROWS`**, because that budget is costed in bytes against exactly this heap.
+
+The container's limit and the heap from the outside:
 
 ```bash
 docker stats --no-stream --format '{{.Name}}  {{.MemUsage}}'
@@ -1349,10 +1434,13 @@ docker compose exec app java -XX:MaxRAMPercentage=50.0 -XX:+PrintFlagsFinal -ver
 ```
 
 The first prints `used / limit` per container. The second prints the heap in bytes
-(`536870912` is 512 MB). Repeat the flag exactly as shown: `exec` starts a *fresh*
+(`536870912` is 512 MB). **Repeat the flag exactly as shown**: `exec` starts a *fresh*
 JVM that does not inherit the image's startup arguments, so without it you would be
-reading the default rather than yours. If you set `JAVA_TOOL_OPTIONS`, that JVM picks
-it up the same way the app does, so the number stays honest.
+reading the JVM's default (~25% of the limit, i.e. `268435456` — a plausible-looking
+number for a process that is not your application) rather than yours. That mistake has
+been made against this deployment in earnest, which is the other reason the startup line
+above exists. If you set `JAVA_TOOL_OPTIONS`, that fresh JVM picks it up the same way the
+app does, so the number stays honest.
 
 **Do this even if you are sure**, and the blunt form of the check is
 
@@ -1377,6 +1465,75 @@ file. The command above is the only thing that answers it; a file cannot.
 capped your container and the percentage is taken against host RAM — which at 50% is
 *more* heap than before, and closer to the host's ceiling than is safe. Add a
 `mem_limit:` to the app service; the [Quick start](#quick-start) file shows one.
+
+### PostgreSQL is bounded and tuned from 0.18.0
+
+**Read this if you use the bundled `docker-compose.prod.yml` and have never edited the
+`POSTGRES_*` lines in `.env`.** Two defaults change for you, and only one of them can hurt.
+
+Until 0.18.0 the `postgres` service carried **no `mem_limit`** and ran at the image's own
+memory settings. From 0.18.0 the bundled file caps the container and passes three dials
+explicitly:
+
+| Setting | Before (image default) | From 0.18.0 | `.env` variable |
+|---|---|---|---|
+| container ceiling | none | `512m` | `POSTGRES_MEMORY_LIMIT` |
+| `effective_cache_size` | `4GB` | `512MB` | `POSTGRES_EFFECTIVE_CACHE_SIZE` |
+| `shared_buffers` | `128MB` | `128MB` — unchanged | `POSTGRES_SHARED_BUFFERS` |
+| `work_mem` | `4MB` | `4MB` — unchanged | `POSTGRES_WORK_MEM` |
+
+**The defaults are sized for a 1–2 GB host, and `effective_cache_size` is the one that can
+hurt you without failing.** It is not an allocation — it is what the planner *believes* is cached, so
+nothing ever refuses it and nothing ever runs out because of it. On a small box the image's
+`4GB` was a claim that more data was cached than the machine had RAM, and correcting it is
+the fix this change exists for. On an **8 GB or 32 GB host with a multi-gigabyte page
+cache, `512MB` is an under-claim**: the planner stops believing in cache it really has and
+shifts towards sequential scans on large tables. There is no error and nothing fails — the
+only symptom is that things get slower, which is exactly the shape of the 0.17.0 heap cut
+above.
+
+The rows are disjoint — read the one your host falls in, not the first one that could match:
+
+| Your host | Do this |
+|---|---|
+| under 1 GB (a small VPS) | **lower all three**: `POSTGRES_SHARED_BUFFERS=64MB`, `POSTGRES_EFFECTIVE_CACHE_SIZE=192MB` (that is `64MB` + what `free -m` really shows as cache — check yours rather than copying `192MB`), `POSTGRES_WORK_MEM=2MB`. Bring `POSTGRES_MEMORY_LIMIT` down with them if you like, but never under what the server is then configured to use |
+| 1–2 GB | nothing — the new defaults are the fix, and this is the host they were measured on |
+| 4 GB, app + database on one box | `POSTGRES_EFFECTIVE_CACHE_SIZE=1GB` |
+| 8 GB, app + database on one box | `POSTGRES_EFFECTIVE_CACHE_SIZE=2GB`, and `POSTGRES_SHARED_BUFFERS=256MB` with `POSTGRES_MEMORY_LIMIT=1g` if the database is the busy part |
+| dedicated database host | `shared_buffers` ~25% of RAM, `effective_cache_size` ~75%, and `POSTGRES_MEMORY_LIMIT` above the sum |
+
+**Raising `POSTGRES_WORK_MEM` on any of the roomy rows wants `POSTGRES_SHM_SIZE` raised with
+it.** Parallel workers put their share of a sort in `/dev/shm`, which Docker sizes at 64 MB
+for every container; exhausting it fails with `could not resize shared memory segment … No
+space left on device`, which names neither dial. The default is Docker's own 64 MB, so it
+only becomes a setting once `work_mem` grows.
+
+Then `docker compose up -d`. A value PostgreSQL cannot parse makes the **server** refuse to
+start while `docker compose up -d` still exits `0`, so change one dial at a time and check
+`docker compose ps`.
+
+**The container ceiling is the other half, and it is containment rather than protection.**
+`512m` is ~2× the peak RSS measured on this project's own production box (~240 MB) at these
+settings. What it buys is that a runaway database dies and restarts inside its own cgroup
+instead of the kernel picking a victim across the whole host — which, before this release,
+could as easily have been the application, the only bounded process in the file. What it
+does **not** buy is a host that cannot run out of memory: ceilings are maxima, not
+reservations, and the bundled defaults still declare more of them than a 2 GB box has RAM.
+
+**Raise `POSTGRES_MEMORY_LIMIT` whenever you raise any dial that is a term in what it has to
+contain — `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`.** The first
+is obvious; the last is the one that catches people. `work_mem` is charged per sort or hash
+node **per backend**, so both it and the pool size are factors in the same worst case:
+`4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql`
+session) ≈ **190 MB** at the defaults, and `DB_POOL_MAX_SIZE=50` makes it `4MB × 4 × 52` ≈
+**830 MB** — well under a stock `max_connections` of 100, and well over a `512m` ceiling,
+where the failure is an OOM-killed backend or postmaster rather than a refused connection.
+Doubling `POSTGRES_WORK_MEM` doubles the same figure without touching the pool at all.
+
+**Running your own compose file?** None of this reaches you: both the ceiling and the dials
+live in `docker-compose.prod.yml`, so your database keeps the image's `4GB`
+`effective_cache_size` and no container limit. The [Quick start](#quick-start) file shows
+the form to copy, spelled with the same variables so `.env` can still drive it.
 
 ### Account addresses become case-insensitive in 0.18.0 (one query, before you pull)
 

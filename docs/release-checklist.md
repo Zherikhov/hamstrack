@@ -367,6 +367,41 @@ not be left to discover:
 > upgrade. Details:
 > [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
 
+0.18.0 changes a resource default of its own, in the database container this time. It is in
+this class for the reason the section opens with: it improves the small host it was measured
+on and takes something away from a larger one, and neither direction produces an error.
+
+> **PostgreSQL is bounded and tuned (`POSTGRES_MEMORY_LIMIT` `512m`,
+> `POSTGRES_EFFECTIVE_CACHE_SIZE` `512MB`).** If you run the bundled `docker-compose.prod.yml`,
+> the `postgres` container now has a memory ceiling where it had none, and the planner is told
+> `effective_cache_size=512MB` where the image's default was `4GB`. **On a host of 4 GB or more
+> the second one is a planner regression**: `512MB` under-claims a page cache you really have,
+> so the planner drifts towards sequential scans on large tables. There is no error — things
+> just get slower. Set `POSTGRES_EFFECTIVE_CACHE_SIZE` in `.env` to roughly `shared_buffers`
+> plus the page cache this database can expect (4 GB host → `1GB`, 8 GB → `2GB`, dedicated
+> database host → ~75% of RAM) and `docker compose up -d`. On a 1–2 GB host that also runs the
+> app, leave the defaults: correcting the `4GB` claim is what this change is for. Under 1 GB,
+> lower all three server dials instead — the linked section carries the values. **Also raise
+> `POSTGRES_MEMORY_LIMIT` if you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or
+> `DB_POOL_MAX_SIZE`** — `work_mem` is charged per sort node per backend, so both it and the
+> pool size multiply straight into that ceiling: `4MB × ~4 nodes × ~12 backends` ≈ ~190 MB at
+> the defaults, and `DB_POOL_MAX_SIZE=50` makes it `4MB × 4 × 52` ≈ ~830 MB against `512m`.
+> Details:
+> [PostgreSQL is bounded and tuned from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#postgresql-is-bounded-and-tuned-from-0180).
+
+And one line that changes no default but answers a question every one of the lines above
+makes an operator ask:
+
+> **The application now states the memory it actually got.** One INFO line per start:
+> `docker compose logs app | grep "Memory: max heap"` prints the resolved maximum heap in
+> bytes (HotSpot's `MaxHeapSize`, so it can be compared directly with
+> `java -XX:+PrintFlagsFinal -version`), whether it came from an explicit `-Xmx` or from a
+> percentage, the garbage collector, the container limit the JVM can see, and
+> `REPORTS_MAX_ROWS` beside it. It is the only artefact in a deployment that reports a
+> measurement rather than an intention — in particular it is what settles
+> `Picked up JAVA_TOOL_OPTIONS: …`, which says a variable was *read* and not that it was
+> *applied*.
+
 ## Constraints on a populated table, and why they are free right now
 
 Adding a constraint to a table that already holds rows makes PostgreSQL validate

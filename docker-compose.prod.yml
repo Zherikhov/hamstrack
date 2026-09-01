@@ -1,3 +1,42 @@
+# Hamstrack production stack: the application, its database, and the TLS front door.
+#
+# ── HOW THIS BOX'S MEMORY IS DIVIDED (HD-180, sized from the 2026-08-31 load window)
+#
+# Every service here and in docker-compose.observability.yml carries a mem_limit.
+# That is CONTAINMENT, not protection. A mem_limit is a CEILING on one container and
+# never a reservation, so a service that runs away is killed and restarted inside its
+# own cgroup instead of the kernel choosing a victim across the whole box. It does not
+# make the deployment unable to exhaust host memory, and on the current production
+# host it demonstrably does not:
+#
+#   declared ceilings   app 1024 + postgres 512 + caddy 128
+#                       + observability 1024 (that file's seven services)  = 2688 MiB
+#   host                t3.small, 1909 MiB
+#
+# 2688 MiB of ceilings on 1909 MiB of RAM. Ceilings summing past RAM is ordinary —
+# they are maxima that are not reached together — but it does mean the sentence
+# "every service is bounded, so the stack cannot OOM the box" is FALSE for this
+# deployment, and on this host it cannot be made true without either cutting the app's
+# heap or dropping observability. That is the strongest argument for the resize
+# tracked as HD-189, and it is written down here rather than left to be re-derived
+# from a sum that looks reassuring.
+#
+# What was actually measured under load (ops/loadtest/RESULTS-2026-08-31.md): peak RSS
+# app ~678 MB, postgres ~240 MB, caddy ~24 MB, observability ~466 MB — about 1.4 GiB
+# of the 1909 — while host available memory fell to 147 MB, buff/cache ran 387–631 MB
+# and swap climbed 51 → 275 MB. The ceilings below are sized from those peaks, not
+# from a budget, and the app's is NOT raised here: on a box this size a bigger heap
+# makes the swapping worse (that decision belongs to HD-189, with the resize).
+#
+# The division this becomes after that resize, on an 8 GiB host: app 2 GiB, postgres
+# 2 GiB, observability 1 GiB, caddy 256 MB — ~5.25 GiB declared, leaving ~2.7 GiB to
+# the OS and to the page cache PostgreSQL reads through. Each of those is an .env
+# variable (APP_MEMORY_LIMIT / POSTGRES_MEMORY_LIMIT / CADDY_MEMORY_LIMIT), so the
+# resize is three values in .env and no edit to this file — the observability
+# ceilings are literals in their own file and are already right at 1 GiB.
+#
+# Identical in dc and cloud: how a box divides its RAM is a property of the box, not
+# of the deployment model.
 services:
   app:
     # The owner's prod tracks `latest` on purpose (continuous deploy). If you are
@@ -72,13 +111,14 @@ services:
     # docker-compose.observability.yml already uses, and it cannot become a no-op by
     # being read in the wrong mode.
     #
-    # This bounds the app ALONE. postgres and caddy below are deliberately unbounded
-    # (Postgres sizes itself from shared_buffers/work_mem, not from a container cap,
-    # and capping it turns a tuning problem into a kill), so the observability file's
-    # "every service has a mem_limit, so the stack can't OOM the box" is an invariant
-    # of THAT file and not of this deployment. Under host memory pressure the kernel
-    # still chooses a victim, and the app — the one process here with a declared
-    # ceiling — is not thereby protected from being it.
+    # This bounds the app ALONE, and until HD-180 it was the only bound in this file:
+    # postgres and caddy ran unbounded while every observability container was capped,
+    # so under host memory pressure the kernel chose the victim and the app — the one
+    # process here with a declared ceiling — was not thereby protected from being it.
+    # Both now carry limits below. What that buys is containment (each service fails
+    # inside its own cgroup and restarts) and NOT an inability to exhaust the host:
+    # the ceilings still sum past this box's RAM. The arithmetic is at the top of this
+    # file, where it belongs to the deployment rather than to any one service.
     #
     # AND THIS LINE IS A CEILING ONLY ON A BOX THAT IS ACTUALLY RUNNING THIS FILE.
     # Measured on production 2026-08-28 (HD-189): the app, postgres and caddy all
@@ -98,6 +138,16 @@ services:
     # <compose-project>-app-1 and that follows your directory. The HostMemoryLow /
     # HostSwapInUse / HostKernelOOMKill rules in observability/grafana/provisioning/
     # alerting/rules.yml are what watch the host side of this either way.
+    #
+    # THIS LINE ALSO PICKS THE GARBAGE COLLECTOR, WHICH IS NOT OBVIOUS FROM ANYTHING
+    # ELSE HERE. At 1g the JVM is below its "server-class machine" threshold and
+    # ergonomically selects SerialGC — single-threaded, stop-the-world; at 2g, same
+    # image and same flags, it selects G1 (measured 2026-09-01 on
+    # eclipse-temurin:21-jre-alpine, the tag this deployment's Dockerfile runs, 2 CPUs).
+    # That is the likeliest explanation of the 4.99 s GC pause in
+    # ops/loadtest/RESULTS-2026-08-31.md, which ran on a 1g container, and it is a second
+    # reason the resize (HD-189) is worth more than it looks. The app states the
+    # collector it actually got on its startup line (HD-179).
     mem_limit: ${APP_MEMORY_LIMIT:-1g}
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local
@@ -115,12 +165,101 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    # PostgreSQL's memory dials (HD-225), and the only reason this service has a
+    # `command:` at all. Without one the image runs at ITS defaults, which is where
+    # this deployment sat until now: shared_buffers 128MB, work_mem 4MB — and
+    # effective_cache_size 4GB on a 1909 MiB host, i.e. the planner was told there is
+    # more than twice as much cache as the machine has RAM. On a box measured
+    # swapping, that assumption is not optimistic, it is inverted.
+    #
+    # `postgres -c name=value` is the image's documented way to pass server
+    # parameters: the entrypoint still runs, so initdb, the POSTGRES_* variables and
+    # the healthcheck are unaffected. A value PostgreSQL cannot parse makes the server
+    # REFUSE TO START, and `docker compose up -d` still exits 0 while that happens —
+    # change one at a time and check `docker compose ps`.
+    #
+    # Each is an .env variable with the default below, because a self-hoster's box is
+    # not this box; see .env.prod.example and docs/self-hosting.md for the sizing
+    # rules. Read by Compose, never by the app, so they take PostgreSQL's own units
+    # (128MB, 1GB) and an EMPTY value is harmless — `:-` falls back to the default.
+    #
+    # effective_cache_size = 512MB. THE DERIVATION, not a number somebody typed: it is
+    # not an allocation, it is what the planner BELIEVES is cached — shared_buffers
+    # plus the OS page cache it can expect to reach. Measured on this host during the
+    # 2026-08-31 load window: buff/cache 387–631 MB, available memory 147–493 MB,
+    # against a 312 MB database. shared_buffers (128 MB) + the LOW end of the observed
+    # page cache (387 MB) is ~515 MB, so 512MB. Deliberately the low end, twice over:
+    # this box swaps under load, and the page cache is shared with the JVM, Caddy and
+    # the observability stack's seven containers rather than being the database's. On a dedicated
+    # database host the usual starting point is ~75% of RAM; this host is not one.
+    #
+    # shared_buffers = 128MB, LEFT AT THE IMAGE DEFAULT deliberately. The stock advice
+    # of 25% of RAM (~477 MB here) is wrong for this box: that RAM is not spare, it is
+    # the app's heap and the observability stack's, and shared_buffers is
+    # double-buffered against the very page cache the line above just told the planner
+    # to count on. 128 MB against a 312 MB database — with postgres peaking at ~240 MB
+    # RSS — is the shape that was measured working. Raise it with the host, and raise
+    # effective_cache_size with it.
+    #
+    # work_mem = 4MB, also left alone, and read the UNIT before changing it: work_mem
+    # is PER SORT OR HASH NODE, not per connection. One query with three sorts and a
+    # hash join can take four times this figure, and the backend count is the app's
+    # pool max (10) plus the postgres-exporter plus any psql session, so the honest
+    # worst case is work_mem × nodes × backends — 4MB × ~4 × ~12 backends ≈ 190 MB on a
+    # box whose available memory was measured at 147 MB. THIS FILE IS WHERE THAT DERIVATION
+    # LIVES; anywhere else in the repository a worst-case figure appears it is spelled with
+    # these same factors, so a reader can multiply it instead of trusting it — a number
+    # nobody can check is how "~190 MB" and "10 backends" came to sit in one sentence.
+    # Lower spills a sort to a temp file, which is
+    # slow; higher swaps the box, which is slower and takes the JVM's garbage collector
+    # down with it (4.99 s pauses, measured — RESULTS-2026-08-31.md §3.7). RAISING THIS
+    # RAISES POSTGRES_MEMORY_LIMIT WITH IT — it is a factor in the product that ceiling
+    # has to contain — and on a roomy host it also wants shm_size below, because a
+    # parallel worker's share of a sort lives in /dev/shm and Docker's is 64 MB.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
     environment:
       POSTGRES_DB: hamstrack
       POSTGRES_USER: ${DB_USERNAME:?set DB_USERNAME in .env}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+    # /dev/shm, which Docker sizes at 64 MB for every container and which PostgreSQL's
+    # PARALLEL workers use for their dynamic shared memory segments — sized from work_mem.
+    # The default here IS Docker's 64m, so this line changes nothing as shipped; it exists
+    # because the comment above and the docs both invite raising work_mem on a roomy host,
+    # and the failure that follows names neither dial: `could not resize shared memory
+    # segment … No space left on device`, raised against /dev/shm and not against
+    # mem_limit. Raise this with work_mem (a starting point: work_mem × the parallel
+    # workers a query may use, with room to spare), or leave both alone together.
+    shm_size: ${POSTGRES_SHM_SIZE:-64m}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    # HD-180. This service was unbounded, and the ticket allows "deliberately
+    # unbounded, because X" as an outcome — so here is why it is bounded instead.
+    # The case for leaving it alone is real and was weighed: shared_buffers and
+    # work_mem above are PostgreSQL's actual dials, and a cgroup ceiling converts a
+    # tuning mistake into an OOM kill of a backend — or of the postmaster, which takes
+    # every session with it. What decides it the other way is that the alternative is
+    # not "nothing gets killed", it is "the kernel picks", and on a host measured at
+    # 147 MB available the kernel's pick is as likely to be the JVM: neither the
+    # process that grew, nor the one that comes back cheapest.
+    #
+    # 512m is ~2× the measured peak RSS (~240 MB) and well above what this server can
+    # reach at the settings above (128 MB shared_buffers + per-backend work_mem +
+    # maintenance_work_mem + WAL buffers + ~12 backends of overhead). A containment
+    # ceiling, sized so that touching it means something is wrong rather than that the
+    # box is busy. RAISE IT WITH ANY DIAL THAT IS A TERM IN WHAT IT HAS TO CONTAIN —
+    # shared_buffers (a floor under it), work_mem and DB_POOL_MAX_SIZE (the two factors
+    # in the ~190 MB product above) — and never below it. Note Docker
+    # gives a container with a mem_limit and no memswap_limit twice the limit in swap,
+    # so under pressure this swaps before it dies, which is the behaviour the app
+    # already has (MemorySwap 2 GiB, measured on the running box).
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d hamstrack"]
       interval: 5s
@@ -140,6 +279,12 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data        # stores certificates (persisted across restarts)
       - caddy_config:/config
+    # HD-180. 128m against a measured peak of ~24 MB — deliberately ~5× where postgres
+    # gets ~2×, because an OOM kill HERE is the whole site: this is the only container
+    # on 80/443, so a restart is an outage for every visitor plus a TLS handshake surge
+    # on the way back up, while ~100 MB of unused ceiling costs nothing (a ceiling is
+    # not a reservation). Sized to contain a leak, not to ration capacity.
+    mem_limit: ${CADDY_MEMORY_LIMIT:-128m}
     depends_on:
       app:
         condition: service_healthy

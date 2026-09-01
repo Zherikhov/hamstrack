@@ -277,8 +277,18 @@ same box the `app`, `postgres` and `caddy` containers each reported
 `HostConfig.Memory = 0` — no limit at all — so this stack was the only *bounded* part
 of the deployment. Read that before blaming the optional stack for host memory
 pressure; it is the part that cannot run away. It is **not** a sizing recommendation
-— that instance has never been under load, and the load run that would produce one is
-HD-186.
+— that instance had never been under load when it was taken.
+
+**Both halves have since moved, so read the paragraph above as a dated reading.** The
+load run happened (2026-08-31, `ops/loadtest/RESULTS-2026-08-31.md`): under load this
+stack peaked at the same **~466 MiB** while the app reached ~678 MB, PostgreSQL ~240 MB
+and Caddy ~24 MB, and the box — not this stack — ran out of memory. And `app`,
+`postgres` and `caddy` are no longer unbounded: all three now carry a `mem_limit` in
+`docker-compose.prod.yml` (HD-152 / HD-180). What that does **not** buy is a stack that
+cannot exhaust the host: the ten ceilings now declare **2688 MiB on a 1909 MiB box**,
+which is why the sum is written out at the top of that file rather than left to be
+inferred from here. Whether any given container is bounded is still a question for
+`docker inspect`, on the box, today.
 
 ### Dashboards
 
@@ -421,6 +431,33 @@ Resolve the container rather than naming it: the container's name is
 `<compose-project>-app-1`, taken from the directory the compose file sits in, so a
 hard-coded `hamstrack-app-1` answers `No such object` on any install that cloned somewhere
 else.
+
+**The heap the JVM actually resolved is in the application's own log, once per start**
+(HD-179) — the one signal here that is neither a declaration nor a reading of a different
+process:
+
+```bash
+docker compose logs app | grep "Memory: max heap"
+# Memory: max heap 512 MB = 536870912 bytes (MaxHeapSize; derived from -XX:MaxRAMPercentage=50,
+# no -Xmx); GC SerialGC; container memory limit 1024 MB; app.reports.max-rows=20000
+```
+
+It names the resolved maximum in bytes — HotSpot's `MaxHeapSize`, so it compares digit for
+digit with `java -XX:+PrintFlagsFinal -version`; the word `Runtime.maxMemory` there instead
+means the JVM would not state `MaxHeapSize` and the figure is usable heap, which can read
+slightly below it — whether that maximum came from an explicit `-Xmx` or was derived from a
+percentage, **the garbage collector**, the container limit the JVM can see (`none` there
+means the percentage was taken against *host* RAM — the state `JVMHeapPressure` cannot see
+and `HostMemoryLow` exists for), and `REPORTS_MAX_ROWS`, which is costed in bytes against
+that heap.
+
+The collector is on that line because the container limit selects it: at `1g` the JVM is
+below its "server-class machine" threshold and ergonomically picks **SerialGC**, at `2g` it
+picks **G1** (measured, same image and flags). A stop-the-world single-threaded collector is
+the likeliest explanation of the 4.99 s pause in `ops/loadtest/RESULTS-2026-08-31.md`, and
+no dashboard panel here would have told you which one was running.
+`jvm_memory_max_bytes{area="heap"}` is the heap figure as a series when you want it on a
+dashboard; the log line is what an operator has during an incident, before Grafana is open.
 
 **The two thresholds are absolute bytes rather than percentages, on purpose.** A percentage
 stops meaning anything the moment the instance is resized: 90% of 1909 MB and 90% of

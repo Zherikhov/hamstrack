@@ -103,9 +103,62 @@ shell "docker inspect \$(docker ps -q) --format '{{.Name}} {{.HostConfig.Memory}
 # one exists and against HOST RAM when it does not, so the same image yields a 495 MiB heap
 # or a 956 MB one depending on a line in a compose file. This is the number the
 # REPORTS_MAX_ROWS costing is against, so it is the number that must be recorded.
-sec "JVM heap ceiling (as the JVM actually computed it)"
-shell "docker exec $APP_CONTAINER sh -c 'java -XX:+PrintFlagsFinal -version 2>/dev/null | grep -E \"MaxHeapSize|MaxRAMPercentage|InitialHeapSize\"'"
-shell "docker exec $APP_CONTAINER sh -c 'wget -qO- http://localhost:8080/actuator/prometheus 2>/dev/null | grep -E \"^jvm_memory_max_bytes.*heap|^jvm_gc_max_data_size_bytes\"'"
+#
+# ASK THE RUNNING PROCESS FIRST, AND NOTHING ELSE COUNTS AS ITS ANSWER. The 2026-08-31
+# window recorded "JVM max heap 268435456 (256 MB), MaxRAMPercentage=25" and neither figure
+# belonged to the application: `docker exec … java -XX:+PrintFlagsFinal -version` starts a
+# SECOND JVM which does not inherit the entrypoint's flags, so it reported its own default
+# ergonomics (25% of the 1 GiB cgroup limit) while the app was running the image's
+# -XX:MaxRAMPercentage=50.0 — a plausible number, off by a factor of two, in the section the
+# whole capacity attribution is read against. The two lines below are the honest sources and
+# they are ordered by trust: the application's own startup line (HD-179, which also names the
+# collector — SerialGC at a 1 GiB limit, G1 at 2 GiB), then the heap and collector flags
+# PID 1 carries, allow-listed by name.
+# The PrintFlagsFinal probe is kept LAST and with the percentage repeated, so
+# it can only agree or disagree rather than quietly substitute.
+sec "JVM heap ceiling — the application's own startup line (HD-179; authoritative)"
+shell "docker logs $APP_CONTAINER 2>&1 | grep -F 'Memory: max heap' | tail -1"
+# THE PROJECTION HERE IS ABOUT THIS COMMAND'S OUTPUT, NOT ABOUT ITS SOURCE. PID 1's command
+# line is the honest answer to "what flags is the app running with", and it is also a string
+# somebody else wrote: this harness is parameterised and aimed at self-hosters, and a compose
+# file of their own may perfectly well say `command: java -Dspring.datasource.password=… -jar
+# app.jar`. Dumping /proc/1/cmdline whole would then paste that into RESULTS-<date>.md, which
+# is committed to a source-available repository — the same substitution the IMDS identity
+# document was appended under ("the source is trustworthy" is not "the output is
+# publishable").
+#
+# SO IT IS AN ALLOW-LIST OF THE FLAGS THE MEASUREMENT NEEDS, NAMED ONE BY ONE, and not a
+# shape filter. `grep -E "^-X"` was the first attempt and it is a DENY-LIST wearing a
+# prefix: -X is a namespace, not a category of harmless value. -XX:OnOutOfMemoryError= and
+# -XX:OnError= take an arbitrary operator-written SHELL COMMAND (a webhook notifier with an
+# inline bearer token is the ordinary case), and -Xlog:gc:file=, -XX:HeapDumpPath= and
+# -XX:ErrorFile= publish host paths. "-X is where -Xmx lives and where a -D cannot" was a
+# claim about which flags carry secrets, and those three refute it while containing none of
+# the words a reader would grep for — which is exactly why the posture, and not the pattern,
+# had to change: this file already argues twice that a deny-list is one new entry away from
+# leaking (the environment dump, the IMDS projection), and it cannot hold both postures.
+# Values are constrained to numbers too, so an admitted NAME cannot smuggle a string.
+# Adding a flag here is a deliberate edit that says what the measurement needs it for.
+#
+# The documented override JAVA_TOOL_OPTIONS is an environment variable and never appears in
+# cmdline at all, so nothing this section exists to record is lost. The startup line
+# immediately above already carries the heap, its origin and the collector.
+JVM_FLAG_ALLOWLIST='^(-Xm[sx][0-9]+[kKmMgG]?|-XX:[+-]?(MaxHeapSize|InitialHeapSize|MaxRAMPercentage|MinRAMPercentage|InitialRAMPercentage|ActiveProcessorCount|Use[A-Za-z0-9]+GC)(=[0-9]+([.][0-9]+)?[kKmMgG]?)?)$'
+# READ ONCE, FAIL LOUDLY, AND SAY SO WHEN THERE IS NOTHING TO PRINT. `sh -c 'A | B; echo'`
+# exits with the status of `echo`, so `shell()`'s "(command failed)" marker can never fire
+# for this line — which would leave a blank line meaning either "no matching flags" or "the
+# read failed quietly". That is the collision §"entitlements" forbids in so many words: an
+# absent value and an agreeing value must not look the same. So /proc/1/cmdline is read once
+# into a variable and a failed read exits non-zero, while the only tolerated empty result
+# names itself.
+sec "JVM heap ceiling — PID 1's heap/GC flags (allow-list: -Xms/-Xmx, heap size, RAM percentage, processor count, collector)"
+shell "docker exec $APP_CONTAINER sh -c 'a=\$(tr \"\\0\" \"\\n\" < /proc/1/cmdline) || exit 1; printf \"%s\\n\" \"\$a\" | grep -E \"$JVM_FLAG_ALLOWLIST\" | tr \"\\n\" \" \"; printf \"%s\\n\" \"\$a\" | grep -qE \"$JVM_FLAG_ALLOWLIST\" || printf \"(no heap or GC flag on PID 1 command line)\"; echo'"
+sec "JVM heap ceiling (a fresh JVM given the same flags — corroboration, not the source)"
+shell "docker exec $APP_CONTAINER sh -c 'java -XX:MaxRAMPercentage=50.0 -XX:+PrintFlagsFinal -version 2>/dev/null | grep -E \"MaxHeapSize|MaxRAMPercentage|InitialHeapSize\"'"
+# 9090, not 8080: this product serves the actuator on its MANAGEMENT port
+# (`management.server.port=${MANAGEMENT_PORT:9090}`). Scraping 8080 here returned nothing on
+# every install of this product, silently — the same defect capture.sh carried (§9).
+shell "docker exec $APP_CONTAINER sh -c 'wget -qO- http://localhost:9090/actuator/prometheus 2>/dev/null | grep -E \"^jvm_memory_max_bytes.*heap|^jvm_gc_max_data_size_bytes\"'"
 
 # --- the values actually in effect ------------------------------------------
 # The pool, the statement and lock bounds, the report/search caps and the board/agile caps.
