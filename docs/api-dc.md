@@ -10,7 +10,7 @@ This is the reference for the HTTP API behind the Hamstrack web app. Everything 
 https://tracker.example.com/api
 ```
 
-> **Beta notice:** the API is unversioned while Hamstrack is in beta — breaking changes are possible and are announced in release notes.
+> **API stability:** the API is unversioned — breaking changes are possible and are announced in release notes.
 
 ## Contents
 

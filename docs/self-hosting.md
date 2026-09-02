@@ -2118,6 +2118,10 @@ refused on save, unchanged in storage, fixed by shortening once.
 Two things to back up: the **PostgreSQL database** and **attachments**. They
 reference each other, so capture them together and restore to a consistent point.
 
+Durability on a self-hosted instance is whatever your backups make it — nothing in
+the product provides it for you, and the statement about Hamstrack Cloud is about
+the operator's instance, not yours.
+
 > **Restore it once, or you do not have a backup.** A dump nobody has read back is
 > a belief about a file. The commands below take about fifteen minutes to run
 > against a throwaway container, and they are the only thing that turns the belief

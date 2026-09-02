@@ -272,6 +272,9 @@ body {
 .lp-licence { max-width: 720px; margin: 24px auto 0; text-align: center; font-size: 13.5px; line-height: 1.6; color: var(--color-text-muted); }
 .lp-licence a { color: var(--color-brand); font-weight: 600; }
 .lp-licence a:hover { text-decoration: underline; }
+/* HD-195: the Cloud durability note under the deploy cards. Same scale and muted token as
+   .lp-licence above it — a policy-meta line, not a feature claim. Tokens only, no hex. */
+.lp-datanote { max-width: 720px; margin: 10px auto 0; text-align: center; font-size: 13.5px; line-height: 1.6; color: var(--color-text-muted); }
 
 .lp-final { text-align: center; padding: 24px 0 0; }
 .lp-finalbox { background: var(--color-ink); border-radius: 20px; padding: 56px 24px; color: #fff; position: relative; overflow: hidden; }

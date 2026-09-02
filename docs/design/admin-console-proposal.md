@@ -96,6 +96,11 @@ Semantics:
 
 ### 4.4 Migration strategy
 
+*(Historical — written 2026-07-16, when the production instance had no users to preserve.
+The reset policy this section assumes was retired by HD-195; see
+`docs/adr/0022-cloud-data-not-reset.md`. Kept as the record of how the migration was
+actually performed, not as current policy.)*
+
 Prod is in test mode with an approved reset precedent and automatic demo
 reseeding on next login. The migration therefore: creates new tables, seeds the
 global catalog (statuses To Do/In Progress/Done; priorities Urgent…None;

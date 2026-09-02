@@ -19,7 +19,7 @@ One codebase ships in two deployment models:
 | File storage | S3 | Local filesystem (or any S3-compatible store) |
 | Configuration | Managed | Fully under your control via environment variables |
 
-> **Status:** Hamstrack is in active development (beta). While in test mode, data on the Cloud instance may periodically be reset; every account gets a pre-populated demo project to explore.
+> **Status:** Hamstrack is in active development — breaking changes are called out in the release notes. Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay until they are deleted. The database is backed up daily and restoring from a backup has been tested; that is an operational practice, not a guaranteed service level. Every account starts with a demo workspace and a sample project to explore.
 
 ## Features
 

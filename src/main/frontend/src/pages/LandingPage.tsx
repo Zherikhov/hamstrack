@@ -236,6 +236,17 @@ export default function LandingPage() {
               {' '}— self-host it, modify it and use it commercially, free of charge. The one thing you
               may not do is offer Hamstrack to third parties as a hosted or managed service.
             </p>
+            {/* HD-195: the canonical durability paragraph, carried verbatim by every surface that
+                raises the subject (README, the Cloud API reference, here). The third clause is
+                load-bearing — it is what makes the paragraph agree with Terms §5/§7 instead of
+                contradicting them, so a copy that keeps the first two sentences and drops it
+                re-creates the defect this note exists to close. Plain contiguous text: no emphasis
+                markup and nothing assembled from adjacent children, or the seal cannot see it. */}
+            <p className="lp-datanote">
+              Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay
+              until they are deleted. The database is backed up daily and restoring from a backup
+              has been tested; that is an operational practice, not a guaranteed service level.
+            </p>
           </section>
 
           <section className="lp-final">

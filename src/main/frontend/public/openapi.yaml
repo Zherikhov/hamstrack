@@ -18,7 +18,7 @@ info:
 
     **Access model** — a resource you cannot see returns `404`, whether it
     does not exist or you are not a member of its workspace. The API is
-    unversioned while in beta; breaking changes are announced in release notes.
+    unversioned; breaking changes are announced in release notes.
 
     **Permissions** — authorization is a permission check, not a role
     comparison, at workspace scope as well as inside a project: the role enums

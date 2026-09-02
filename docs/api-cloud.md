@@ -10,7 +10,9 @@ This is the reference for the HTTP API behind the Hamstrack web app. Everything 
 https://hamstrack.com/api
 ```
 
-> **Beta notice:** the API is unversioned while Hamstrack is in beta — breaking changes are possible and are announced in release notes. While the Cloud instance is in test mode, user data may periodically be reset; every account gets a pre-populated demo workspace to explore.
+> **API stability:** the API is unversioned — breaking changes are possible and are announced in release notes.
+
+> **Your data:** Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay until they are deleted. The database is backed up daily and restoring from a backup has been tested; that is an operational practice, not a guaranteed service level. Every account starts with a demo workspace and a sample project to explore.
 
 ## Contents
 
