@@ -505,6 +505,39 @@ paths:
         and `ivan@example.com` cannot both be accounts, so registering the
         second is a `409`. Casing in the address you submit therefore never
         changes which account you reach.
+
+
+        **The verification mail is throttled per destination inbox, and the
+        `429` on this endpoint has two independent causes.** One is the
+        ordinary per-IP budget on `/auth/*`. The other is a ceiling on the
+        recipient: at most one registration a minute and five an hour per
+        inbox, counted across everybody who asks. That budget is **separate
+        from `POST /auth/resend-verification`'s**, even though the two send the
+        same message — that endpoint spends its slot at addresses with no
+        account and sends nothing, so a shared bucket let anybody deny signup
+        at a stranger's inbox for free and in silence. That
+        ceiling counts the **inbox** rather than the spelling — `a+1@gmail.com`,
+        `a+2@gmail.com` and `a.1@googlemail.com` are one bucket even though
+        they are three different accounts — so a client registering several
+        accounts at one address will meet it. Nothing is created by either
+        cause, so the address stays free, and both carry `Retry-After` — but
+        they are not the same refusal, and which one was met changes what you
+        can honestly tell the person in front of you. **The per-IP one is about
+        the caller's own traffic**: its `detail` is the generic “too many
+        requests” sentence and its `Retry-After` is only the remainder of the
+        current minute, so slowing down clears it. **The per-inbox one is not
+        about the caller at all** — its `detail` talks about verification mail
+        to this address rather than about a request rate, and that budget is
+        spent by everybody who asks, so retrying from another network, another
+        client, or another spelling of the same inbox changes nothing; only
+        waiting does. That wait is
+        either the per-inbox cooldown (one minute by default) or, at the
+        per-window cap, the moment the oldest registration for that inbox ages
+        out **rounded up to the next 15-minute boundary** — an absolute
+        deadline rather than a countdown, so it can exceed an hour and
+        `now + Retry-After` names the same instant however often it is asked.
+        In code, obey `Retry-After` in both cases and do not branch on the
+        wording of `detail`: the remedy is the same wait either way.
       operationId: register
       security: []
       requestBody:
@@ -625,7 +658,28 @@ paths:
     post:
       tags: [Auth]
       summary: Re-send the verification email
-      description: Always returns `200` — no account enumeration.
+      description: >-
+        Always returns `200` — no account enumeration. Mail is also throttled per recipient
+        address (at most one a minute, five an hour, counted across everybody who asks and
+        whether or not the address is registered). Past a ceiling this still answers `200`
+        with the same body and simply sends nothing: this ceiling deliberately has no `429` of
+        its own and no `Retry-After`, because a visible refusal would reveal that somebody
+        asked for a link at this address. The `429` this operation declares is the ordinary
+        per-IP budget on `/auth/*`, which is about the caller's request rate and says
+        nothing about any address. A client cannot tell "sent" from "suppressed" — debounce the button
+        rather than relying on the server to refuse.
+
+
+        That budget is **separate from `POST /auth/register`'s**, even though the two send
+        the same message to the same person. Sharing one looked right — an attacker refused
+        by one endpoint would otherwise use the other — but this endpoint spends its slot
+        *before* the account lookup and whether or not an account exists, which it must, or
+        the bookkeeping itself would answer the question the uniform `200` refuses to. So at
+        an address nobody has registered it sends no mail and still filled register's
+        ceiling: five requests an hour locked every spelling of a stranger's inbox out of
+        signup, for free and in silence. Register refuses visibly where this one refuses
+        silently — it already discloses address existence through its own `409`, so there is
+        nothing left for a `429` to reveal there.
       operationId: resendVerification
       security: []
       requestBody:
@@ -707,7 +761,22 @@ paths:
     post:
       tags: [Auth]
       summary: Request a password reset link
-      description: Always returns `200` — no account enumeration.
+      description: >-
+        Always returns `200` — no account enumeration. Mail is also throttled per recipient
+        address (at most one a minute, five per quarter of an hour, counted across everybody
+        who asks and whether or not the address is registered). Past a ceiling this still
+        answers `200` with the same body and simply sends nothing: this ceiling deliberately has
+        no `429` of its own and no `Retry-After`, because a visible refusal would reveal that
+        somebody asked for a link at this address. The `429` this operation declares is the
+        ordinary per-IP budget on `/auth/*`, which is about the caller's request rate and
+        says nothing about any address. A client cannot tell "sent" from "suppressed" —
+        debounce the button rather than relying on the server to refuse.
+
+
+        The quarter-hour window is narrower than the verification one on purpose: this
+        ceiling is simultaneously a bound on mail arriving and a bound on **account
+        recovery**, since anybody may type any address here, so its width is how long
+        whoever fills it keeps that person from resetting their own password.
       operationId: forgotPassword
       security: []
       requestBody:
@@ -8739,8 +8808,8 @@ components:
         step earlier as a duplicate.
 
 
-        `Retry-After` is a real wait, and on one ceiling it is deliberately
-        coarse. For the cooldown and the per-sender budget it is the exact
+        `Retry-After` is a real wait, and on one of the three ceilings here it
+        is deliberately coarse. For the cooldown and the per-sender budget it is the exact
         seconds until the caller's own slot frees; for the per-address daily cap
         it is the moment the oldest send in that window ages out **rounded up to
         the next 15-minute boundary** — an absolute deadline rather than a

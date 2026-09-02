@@ -30,9 +30,17 @@ public class InviteMailThrottleConfig {
         return new MailThrottlePolicy(
                 EmailType.INVITE,
                 Duration.ofMinutes(properties.recipientCooldownMinutes()),
+                // A DAY, and it is the widest window any policy may declare
+                // (MailThrottlePolicy.MAX_CEILING_WINDOW) — the number the mail_send_events
+                // retention is asserted against at startup. Invitations can afford it because the
+                // harm this cap bounds is a stranger's mail ARRIVING; where the same ceiling also
+                // withholds mail the recipient asked for, an hour is the right width instead
+                // (AuthMailThrottleConfig).
+                MailThrottlePolicy.MAX_CEILING_WINDOW,
                 properties.maxPerRecipientPerDay(),
                 RateLimitKind.INVITE_RECIPIENT_COOLDOWN,
                 RateLimitKind.INVITE_RECIPIENT_DAILY,
+                MailThrottlePolicy.Refusal.RESPONDS_429,
                 new InviteThrottleWording());
     }
 
@@ -58,7 +66,7 @@ public class InviteMailThrottleConfig {
         }
 
         @Override
-        public String recipientDaily(String wait) {
+        public String recipientVolume(String wait) {
             // Not "…because other workspaces invited them", not "…they already have an invitation",
             // and not "ask them to accept one they already have". Each of those turns one bit into
             // two. Waiting IS the remedy here, so the terse form loses nothing.

@@ -61,7 +61,10 @@ import java.util.List;
  *
  * <h2>Best-effort mail gets no row, and the caller is told instead</h2>
  * {@link MailService#isCritical} is the same fork the retry path uses, deliberately: a new
- * {@code EmailType} lands on one side or the other exactly once. Invite mail is best-effort, so
+ * {@code EmailType} lands on one side or the other exactly once — which a boolean fork cannot
+ * enforce on its own, since its else-branch absorbs any constant added later, so
+ * {@code MailCriticalityCoverageTest} fails on a type neither side names. Invite mail is
+ * best-effort, so
  * there is nothing durable to write — {@link #record} therefore returns {@code false} and
  * {@link MailDispatcher} rethrows, which is what puts the loss into the {@code AfterCommit} ERROR
  * line that names the workspace an operator would have to open. Silence is the one outcome that is

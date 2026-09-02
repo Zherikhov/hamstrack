@@ -5,8 +5,9 @@ package com.hamstrack.common.ratelimit;
  *
  * <p>Wording is per {@code EmailType} rather than shared, because the mechanism is shared and the
  * sentence is not: "you already invited this person" and "a reset link is already on its way" are
- * the same ceiling and different remedies. Making the wording part of the policy is what keeps
- * HD-202 down to two policy beans and two call sites instead of a second half-overlapping limiter.
+ * the same ceiling and different remedies. Making the wording part of the policy is what lets a
+ * new mailer be one policy bean and one call site instead of a second half-overlapping limiter —
+ * which is how HD-202 landed, however many mailers it turned out to have.
  *
  * <p><strong>The standing rule these implementations are held to: a refusal may only prescribe an
  * action its reader can perform.</strong> This project has shipped an unperformable refusal three
@@ -30,7 +31,7 @@ public interface MailThrottleWording {
     String cooldown(String recipient, String wait, String addendum);
 
     /**
-     * The global per-recipient daily refusal.
+     * The global per-recipient volume refusal — the {@code maxPerRecipientPerWindow} ceiling.
      *
      * <p>Terse on purpose, and the terseness is the security property. "Wait" is performable, and
      * every richer remedy ("ask them to accept the one they already have") converts the single bit
@@ -40,5 +41,5 @@ public interface MailThrottleWording {
      *
      * @param wait a human phrase from {@link RetryWait#describe}
      */
-    String recipientDaily(String wait);
+    String recipientVolume(String wait);
 }

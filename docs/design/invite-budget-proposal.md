@@ -906,7 +906,7 @@ The ceilings are counted against our own table and are true for a self-hoster po
 |---|---|---|---|---|
 | `app.invites.max-per-sender-per-hour` | `INVITE_MAX_PER_SENDER_PER_HOUR` | `20` | 1–1000 | Invitations one principal may send per hour |
 | `app.invites.max-per-sender-per-day` | `INVITE_MAX_PER_SENDER_PER_DAY` | `100` | 1–10000 | Per day. This is the quota control |
-| `app.invites.recipient-cooldown-minutes` | `INVITE_RECIPIENT_COOLDOWN_MINUTES` | `60` | 1–1440 | Same sender → same address, across all workspaces |
+| `app.invites.recipient-cooldown-minutes` | `INVITE_RECIPIENT_COOLDOWN_MINUTES` | `60` | 1–**1439** | Same sender → same address, across all workspaces. The top of the range is one minute **inside** the fixed 24 h volume window: `MailThrottlePolicy` refuses a policy whose cooldown merely *equals* its ceiling window, so `1440` — which this table said until HD-202's final review — now aborts the boot |
 | `app.invites.max-per-recipient-per-day` | `INVITE_MAX_PER_RECIPIENT_PER_DAY` | `5` | 1–1000 | One address per day: own sends one each, other senders one each |
 | `app.invites.event-retention-days` | `INVITE_EVENT_RETENTION_DAYS` | `7` | **2**–90 | How long `mail_send_events` rows are kept. Cross-checked at startup against the **wider of the two ceiling windows** — the configurable cooldown *and* the fixed 24 h window of `max-per-recipient-per-day` — because a swept row is a row either ceiling silently stops counting. The floor is 2 rather than 1 for that second window: one day would be *exactly* 24 h against a 24 h window, and a replica whose sweep clock runs a second ahead then deletes a row another replica's daily count still needs |
 

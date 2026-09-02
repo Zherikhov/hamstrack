@@ -1,6 +1,8 @@
 package com.hamstrack.common.config;
 
-import com.hamstrack.common.ratelimit.RecipientMailThrottle;
+import com.hamstrack.common.observability.ProductMetrics.EmailType;
+import com.hamstrack.common.observability.ProductMetrics.RateLimitKind;
+import com.hamstrack.common.ratelimit.MailThrottlePolicy;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.autoconfigure.context.ConfigurationPropertiesAutoConfiguration;
@@ -15,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.fail;
 
 /**
@@ -90,9 +93,13 @@ class InvitePropertiesTest {
      * The documented ranges are inclusive at both ends — an operator who follows the published
      * numbers to the letter must be able to boot — and one over is a refusal, never a clamp.
      *
-     * <p>{@code recipient-cooldown-minutes} tops out at 1440 for a stated reason: at one day the
-     * cooldown window never reaches further back than the fixed daily window, and nothing above a
-     * day would be a cooldown anyway. {@code event-retention-days} starts at <strong>2</strong>, not
+     * <p>{@code recipient-cooldown-minutes} tops out at <strong>1439</strong> for a stated reason:
+     * one minute inside the fixed daily window, so the cooldown never reaches as far back as the
+     * window it sits inside, and nothing above a day would be a cooldown anyway. It was 1440 until
+     * HD-202's final review tightened {@code MailThrottlePolicy}'s guard from "wider than" to "not
+     * narrower than" — at equality a single-bucket policy's volume cap is unreachable, which is
+     * what that guard's message claims to prevent, and the last minute of a day was cheaper to give
+     * up than a second rule with an exception for this one policy. {@code event-retention-days} starts at <strong>2</strong>, not
      * 1, and that floor is the subject of {@link #theRetentionCrossCheckRefusesAZeroMarginRetention()}.
      */
     @Test
@@ -103,7 +110,8 @@ class InvitePropertiesTest {
         assertBoots("app.invites.max-per-sender-per-day", 1, 10_000);
         assertRejected("app.invites.max-per-sender-per-day=10001", "maxPerSenderPerDay");
 
-        assertBoots("app.invites.recipient-cooldown-minutes", 1, 1440);
+        assertBoots("app.invites.recipient-cooldown-minutes", 1, 1439);
+        assertRejected("app.invites.recipient-cooldown-minutes=1440", "recipientCooldownMinutes");
         assertRejected("app.invites.recipient-cooldown-minutes=1441", "recipientCooldownMinutes");
 
         assertBoots("app.invites.max-per-recipient-per-day", 1, 1000);
@@ -136,15 +144,16 @@ class InvitePropertiesTest {
      * file: raise the {@code @Max} on the cooldown past a day, or lower the {@code @Min} on the
      * retention back to one. Neither has any reason to visit the other.
      *
-     * <p><strong>Widening {@code RecipientMailThrottle.DAY} is a THIRD drift and this test cannot
-     * see it</strong> — saying otherwise would restate, one level up, the exact defect the
-     * {@code max(cooldown, fixed window)} widening removed. The fixed window reaches this predicate
-     * as {@code InviteProperties.FIXED_CEILING_WINDOW_MINUTES}, a hand-copied 1440; widen
-     * {@code DAY} alone and the copy does not move, so every assertion here goes on passing against
-     * the old window while the running system counts over a wider one. Only an equality check
-     * between the two constants catches that, and it is
-     * {@link #theFixedCeilingWindowIsTheSameNumberInBothFiles()} — not this test, and not the
-     * {@code @AssertTrue}.
+     * <p><strong>Widening the ceiling window itself was once a THIRD drift this test could not
+     * see</strong>, because the width reached this predicate as a hand-copied {@code 1440} in
+     * {@code InviteProperties.FIXED_CEILING_WINDOW_MINUTES}: widen the real window alone and the
+     * copy did not move, so every assertion here went on passing against the old width while the
+     * running system counted over a wider one. HD-202 deleted the copy — the constant now reads
+     * {@link MailThrottlePolicy#MAX_CEILING_WINDOW}, which is also enforced as the ceiling on every
+     * policy's window at bean creation. That pair is held by
+     * {@link #theRetentionIsMeasuredAgainstTheWindowTheCeilingsActuallyCountOver()} and
+     * {@link #aPolicyCannotDeclareAWindowWiderThanTheRetentionIsCheckedAgainst()} — not by this
+     * test, and not by the {@code @AssertTrue}.
      */
     @Test
     void theRetentionCrossCheckRefusesAZeroMarginRetention() {
@@ -173,67 +182,90 @@ class InvitePropertiesTest {
     }
 
     /**
-     * <strong>The seal on the one drift the startup cross-check cannot police</strong> — an
-     * equality check between two constants that are the same number written twice, in two packages,
-     * with nothing but a pair of javadoc paragraphs joining them.
+     * <strong>The drift this used to police is gone, and the replacement asserts that it is
+     * gone</strong> (HD-202).
      *
-     * <p>{@code InviteProperties.FIXED_CEILING_WINDOW_MINUTES} exists because
-     * {@code isRetentionLongerThanWidestCeilingWindow} has to know the width of the window
-     * {@code max-per-recipient-per-day} is counted over, and that width is
-     * {@code RecipientMailThrottle.DAY} — a {@code private} constant in another package, so it is
-     * restated rather than imported. A restatement is only as good as something that compares it,
-     * and what makes this one dangerous is the <em>direction</em> it fails in: widening
-     * {@code DAY} to, say, 48 hours leaves the copy at 1440, so the assertion keeps comparing the
-     * retention against a day, keeps <strong>passing</strong>, and keeps promising cover it is no
-     * longer computing. A constraint cannot notice, because the value it would have to read is the
-     * one that did not change.
+     * <p>What stood here was an equality check between two constants that were one number written
+     * twice: {@code InviteProperties.FIXED_CEILING_WINDOW_MINUTES} and a {@code private}
+     * {@code RecipientMailThrottle.DAY}. It was needed because a copy fails in the passing
+     * direction — widen the real window and the copy stays, so the retention cross-check keeps
+     * promising cover it is no longer computing, with nothing to notice.
      *
-     * <p>Read reflectively for the same reason {@code MailSendEventRepositorySealTest} does it:
-     * the question is about the constant a future edit will actually touch, and neither of these is
-     * visible from here. Renaming or deleting either one fails this test rather than skipping it.
+     * <p>HD-202 made the ceiling window a <em>per-policy</em> value — the policies do not agree on
+     * it, and a new kind of throttled mail brings another width with it — which would have turned
+     * one stale copy into one per policy, growing. So the copy
+     * was deleted instead: the retention now compares against
+     * {@link MailThrottlePolicy#MAX_CEILING_WINDOW}, the same constant
+     * {@code MailThrottlePolicy}'s constructor enforces as the ceiling on every policy's window.
+     * The link is a compile-time one, which is what the old test's own failure message asked for.
+     *
+     * <p>This is therefore no longer a comparison of two numbers — there is one — but it is not
+     * nothing: it holds the two halves of that arrangement together. Someone widening a policy
+     * window past the retention's guarantee has to go through the constant this measures, and a
+     * policy that tries to go around it fails to be built at all.
      */
     @Test
-    void theFixedCeilingWindowIsTheSameNumberInBothFiles() {
-        long copied = ((Number) constant(InviteProperties.class, "FIXED_CEILING_WINDOW_MINUTES"))
+    void theRetentionIsMeasuredAgainstTheWindowTheCeilingsActuallyCountOver() {
+        long measured = ((Number) constant(InviteProperties.class, "FIXED_CEILING_WINDOW_MINUTES"))
                 .longValue();
-        long actual = ((Duration) constant(RecipientMailThrottle.class, "DAY")).toMinutes();
 
-        assertThat(copied)
+        assertThat(measured)
                 .as("""
-                        These two are one number written twice and they have drifted:
+                        The retention cross-check must measure against the SAME constant that \
+                        bounds every policy's ceiling window, or it certifies cover it is not \
+                        computing -- silently, in the passing direction, which is why this is an \
+                        assertion and not a comment.
 
                           src/main/java/com/hamstrack/common/config/InviteProperties.java \
                         (FIXED_CEILING_WINDOW_MINUTES = %d)
-                          src/main/java/com/hamstrack/common/ratelimit/RecipientMailThrottle.java \
-                        (DAY = %d minutes)
+                          src/main/java/com/hamstrack/common/ratelimit/MailThrottlePolicy.java \
+                        (MAX_CEILING_WINDOW = %d minutes)
 
-                        DAY is the window app.invites.max-per-recipient-per-day is counted over. \
-                        FIXED_CEILING_WINDOW_MINUTES is the copy that startup validation measures \
-                        the retention sweep against, and it is the WIDER of the two ceiling \
-                        windows, so it is the one that decides whether \
-                        isRetentionLongerThanWidestCeilingWindow passes.
-
-                        While they disagree, that check certifies cover it is not computing. Take \
-                        DAY = 2 days and the copy left at 1440: the documented minimum retention of \
-                        2 days clears the stale copy comfortably and is EXACTLY EQUAL to the real \
-                        window, which this file argues at length is not cover -- two replicas whose \
-                        clocks differ by a second are enough for one node's sweep to delete a row \
-                        the other node's daily count still needs. The cap then under-counts and \
-                        hands out a send it meant to refuse, with no exception, no 429 and no log \
-                        line. That silence is the whole reason this is an assertion and not a \
-                        comment.
-
-                        Fix it in whichever file is wrong -- they must be the same number -- and \
-                        do NOT delete this test to make the red go away.""",
-                        copied, actual)
-                .isEqualTo(actual);
+                        If these have become two numbers again, they are a hand-copied pair and \
+                        the copy will be left behind by the next widening. Import it.""",
+                        measured, MailThrottlePolicy.MAX_CEILING_WINDOW.toMinutes())
+                .isEqualTo(MailThrottlePolicy.MAX_CEILING_WINDOW.toMinutes());
     }
 
+    /**
+     * The other half of the same arrangement: a policy may not declare a window wider than the one
+     * the retention is asserted against, and it is refused <em>at bean creation</em> rather than at
+     * some later moment when a count silently comes back short.
+     *
+     * <p>Here rather than in a {@code MailThrottlePolicy} test on purpose — this file is where the
+     * retention's guarantee is argued, and this is the assumption that guarantee rests on.
+     */
+    @Test
+    void aPolicyCannotDeclareAWindowWiderThanTheRetentionIsCheckedAgainst() {
+        assertThatThrownBy(() -> new MailThrottlePolicy(
+                EmailType.INVITE,
+                Duration.ofMinutes(1),
+                MailThrottlePolicy.MAX_CEILING_WINDOW.plusMinutes(1),
+                5,
+                RateLimitKind.INVITE_RECIPIENT_COOLDOWN,
+                RateLimitKind.INVITE_RECIPIENT_DAILY,
+                MailThrottlePolicy.Refusal.SILENT,
+                null))
+                .as("a window wider than MAX_CEILING_WINDOW would count rows the retention sweep "
+                    + "has already deleted, so the ceiling would silently shorten to the retention")
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("event-retention-days");
+    }
     /**
      * The cross-check does not merely exist — it <em>reports</em>, and its message is the one that
      * explains a refusal the {@code @Min(2)} alone would leave cryptic ("must be at least 2" says
      * nothing about which other property it is in tension with). Hibernate Validator evaluates every
      * constraint, so {@code =1} comes back carrying both.
+     *
+     * <p><strong>Both other property names must appear, and since HD-202 they appear for opposite
+     * reasons.</strong> {@code recipient-cooldown-minutes} is one of the two terms the predicate
+     * actually compares. {@code max-per-recipient-per-day} is <em>not</em> — the second term is a
+     * width fixed in code ({@code MailThrottlePolicy.MAX_CEILING_WINDOW}), and it stopped being
+     * "that property's window" when windows became per policy. It is named anyway, and this
+     * assertion still requires it, because an operator reading "the widest ceiling window" reaches
+     * for the cap they can see; the message has to tell them that lowering a COUNT cannot satisfy a
+     * bound on a WIDTH. A refusal may only prescribe an action its reader can perform, and the
+     * corollary is that it must rule out the plausible actions that will not work.
      */
     @Test
     void theCrossCheckExplainsItselfWhenTheRetentionFloorIsBreached() {
@@ -412,12 +444,12 @@ class InvitePropertiesTest {
             field.setAccessible(true);
             return field.get(null);
         } catch (NoSuchFieldException e) {
-            return fail("%s.%s no longer exists. It is one half of a hand-copied constant pair "
-                        + "(the other is in %s) — if the pair has been replaced by a real "
-                        + "compile-time link, delete this test and say so; if it was merely "
-                        + "renamed, rename it here too",
-                    owner.getSimpleName(), name,
-                    owner == InviteProperties.class ? "RecipientMailThrottle" : "InviteProperties");
+            return fail("%s.%s no longer exists. It is what the retention cross-check measures "
+                        + "against, and it must stay a compile-time link to "
+                        + "MailThrottlePolicy.MAX_CEILING_WINDOW — if it was renamed, rename it "
+                        + "here too; if it was replaced by something better, say so where the "
+                        + "reader of isRetentionLongerThanWidestCeilingWindow will find it",
+                    owner.getSimpleName(), name);
         } catch (IllegalAccessException e) {
             return fail("cannot read %s.%s reflectively: %s", owner.getSimpleName(), name, e);
         }

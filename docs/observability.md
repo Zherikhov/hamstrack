@@ -190,7 +190,9 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_auth_login_total` | counter | `outcome`(success/failure), `reason`(ok/bad_credentials/not_verified/disabled) | login attempts |
 | `hamstrack_auth_email_verified_total` | counter | — | email verifications |
 | `hamstrack_auth_password_reset_total` | counter | `phase`(requested/completed) | password-reset flow |
-| `hamstrack_ratelimit_hit_total` | counter | `kind`(ip_window/login_backoff/rank_rebalance/report_requests/search_requests/invite_sender_volume/invite_recipient_cooldown/invite_recipient_daily) | rate-limit rejections. The three `invite_*` kinds are separate because they mean three different things to whoever reads the alert: `invite_sender_volume` is bulk-shaped, `invite_recipient_cooldown` is harassment-shaped, and `invite_recipient_daily` means one address has taken all it may take in a day — reached from several accounts (each other sender counts once, so that costs a mailbox per slot, which is why it is the sharpest of the three) or by one account spending its own share; the kind alone does not say which, and the domain-only log line and `mail_send_events` do. **A rule built on this metric only ever sees an attacker who HITS a ceiling** — one who stays beneath them is invisible here, which is why `MailDailyVolumeHigh` and `InviteVolumeUnaccepted` rank above `InviteThrottleTripping` |
+| `hamstrack_ratelimit_hit_total` | counter | `kind`(ip_window/login_backoff/rank_rebalance/report_requests/search_requests/invite_sender_volume/invite_recipient_cooldown/invite_recipient_daily/password_reset_recipient_cooldown/password_reset_recipient_window/verification_recipient_cooldown/verification_recipient_window/registration_verification_recipient_cooldown/registration_verification_recipient_window) | rate-limit rejections. The three `invite_*` kinds are separate because they mean three different things to whoever reads the alert: `invite_sender_volume` is bulk-shaped, `invite_recipient_cooldown` is harassment-shaped, and `invite_recipient_daily` means one address has taken all it may take in a day — reached from several accounts (each other sender counts once, so that costs a mailbox per slot, which is why it is the sharpest of the three) or by one account spending its own share; the kind alone does not say which, and the domain-only log line and `mail_send_events` do. The `password_reset_*`/`verification_*` kinds (HD-202) are the per-address ceilings on the two anonymous auth mailers **whose refusal is invisible**, and they are the one refusal in this product with **no other witness at all**: both endpoints must answer identically for a registered and an unregistered address, so a throttled request gets the usual `200`, the usual sentence and no log line — this counter is the entire evidence that it happened. The `registration_verification_*` pair is the third auth budget, held by `POST /api/auth/register` alone; it refuses *visibly*, so those two are corroboration rather than sole evidence — a bucket shared with resend-verification let anybody deny a stranger's signup for free and in silence, which is why it is separate. `AuthMailThrottleTripping` is built on it. Read a `_window` rate in two directions: mail aimed at a person, *and* a window in which that person cannot recover their own account. **A rule built on this metric only ever sees an attacker who HITS a ceiling** — one who stays beneath them is invisible here, which is why `MailDailyVolumeHigh` and `InviteVolumeUnaccepted` rank above `InviteThrottleTripping`, and why the auth mailers needed `hamstrack_mail_anonymous_recipient_max` below. Every kind here that a mail policy declares is named `<thing>_recipient_cooldown` / `_recipient_window` / `_recipient_daily`, and the alert rules select on that convention rather than on a list of names — a test reads the regexes out of `rules.yml` and fails if a policy declares a kind no rule would match |
+| `hamstrack_mail_anonymous_recipient_max` | gauge | — | **The one meter here that sees an attacker who stays under every ceiling** (HD-202). How much anonymous auth mail (password reset / verification) reached the single busiest `recipient_key` in the last 6 h, refreshed every 5 min by `AnonymousMailConcentration`. The refusal counter above cannot see the denial-of-recovery attack it was written for: to hold a victim's bucket full you send exactly as slots age out, and **every one of those requests is allowed**, so the counter reads zero while somebody stays locked out of their own password recovery indefinitely. This is a *quantity*, so it is true whether or not a ceiling fired. **It carries no address on purpose** — a Grafana alert emits its series labels through the contact point, so a `recipient_key` label would mail recipient addresses to the operator; the address is looked up in `mail_send_events`. Every replica computes the same instance-wide number, so alert on `max()`, never `sum()`. **It fails silent**: the value is last-write-wins, so a query that starts erroring or timing out freezes it at its last (quiet) value rather than clearing it — and the row count that makes that query slow is the flood it exists to detect. Read it together with the freshness gauge below. `MailRecipientConcentration` treats `NoData`/`Error` as firing rather than `OK`, which is the file's default — that departure is a **category rather than a count**: any rule whose failure mode is *absence* rather than noise, i.e. any rule that is the only witness to something, and `MailConcentrationGaugeStale` below qualifies for the same reason one level up |
+| `hamstrack_mail_anonymous_recipient_max_age_seconds` | gauge | — | Seconds since the gauge above was last **successfully** refreshed — counting from **process start** until the first success, so there is deliberately no "never yet refreshed" sentinel. It published `-1` until HD-202's final review, and `-1` is *below* the alert's own `> 1800` threshold: an instance whose refresh never succeeded once (V25 not applied on an upgrade, a persistent timeout, a permissions problem) therefore had `MailRecipientConcentration` pinned at `0` and `MailConcentrationGaugeStale` unable to fire, with both series present so `NoData`/`Error` did not help and no Loki-backed rule to catch the WARN. Evaluated at scrape rather than on the refresh schedule, so it keeps rising while the refresh is broken instead of freezing beside the value it describes. `MailConcentrationGaugeStale` fires past 30 min (six missed refreshes), over a `for: 10m`, which absorbs a deploy several times over. If it fires, check that `idx_mail_send_events_anonymous` (V25, partial on `(created_at, recipient_key) WHERE sender_user_id IS NULL`) exists — without it that aggregate scans the whole table |
 | `hamstrack_workspaces_created_total` | counter | `source`(user/onboarding/demo) | workspaces created |
 | `hamstrack_projects_created_total` | counter | — | projects created |
 | `hamstrack_issues_created_total` | counter | `type`(issue-type name, from the admin catalog) | issues created |
@@ -400,6 +402,10 @@ row of that rule rather than an exception to it.
 | MailDailyVolumeHigh | `sum(increase(hamstrack_email_sent_total{outcome="success"}[24h])) > 500` | 30m | warning |
 | InviteVolumeUnaccepted | 6h invitation acceptance ratio < 10% **and** > 200 invitations sent in 6h | 30m | warning |
 | InviteThrottleTripping | `sum(increase(hamstrack_ratelimit_hit_total{kind=~"invite_.*"}[15m])) > 20` | 5m | warning |
+| AuthMailThrottleTripping | `sum(increase(hamstrack_ratelimit_hit_total{kind=~".*_recipient_(cooldown|window|daily)"}[15m])) > 20` | 5m | warning |
+| MailRecipientVolumeCapReached | `sum(increase(hamstrack_ratelimit_hit_total{kind=~".*_recipient_(window|daily)"}[6h])) > 10` | 15m | warning |
+| MailRecipientConcentration | `max(hamstrack_mail_anonymous_recipient_max) > 20` | 15m | warning |
+| MailConcentrationGaugeStale | `max(hamstrack_mail_anonymous_recipient_max_age_seconds) > 1800` | 10m | warning |
 
 **`EmailFailures` counts two different things, and the difference decides what you do**
 (HD-207/HD-208). A row in `failed_email` with `attempts >= 1` was *tried* and refused by the
@@ -422,7 +428,7 @@ mail was simply gone. One burst at a deploy timestamp, all never-attempted, is t
 (those users were told to check an inbox nothing arrived in), but not an outage. A rate that
 continues after the deploy is.
 
-**The three invitation rules are ranked, and the ranking is the point** (HD-190). A rule
+**The invitation rules are ranked, and the ranking is the point** (HD-190). A rule
 built on throttle refusals can only see an attacker who *hits* a ceiling; one who reads
 the configured numbers and stays beneath them trips nothing and never appears in
 `hamstrack_ratelimit_hit_total`. So `InviteThrottleTripping` is listed last on purpose —
@@ -434,6 +440,49 @@ else in the metric surface separates the two. `InviteVolumeUnaccepted` has a **n
 positive** — a genuine large onboarding started on a Friday evening — which is written into
 its own annotation, because a rule whose false positive is a surprise gets muted within a
 week and a rule that explains its own survives.
+
+**The auth mailers get three rules, and the reason is that the obvious one cannot see the
+attack they exist to stop** (HD-202). `AuthMailThrottleTripping` is built on refusals like
+`InviteThrottleTripping` and inherits the same blind spot — but here the blind spot is not a
+corner case, it is the **optimal play**. To keep a victim's bucket full an attacker sends
+exactly as slots age out, spaced past the cooldown: five requests a window, *every one of
+them allowed*. Nothing is refused, so the counter stays at zero; the only refusals generated
+are the victim's own one or two attempts, one or two hits against a threshold of twenty.
+That rule therefore fires for a noisy mail bomb and **never** for a sustained single-target
+denial of recovery, which is precisely what `AuthMailProperties` names as the failure mode.
+
+It is also the one refusal in the product with no second witness. Every other throttle tells
+its caller it fired, so a user complaint eventually arrives; `POST /auth/forgot-password` and
+`POST /auth/resend-verification` must answer identically for a registered and an unregistered
+address, so a refusal there returns the usual `200`, the usual sentence and no log line.
+Weakest witness and sole witness at once.
+
+Hence the other two. **`MailRecipientVolumeCapReached`** is the same counter at a tenth of
+the threshold over eight times the window, restricted to the *volume* kinds — a
+`_recipient_window` / `_recipient_daily` hit means one inbox took its whole allowance for the
+period, which needs sustained volume or several senders and is abnormal at any instance size,
+so it can fire far earlier than a rule that must tolerate ordinary cooldown noise.
+**`MailRecipientConcentration`** is not built on refusals at all: it reads
+`hamstrack_mail_anonymous_recipient_max`, a quantity that is true whichever ceiling did or did
+not fire, and it is the only rule here that sees the paced attacker. Its summary carries the
+`mail_send_events` query that names the address, because the metric may not.
+
+**The selectors are naming conventions, not lists.** They used to enumerate the four kinds
+this feature shipped with, so a fifth silent mailer would have tripped nothing and failed no
+test — silence squared, given that the counter is the only witness.
+`MailThrottleCoverageTest.everyRecipientKindIsSelectedByTheAlertRules` now reads the regexes
+out of this file and fails if any policy declares a kind none of them matches.
+
+**On a self-hosted install with no observability stack there is neither of these**, since it
+is optional and the management port is not published. `docs/self-hosting.md` carries the two
+things that still work: reading the counters out of the container
+(`docker compose exec app wget -qO- http://localhost:9090/actuator/prometheus | grep ratelimit_hit`
+— `wget`, because the `eclipse-temurin:21-jre-alpine` app image has no `curl`, which is also why
+the compose healthcheck uses it)
+and the `mail_send_events` query, which needs nothing at all. Note the asymmetry —
+`mail_send_events` records *allowed* sends, so it sees the paced attacker the counters miss,
+while a *cooldown* refusal writes no row and no log line and has no witness whatsoever
+without a metrics scrape.
 
 **`HostMemoryLow`, `HostSwapInUse` and `HostKernelOOMKill` watch the host, and they exist
 because `JVMHeapPressure` cannot see the failure that actually threatens a small box**

@@ -839,15 +839,24 @@ groups:
                   type: query
 
       # ---------------------------------------------------------------------------
-      # HD-190 — the invitation mailer. THREE RULES, RANKED BY VALUE, which is the
-      # reverse of the order they would naturally be written in.
+      # OUTBOUND MAIL ABUSE (HD-190, HD-202). The rules below are ORDERED BY VALUE, which
+      # is the reverse of the order they would naturally be written in, and the ordering
+      # is the finding rather than a convention. Read it before adding another one.
       #
-      # The ranking is the finding, so read it before adding a fourth: a rule built on
-      # THROTTLE REFUSALS can only see an attacker who HITS a ceiling. An attacker who
-      # reads the configured numbers and stays beneath them trips no RateLimitedException
-      # and is invisible to InviteThrottleTripping below. What is always true, whichever
-      # ceiling did or did not fire, is the VOLUME of mail leaving the box and the
-      # PROPORTION of invitations anybody accepts. Those are rules 1 and 2.
+      # THE RANKING RULE: a rule built on THROTTLE REFUSALS can only see an attacker who
+      # HITS a ceiling. Anybody who reads the configured numbers and stays beneath them
+      # trips no refusal at all and is invisible to every such rule. That is not a corner
+      # case — for the auth mailers it is the OPTIMAL attack, because the way to hold a
+      # victim's bucket full is to send exactly as slots age out, which is never refused.
+      # So a refusal counter is always the weakest witness available, and a rule that
+      # measures a QUANTITY (mail volume, acceptance ratio, concentration on one inbox) is
+      # always the stronger one. Refusal rules come last here for that reason.
+      #
+      # Where a refusal is the ONLY thing a caller is ever told, the counter is also the
+      # only evidence that exists at all — the auth mailers' uniform 200 means nobody
+      # complains and nothing is logged. Weakest witness and sole witness at once, which is
+      # why those two get both a normal and a low-threshold rule, plus a quantity rule that
+      # does not depend on a refusal ever happening.
       #
       # None is `critical`. None of this is "the product is down", and paging an operator
       # for abuse trains them to mute the folder that also carries AppDown.
@@ -976,6 +985,255 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: gt, params: [20] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 4 (HD-202): the loud version of an attack on the auth mailers, whose subject has
+      # NO OTHER WITNESS. Every other throttle in the product tells its caller it fired, so a
+      # user complaint is a second signal. The per-address ceilings on forgot-password and
+      # resend-verification refuse in SILENCE - those endpoints must answer identically for a
+      # registered and an unregistered address, so a throttled request gets the usual 200 and the
+      # usual sentence and no log line. (POST /api/auth/register spends a THIRD budget of its own,
+      # registration_verification, and does answer 429; it already discloses existence through its
+      # own 409. It shared the verification budget until final review, which let anybody deny a
+      # stranger's signup for free and in silence.)
+      #
+      # THE SELECTOR IS A NAMING CONVENTION, NOT A LIST. It used to name today's four kinds
+      # explicitly, so a fifth silent mailer would have tripped nothing and no test would have
+      # failed - silence squared, given that this counter is the only witness. Every
+      # recipient-keyed RateLimitKind is now required to end in _recipient_cooldown,
+      # _recipient_window or _recipient_daily, and MailThrottleCoverageTest asserts that every
+      # policy's two kinds are matched by the regexes in THIS FILE. Adding a policy therefore
+      # either lands inside these rules automatically or fails a test that says so.
+      #
+      # Read it in two directions: somebody is aiming reset mail at one address, AND somebody may
+      # be keeping a named person from recovering their own account for the length of the window.
+      - uid: hamstrack-auth-mail-throttle-tripping
+        title: AuthMailThrottleTripping
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Per-address ceilings on reset/verification mail refused more than 20 requests in 15m, and ON TWO OF THE THREE ENDPOINTS NOBODY WAS TOLD - forgot-password and resend-verification answer 200 either way by design, so this counter is the only evidence that exists for them. READ THE kind LABEL: *_recipient_cooldown is repetition at one address (one a minute is the bound); *_recipient_window means an address has taken its whole window's allowance, which is both a mail flood aimed at a person AND a window in which that person cannot reset their own password (15m on reset, 1h on verification). THIS RULE ONLY SEES A NOISY ATTACKER. One who spends the cap exactly as slots age out is never refused and never appears here - MailRecipientConcentration is the rule that sees that one, and it is the failure mode the ceilings exist to bound. mail_send_events is where to find WHICH addresses; the metrics deliberately cannot carry one. If this is quiet and users report missing reset links, check MailRecipientConcentration first, then MailDailyVolumeHigh and the failed_email table"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_ratelimit_hit_total{kind=~".*_recipient_(cooldown|window|daily)"}[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [20] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 5 (HD-202 review): the SAME counter, a tenth of the threshold and a window
+      # eight times as wide, restricted to the VOLUME kinds.
+      #
+      # Rule 4 answers "is somebody hammering an address right now" and needs a big number to
+      # avoid firing on ordinary cooldown noise - a user pressing "send me a link" twice is a
+      # legitimate _recipient_cooldown hit, and a busy instance produces a steady trickle of
+      # them. A _recipient_*window*/*daily* hit is a different animal: it means one inbox has
+      # taken its ENTIRE allowance for the period, which needs either sustained volume or
+      # several senders. Ten of those in six hours is already abnormal on any instance size,
+      # so this fires far earlier and far more quietly than rule 4 can.
+      #
+      # It is deliberately NOT a duplicate of rule 4 at a lower threshold: the kind selector
+      # excludes the cooldown kinds, which are the noisy ones, and that is the whole reason the
+      # threshold can come down this far. Same naming-convention selector, same test.
+      - uid: hamstrack-mail-recipient-cap-reached
+        title: MailRecipientVolumeCapReached
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 10 per-recipient VOLUME refusals in 6h. Unlike a cooldown refusal, one of these means a single inbox took its whole allowance for the period - which needs sustained volume or several senders, and is abnormal at any instance size. READ THE kind LABEL, AND THE ENDPOINT IT NAMES DECIDES WHETHER ANYBODY WAS TOLD: invite_recipient_daily is one address invited from several accounts (costs the attacker a mailbox per account, almost never innocent, and the admin who tripped it got a 429); password_reset_recipient_window / verification_recipient_window mean an address has taken its whole reset or verification allowance, which is simultaneously a mail flood aimed at a person and a period in which that person cannot recover their own account - and on those two NOBODY WAS TOLD, because the refusal is silent by design and this counter is the entire record of it; registration_verification_recipient_window is register's own budget, which does answer 429, so there the refused caller knows and this rule is corroboration rather than sole evidence. Find WHICH addresses in mail_send_events (see docs/self-hosting.md); no metric here may carry one. If this is firing, also look at MailRecipientConcentration: an attacker who paces themselves trips that and not this"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_ratelimit_hit_total{kind=~".*_recipient_(window|daily)"}[6h]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [10] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 6 (HD-202 review), and THE ONLY RULE IN THIS FILE THAT SEES THE ATTACK THE AUTH
+      # CEILINGS WERE BUILT FOR. Every rule above it is built on refusals, and the
+      # denial-of-recovery attacker is NEVER REFUSED: to keep a victim's bucket full they send
+      # exactly at the rate slots age out, spaced past the cooldown, and every one of those
+      # requests is ALLOWED. The only refusals such an attack generates are the victim's own
+      # one or two attempts to reset their password - a couple of hits against thresholds in
+      # the tens. Rules 4 and 5 therefore fire for the noisy shape and stay silent for the
+      # quiet one, which is precisely the shape AuthMailProperties names as the failure mode.
+      #
+      # So this one measures a QUANTITY instead: how much anonymous auth mail went to the
+      # single busiest recipient key in the last six hours. That number is true whichever
+      # ceiling did or did not fire.
+      #
+      # WHY IT CARRIES NO ADDRESS, WHICH IS ALSO WHY IT CAN BE A METRIC AT ALL. A Grafana
+      # alert carries its series labels into alert state and out through the email contact
+      # point, so a recipient_key label here would MAIL RECIPIENT ADDRESSES to the operator.
+      # The gauge answers "is somebody being targeted"; the SQL in the summary answers "who",
+      # run against the database, where an address legitimately lives. This is the same reason
+      # no other meter in this product carries an id or an address.
+      #
+      # max() and not sum(): every replica computes the same instance-wide number from the
+      # same table, so the series are duplicates rather than shards.
+      #
+      # THE THRESHOLD, and the arithmetic that makes 20 a bound rather than a guess. The gauge's
+      # query has NO email_type filter, so it sums all three anonymous budgets at one inbox. To
+      # SUSTAIN a denial an attacker must keep a bucket full: 5/h for the registration bucket = 30
+      # rows per 6h, the same 30 for resend-verification, and 20/h for the quarter-hour password
+      # reset bucket = 120 per 6h. Every one of those exceeds 20, with 1.5x of margin on the
+      # loosest - so the minimum traffic that holds somebody out of their own recovery cannot stay
+      # under this rule. Meanwhile an honest inbox tops out at a handful in six hours (five per
+      # window is already generous for "spam folder, typo, second device").
+      #
+      # WHAT IT DOES NOT CATCH, as the accepted cost: a hit-and-run. One capful fired once is five
+      # rows, a quarter of the threshold, and it buys a full window of lockout - indistinguishable
+      # here from a person with a typo and two devices. The refusal rules above see the burst
+      # shape, this one sees the sustained shape, and a single cheap capful is seen by neither.
+      #
+      # On a self-hosted instance where 20 is wrong, this file is where to change it - Grafana
+      # thresholds in this stack are provisioned, not environment-driven. The derivation above is
+      # on AnonymousMailConcentration; move both or neither.
+      #
+      # noDataState/execErrState are NOT OK here. The default in this file is OK, and for almost
+      # every rule that is right: a missing series means somebody did not deploy the thing being
+      # watched, and paging them for it is noise. THE RULE FOR DEPARTING FROM IT IS A CATEGORY, NOT
+      # A COUNT - any rule whose failure mode is ABSENCE rather than noise must treat NoData and
+      # Error as firing states, because for such a rule "no series" is not "nothing is wrong", it is
+      # "the thing that would have told you is gone". This rule qualifies because it is the sole
+      # witness to an attacker who is never refused; MailConcentrationGaugeStale below qualifies for
+      # the same reason one level up, and any future rule watching a single-witness signal joins
+      # them. (An earlier version of this comment said this rule was the ONLY departure in the file,
+      # and named its counterexample fourteen lines later.) See that rule for the third and quietest
+      # shape, a gauge that is present and FROZEN.
+      - uid: hamstrack-mail-recipient-concentration
+        title: MailRecipientConcentration
+        condition: B
+        for: 15m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "One email address has received more than 20 anonymous auth emails (password reset / verification) in 6h. THIS IS THE ONE RULE THAT SEES AN ATTACKER WHO STAYS UNDER THE CEILINGS, and staying under them is the optimal play here: sending exactly as slots age out keeps a person locked out of their own password recovery indefinitely, is never refused, and shows up in no refusal metric. It is silent from the victim's side too - forgot-password answers 200 either way, so they are told a link was sent and it never arrives. NEXT STEP, and the metric cannot do it for you because no meter may carry an address: run against the database - SELECT recipient_key, email_type, count(*) FROM mail_send_events WHERE sender_user_id IS NULL AND created_at > now() - interval '6 hours' GROUP BY 1, 2 HAVING count(*) > 20 ORDER BY 3 DESC; Then block the source at the proxy - lowering AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW does NOT help, it shortens the victim's own allowance too"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(hamstrack_mail_anonymous_recipient_max)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [20] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 7 (HD-202 final review): THE WITNESS'S OWN WITNESS.
+      #
+      # hamstrack_mail_anonymous_recipient_max is refreshed on a five-minute schedule into a
+      # last-write-wins AtomicLong. That makes its failure mode SILENT rather than absent: if the
+      # query behind it starts erroring or timing out, the gauge does not vanish and does not go to
+      # zero - it FREEZES at its last value, which on any healthy instance is a low one. Rule 6
+      # then reads a frozen quiet number as a quiet instance, for ever. And the population that
+      # makes that query slow is the flood rule 6 exists to detect, so the two failures correlate.
+      #
+      # AnonymousMailConcentration.refresh now catches and logs, and stamps
+      # hamstrack_mail_anonymous_recipient_max_age_seconds only on a run that completed. That gauge
+      # is evaluated at scrape rather than on the schedule, so it keeps RISING while the refresh is
+      # broken - which is the property a rule can see and a frozen value is not.
+      #
+      # THE THRESHOLD is 1800s = six missed refreshes. The schedule is 300s, so this tolerates a
+      # slow node, a redeploy and a couple of transient timeouts before it says anything. A fresh
+      # process is not a special case and deliberately has no sentinel: the age counts from PROCESS
+      # START until the first successful refresh, so 1800s + for:10m absorbs a deploy six times over
+      # while an instance whose refresh NEVER succeeds still ages into this rule. It used to publish
+      # -1 until the first success, which put "has never worked, not once" permanently BELOW this
+      # threshold - so the state with the worst consequences (V25 not applied on an upgrade, a
+      # persistent timeout, a permissions problem) was the one state neither this rule nor rule 6
+      # could reach: the value stayed 0, the age stayed -1, both series existed so NoData/Error did
+      # not help, and no rule in this file is Loki-backed, so the WARN that names the cause alerts
+      # nobody.
+      #
+      # noDataState/execErrState are NOT OK, for the category reason given on rule 6: this rule's
+      # failure mode is ABSENCE. It watches the watcher, so a missing or erroring series here means
+      # the only signal that sees an unrefused attacker is unsupervised - which is exactly what an
+      # operator must not read as calm.
+      #
+      # max() over replicas would hide a single broken node behind its healthy neighbours only if
+      # the number were per-node; it is not - every replica runs the same instance-wide query, so a
+      # node whose refresh is failing is a node whose age is rising, and min() would be the one that
+      # hides it. max() is correct here for the opposite reason it is correct on rule 6.
+      - uid: hamstrack-mail-concentration-gauge-stale
+        title: MailConcentrationGaugeStale
+        condition: B
+        for: 10m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "hamstrack_mail_anonymous_recipient_max has not been refreshed for over 30 minutes, so MailRecipientConcentration is reading a FROZEN number and cannot be trusted. That gauge is the only signal that sees an attacker who stays under every ceiling and is therefore never refused, and it fails silent by construction: a failing or timing-out query leaves the last value in place rather than clearing it, and the last value is almost always a quiet one. Look for a WARN from AnonymousMailConcentration naming the cause. Most likely a statement timeout on the mail_send_events aggregate - check that idx_mail_send_events_anonymous (V25) exists, because without it that query scans the whole table and gets slower exactly as the flood it watches grows. Until this clears, run the mail_send_events query from MailRecipientConcentration's summary by hand"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(hamstrack_mail_anonymous_recipient_max_age_seconds)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [1800] }
                   operator: { type: and }
                   query: { params: [] }
                   reducer: { type: last, params: [] }

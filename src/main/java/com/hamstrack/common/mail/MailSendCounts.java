@@ -15,9 +15,17 @@ import java.time.Instant;
  * answers "try again in one full window" over-states the wait every time but the first, and a
  * refusal that lies about its own remedy is how a retryable 429 gets read as a wall.
  *
- * <p><strong>Why the daily figure arrives in two pieces.</strong> The global daily ceiling counts
+ * <p><strong>"Window", not "day".</strong> The volume figures below are counted over
+ * {@code MailThrottlePolicy.ceilingWindow}, which each kind of mail declares for itself and which
+ * differs between them — a day for invitations, a quarter of an hour for password reset, an hour
+ * for verification. The widths are not arbitrary: where the ceiling also withholds mail the
+ * recipient asked for, it is simultaneously a bound on how long a victim cannot recover their own
+ * account (HD-202). Nothing in this record knows which window it was handed; it is given two
+ * instants and counts between them.
+ *
+ * <p><strong>Why the volume figure arrives in two pieces.</strong> The global ceiling counts
  * <em>the caller's own sends individually and every other sender once</em> (§6.3). Counting raw
- * sends let one account spend a stranger's whole daily allowance and lock every other workspace out
+ * sends let one account spend a stranger's whole allowance and lock every other workspace out
  * of inviting that person; counting only distinct senders would have let one account ring the
  * doorbell all day, bounded by nothing but its own cooldown. Splitting the figure gives both bounds
  * from one scan: no single account may exceed the cap on one address, and no single account may
@@ -31,30 +39,33 @@ import java.time.Instant;
  * {@code app.invites.max-per-recipient-per-day} is buying more of it than the number suggests. The
  * arithmetic is on that property.
  *
- * @param samePair                 sends to this key, from this sender, inside the cooldown window
- * @param samePairLatest           when the most recent of those was — {@code null} when there are
- *                                 none. The cooldown lifts at {@code samePairLatest + cooldown}
- * @param recipientDayOwn          sends to this key from <em>this</em> sender inside the daily
- *                                 window (for an anonymous caller: from the shared anonymous
- *                                 bucket), counted one per send
- * @param recipientDayOtherSenders how many <em>distinct other</em> senders reached this key inside
- *                                 the daily window, however many times each of them sent. All
- *                                 anonymous senders collapse into one bucket, because "who
- *                                 submitted the form" is not knowable and must not be guessable
- * @param recipientDayOldest       when the oldest send inside the daily window was — {@code null}
- *                                 when there are none. <strong>A lower bound on when the daily
- *                                 figure can next fall</strong>, not the moment it certainly does:
- *                                 ageing out one of several sends by the same other sender does not
- *                                 free that sender's slot. Understating is the safe direction — the
- *                                 caller retries and is refused again — and the value is coarsened
- *                                 before it leaves the process anyway
+ * @param samePair                    sends to this key, from this sender, inside the cooldown
+ *                                    window
+ * @param samePairLatest              when the most recent of those was — {@code null} when there
+ *                                    are none. The cooldown lifts at
+ *                                    {@code samePairLatest + cooldown}
+ * @param recipientWindowOwn          sends to this key from <em>this</em> sender inside the ceiling
+ *                                    window (for an anonymous caller: from the shared anonymous
+ *                                    bucket), counted one per send
+ * @param recipientWindowOtherSenders how many <em>distinct other</em> senders reached this key
+ *                                    inside the ceiling window, however many times each of them
+ *                                    sent. All anonymous senders collapse into one bucket, because
+ *                                    "who submitted the form" is not knowable and must not be
+ *                                    guessable
+ * @param recipientWindowOldest       when the oldest send inside the ceiling window was
+ *                                    ({@code null} when there are none). <strong>A lower bound on
+ *                                    when the volume figure can next fall</strong>, not the moment
+ *                                    it certainly does: ageing out one of several sends by the same
+ *                                    other sender does not free that sender's slot. Understating is
+ *                                    the safe direction — the caller retries and is refused again —
+ *                                    and the value is coarsened before it leaves the process anyway
  */
 public record MailSendCounts(long samePair, Instant samePairLatest,
-                             long recipientDayOwn, long recipientDayOtherSenders,
-                             Instant recipientDayOldest) {
+                             long recipientWindowOwn, long recipientWindowOtherSenders,
+                             Instant recipientWindowOldest) {
 
-    /** What the global daily ceiling is compared against. See the record javadoc for the shape. */
-    public long recipientDay() {
-        return recipientDayOwn + recipientDayOtherSenders;
+    /** What the global volume ceiling is compared against. See the record javadoc for the shape. */
+    public long recipientWindow() {
+        return recipientWindowOwn + recipientWindowOtherSenders;
     }
 }

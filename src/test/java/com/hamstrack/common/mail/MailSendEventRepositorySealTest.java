@@ -8,6 +8,7 @@ import org.springframework.data.repository.CrudRepository;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -204,11 +205,45 @@ class MailSendEventRepositorySealTest {
      * withdrawal refunds nothing) is held on this end by nothing but the absence of a method. This
      * is where that absence becomes structural.
      *
-     * <p>Phrased as "the predicate is {@code createdAt}, and nothing else" rather than as a list of
-     * forbidden columns, because a deny-list goes stale one column before the table does. The rule
-     * is that a row is removed for its <strong>age</strong>, never for being <strong>about</strong>
+     * <p>Phrased as a whitelist of predicate <em>shapes</em> rather than as a list of forbidden
+     * columns, because a deny-list goes stale one column before the table does. The rule is that a
+     * row is removed for its <strong>age</strong>, never for being <strong>about</strong>
      * somebody — so a delete that names no predicate at all fails too: it names no age, and it
      * takes every row.
+     *
+     * <p><strong>Two shapes are legal, not one, and the second was added under protest by this
+     * test</strong> (HD-202 review). {@code deleteAnonymousCreatedBefore} sweeps rows nobody signed
+     * for on a much shorter clock than the invite retention — they carry no
+     * {@code sender_user_id} to answer <em>who</em> with, and they are the only rows an
+     * unauthenticated stranger can force this instance to write. Its predicate therefore mentions
+     * {@code senderUserId}, and the first version of that method failed here, correctly: the
+     * assertion as written could not tell "delete the rows belonging to <em>this</em> sender" from
+     * "delete the rows belonging to <em>no</em> sender".
+     *
+     * <p>What separates them, and what is now asserted instead of the cruder rule: <strong>a
+     * property other than {@code createdAt} may appear only in a NULLITY test, and the method may
+     * take no parameter but the cutoff.</strong> Both halves are load-bearing. A nullity test names
+     * a <em>class</em> of row and cannot be aimed at a person — there is no value to supply — and
+     * the parameter check is what stops the loophole of aiming it anyway through a second argument.
+     * A refund requires naming somebody; neither half lets you.
+     *
+     * <p><strong>Be exact about what this rule is: it is literally WEAKER than the equality it
+     * replaced</strong> — the old assertion admitted only predicates on {@code createdAt}, and this
+     * one admits a strict superset of those. What is true, and what it was chosen for, is that it
+     * is far stronger than the alternative it was weighed against: a whitelist naming
+     * {@code deleteAnonymousCreatedBefore}. A name stops checking the moment it matches; the
+     * predicate rule keeps checking every delete for ever, including the ones written after
+     * everybody who remembers this paragraph has left. "Stronger" without a stated comparand is the
+     * kind of sentence this project keeps having to correct.
+     *
+     * <p><strong>The residual, not reachable today.</strong> {@link #propertiesMentionedIn} reflects
+     * over {@link MailSendEvent}'s FIELDS, so it can only recognise a column the entity maps. A
+     * native delete naming an unmapped column — one added by a migration and never mapped, or a
+     * database-side one — mentions nothing this method can see, so the nullity half of the rule
+     * looks at an empty set and the predicate reads as harmless. Every column of
+     * {@code mail_send_events} is mapped today and every delete here is JPQL, which is why this is
+     * a note rather than a second assertion; a native delete arriving in this interface is the
+     * moment to make it one.
      */
     @Test
     void noDeleteMayBeKeyedOnAnythingButAge() {
@@ -217,8 +252,9 @@ class MailSendEventRepositorySealTest {
             if (!isDelete(method)) {
                 continue;
             }
-            var keyedOn = propertiesMentionedIn(predicateOf(method));
-            if (!keyedOn.equals(Set.of("createdAt"))) {
+            var predicate = predicateOf(method);
+            var keyedOn = propertiesMentionedIn(predicate);
+            if (!removesRowsOnlyForBeingOld(method, predicate, keyedOn)) {
                 offending.put(signature(method), keyedOn);
             }
         }
@@ -233,9 +269,63 @@ class MailSendEventRepositorySealTest {
                     + "slot, a stock cap — and never flow — sends, cooldowns, daily ceilings. "
                     + "Deleting the record of an offer does not delete the record of a delivery. "
                     + "Each offender maps to the entity properties its predicate mentions; an "
-                    + "empty set means it names no predicate at all, which takes every row."
+                    + "empty set means it names no predicate at all, which takes every row. A "
+                    + "property other than createdAt is allowed ONLY as a nullity test on a method "
+                    + "whose sole parameter is the cutoff — that names a CLASS of row (rows nobody "
+                    + "signed for) and cannot be aimed at a person, because there is no value to "
+                    + "supply. If yours takes a second parameter, it can be aimed, and it is a "
+                    + "refund."
                     + WHY)
                 .isEmpty();
+    }
+
+    /**
+     * The whitelist itself. A delete qualifies when it is bounded by {@code createdAt}, every other
+     * property it mentions appears only as {@code IS [NOT] NULL}, and the method accepts nothing
+     * but the cutoff.
+     *
+     * <p>The parameter count is not belt-and-braces: a nullity test alone would still permit
+     * {@code delete … where senderUserId is null and recipientKey = :key}, which mentions
+     * {@code recipientKey} — caught by the nullity rule — but also permits subtler shapes as the
+     * predicate grammar grows. One parameter, and it is an {@link Instant}, is the property that
+     * makes "cannot be aimed at anybody" true by construction rather than by inspection.
+     */
+    private static boolean removesRowsOnlyForBeingOld(Method method, String predicate,
+                                                      Set<String> keyedOn) {
+        if (!keyedOn.contains("createdAt")) {
+            return false;
+        }
+        if (keyedOn.size() == 1) {
+            return true;
+        }
+        if (method.getParameterCount() != 1
+            || !Instant.class.isAssignableFrom(method.getParameterTypes()[0])) {
+            return false;
+        }
+        return keyedOn.stream()
+                .filter(property -> !property.equals("createdAt"))
+                .allMatch(property -> onlyTestedForNullity(predicate, property));
+    }
+
+    /**
+     * Whether every mention of {@code property} in {@code predicate} is a nullity test. Both sides
+     * are already normalised to words by {@link #words(String)}, so a JPQL
+     * {@code e.senderUserId IS NULL} and a native {@code sender_user_id IS NULL} read alike.
+     */
+    private static boolean onlyTestedForNullity(String predicate, String property) {
+        var phrase = words(property);
+        var haystack = " " + predicate + " ";
+        int mentions = 0;
+        int nullityTests = 0;
+        for (int at = haystack.indexOf(" " + phrase + " "); at >= 0;
+             at = haystack.indexOf(" " + phrase + " ", at + 1)) {
+            mentions++;
+            var rest = haystack.substring(at + phrase.length() + 2);
+            if (rest.startsWith("is null") || rest.startsWith("is not null")) {
+                nullityTests++;
+            }
+        }
+        return mentions > 0 && mentions == nullityTests;
     }
 
     /**

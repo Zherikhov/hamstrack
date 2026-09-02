@@ -59,8 +59,20 @@ public class MailService {
     // that never reaches a send at all, and it has to be the SAME question. A new EmailType must
     // land on one side or the other exactly once — two copies of this method would let it be
     // critical when a send fails and best-effort when a send never happens.
+    //
+    // REGISTRATION_VERIFICATION is named EXPLICITLY even though no mailer emits it today (it is a
+    // throttle-budget tag; POST /api/auth/register dispatches VERIFICATION). A default is not a
+    // decision: falling through to false would make it best-effort SILENTLY on the day some future
+    // mailer does dispatch it — log-only, no retry, no dead-letter — which is precisely the trap
+    // the paragraph above exists to prevent, and the paragraph could not see it because the fork's
+    // "else" branch needs no edit to absorb a new constant. Critical rather than best-effort
+    // because the message that budget pays for is a verification link, and a lost one leaves an
+    // account nobody can activate, its owner included. MailCriticalityCoverageTest is what makes
+    // this a placement rather than an omission: it fails on a constant no side names.
     static boolean isCritical(EmailType type) {
-        return type == EmailType.VERIFICATION || type == EmailType.PASSWORD_RESET;
+        return type == EmailType.VERIFICATION
+               || type == EmailType.REGISTRATION_VERIFICATION
+               || type == EmailType.PASSWORD_RESET;
     }
 
     public void sendVerificationEmail(String to, String token) {

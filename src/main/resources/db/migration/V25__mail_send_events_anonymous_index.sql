@@ -1,0 +1,78 @@
+-- ---------------------------------------------------------------------------
+-- HD-202 (review) -- an index for the concentration gauge, which is the ONE
+-- signal that sees an attacker who is never refused.
+-- ---------------------------------------------------------------------------
+-- MailSendEventRepository.maxAnonymousSendsToOneRecipient runs
+--
+--     SELECT max(per_key) FROM (SELECT count(*) ... WHERE sender_user_id IS NULL
+--                                 AND created_at > :since GROUP BY recipient_key)
+--
+-- every five minutes, on EVERY replica, from AnonymousMailConcentration. V21
+-- gave this table three indexes and none of them answers that shape:
+-- (recipient_key, created_at) leads on the wrong column; (sender_user_id,
+-- created_at) does not carry recipient_key, so every group costs a heap fetch;
+-- and (created_at) alone still fetches every heap row in the window to test the
+-- sender and to read the key. So the query degraded to a scan whose cost grows
+-- with the table -- and the population that makes it grow is exactly the flood
+-- the gauge exists to detect. A signal that gets slower in proportion to the
+-- event it watches is a signal that stops working when it is needed.
+--
+-- NOT because "IS NULL cannot be probed as a range": PostgreSQL btrees have
+-- accepted IS NULL as an indexable scan key since 8.3, and an earlier draft of
+-- this header said otherwise. The missing COLUMN is the whole argument.
+--
+-- PARTIAL, on the predicate itself. sender_user_id IS NULL is a constant, and
+-- anonymous rows are the minority of the table on any instance with real
+-- workspaces, so the index carries only rows the query can use. recipient_key
+-- is the second column so the GROUP BY is answered from the index instead of
+-- from the heap.
+--
+-- PLAIN CREATE INDEX, NOT CONCURRENTLY -- and Flyway is not the reason. Its
+-- PostgreSQL parser detects CREATE/DROP INDEX CONCURRENTLY and runs such a
+-- migration outside a transaction (flyway-database-postgresql 12.4.0,
+-- PostgreSQLParser.detectCanExecuteInTransaction), and executeInTransaction=false
+-- exists besides; a header that calls it a hard blocker is wrong. The reason is
+-- the trade the other way round: a failed concurrent build leaves an INVALID
+-- index behind, which the planner ignores while ddl-auto=validate stays green --
+-- i.e. precisely this file's own failure mode, arrived at silently. A plain
+-- build takes a lock on the table for its duration instead, and it is bounded by
+-- the WHOLE table rather than by the rows it keeps: a partial index still scans
+-- every heap row to decide which ones it covers, so the build time tracks the
+-- 90-day ceiling on app.invites.event-retention-days, not the 2-day subset
+-- below. No Upgrading entry is needed for it: the compose upgrade recreates the
+-- container, so nothing is writing to this table while the migration runs, and
+-- statement_timeout is deliberately not applied on the Hikari init so Flyway may
+-- run long.
+--
+-- The rows this index actually covers live TWO DAYS, not "a retention of 2-7":
+-- 7 is only the default of app.invites.event-retention-days (@Min(2) @Max(90)),
+-- while anonymous rows are additionally swept at
+-- AuthMailProperties.ANONYMOUS_EVENT_RETENTION -- a constant with no knob, so
+-- their lifetime is min(2 days, that property) and the minimum legal property
+-- value is the same 2. The covered set is therefore bounded by a number no
+-- operator can raise, which is the stronger statement and the one worth making.
+--
+-- FOR WHOEVER READS V21's index comments: two of them are counts, and both have
+-- moved. An applied migration must not be edited, so the correction lives here --
+-- and, because a correction only reaches somebody who opens the file it is buried
+-- in, DURABLY on MailSendEventRepository, which is where anybody deciding the
+-- fate of an index on this table is actually standing.
+--
+--   * idx_mail_send_events_recipient is no longer "the throttle's only read":
+--     the throttle is one reader among several now, and any statement about how
+--     many there are will be stale before the next one is written.
+--   * idx_mail_send_events_sender becomes MORE droppable because of this file,
+--     not less. The anonymous half of the sender dimension moves onto the index
+--     below (it leads on created_at as a range, matches the partial predicate,
+--     and scans a strictly smaller relation), and deleteAnonymousCreatedBefore
+--     will very likely plan on it too. What stays uniquely _sender's is the
+--     non-NULL forensic lookup -- "what else did this account send?" after
+--     MailDailyVolumeHigh fires -- which is roughly what V21 said in the first
+--     place. Confirm with EXPLAIN against a populated table before acting on
+--     either half of this.
+--
+-- Standing rules: no schema change beyond the index; nothing here touches an
+-- entity, so entity/schema parity is unchanged.
+CREATE INDEX idx_mail_send_events_anonymous
+    ON mail_send_events (created_at, recipient_key)
+ WHERE sender_user_id IS NULL;

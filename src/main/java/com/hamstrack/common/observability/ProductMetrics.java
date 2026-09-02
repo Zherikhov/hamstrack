@@ -11,6 +11,9 @@ import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Component;
 
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * Single home for all custom business (product) metrics — every custom meter
  * name and label lives here so the metric surface is auditable in one place
@@ -82,7 +85,30 @@ public class ProductMetrics {
         // costs a mailbox per slot, which makes this the sharpest of the three) or from one
         // account spending its own share across the day. The kind alone does not say which; the
         // domain-only INFO line and mail_send_events do.
-        INVITE_RECIPIENT_DAILY("invite_recipient_daily");
+        INVITE_RECIPIENT_DAILY("invite_recipient_daily"),
+        // ---- The anonymous auth mailers (HD-202). Same mechanism, same table, separate budgets:
+        // one address may receive the reset cap AND the verification cap, because a shared bucket
+        // would let a stranger's traffic suppress the one piece of mail the victim asked for.
+        //
+        // THESE FIRE ON REFUSALS THE CALLER NEVER SEES. Both endpoints answer one uniform sentence
+        // whether the address exists, whether mail went out, and whether a ceiling refused — so a
+        // metric is not merely the best signal here, it is the ONLY one. A rate on either _COOLDOWN
+        // is somebody pressing "send me a link" at one address; a rate on either _WINDOW is that
+        // sustained past the hourly cap, which is both a mail bomb aimed at a person and, from that
+        // person's side, an hour in which they cannot recover their own account.
+        PASSWORD_RESET_RECIPIENT_COOLDOWN("password_reset_recipient_cooldown"),
+        PASSWORD_RESET_RECIPIENT_WINDOW("password_reset_recipient_window"),
+        VERIFICATION_RECIPIENT_COOLDOWN("verification_recipient_cooldown"),
+        VERIFICATION_RECIPIENT_WINDOW("verification_recipient_window"),
+        // POST /api/auth/register holds its OWN pair, because a bucket shared with
+        // resend-verification is a bucket a stranger can fill through an endpoint that sends no
+        // mail at all: resend records unconditionally (it must, or the row itself answers whether
+        // the account exists), so filling it at an address with no PENDING account denied signup
+        // for that whole inbox for free and in silence. Unlike its siblings these two are NOT
+        // silent - register answers 429 - so they are a corroborating signal rather than the only
+        // evidence; a rate on them is somebody walking spellings of one inbox through signup.
+        REGISTRATION_VERIFICATION_RECIPIENT_COOLDOWN("registration_verification_recipient_cooldown"),
+        REGISTRATION_VERIFICATION_RECIPIENT_WINDOW("registration_verification_recipient_window");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }
@@ -123,8 +149,38 @@ public class ProductMetrics {
         public String tag() { return tag; }
     }
 
+    /**
+     * The kinds of outbound mail, and — since HD-202 — the {@code mail_send_events.email_type}
+     * budget keys, which is why the two are not quite the same list.
+     *
+     * <p>{@link #REGISTRATION_VERIFICATION} names a BUDGET and no mailer emits it: the message
+     * {@code POST /api/auth/register} eventually sends is ordinary verification mail and is
+     * metered as {@link #VERIFICATION}. Separating the budget is what stops one endpoint denying
+     * the other; separating the meter would only split a volume series nobody reads per endpoint.
+     * {@code MailThrottleCoverageTest} seals mailer-to-type in that direction only (every mailer
+     * declares exactly one type), so a budget-only constant is legitimate here.
+     *
+     * <p><strong>A budget-only constant still has to be PLACED on every fork that switches on this
+     * enum</strong>, and {@code MailService.isCritical} is one: emitting nothing today means the
+     * placement is untested rather than unnecessary, and the day a mailer does emit it the
+     * else-branch would silently make it log-only. {@code MailCriticalityCoverageTest} fails on a
+     * constant neither side names.
+     */
     public enum EmailType {
-        VERIFICATION("verification"), PASSWORD_RESET("password_reset"), INVITE("invite");
+        VERIFICATION("verification"),
+        /**
+         * The budget {@code POST /api/auth/register} spends. Its own bucket, not a share of
+         * {@link #VERIFICATION}: while they shared one, five {@code resend-verification} requests
+         * an hour at an address with no account — which send nothing and log nothing above
+         * DEBUG — denied registration for every spelling of that inbox, indefinitely and for free.
+         * The cost of the split is a third bucket in the per-inbox bound — twice the per-window
+         * verification cap on the hour-wide budgets, and see {@code AuthMailProperties} for the
+         * whole sum, which is a sum of rates rather than a multiple of the cap. Refusal shape:
+         * {@code RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses}.
+         */
+        REGISTRATION_VERIFICATION("registration_verification"),
+        PASSWORD_RESET("password_reset"),
+        INVITE("invite");
         final String tag;
         EmailType(String tag) { this.tag = tag; }
     }
@@ -147,6 +203,45 @@ public class ProductMetrics {
     private final Counter invitesRevoked;
     private final Counter attachmentsUploaded;
     private final DistributionSummary attachmentBytes;
+
+    /**
+     * Backing value of {@code hamstrack.mail.anonymous_recipient_max}. Refreshed on a schedule by
+     * {@code AnonymousMailConcentration} rather than evaluated at scrape time: the query behind it
+     * is a {@code GROUP BY} over hours of rows, and a scrape is not the place for one.
+     */
+    private final AtomicLong anonymousMailConcentration = new AtomicLong();
+
+    /**
+     * When {@link #anonymousMailConcentration} was last <em>successfully</em> refreshed, as epoch
+     * seconds — <strong>seeded with the moment this bean was built, not with zero</strong>.
+     *
+     * <p>It exists because the gauge above is last-write-wins and therefore <strong>fails
+     * silent</strong>: a query that starts erroring or timing out leaves it frozen at its last
+     * value, which is almost certainly a quiet one, and a frozen number reads exactly like a calm
+     * instance. Worse, the population that makes that query slow is the attack the gauge exists to
+     * see. So the freshness is published beside the value and
+     * {@code MailConcentrationGaugeStale} alerts on it.
+     *
+     * <p><strong>Seeded at boot because the state that mattered most was the one the alert could
+     * not reach</strong> (HD-202 final review). This used to start at {@code 0} and the gauge
+     * mapped {@code 0} to {@code -1}, so "has never refreshed successfully, not once" published a
+     * value BELOW its own {@code > 1800} threshold — permanently. On an instance where the refresh
+     * never succeeds (V25 not applied on an upgrade, a persistent timeout, a permissions problem)
+     * that is the whole alerting story: {@code MailConcentrationGaugeStale} never fires because
+     * {@code -1} is not stale, {@code MailRecipientConcentration} never fires because the value is
+     * still {@code 0}, both series <em>exist</em> so {@code NoData}/{@code Error} do not help, and
+     * no rule in that file is Loki-backed so the WARN from
+     * {@code AnonymousMailConcentration.refresh} alerts nobody. The sole witness and the witness
+     * watching it were both silent for ever, in the one state where an operator most needs to hear
+     * from them.
+     *
+     * <p>Seeding it with boot time makes the never-succeeded case indistinguishable from the
+     * stopped-succeeding case, which is correct — they have the same remedy — and it costs
+     * nothing at startup: the schedule's first run is fifteen seconds in and the rule needs
+     * 1800 s over a {@code for: 10m}, which tolerates a deploy six times over.
+     */
+    private final AtomicLong anonymousMailConcentrationRefreshedAt =
+            new AtomicLong(Instant.now().getEpochSecond());
 
     public ProductMetrics(MeterRegistry registry,
                           UserRepository userRepository,
@@ -174,6 +269,32 @@ public class ProductMetrics {
         this.attachmentBytes = DistributionSummary.builder("hamstrack.attachments.bytes")
                 .description("Uploaded attachment sizes in bytes")
                 .baseUnit("bytes").register(registry);
+
+        // The one meter in this file that is neither a counter at an event site nor a count at
+        // scrape time. See anonymousMailConcentration(long) for what it measures and why it is the
+        // only thing that can see the attack it was built for.
+        Gauge.builder("hamstrack.mail.anonymous_recipient_max", anonymousMailConcentration,
+                        AtomicLong::get)
+                .description("Anonymous auth mail sent to the single busiest recipient key, last 6h")
+                .register(registry);
+
+        // The freshness of the line above, and the only thing that can tell a quiet instance from a
+        // broken refresh. Evaluated at scrape (it is arithmetic on a long, not a query) so it keeps
+        // rising while the refresh is failing, instead of freezing alongside the value it describes.
+        //
+        // NO SENTINEL BRANCH. Before the first successful run this reads the age of the PROCESS,
+        // because the field is seeded at construction — see its javadoc. The -1 that used to stand
+        // here was the one hole in the whole arrangement: it put "never refreshed, not once"
+        // permanently below the rule's own threshold, so the failure that matters most produced no
+        // alert from either gauge.
+        Gauge.builder("hamstrack.mail.anonymous_recipient_max_age_seconds",
+                        anonymousMailConcentrationRefreshedAt,
+                        at -> (double) (Instant.now().getEpochSecond() - at.get()))
+                .description("Seconds since hamstrack.mail.anonymous_recipient_max was last "
+                             + "successfully refreshed; counts from process start until the first "
+                             + "successful refresh, so a refresh that never succeeds still ages")
+                .baseUnit("seconds")
+                .register(registry);
 
         // Gauges — evaluated at scrape time, each a single cheap count query.
         Gauge.builder("hamstrack.users.total", userRepository, UserRepository::count)
@@ -217,6 +338,46 @@ public class ProductMetrics {
     /** {@code hamstrack.ratelimit.hit{kind}} — at each RateLimitedException throw. */
     public void rateLimitHit(RateLimitKind kind) {
         registry.counter("hamstrack.ratelimit.hit", "kind", kind.tag).increment();
+    }
+
+    /**
+     * {@code hamstrack.mail.anonymous_recipient_max} — how much anonymous auth mail went to the
+     * single busiest recipient key over the last six hours (HD-202 review).
+     *
+     * <p><strong>The refusal counters cannot see the attack this feature exists to bound, and this
+     * can.</strong> {@link #rateLimitHit} is emitted only when a ceiling <em>fires</em>. The
+     * denial-of-recovery attacker is never refused: to hold a victim's bucket full they send
+     * exactly at the rate slots age out, spaced past the cooldown, and every one of those requests
+     * is allowed. So the only refusals a sustained single-target attack generates are the victim's
+     * own one or two attempts — a handful, against a threshold in the tens. A rule built on
+     * refusals fires for the noisy mail-bomb shape and stays silent for the quiet one, which is the
+     * shape the whole ceiling was argued for.
+     *
+     * <p><strong>No address label, and that is why this is expressible as a metric at all.</strong>
+     * The cardinality/privacy rule at the top of this class is not negotiable, and it binds harder
+     * here than usual: a Grafana alert carries its series labels into alert state and out through
+     * the email contact point, so a {@code recipient_key} label would mail recipient addresses to
+     * the operator's inbox. The number says "somebody is being targeted"; the address is looked up
+     * in {@code mail_send_events}, where it legitimately lives, with the query in
+     * {@code docs/self-hosting.md}.
+     *
+     * <p>Every replica computes the same instance-wide number from the same table, so the series
+     * are duplicates rather than shards — an alert on it takes {@code max()}, never {@code sum()}.
+     */
+    public void anonymousMailConcentration(long max) {
+        anonymousMailConcentration.set(max);
+    }
+
+    /**
+     * Stamps {@code hamstrack.mail.anonymous_recipient_max_age_seconds} — called only after a
+     * refresh that actually completed.
+     *
+     * <p>A separate call rather than a side effect of {@link #anonymousMailConcentration(long)}, so
+     * that a future caller which sets the value from somewhere other than a fresh query cannot
+     * accidentally certify it as fresh.
+     */
+    public void anonymousMailConcentrationRefreshed() {
+        anonymousMailConcentrationRefreshedAt.set(Instant.now().getEpochSecond());
     }
 
     // --- workspace / project / issue ---

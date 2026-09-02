@@ -1,5 +1,6 @@
 package com.hamstrack.common.config;
 
+import com.hamstrack.common.ratelimit.MailThrottlePolicy;
 import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -97,11 +98,29 @@ public record InviteProperties(
          * from workspace_invites it would be reset by three existing paths, one of which is the
          * victim's own decline button.
          *
-         * Capped at 1440 (one day) so the cooldown window never reaches further back than the daily
-         * window; the throttle's single SELECT passes the earlier of the two explicitly rather than
-         * relying on that, but nothing above a day would be a cooldown anyway.
+         * Capped at 1439 - one minute INSIDE this policy's volume window (1440, one day) - so the
+         * cooldown never reaches as far back as the window it sits inside; the throttle's single
+         * SELECT passes the earlier of the two explicitly rather than relying on that, and nothing
+         * above a day would be a cooldown anyway.
+         *
+         * IT WAS 1440 UNTIL HD-202's FINAL REVIEW, AND THE MINUTE WAS GIVEN UP TO KEEP ONE RULE.
+         * MailThrottlePolicy now refuses a cooldown that merely EQUALS its ceiling window, because
+         * on a single-bucket policy - the anonymous auth ones, where the cooldown and the cap count
+         * the same population - equality already makes the cap unreachable, which is precisely what
+         * that guard's message says it exists to prevent. Here equality is milder: the cooldown is
+         * per SENDER while the cap counts distinct other senders too, so five accounts could still
+         * reach it. Milder is not a reason for a second rule with a second exception to remember,
+         * and the last minute of a 24-hour range is a setting nobody has. So the bound moved rather
+         * than the guard.
+         *
+         * THE 1439 IS A HAND-COPY OF MailThrottlePolicy.MAX_CEILING_WINDOW.toMinutes() - 1, because
+         * an annotation cannot call a method. Nothing keeps the two in step by construction - and
+         * nothing has to: MailThrottlePolicy's canonical constructor refuses a policy whose cooldown
+         * is not narrower than its own ceiling window, so a stale copy here does not ship a broken
+         * ceiling, it aborts the boot with a message naming both widths. AuthMailProperties carries
+         * the same arrangement for the same reason, and says so in the same place.
          */
-        @DefaultValue("60") @Min(1) @Max(1440) int recipientCooldownMinutes,
+        @DefaultValue("60") @Min(1) @Max(1439) int recipientCooldownMinutes,
 
         /*
          * How many INVITATIONS one address may receive per day from senders other than yourself,
@@ -172,17 +191,25 @@ public record InviteProperties(
          *
          * It has to outlast EVERY ceiling window, because a row the sweep deleted is a row no
          * ceiling can count - the ceiling silently shortens to the retention, with no error and no
-         * log line. THERE ARE TWO WINDOWS, and the second is the one this comment used to forget:
-         * the per-(sender, recipient) cooldown, up to 1440 minutes, and the GLOBAL DAILY CAP, which
-         * is a fixed 24 hours (RecipientMailThrottle.DAY) and is not configurable at all. So the
-         * floor is a day whatever the cooldown is set to, which is why the minimum here is 2 rather
-         * than 1: at 1 day the retention would be EXACTLY the daily window, and "exactly" is not
-         * cover - two replicas whose clocks differ by a second are enough for one node's sweep to
-         * delete a row the other node's daily count still needs, and the only symptom is a send that
-         * should have been refused. The relationship is asserted at startup below rather than left
-         * to independently editable annotations in two different files. (HD-202 will want a 24h
-         * resend-verification cooldown, which IS 1440 minutes - and is covered by 2 days, which is
-         * the point of asserting the pair instead of hoping.)
+         * log line. NOT EVERY ONE OF THOSE WINDOWS IS CONFIGURABLE, and that is what an earlier
+         * version of this comment forgot: the per-(sender, recipient) cooldown is a property, but
+         * every per-recipient VOLUME cap counts over a width that is fixed in code, differs per
+         * policy, and grows a new member whenever a new kind of mail is throttled. An enumeration
+         * of today's widths here would therefore be stale one policy before it looked wrong.
+         *
+         * So the assertion below does not enumerate. It compares against
+         * MailThrottlePolicy.MAX_CEILING_WINDOW - the widest width any policy is ALLOWED to
+         * declare, enforced as a ceiling on every one of them at bean creation - which is 24 hours.
+         * That is why the minimum here is 2 rather than 1: at 1 day the retention would be EXACTLY
+         * that bound, and "exactly" is not cover - two replicas whose clocks differ by a second are
+         * enough for one node's sweep to delete a row the other node's count still needs, and the
+         * only symptom is a send that should have been refused. Asserted at startup below rather
+         * than left to independently editable annotations in two different files.
+         *
+         * IT DOES NOT REACH THE ANONYMOUS ROWS. Rows with no sender_user_id are swept on
+         * AuthMailProperties.ANONYMOUS_EVENT_RETENTION (2 days) instead: the long window here is
+         * bought to answer WHO, and "who" is a sender id an anonymous row does not have, while
+         * those rows are the only ones an unauthenticated stranger can force the instance to write.
          *
          * The rest of the window is forensic: after the MailDailyVolumeHigh alert fires this table
          * is the only place that can answer WHO and WHICH ADDRESSES, and the metrics deliberately
@@ -192,18 +219,40 @@ public record InviteProperties(
          * The sweep runs whether or not app.rate-limit.enabled is true - rows are cheap and the
          * alternative is an unbounded table on any instance that toggles the switch.
          */
-        @DefaultValue("7") @Min(2) @Max(90) int eventRetentionDays
+        @DefaultValue("7") @Min(MIN_EVENT_RETENTION_DAYS) @Max(90) int eventRetentionDays
 ) {
+
+    /**
+     * The lowest {@code app.invites.event-retention-days} that boots — <strong>exported because a
+     * second constant is derived from it, not for readability</strong> (HD-202 review).
+     *
+     * <p>It is one day more than {@link MailThrottlePolicy#MAX_CEILING_WINDOW} because exact is not
+     * cover (see {@link #isRetentionLongerThanWidestCeilingWindow}), and
+     * {@code AuthMailProperties.ANONYMOUS_EVENT_RETENTION} is documented as being reached first —
+     * a claim that is true only while it does not exceed THIS value, since the general sweep has no
+     * sender predicate and the effective anonymous lifetime is the smaller of the two.
+     * {@code MailSendEventRetention} asserts that at startup against this constant rather than
+     * against a hand-copied {@code 2}, so the pair cannot drift the way the {@code 1440} once did.
+     */
+    public static final int MIN_EVENT_RETENTION_DAYS = 2;
 
     private static final int MINUTES_PER_DAY = 1440;
 
     /**
-     * The width of the <strong>fixed</strong> ceiling window — {@code RecipientMailThrottle.DAY},
-     * the window {@link #maxPerRecipientPerDay} is counted over. It is restated here rather than
-     * imported because it is a {@code private} constant in another package; the pointer back is on
-     * that field, since the person who widens it is standing there and not here.
+     * The widest ceiling window any {@link MailThrottlePolicy} may declare — <strong>imported, not
+     * restated</strong>.
+     *
+     * <p>It used to be a hand-copied {@code 1440} beside a paragraph explaining exactly how it
+     * would rot: widen the window and the copy does not move, so the assertion below keeps passing
+     * while guaranteeing less than its message says, with no error and no log line, and nothing
+     * evaluated inside this record could notice. HD-202 made the window a PER-POLICY value, which
+     * would have turned one stale copy into N — so the copy is gone instead.
+     * {@code MailThrottlePolicy} enforces this same constant as a ceiling on every policy at bean
+     * creation, so what this assertion compares against is what the ceilings actually count over,
+     * by construction rather than by care.
      */
-    private static final int FIXED_CEILING_WINDOW_MINUTES = MINUTES_PER_DAY;
+    private static final long FIXED_CEILING_WINDOW_MINUTES =
+            MailThrottlePolicy.MAX_CEILING_WINDOW.toMinutes();
 
     /**
      * The knobs that have to be read together, and that live in different files.
@@ -213,18 +262,23 @@ public record InviteProperties(
      * that ceiling quietly becomes the retention. Nothing would fail — the count would simply come
      * back lower, and the throttle would hand out a send it meant to refuse.
      *
-     * <p><strong>There are TWO ceiling windows and this compares against the wider of them.</strong>
-     * The first cut compared only the configurable cooldown, which made the assertion guarantee half
-     * of what its own message claims: {@link #maxPerRecipientPerDay} is counted over a fixed 24
-     * hours that no property can lower, so a one-day retention was <em>exactly</em> a daily window,
-     * and exact is not cover. Two replicas whose clocks differ by a second are enough for one node's
-     * sweep to remove a row the other node's daily count still needs — the global cap under-counts
-     * and permits a send it meant to refuse, with no error and no log line, which is the precise
-     * failure this assertion exists to delete. Hence {@code max(cooldown, fixed daily window)}.
+     * <p><strong>Some ceiling windows are not properties, and this compares against the widest
+     * width any of them may have.</strong> The first cut compared only the configurable cooldown,
+     * which made the assertion guarantee half of what its own message claims: every per-recipient
+     * volume cap counts over a width fixed in code that no property can lower, so a one-day
+     * retention was <em>exactly</em> the widest such width, and exact is not cover. Two replicas
+     * whose clocks differ by a second are enough for one node's sweep to remove a row the other
+     * node's count still needs — the cap under-counts and permits a send it meant to refuse, with
+     * no error and no log line, which is the precise failure this assertion exists to delete. Hence
+     * {@code max(cooldown, MailThrottlePolicy.MAX_CEILING_WINDOW)} — a bound rather than a list, so
+     * that adding a policy cannot make this sentence false without also failing that policy's own
+     * construction.
      *
      * <p><strong>At today's annotation values it can never be the SOLE reason a boot is refused,
      * and that is the point rather than dead code.</strong> {@code @Min(2)} on the retention against
-     * {@code @Max(1440)} on the cooldown means no value that satisfies the other constraints can
+     * the {@code @Max} on {@code recipientCooldownMinutes} — which is a day minus a minute, and
+     * is quoted here as a property rather than as a number on purpose, this being the paragraph
+     * about hand-copied bounds — means no value that satisfies the other constraints can
      * falsify this one — and {@code @Min(2)} is itself derived from this predicate, since one day
      * would be refused by it and allowing one day would make the documented range a lie. It still
      * <em>fires</em>: Hibernate Validator evaluates every constraint, so
@@ -235,26 +289,30 @@ public record InviteProperties(
      * floor back to one, and this predicate becomes load-bearing on its own. Either edit is
      * individually defensible where it lives and neither has a reason to visit the other.
      *
-     * <p><strong>The third drift — widening {@code RecipientMailThrottle.DAY} — is the one this
-     * assertion CANNOT catch, and claiming it can would restate, one level up, the defect the
-     * widening above removed.</strong> {@code FIXED_CEILING_WINDOW_MINUTES} is a hand-copied 1440:
-     * widen that constant and the copy does not move, so the predicate goes on comparing against
-     * the old window and goes on PASSING while guaranteeing less than its message says — no error,
-     * no log line, which is the silent under-cover this pair of knobs exists to prevent. Nothing
-     * evaluated inside this record can notice, because the value it would have to read is the one
-     * that did not change. Only an equality check between the two constants catches that, it is a
-     * test rather than a constraint, and this annotation must not be cited in its place.
+     * <p><strong>The third drift — widening the ceiling window itself — used to be the one this
+     * assertion could not catch, and HD-202 closed it by deleting the copy rather than by adding a
+     * test.</strong> {@code FIXED_CEILING_WINDOW_MINUTES} was a hand-copied {@code 1440}: widen the
+     * window and the copy did not move, so the predicate went on comparing against the old width
+     * and went on PASSING while guaranteeing less than its message says — no error, no log line.
+     * It now reads {@code MailThrottlePolicy.MAX_CEILING_WINDOW}, which is also enforced as the
+     * ceiling on every policy's window at bean creation. So there is one number, in one place,
+     * asserted here and enforced there; widening it widens both, and a policy that tries to outrun
+     * it fails to start.
      *
      * <p>A unit test wanting the {@code false} branch alone constructs the record directly
      * ({@code eventRetentionDays = 1}) rather than binding properties.
      */
     @AssertTrue(message = "app.invites.event-retention-days must cover more than the widest ceiling "
-            + "window — that is the LARGER of app.invites.recipient-cooldown-minutes and the fixed "
-            + "24h window of app.invites.max-per-recipient-per-day. mail_send_events rows are swept "
-            + "on the retention window and counted by both ceilings, so a shorter retention silently "
-            + "shortens whichever ceiling it undercuts. Raise the retention: while the cooldown is "
-            + "capped at 24h, the fixed daily window is what this compares against, so lowering the "
-            + "cooldown cannot satisfy it")
+            + "window — that is the LARGER of app.invites.recipient-cooldown-minutes and the widest "
+            + "window any recipient-keyed volume cap is permitted to count over "
+            + "(MailThrottlePolicy.MAX_CEILING_WINDOW, 24h, fixed in code and not settable by any "
+            + "property). mail_send_events rows are swept on the retention window and counted by "
+            + "every one of those ceilings, so a shorter retention silently shortens whichever it "
+            + "undercuts. RAISE THE RETENTION — it is the only side that can satisfy this. Lowering "
+            + "app.invites.recipient-cooldown-minutes cannot, because the 24h bound is the larger "
+            + "term whatever the cooldown is; and lowering app.invites.max-per-recipient-per-day "
+            + "cannot either, because that property is a COUNT and the width it is counted over is "
+            + "the one fixed in code")
     public boolean isRetentionLongerThanWidestCeilingWindow() {
         return (long) eventRetentionDays * MINUTES_PER_DAY
                > Math.max(recipientCooldownMinutes, FIXED_CEILING_WINDOW_MINUTES);

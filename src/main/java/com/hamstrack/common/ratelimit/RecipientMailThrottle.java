@@ -49,9 +49,9 @@ import java.util.function.Supplier;
  * is always sent to the submitted address, never to the key.
  *
  * <p><strong>Fail-safe is not free, and its cost differs per ceiling — the milder one is not the
- * bound.</strong> An over-fold costs {@link #refuseIfCoolingDown} an honest sender a wait they did
+ * bound.</strong> An over-fold costs {@link #refusalIfCoolingDown} an honest sender a wait they did
  * not earn, which is their own inconvenience and expires. It costs
- * {@link #refuseIfRecipientDailyCapReached} a slot belonging to <em>a different, innocent person</em>
+ * {@link #refusalIfVolumeCapReached} a slot belonging to <em>a different, innocent person</em>
  * who merely shares a folded key, because that ceiling is sender-invariant — an invitation denied to
  * somebody who did nothing, for a reason nobody involved can see. Which is why the folding rules are
  * published facts about delivery and standard normalisations only, never heuristics; the argument
@@ -86,6 +86,38 @@ import java.util.function.Supplier;
  * {@code RateLimitService.checkLoginAllowed}, which keys on the submitted email "whether or not the
  * account exists, so the limiter itself cannot be used to probe which emails are registered".
  *
+ * <p><strong>That is a property of this class and a duty of its callers</strong> (HD-202). On the
+ * anonymous auth flows the ceiling is spent BEFORE the account is looked up, because a ceiling
+ * spent after one — or only on the branch that really sends — answers exactly the question the
+ * endpoint refuses to answer, and it does so while looking like a fix. See
+ * {@link #allowAnonymousSend}.
+ *
+ * <h2>Three doors, one body, and why the policy owns the choice</h2>
+ * A caller who has proven their right to make the request gets a {@code 429} naming a wait
+ * ({@link #requireAndRecord}); an endpoint whose response is uniform by design gets nothing at all
+ * and drops the mail ({@link #allowAnonymousSend}); an endpoint that already discloses, by its own
+ * status codes, everything a refusal would disclose gets the {@code 429} as well
+ * ({@link #requireAndRecordWhereEndpointDiscloses}). Which doors a type may use is declared on the
+ * {@link MailThrottlePolicy}, not chosen at the call site, and every door refuses to serve a type
+ * that did not declare it — because the call site is what gets copied, and a copied
+ * {@code requireAndRecord} on {@code forgot-password} would publish, to anybody on the internet,
+ * that <em>somebody</em> asked for a reset at an address in the last minute.
+ *
+ * <p>Each door admits <strong>exactly one</strong> {@code Refusal} constant, never "anything that
+ * is not the opposite one". While the guards were negations, a type entitled to the anonymous
+ * {@code 429} was also admissible through {@link #requireAndRecord} — a copied call site there
+ * would have made {@code resend-verification} answer {@code 429}, and the seal below watches only
+ * the third door, so nothing would have fired.
+ *
+ * <p>What the type still cannot see is WHERE it is called from, and the third door is safe only
+ * because of a property of the endpoint. Its set of call sites is therefore sealed by
+ * {@code AuthMailDoorsTest} — down to the enclosing method, because all three auth flows live in
+ * one file and a file-granular seal would not notice the call moving between them. That seal is
+ * load-bearing rather than tidy: mounting this door on a uniform-response endpoint is exactly the
+ * leak the other two doors exist to prevent.
+ *
+ * <p>All three spend and record identically; they differ only in what they do with the answer.
+ *
  * <h2>Exactness and cost, and the invariant that keeps the lock cheap</h2>
  * One extra {@code SELECT} and one extra {@code INSERT} on a low-frequency write. The counts are
  * read then written, so before reading it takes {@code pg_advisory_xact_lock(hashtext(key))}
@@ -96,56 +128,79 @@ import java.util.function.Supplier;
  * becomes visible at commit, a queued request sees the row it waited for.
  *
  * <p><strong>The critical section must stay lock → one aggregate SELECT → optional exists → one
- * INSERT → commit. Nothing slow and nothing caller-controlled may ever be added between
- * {@code require...} and the commit that follows it.</strong> The key is a recipient address, and an
- * address is something two tenants legitimately share — so any wait held inside this section is a
- * wait one tenant can impose on another. Sending the mail itself is outside this section because
- * the call site registers it on {@code AfterCommit} (HD-181) — after the commit that releases this
+ * INSERT → commit. Nothing slow and nothing caller-controlled may ever be added between the
+ * ceiling being spent and the commit that follows it.</strong> The key is a recipient address, and
+ * an address is something two tenants legitimately share — so any wait held inside this section is
+ * a wait one tenant can impose on another. Since HD-202 it is also a wait an <em>unauthenticated</em>
+ * caller can impose, which does not change the rule but does raise the price of breaking it.
+ * Sending the mail itself is outside this section because the call site registers it on
+ * {@code AfterCommit} (HD-181) — after the commit that releases this
  * lock. It is <strong>not</strong> the hand-off to the mail pool that keeps it out, as this
  * paragraph used to say: that pool was bounded with {@code CallerRunsPolicy}, so a full queue turned
  * the dispatch into an inline send, under exactly the load where an SMTP round trip held across
  * tenants would hurt most. HD-208 has since removed the inline branch, so the hand-off no longer
  * betrays that claim — but the claim is still the wrong one to rest on, because it is a property of
  * the pool's current policy and not of this section. What must not appear between
- * {@code require...} and the commit is anything slow, however it is spelled, and that rule survives
- * any policy.
+ * a ceiling and the commit is anything slow, however it is spelled, and that rule survives any
+ * policy.
  *
- * <p>These ceilings are consequently <strong>cluster-wide and exact</strong> — the first limiter in
- * this product that does not divide by the replica count, because its state is in PostgreSQL. The
- * per-sender volume budget ({@link InviteSenderVolumeBudget}) is in memory and degrades the usual
- * way; the asymmetry is deliberate and is written up in {@code docs/self-hosting.md}.
+ * <p>These ceilings are consequently <strong>cluster-wide and exact</strong> — they do not divide
+ * by the replica count, because their state is in PostgreSQL rather than in a map in a process. On
+ * N replicas the bound is the configured number, not N times it, and a deploy does not re-arm it.
+ * That is the requirement rather than a nicety: these protect a <em>person</em>, and a cooldown a
+ * second replica resets is a cooldown an attacker waits out. The per-sender volume budget
+ * ({@link InviteSenderVolumeBudget}) is in memory and degrades the usual way; the asymmetry is
+ * deliberate and is written up in {@code docs/self-hosting.md}.
  */
 @Slf4j
 @Service
 public class RecipientMailThrottle {
 
     /**
-     * Every recipient-keyed ceiling that is not the cooldown is measured over this window.
-     *
-     * <p><strong>Widening it is a two-file edit, and the second file will not remind you.</strong>
-     * The retention sweep has to outlast every ceiling window, or a swept row silently shortens the
-     * ceiling that counted it — and the pair is asserted at startup by
-     * {@code InviteProperties.isRetentionLongerThanWidestCeilingWindow}, which necessarily has to
-     * know what the widest window is. It knows it as {@code InviteProperties.FIXED_CEILING_WINDOW_MINUTES},
-     * a hand-copied 1440 that says one day because this constant says one day. Widen this one alone
-     * and that copy does not move: the assertion keeps passing while guaranteeing less than its
-     * message says, with no error and no log line. So the assertion cannot police this constant —
-     * only a test asserting the two are equal can, and this edit is where that test earns its keep.
-     */
-    private static final Duration DAY = Duration.ofDays(1);
-
-    /**
-     * The daily cap's {@code Retry-After} names a <em>deadline</em> rounded up to the next multiple
+     * The volume cap's {@code Retry-After} names a <em>deadline</em> rounded up to the next multiple
      * of this — never a <em>duration</em> rounded to it. {@link #secondsUntilBucketedDeadline} is
      * where that distinction is argued, and it is the whole of the control;
-     * {@link #refuseIfRecipientDailyCapReached} is where only this one ceiling is coarsened at all.
+     * {@link #refusalIfVolumeCapReached} is where only this one ceiling is coarsened at all.
+     *
+     * <p>It is the same quantum for every policy, and it only ever leaves the process on a policy
+     * whose refusal is visible: a {@code SILENT} one computes a wait nobody reads. That is not
+     * waste worth removing — the two paths differ in what they DO with a refusal and in nothing
+     * else, which is the property that stops a future silent path from quietly skipping a ceiling.
      */
-    private static final long DAILY_RETRY_QUANTUM_SECONDS = 900;
+    private static final long VOLUME_RETRY_QUANTUM_SECONDS = 900;
 
     /**
-     * Serialises concurrent sends aimed at one recipient key for the rest of the transaction.
-     * Positional parameters and an explicit {@code CAST} rather than {@code ::bigint}, so nothing in
-     * the statement can be mistaken for a named parameter; the wrapping {@code SELECT 1} exists
+     * Serialises concurrent sends of ONE KIND of mail aimed at one recipient key, for the rest of
+     * the transaction.
+     *
+     * <p><strong>The lock key is {@code emailType} and {@code recipientKey}, and the type half is
+     * not decoration.</strong> Every count in this class filters {@code email_type} in its
+     * {@code WHERE} clause, so an invitation and a password reset to one address are two
+     * independent ceilings — locking on the address alone would make them serialise anyway, which
+     * contradicts the design they sit inside and, since HD-202, lets an <em>unauthenticated</em>
+     * {@code forgot-password} for an address queue behind a tenant's invitation to the same
+     * address. Contention rather than disclosure, but with a pool of ten connections and a
+     * three-second lock timeout, ten concurrent requests naming one address are enough to matter.
+     *
+     * <p><strong>A {@code '|'} separator, and NOT a NUL — that first attempt failed loudly and is
+     * worth recording.</strong> {@code 0x00} is the obvious "cannot occur in either half" byte and
+     * PostgreSQL will not accept it in {@code text} at all: every send became
+     * {@code invalid byte sequence for encoding "UTF8": 0x00} from the lock statement itself. What
+     * makes {@code '|'} safe is not that it cannot appear in an address (it can, in an unquoted
+     * local part) but that it cannot appear in the OTHER half: an {@link EmailType} name is
+     * {@code [A-Z_]+}, so the first {@code '|'} always ends the type and no two (type, key) pairs
+     * can collide by concatenation whatever the address contains.
+     *
+     * <p>The window {@code maxPerRecipientPerWindow} is counted over is likewise the POLICY'S
+     * ({@code MailThrottlePolicy.ceilingWindow}), not a constant here — a day for invitations, a
+     * quarter of an hour for password reset, an hour for verification, and the argument for each is
+     * on that record. The widest any policy may declare is
+     * {@code MailThrottlePolicy.MAX_CEILING_WINDOW}, which is also what {@code InviteProperties}
+     * asserts the {@code mail_send_events} retention against, so there is no hand-copied width in a
+     * second file to drift out from under this one.
+     *
+     * <p>Positional parameters and an explicit {@code CAST} rather than {@code ::bigint}, so nothing
+     * in the statement can be mistaken for a named parameter; the wrapping {@code SELECT 1} exists
      * because {@code pg_advisory_xact_lock} returns {@code void}, which is awkward to map back.
      */
     private static final String LOCK_RECIPIENT =
@@ -199,7 +254,8 @@ public class RecipientMailThrottle {
      *
      * <p><strong>Call this AFTER tenancy and authorization have been resolved.</strong> A refusal
      * here is only ever seen by a caller who has already proven they may make this request — see the
-     * class javadoc for why that ordering is not negotiable.
+     * class javadoc for why that ordering is not negotiable. The anonymous auth flows, which have
+     * no such caller, use {@link #allowAnonymousSend} instead and are refused in silence.
      *
      * @param type            which mail is about to be sent; unthrottled types are a no-op
      * @param recipientEmail  the recipient as submitted (lower-cased at the boundary). It is stored
@@ -220,11 +276,166 @@ public class RecipientMailThrottle {
     public void requireAndRecord(EmailType type, String recipientEmail, UUID senderUserId,
                                  UUID workspaceId, Supplier<String> cooldownAddendum) {
         var policy = policies.get(type);
+        if (policy != null && !policy.mayRefuseWithStatus()) {
+            // Not a defensive nicety: this door THROWS, and a throw is how an endpoint whose
+            // response must be uniform becomes an oracle. The policy carries the shape of its
+            // refusal precisely so that a copied call site cannot change it by picking a method.
+            // Sealed by AuthMailDoorsTest, because a guard that never fires reads exactly like one
+            // that works.
+            //
+            // The predicate is EXACT (== RESPONDS_429) and used to be "not SILENT", which admitted
+            // the anonymous 429 shape here as well — so a copied requireAndRecord could have put a
+            // 429 on resend-verification while passing this guard AND while sitting outside the
+            // seal, which only ever watched the disclosing door. Each door admits one constant.
+            throw new IllegalStateException(
+                    type + " does not declare MailThrottlePolicy.Refusal.RESPONDS_429, and this "
+                    + "door answers 429 to a caller whose authorization is already resolved. A "
+                    + "SILENT type belongs on allowAnonymousSend (drop the mail, move nothing in "
+                    + "the response); an anonymous type that may answer 429 declares "
+                    + "RESPONDS_429_WHERE_ENDPOINT_DISCLOSES and goes through "
+                    + "requireAndRecordWhereEndpointDiscloses, whose call sites are sealed.");
+        }
+        var refusal = spend(policy, type, recipientEmail, senderUserId, workspaceId,
+                cooldownAddendum);
+        if (refusal != null) {
+            throw new RateLimitedException(refusal.message().get(), refusal.retryAfterSeconds());
+        }
+    }
+
+    /**
+     * <strong>The same ceilings, spent by an endpoint that already discloses everything the refusal
+     * would</strong> — {@code POST /api/auth/register}, and nowhere else.
+     *
+     * <h2>Why register needs a door of its own</h2>
+     * Register mails a verification link to an address anybody on the internet types, and it was
+     * left off this mechanism on the written ground that "registration can produce at most one
+     * message per address — the second attempt is a 409". That is true per <em>address</em>, and an
+     * address is not the unit of harm. {@code users.email} is unique on {@code lower(email)}, i.e.
+     * on the SPELLING; every ceiling here counts {@code MailAddresses.throttleKey}, i.e. the
+     * INBOX. Those two keys disagree exactly where it matters: {@code victim+1@gmail.com},
+     * {@code victim+2@gmail.com} and {@code v.i.ctim@googlemail.com} are three distinct
+     * {@code users} rows, three {@code 201}s, three verification mails — and one inbox. It is the
+     * same one-keystroke re-spelling defeat {@code MailAddresses.throttleKey} exists to close,
+     * reproduced against a door deliberately left off the mechanism.
+     *
+     * <h2>What is refused, and why that answers the original objection</h2>
+     * The REGISTRATION, not the mail. Refusing the mail would leave a {@code PENDING} row nobody —
+     * its owner included — could ever activate; refusing before the {@code users} INSERT strands
+     * nothing. So this door throws, and register answers {@code 429}.
+     *
+     * <p>A {@code 429} is available here and only here because register is not an anti-enumeration
+     * endpoint: it already answers {@code 409} for a taken address, so it publishes address
+     * existence by construction. What the refusal adds is one folded-key bit — that some address
+     * sharing this inbox was registered recently — to a caller who has just been told, or not told,
+     * about the exact spelling anyway.
+     *
+     * <h2>The accepted cost, and the budget split that bounds who can impose it</h2>
+     * Filling an inbox's registration window also refuses that inbox's owner a NEW registration
+     * until the window rolls. That is a ceiling on a flow somebody may need, and — like every
+     * per-address ceiling in this class — it is fillable, so <strong>the denial is sustainable
+     * indefinitely by anyone willing to keep refilling it</strong>. Calling it "bounded by the
+     * window" would be the hit-and-run case mistaken for the whole; {@code AuthMailProperties} makes
+     * exactly this distinction for password reset and it holds here too.
+     *
+     * <p>What the design does bound is <strong>the price of imposing it</strong>, and that is why
+     * {@link EmailType#REGISTRATION_VERIFICATION} is a bucket of its own rather than a share of
+     * {@link EmailType#VERIFICATION}. While the two shared one, an attacker filled the register
+     * ceiling through {@code POST /api/auth/resend-verification} at an address with NO account:
+     * that endpoint records unconditionally (it must — a row written only when the account exists
+     * is the existence oracle it is built to refuse), so five requests an hour, spaced past the
+     * cooldown, denied signup for that whole inbox while sending <em>zero</em> mail and logging
+     * nothing above DEBUG. Free, silent, refillable for ever, against any address a stranger names.
+     * With separate buckets the only way to fill this one is to POST here — which costs a real
+     * verification mail the victim can see and a {@code PENDING} row an administrator can find.
+     *
+     * <p>The price of the split is stated too: the verification mail one inbox can be sent goes
+     * from {@code cap} per hour to {@code 2 x cap} worst case, because register and resend now hold
+     * a cap each. That is the trade — a doubled mail bound, still far under the deliverability
+     * number, bought against a free and invisible denial of account creation.
+     *
+     * <p><strong>Call it AFTER the cheap duplicate pre-check and immediately before the INSERT.</strong>
+     * See {@code AuthService.register}, which states why it is deliberately NOT above
+     * {@code passwordEncoder.encode}.
+     *
+     * @param type           which mail the endpoint is about to send; a type with no policy is a
+     *                       no-op
+     * @param recipientEmail the address as submitted, lower-cased at the boundary
+     * @throws RateLimitedException 429 with {@code Retry-After}
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void requireAndRecordWhereEndpointDiscloses(EmailType type, String recipientEmail) {
+        var policy = policies.get(type);
+        if (policy != null && !policy.mayRefuseWhereEndpointDiscloses()) {
+            throw new IllegalStateException(
+                    type + " does not declare "
+                    + "MailThrottlePolicy.Refusal.RESPONDS_429_WHERE_ENDPOINT_DISCLOSES, and this "
+                    + "door answers 429 to an ANONYMOUS caller. Reaching it is a statement that the "
+                    + "endpoint sending this mail already publishes what a refusal would — say it "
+                    + "on the policy, not by picking a method. A SILENT type belongs on "
+                    + "allowAnonymousSend; an authorized-caller type belongs on requireAndRecord.");
+        }
+        var refusal = spend(policy, type, recipientEmail, null, null, null);
+        if (refusal != null) {
+            throw new RateLimitedException(refusal.message().get(), refusal.retryAfterSeconds());
+        }
+    }
+
+    /**
+     * <strong>The same ceilings, spent by an endpoint that may not admit it refused</strong>
+     * (HD-202) — {@code POST /api/auth/forgot-password} and
+     * {@code POST /api/auth/resend-verification}.
+     *
+     * <p><strong>Call this BEFORE the account lookup, and on every request.</strong> Both endpoints
+     * answer one uniform sentence whether or not the address has an account, and HD-208 requires
+     * the two to take indistinguishable time. A ceiling spent after the lookup — or only on the
+     * branch where mail would really be sent — is an existence oracle wearing the costume of a fix:
+     * it would answer "throttled" for registered addresses and "not throttled" for the rest, which
+     * is the precise question both endpoints exist not to answer. Spent first, it is a statement
+     * about an address somebody typed and about nothing else, and the row is recorded either way.
+     *
+     * <p>Anonymous sends share one bucket per key ({@code sender_user_id IS NULL}), because "who
+     * submitted the form" is not knowable and must not be guessable — keying it on anything the
+     * request carries would hand an attacker a fresh cooldown per request.
+     *
+     * @param type           which mail is about to be sent; a type with no policy is allowed and
+     *                       nothing is recorded for it
+     * @param recipientEmail the address as submitted, lower-cased at the boundary
+     * @return {@code true} when the send may proceed. {@code false} means a ceiling refused: send
+     *         nothing, and change nothing else about the response
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public boolean allowAnonymousSend(EmailType type, String recipientEmail) {
+        var policy = policies.get(type);
+        if (policy != null && !policy.mayRefuseSilently()) {  // exactly Refusal.SILENT
+            // Sealed by AuthMailDoorsTest, for the reason its sibling above is: a guard that never
+            // fires is indistinguishable from one that works.
+            throw new IllegalStateException(
+                    type + " does not declare MailThrottlePolicy.Refusal.SILENT, so it answers 429 "
+                    + "on refusal and dropping its mail silently here would lose a refusal its "
+                    + "caller is meant to see. Call requireAndRecord (RESPONDS_429) or "
+                    + "requireAndRecordWhereEndpointDiscloses "
+                    + "(RESPONDS_429_WHERE_ENDPOINT_DISCLOSES).");
+        }
+        return spend(policy, type, recipientEmail, null, null, null) == null;
+    }
+
+    /**
+     * Both ceilings, the lock, the metrics and the bookkeeping — <strong>everything except what is
+     * done with a refusal</strong>.
+     *
+     * <p>One body for both doors on purpose. The alternative, a second method that "just skips the
+     * throw", is how a silent path ends up skipping a ceiling as well: here the only thing the
+     * silent door does differently is discard the value returned below.
+     *
+     * @return the refusal, or {@code null} when the send was allowed and recorded
+     */
+    private Refusal spend(MailThrottlePolicy policy, EmailType type, String recipientEmail,
+                          UUID senderUserId, UUID workspaceId, Supplier<String> cooldownAddendum) {
         // An unthrottled mail type is a no-op rather than an error, and nothing is recorded for it
         // either: the row exists only to be counted by a ceiling. A type with no policy is one
         // MailThrottleCoverageTest holds a written exemption for.
         if (policy == null) {
-            return;
+            return null;
         }
 
         // Derived HERE rather than taken from the caller, so "the ceilings count inboxes" is true by
@@ -241,29 +452,52 @@ public class RecipientMailThrottle {
             // Bound the wait, then take the lock — the standing rule, and the order matters: a bound
             // applied after a locking read bounds nothing. The lock is on the KEY, not the address:
             // locking the spelling would serialise nothing that the counts then aggregate together.
+            // It is also scoped to the TYPE, because every count below filters email_type — see
+            // LOCK_RECIPIENT for why an address-only lock contradicts the per-type design and, since
+            // HD-202, lets an anonymous caller queue behind a tenant's invitation.
             lockTimeout.applyToCurrentTransaction();
             entityManager.createNativeQuery(LOCK_RECIPIENT)
-                    .setParameter(1, recipientKey)
+                    .setParameter(1, type.name() + '|' + recipientKey)
                     .getSingleResult();
 
             var now = Instant.now();
             var cooldownFrom = now.minus(policy.cooldown());
-            var dayFrom = now.minus(DAY);
-            var from = cooldownFrom.isBefore(dayFrom) ? cooldownFrom : dayFrom;
+            var windowFrom = now.minus(policy.ceilingWindow());
+            var from = cooldownFrom.isBefore(windowFrom) ? cooldownFrom : windowFrom;
             var counts = senderUserId == null
-                    ? repository.countRecentForAnonymous(type.name(), recipientKey, cooldownFrom, dayFrom, from)
+                    ? repository.countRecentForAnonymous(type.name(), recipientKey, cooldownFrom, windowFrom, from)
                     : repository.countRecentForSender(type.name(), recipientKey, senderUserId,
-                            MailSendEventRepository.ANONYMOUS_SENDER, cooldownFrom, dayFrom, from);
+                            MailSendEventRepository.ANONYMOUS_SENDER, cooldownFrom, windowFrom, from);
 
             // The cooldown is checked first on purpose. When both would fire, its message describes
-            // the caller's OWN past action and discloses nothing, while the daily cap's necessarily
-            // says something about traffic the caller cannot see. Refuse with the cheaper disclosure.
-            refuseIfCoolingDown(policy, recipientEmail, counts, now, cooldownAddendum);
-            refuseIfRecipientDailyCapReached(policy, counts, now);
+            // the caller's OWN past action and discloses nothing, while the volume cap's necessarily
+            // says something about traffic the caller cannot see. Refuse with the cheaper
+            // disclosure. (A silent policy renders neither, and the order still matters: the METRIC
+            // is what an operator reads, and the two kinds mean different attacks.)
+            var refusal = refusalIfCoolingDown(policy, recipientEmail, counts, now, cooldownAddendum);
+            if (refusal == null) {
+                refusal = refusalIfVolumeCapReached(policy, counts, now);
+            }
+            if (refusal != null) {
+                return refusal;
+            }
         }
 
         record(type, recipientEmail, recipientKey, senderUserId, workspaceId);
+        return null;
     }
+
+    /**
+     * A ceiling that fired: the wait it named, and the sentence it would say if anybody were going
+     * to read it.
+     *
+     * <p>The message is a {@link Supplier} rather than a {@code String} because a
+     * {@code Refusal.SILENT} policy has no wording at all — rendering one would be building a
+     * sentence nobody can read, and the {@code cooldownAddendum} it interpolates is a query. The
+     * metric, by contrast, is recorded where the ceiling fires and for every policy: a refusal the
+     * caller cannot see is exactly the kind an operator must be able to.
+     */
+    private record Refusal(long retryAfterSeconds, Supplier<String> message) {}
 
     /** Overload for paths with no row to make a claim about. */
     @Transactional(propagation = Propagation.MANDATORY)
@@ -278,25 +512,29 @@ public class RecipientMailThrottle {
      * <p><strong>Its wait is exact, and deliberately so.</strong> The instant it is derived from is
      * the caller's own last send to this inbox, so there is nothing here to hide and every second of
      * precision is precision about the reader's own history. Do not "unify" this with the
-     * coarsening in {@link #refuseIfRecipientDailyCapReached} — the two waits describe different
+     * coarsening in {@link #refusalIfVolumeCapReached} — the two waits describe different
      * people's actions, which is the whole reason one of them is rounded.
      */
-    private void refuseIfCoolingDown(MailThrottlePolicy policy, String recipientEmail,
-                                     MailSendCounts counts, Instant now,
-                                     Supplier<String> cooldownAddendum) {
+    private Refusal refusalIfCoolingDown(MailThrottlePolicy policy, String recipientEmail,
+                                         MailSendCounts counts, Instant now,
+                                         Supplier<String> cooldownAddendum) {
         if (counts.samePair() == 0 || counts.samePairLatest() == null) {
-            return;
+            return null;
         }
         long retryAfter = secondsUntil(counts.samePairLatest().plus(policy.cooldown()), now);
         metrics.rateLimitHit(policy.cooldownKind());
-        var addendum = cooldownAddendum == null ? null : cooldownAddendum.get();
-        throw new RateLimitedException(
-                policy.wording().cooldown(recipientEmail, RetryWait.describe(retryAfter), addendum),
-                retryAfter);
+        return new Refusal(retryAfter, () -> policy.wording().cooldown(recipientEmail,
+                RetryWait.describe(retryAfter),
+                cooldownAddendum == null ? null : cooldownAddendum.get()));
     }
 
     /**
-     * The global per-recipient daily cap — the one ceiling whose count includes strangers.
+     * The global per-recipient volume cap — the one ceiling whose count includes strangers.
+     *
+     * <p>Counted over the policy's own {@code ceilingWindow}: a day for invitations, an hour for
+     * the anonymous auth mailers, where the same ceiling is also the length of time a victim
+     * cannot recover their account (HD-202). Everything below is the invitation cap's arithmetic
+     * because that is the ceiling whose numbers were argued over; the mechanism is the same one.
      *
      * <p><strong>Counted as "my own sends, one each; every other sender, once."</strong> Counting
      * raw sends let a single account spend a victim's entire daily allowance and thereby block every
@@ -357,15 +595,17 @@ public class RecipientMailThrottle {
      * one of several sends by the same other sender does not free that sender's slot. Under-stating
      * the wait is the safe direction — the caller retries and is refused again.
      */
-    private void refuseIfRecipientDailyCapReached(MailThrottlePolicy policy, MailSendCounts counts,
-                                                  Instant now) {
-        if (counts.recipientDay() < policy.maxPerRecipientPerDay() || counts.recipientDayOldest() == null) {
-            return;
+    private Refusal refusalIfVolumeCapReached(MailThrottlePolicy policy, MailSendCounts counts,
+                                              Instant now) {
+        if (counts.recipientWindow() < policy.maxPerRecipientPerWindow()
+            || counts.recipientWindowOldest() == null) {
+            return null;
         }
-        long retryAfter = secondsUntilBucketedDeadline(counts.recipientDayOldest().plus(DAY), now);
-        metrics.rateLimitHit(policy.recipientDailyKind());
-        throw new RateLimitedException(
-                policy.wording().recipientDaily(RetryWait.describe(retryAfter)), retryAfter);
+        long retryAfter = secondsUntilBucketedDeadline(
+                counts.recipientWindowOldest().plus(policy.ceilingWindow()), now);
+        metrics.rateLimitHit(policy.recipientVolumeKind());
+        return new Refusal(retryAfter,
+                () -> policy.wording().recipientVolume(RetryWait.describe(retryAfter)));
     }
 
     private void record(EmailType type, String recipientEmail, String recipientKey,
@@ -378,11 +618,26 @@ public class RecipientMailThrottle {
         event.setWorkspaceId(workspaceId);
         entityManager.persist(event);
         // The bridge between an alert that cannot carry ids and an operator who needs to know who
-        // (§10.1). DOMAIN ONLY, never the local part. Successful sends only, so it is bounded by the
-        // very ceilings above — a refused caller in a loop cannot make this a log-flooding vector,
-        // which is why the REFUSALS are metrics and not log lines.
-        log.info("mail send allowed: type={} sender={} workspace={} recipientDomain={}",
-                type, senderUserId, workspaceId, MailAddresses.domainOf(recipientEmail));
+        // (§10.1). DOMAIN ONLY, never the local part.
+        //
+        // AT INFO ONLY WHEN THERE IS A "WHO" TO NAME, AND THE REASON IS A BOUND THAT NO LONGER
+        // HOLDS FOR ANONYMOUS ROWS. This line used to be justified as "successful sends only, so it
+        // is bounded by the very ceilings above" — true while every caller was an authenticated
+        // invite sender, because such a caller runs out of budget. An anonymous caller CONTROLS THE
+        // KEY SPACE: a fresh address is a fresh bucket, so every request is ALLOWED, every one
+        // writes a row, and the rate is bounded only by a per-IP budget a proxy pool defeats.
+        // A forensic trail that an unauthenticated stranger can turn into unbounded Loki ingest is
+        // itself the flooding vector, and the sender/workspace it would print are both null — so it
+        // names nothing an operator could act on either. Anonymous sends are DEBUG; the durable
+        // evidence for them is the mail_send_events row (swept aggressively, see
+        // AuthMailProperties.ANONYMOUS_EVENT_RETENTION) and the concentration gauge built on it.
+        if (senderUserId == null) {
+            log.debug("mail send allowed (anonymous): type={} recipientDomain={}",
+                    type, MailAddresses.domainOf(recipientEmail));
+        } else {
+            log.info("mail send allowed: type={} sender={} workspace={} recipientDomain={}",
+                    type, senderUserId, workspaceId, MailAddresses.domainOf(recipientEmail));
+        }
     }
 
     /** Never below 1: a {@code Retry-After: 0} invites an immediate retry that is refused again. */
@@ -414,8 +669,8 @@ public class RecipientMailThrottle {
      * and a caller sent away for a few extra minutes loses nothing they were going to be given.
      */
     private static long secondsUntilBucketedDeadline(Instant deadline, Instant now) {
-        long bucketed = Math.floorDiv(deadline.getEpochSecond(), DAILY_RETRY_QUANTUM_SECONDS)
-                        * DAILY_RETRY_QUANTUM_SECONDS + DAILY_RETRY_QUANTUM_SECONDS;
+        long bucketed = Math.floorDiv(deadline.getEpochSecond(), VOLUME_RETRY_QUANTUM_SECONDS)
+                        * VOLUME_RETRY_QUANTUM_SECONDS + VOLUME_RETRY_QUANTUM_SECONDS;
         // Never below 1, for the reason on secondsUntil: a Retry-After of 0 invites an immediate
         // retry that is refused again.
         return Math.max(bucketed - now.getEpochSecond(), 1);

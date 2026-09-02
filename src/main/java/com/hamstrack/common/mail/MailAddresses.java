@@ -73,11 +73,19 @@ public final class MailAddresses {
      * <p><strong>But "safe" is not "free", and the worst case is different for each ceiling that
      * uses this key — the milder one is not the bound.</strong> For the per-(sender, recipient)
      * cooldown an over-fold costs an honest sender a wait they did not earn: their own
-     * inconvenience, self-inflicted by the folding rules, and it expires. For the GLOBAL
-     * per-recipient daily cap it is worse and it lands on somebody else — that ceiling is
-     * sender-invariant, so an over-fold spends a slot belonging to <em>a different, innocent
-     * person</em> who merely shares a folded key, and denies them an invitation they were entitled
-     * to. Nobody involved can see why. That asymmetry is the argument against widening these rules
+     * inconvenience, self-inflicted by the folding rules, and it expires.
+     *
+     * <p><strong>For a sender-invariant VOLUME cap it is worse, it lands on somebody else, and how
+     * much worse depends entirely on what that ceiling is standing in front of.</strong> Such a
+     * ceiling counts a stranger's traffic against a slot, so an over-fold spends the allowance of
+     * <em>a different, innocent person</em> who merely shares a folded key — and nobody involved
+     * can see why, because these refusals are terse and some of them are silent. What that costs
+     * them is whatever the mail behind the ceiling was <em>for</em>: an invitation they were
+     * entitled to, or their own account recovery, or their ability to register at all. So the rule
+     * is a property of the class rather than of today's members: <strong>an over-fold denies a
+     * bystander the most valuable thing any ceiling on this key guards, and that value goes up
+     * every time a new kind of mail joins the mechanism</strong> — it went up once already, without
+     * a line of this file changing. That asymmetry is the argument against widening these rules
      * on a guess, and it is why there is no configurable delimiter here: every rule below is a
      * published, provider-documented fact about delivery or a standard normalisation, never a
      * heuristic about who somebody is.
@@ -95,10 +103,11 @@ public final class MailAddresses {
      * narrowing — can only make already-written rows stop matching; it can never create a match
      * that did not exist. The failure mode is therefore always an UNDERCOUNT, i.e. fail-open, never
      * a spurious refusal against somebody who did nothing. And the bound on it is the CEILING
-     * WINDOW, not the retention: every window here is at most 24 hours, so rows older than that are
-     * already invisible to both ceilings, and rows written after the deploy key correctly from the
-     * first send — both ceilings are fully re-armed within one window whether retention is 2 days
-     * or 90. A {@code key_version} column would buy nothing, because the only query it enables
+     * WINDOW, not the retention: no ceiling window may exceed 24 hours
+     * ({@code MailThrottlePolicy.MAX_CEILING_WINDOW}, enforced at bean creation), so rows older
+     * than that are already invisible to every ceiling, and rows written after the deploy key
+     * correctly from the first send — every ceiling is fully re-armed within its own window
+     * whatever the retention is. A {@code key_version} column would buy nothing, because the only query it enables
      * ("count rows whose version is current") IS that undercount, merely written down. What does
      * matter, and is easy to miss: {@code mail_send_events.recipient_email} stores the address
      * exactly, so a folding change is BACKFILLABLE if it ever needs to be.

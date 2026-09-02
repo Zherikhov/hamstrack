@@ -9,10 +9,12 @@ import com.hamstrack.common.config.JwtProperties;
 import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.mail.MailService;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
 import com.hamstrack.common.observability.ProductMetrics.LoginReason;
 import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
 import com.hamstrack.common.ratelimit.RateLimitService;
+import com.hamstrack.common.ratelimit.RecipientMailThrottle;
 import com.hamstrack.common.seed.DataSeeder;
 import com.hamstrack.common.security.JwtService;
 import com.hamstrack.common.security.PasswordLimits;
@@ -50,6 +52,16 @@ public class AuthService {
     private final AppProperties appProperties;
     private final MailService mailService;
     private final RateLimitService rateLimitService;
+    // HD-202. The SAME mechanism the invitation ceilings use — one control for "this instance is
+    // about to mail an address somebody typed", not a second limiter that half-overlaps it. The
+    // two uniform-response flows enter it through allowAnonymousSend, which spends and records
+    // exactly as the invite path does and differs only in refusing without saying so; register
+    // enters it through requireAndRecordWhereEndpointDiscloses, which answers 429 because register
+    // already publishes address existence through its own 409. THREE FLOWS, THREE BUDGETS: register
+    // holds EmailType.REGISTRATION_VERIFICATION rather than sharing resend-verification's, because
+    // a shared bucket is fillable through whichever of its endpoints is cheapest to spend, and that
+    // endpoint sends no mail at an address with no account.
+    private final RecipientMailThrottle mailThrottle;
     private final ProductMetrics metrics;
 
     @Transactional
@@ -82,10 +94,77 @@ public class AuthService {
         if (userRepository.existsByFoldedEmail(email)) {
             throw new EmailAlreadyUsedException();
         }
+        // The password is hashed BEFORE the ceiling below, and that ordering is deliberate and
+        // was argued against the review that asked for the opposite. Spending the ceiling first
+        // would save a refused caller one bcrypt-12 (~370 ms) — but it would put that bcrypt
+        // INSIDE the advisory lock RecipientMailThrottle takes on the recipient key, and that class's
+        // standing rule is that nothing slow and nothing caller-controlled may appear between a
+        // ceiling being spent and the commit that follows it. The key is an address an
+        // unauthenticated caller chooses, so a lock held across a bcrypt is a wait that caller
+        // imposes on the inbox's real owner, and ten concurrent requests naming one address would
+        // sit on the connection pool until the 3 s lock timeout.
+        //
+        // THE FACT THAT MAKES THAT NON-OBVIOUS, AND THE ONE A READER GETS WRONG: pg_advisory_xact_lock
+        // IS HELD TO COMMIT, NOT TO THE END OF THE METHOD THAT TOOK IT. There is no unlock call to
+        // scan for and no scope to read it off, so "the throttle call returns, therefore the lock is
+        // gone" is the natural and wrong reading. Everything after the ceiling — the hash, the users
+        // INSERT, the transaction's own commit — runs inside it, which is why moving work ABOVE the
+        // ceiling is the only way to keep it out.
+        //
+        // The saving was worth less than it looks in any case. A caller who wants our CPU uses a
+        // FRESH inbox each time, which is a fresh bucket and is therefore always ALLOWED — so no
+        // ordering of these two lines refuses them, and the bcrypt amplifier is bounded where it
+        // always was, by the per-IP budget. What the ceiling closes is the mail bomb, and that is
+        // closed either way.
+        var passwordHash = passwordEncoder.encode(req.password());
+        // HD-202 (review). THE INBOX CEILING ON REGISTRATION, WHICH REGISTER SPENDS ALONE.
+        //
+        // Register mails a verification link to an address anybody types, and it was left off the
+        // recipient throttle on the written ground that "registration can produce at most one
+        // message per address — the second attempt is a 409". That is true PER ADDRESS, and the
+        // whole premise of MailAddresses.throttleKey is that an address is not the unit of harm:
+        // users.email is unique on lower(email), i.e. on the SPELLING (V23), while every ceiling in
+        // RecipientMailThrottle counts the INBOX. Those two keys disagree exactly here. With
+        // PUBLIC_SIGNUP_ENABLED on, victim+1@gmail.com, victim+2@gmail.com and
+        // v.i.ctim@googlemail.com are three distinct users rows, three 201s, three verification
+        // mails — and one inbox. Same one-keystroke re-spelling defeat, against the one door that
+        // was exempt from the mechanism built to close it.
+        //
+        // IT REFUSES THE REGISTRATION, NOT THE MAIL, and that is what answers the original
+        // objection. Dropping the mail would leave a PENDING row nobody — its owner included —
+        // could ever activate. Refusing HERE, above the INSERT, strands nothing at all.
+        //
+        // AND IT ANSWERS 429, which is available on this endpoint and on no other anonymous mailer
+        // here: register is not an anti-enumeration endpoint, since the existsByFoldedEmail check
+        // above already answers 409 for a taken address. forgot-password and resend-verification
+        // must stay silent, and each door admits exactly the one refusal shape it renders
+        // (MailThrottlePolicy.Refusal.RESPONDS_429_WHERE_ENDPOINT_DISCLOSES, which is a distinct
+        // constant from the invitation path's RESPONDS_429 because the JUSTIFICATION is distinct:
+        // there the caller is already authorized, here the ENDPOINT already discloses). Each door
+        // admits exactly one constant, and the call sites of this one are sealed — down to the
+        // enclosing method — by AuthMailDoorsTest.
+        //
+        // BELOW the duplicate pre-check on purpose: a request that is about to be refused with 409
+        // sends no mail, so letting it spend a slot would hand an attacker a way to burn a real
+        // user's registration budget through an endpoint that never mails.
+        //
+        // AND IT IS REGISTER'S OWN BUCKET, not the one resend-verification spends (HD-202 review).
+        // Sharing them looked right — an attacker refused by one endpoint would otherwise use the
+        // other — but the two endpoints do not cost the same to spend. resend-verification records
+        // BEFORE the account lookup and unconditionally, because a row written only when the account
+        // exists is the existence oracle that endpoint refuses to be; so at an address with no
+        // PENDING account it sends nothing, logs nothing above DEBUG, and still fills this ceiling.
+        // Five such requests an hour denied signup to every spelling of that inbox, for free,
+        // silently, refillable for ever. Separate buckets mean the only way to fill THIS one is to
+        // POST here, which costs a real verification mail the victim sees and a PENDING row an
+        // administrator can find. The price is on AuthMailThrottleConfig: one inbox can now be sent
+        // up to twice the per-window cap of verification mail.
+        mailThrottle.requireAndRecordWhereEndpointDiscloses(
+                EmailType.REGISTRATION_VERIFICATION, email);
         var user = new User();
         user.setEmail(email);
         user.setDisplayName(req.displayName());
-        user.setPasswordHash(passwordEncoder.encode(req.password()));
+        user.setPasswordHash(passwordHash);
         user.setStatus(UserStatus.PENDING);
         if (req.hasAcceptedTerms()) {
             // recorded whenever the box was ticked, even when not required
@@ -220,16 +299,45 @@ public class AuthService {
 
     @Transactional
     public void resendVerification(String email) {
+        var submitted = email.toLowerCase(Locale.ROOT);
+        // HD-202. BEFORE the lookup, and unconditionally — see forgotPassword for the whole
+        // argument, which is the same one twice.
+        if (!mailThrottle.allowAnonymousSend(EmailType.VERIFICATION, submitted)) {
+            return;
+        }
         // Silently no-op for unknown or already-verified emails — no enumeration
-        userRepository.findByEmail(email.toLowerCase(Locale.ROOT))
+        userRepository.findByEmail(submitted)
                 .filter(user -> user.getStatus() == UserStatus.PENDING)
                 .ifPresent(this::sendVerificationEmail);
     }
 
     @Transactional
     public void forgotPassword(ForgotPasswordRequest req) {
+        var submitted = req.email().toLowerCase(Locale.ROOT);
+        // HD-202 — the per-ADDRESS ceiling, and THE POSITION OF THIS LINE IS THE FEATURE.
+        //
+        // Until this shipped, both anonymous mailers were bounded only by the per-IP window on
+        // /api/auth/*, and a budget keyed on where a request came from can always be widened by
+        // coming from somewhere else. Since HD-199 that key is the real visitor rather than the
+        // reverse proxy, so "somewhere else" is unlimited: a proxy pool aims as many buckets as it
+        // likes at one address, and every message goes out from our domain with the victim's own
+        // address in To.
+        //
+        // BEFORE THE LOOKUP, AND SPENT WHETHER OR NOT THE ACCOUNT EXISTS. Moved below the
+        // findByEmail - or, worse, inside the ifPresent where the mail is actually sent - it would
+        // become the exact oracle this endpoint is built to refuse: throttled would mean
+        // "registered" and not-throttled would mean "not registered" — a fix that reads exactly
+        // like one while being its opposite. It would also break HD-208's other half: that a
+        // known and an unknown address must take indistinguishable TIME here; spent first, both
+        // branches pay the same lock, the same count and the same insert.
+        //
+        // A refusal is SILENT: no mail, and the same sentence the caller would have got anyway
+        // (MailThrottlePolicy.Refusal.SILENT says why a 429 is not available to us here).
+        if (!mailThrottle.allowAnonymousSend(EmailType.PASSWORD_RESET, submitted)) {
+            return;
+        }
         // Always return success to prevent email enumeration
-        userRepository.findByEmail(req.email().toLowerCase(Locale.ROOT)).ifPresent(user -> {
+        userRepository.findByEmail(submitted).ifPresent(user -> {
             var raw = generateRawToken();
             var reset = new PasswordReset();
             reset.setUser(user);

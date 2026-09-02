@@ -122,7 +122,7 @@ class RecipientDailyCapTest {
         for (int i = 0; i < CAP; i++) {
             seedSend(noisy, oneOtherSender);
         }
-        assertThat(countsFor(noisy, self).recipientDay())
+        assertThat(countsFor(noisy, self).recipientWindow())
                 .as("ONE other sender occupies ONE slot however much they sent. Counting these as "
                     + "five hands any single account the power to spend a stranger's entire daily "
                     + "allowance and deny every workspace on the instance the ability to invite "
@@ -134,7 +134,7 @@ class RecipientDailyCapTest {
         for (int i = 0; i < CAP; i++) {
             seedSend(crowded, UUID.randomUUID());
         }
-        assertThat(countsFor(crowded, self).recipientDay())
+        assertThat(countsFor(crowded, self).recipientWindow())
                 .as("five DISTINCT other senders fill the cap — the harassment shape, and the one "
                     + "everything sender-keyed is invariant under, because an account costs one "
                     + "mailbox on a catch-all domain")
@@ -145,12 +145,12 @@ class RecipientDailyCapTest {
             seedSend(mine, self);
         }
         var own = countsFor(mine, self);
-        assertThat(own.recipientDayOwn())
+        assertThat(own.recipientWindowOwn())
                 .as("your OWN sends count one each, so one account is still capped at %d into one "
                     + "inbox. Counting only distinct senders would leave one account free to ring "
                     + "the doorbell all day, bounded by nothing but its own cooldown", CAP)
                 .isEqualTo(CAP);
-        assertThat(own.recipientDayOtherSenders())
+        assertThat(own.recipientWindowOtherSenders())
                 .as("and you are never one of your own 'other senders'")
                 .isZero();
 
@@ -160,7 +160,7 @@ class RecipientDailyCapTest {
         }
         seedSend(mixed, UUID.randomUUID());
         seedSend(mixed, UUID.randomUUID());
-        assertThat(countsFor(mixed, self).recipientDay())
+        assertThat(countsFor(mixed, self).recipientWindow())
                 .as("the two halves ADD. Neither is a ceiling of its own — that is what keeps the "
                     + "per-account bound and the per-inbox bound from being the same number")
                 .isEqualTo(CAP);
@@ -198,8 +198,9 @@ class RecipientDailyCapTest {
      * attacker gets a fresh cooldown per request.
      *
      * <p>Asserted now, while the queries are young and nobody is depending on them, because the
-     * ticket that will depend on them is specified as "two policy beans and two call sites" — a
-     * description under which nobody re-reads the SQL.
+     * ticket that will depend on them was forecast as "two policy beans and two call sites" — a
+     * description under which nobody re-reads the SQL. (It landed as three of each, which is the
+     * smaller half of what that forecast got wrong.)
      */
     @Test
     void anonymousSendsShareOneBucketPerKey() {
@@ -224,12 +225,12 @@ class RecipientDailyCapTest {
                 .as("and the bucket has a last-send instant, or the cooldown has nothing to "
                     + "measure from and returns early")
                 .isNotNull();
-        assertThat(anonymous.recipientDayOtherSenders())
+        assertThat(anonymous.recipientWindowOtherSenders())
                 .as("an identified sender is one OTHER sender to the anonymous bucket")
                 .isEqualTo(1);
 
         var identified = countsFor(target, otherSender);
-        assertThat(identified.recipientDayOtherSenders())
+        assertThat(identified.recipientWindowOtherSenders())
                 .as("and symmetrically, all three anonymous sends collapse into ONE other sender "
                     + "as far as an identified caller is concerned — the nil-UUID sentinel exists "
                     + "so they can take part in a count(distinct) at all, since NULL is not equal "

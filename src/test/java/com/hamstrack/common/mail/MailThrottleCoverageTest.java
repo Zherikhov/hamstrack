@@ -5,6 +5,7 @@ import com.hamstrack.common.config.MailAsyncProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailOutcome;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
+import com.hamstrack.common.ratelimit.MailThrottlePolicy;
 import com.hamstrack.common.ratelimit.RecipientMailThrottle;
 import jakarta.mail.Session;
 import jakarta.mail.internet.MimeMessage;
@@ -15,13 +16,18 @@ import org.springframework.mail.javamail.JavaMailSender;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.clearInvocations;
@@ -71,23 +77,33 @@ class MailThrottleCoverageTest {
      * Kinds of mail that may reach a stranger's address with no recipient-keyed ceiling in front of
      * them.
      *
-     * <p><strong>These two are a documented open gap, not a decision that they are safe.</strong>
-     * Verification and password-reset mail are today bounded only by the per-IP auth budget on
-     * {@code /api/auth/*} — an IP budget is defeated by a phone tether, and neither is keyed on the
-     * <em>address</em> that receives the mail, which is the key that matters when the harm lands on
-     * somebody who never asked for an account. <strong>HD-202 moves both onto this mechanism</strong>:
-     * two more {@code MailThrottlePolicy} beans, two {@code requireAndRecord} calls in
-     * {@code AuthService}, two properties — and the deletion of these two entries, which is what
-     * makes that merge verifiable rather than intended. {@code mail_send_events} already carries
-     * {@code email_type} so it needs no migration.
+     * <p><strong>Empty since HD-202, and the emptying was the deliverable.</strong> It used to hold
+     * {@code VERIFICATION} and {@code PASSWORD_RESET} as a documented open gap — bounded only by the
+     * per-IP auth budget, which is defeated by a phone tether and is not keyed on the address that
+     * receives the mail. Both are now on {@code RecipientMailThrottle} through
+     * {@code AuthMailThrottleConfig}, and {@link #nothingIsBothThrottledAndExempt()} is what made
+     * removing them from here unavoidable rather than merely intended.
      *
      * <p>Anything added here needs a reason that survives the same question
      * ({@code ThrottleCoverageTest.EXEMPT}'s framing): <em>who chooses the address, and what does
      * this instance send to it if they choose a stranger's?</em> "It is rate-limited somewhere else"
      * is only an answer if that limiter is keyed on the recipient.
+     *
+     * <p><strong>An exemption is not the only shape a gap can take, and this file structurally
+     * cannot see the other one.</strong> The seal is on <em>mailers</em>, so a throttled
+     * {@link EmailType} sent from a path that never spends its budget passes every assertion here.
+     * {@code POST /api/auth/register} was exactly that: it mailed {@code VERIFICATION} without
+     * consulting the ceiling, on a written exemption that turned out to be false, and this file was
+     * green throughout — the note that used to stand here said so and then called it a decision,
+     * which is a blessing in all but name.
+     *
+     * <p>So the rule the note should have carried: <strong>a written exemption on an axis this test
+     * cannot measure is not covered by this test, whatever it says about itself.</strong> The path
+     * axis belongs to {@code AuthMailDoorsTest} (which door, from which call site) and to each
+     * flow's own behavioural test. Register is on the mechanism now, through
+     * {@code requireAndRecordWhereEndpointDiscloses}, sealed by {@code AuthMailRegisterThrottleTest}.
      */
-    private static final Set<EmailType> EXEMPT =
-            EnumSet.of(EmailType.VERIFICATION, EmailType.PASSWORD_RESET);
+    private static final Set<EmailType> EXEMPT = EnumSet.noneOf(EmailType.class);
 
     /**
      * <strong>The checklist, printed by the failure that needs it.</strong> Same mechanism as
@@ -101,13 +117,31 @@ class MailThrottleCoverageTest {
             the whole of the abuse surface HD-190 exists to bound, so a new one is a decision, \
             never an omission. Do one of these two things:
 
-              THROTTLE IT. Add a MailThrottlePolicy bean for the new EmailType (the shape to copy \
-              is InviteMailThrottleConfig: cooldown, per-recipient daily cap, two RateLimitKind \
-              tags and the wording), then call RecipientMailThrottle.requireAndRecord from the \
-              sending path — AFTER tenancy and authorization have been resolved, never before, and \
-              above anything that can still roll the transaction back. Counts are per EmailType, so \
-              the new budget cannot consume the invitation allowance or the other way round, and \
-              mail_send_events needs no migration.
+              THROTTLE IT. Add a MailThrottlePolicy bean for the new EmailType (the shapes to copy \
+              are InviteMailThrottleConfig and AuthMailThrottleConfig: cooldown, ceiling window, \
+              per-recipient volume cap, two RateLimitKind tags — named by the convention step 8 \
+              below depends on — the refusal shape, and the wording unless that shape is SILENT). \
+              Then spend it from EVERY sending path, through whichever door the policy declares. \
+              Note the plural: a budget spent by one of a type's endpoints and not the others is \
+              not a ceiling, it is a detour, and this file cannot see the difference:
+
+                RecipientMailThrottle.requireAndRecord, which answers 429, AFTER tenancy and \
+                authorization have been resolved and above anything that can still roll the \
+                transaction back; or
+
+                RecipientMailThrottle.allowAnonymousSend, which drops the mail in silence, BEFORE \
+                any lookup that could make the refusal depend on whether the address exists. This \
+                is the door for a path whose response must be uniform — where a 429 would answer, \
+                to anybody, a question about somebody else's traffic; or
+
+                RecipientMailThrottle.requireAndRecordWhereEndpointDiscloses, which answers 429 \
+                for a type that is silent elsewhere, and ONLY from an endpoint that already \
+                publishes what the refusal would (register's own 409). Its call sites are sealed \
+                by AuthMailDoorsTest — adding one is an edit there, and that test's failure \
+                message is the checklist for it.
+
+              Counts are per EmailType, so the new budget cannot consume the invitation allowance \
+              or the other way round, and mail_send_events needs no migration.
 
               OR EXEMPT IT, with a reason written in EXEMPT above that answers: who chooses the \
               address, and what reaches a stranger if they choose one? An IP budget is not an \
@@ -115,8 +149,9 @@ class MailThrottleCoverageTest {
 
             Then propagate, the way ThrottleCoverageTest's own checklist requires for its axis:
 
-              1. src/main/java/.../common/config/InviteProperties.java  — the per-EmailType numbers
-                 and their ranges live on a @ConfigurationProperties record of their own
+              1. src/main/java/.../common/config/                       — the per-EmailType numbers
+                 and their ranges live on a @Validated @ConfigurationProperties record of their own
+                 (InviteProperties, AuthMailProperties), never on a shared one
               2. src/main/resources/application.properties              — the property block AND the
                  numbered list above app.rate-limit.enabled, which enumerates the limiter families
               3. .env.prod.example                                      — the operator block, in the
@@ -124,11 +159,26 @@ class MailThrottleCoverageTest {
               4. docs/self-hosting.md                                   — the operator table, the
                  RATE_LIMIT_ENABLED row, and the node-local prose (the recipient ceilings are the
                  exception: their state is in Postgres, so they are cluster-wide and exact)
-              5. docs/api-dc.md AND docs/api-cloud.md                   — the env-var table and the
-                 429 note on the affected endpoint
-              6. src/main/frontend/public/openapi.yaml                  — the 429 + Retry-After
+              5. docs/api-dc.md AND docs/api-cloud.md                   — the env-var table, and the
+                 refusal on the affected endpoint: a 429 note where the policy RESPONDS_429, or a
+                 sentence saying the mail is dropped where it is SILENT (the status does not move,
+                 and a reader who is not told that will read the uniform 200 as proof it was sent)
+              6. src/main/frontend/public/openapi.yaml                  — the 429 + Retry-After, if
+                 and only if the refusal is visible. A SILENT policy adds no response
               7. docs/adr/0015-recipient-keyed-mail-throttle-persisted.md — it is written as one
                  mechanism for every mail path; a second mechanism contradicts it
+              8. observability/grafana/provisioning/alerting/rules.yml    — THE SHARPEST OMISSION ON
+                 THIS LIST, and the easiest to make, because nothing else fails when you skip it.
+                 Where a refusal is SILENT, the metric is the ONLY evidence the refusal happened at
+                 all, so an unmonitored new kind is silent twice over. The rules there select by
+                 NAMING CONVENTION rather than by a list of kinds, so a kind tagged
+                 <thing>_recipient_cooldown / _recipient_window / _recipient_daily lands inside them
+                 automatically — and everyRecipientKindIsSelectedByTheAlertRules() in this file
+                 fails if yours does not. That test is the reason this step is checkable rather than
+                 hopeful. Also ask the harder question it cannot: does a refusal COUNTER see your
+                 attacker at all? For the auth mailers it does not — an attacker who spends the cap
+                 as slots age out is never refused — which is why a QUANTITY gauge
+                 (hamstrack.mail.anonymous_recipient_max) had to be added beside it
 
             Two claims to re-check rather than copy, because both are counts and a count goes stale \
             one entry before the list does: "the invitation ceilings" (this mechanism is not \
@@ -138,6 +188,7 @@ class MailThrottleCoverageTest {
             """;
 
     @Autowired RecipientMailThrottle recipientMailThrottle;
+    @Autowired List<MailThrottlePolicy> policies;
     @Autowired AppProperties appProperties;
     @Autowired MailAsyncProperties mailAsyncProperties;
     @Autowired FailedEmailWriter failedEmailWriter;
@@ -163,7 +214,7 @@ class MailThrottleCoverageTest {
 
     /**
      * <strong>An exemption must be deleted the moment it stops being one.</strong> This is what
-     * turns HD-202 from an intention into a check: the two policy beans it adds make this test fail
+     * turns HD-202 from an intention into a check: the policy beans it adds make this test fail
      * until {@code VERIFICATION} and {@code PASSWORD_RESET} come out of {@link #EXEMPT}, so the
      * documented gap cannot survive its own closing. Without it, an exemption is a claim nobody
      * ever re-reads.
@@ -264,6 +315,96 @@ class MailThrottleCoverageTest {
                 .allSatisfy((name, types) -> assertThat(types)
                         .as("MailService.%s", name)
                         .hasSize(1));
+    }
+
+    /**
+     * <strong>Every recipient-keyed refusal counter is selected by a rule in
+     * {@code rules.yml}</strong> — the propagation target above, made checkable.
+     *
+     * <p><strong>Why this is worth a test and the other propagation targets are not.</strong> A
+     * missing line in a document is found by the next person who reads it. A missing alert is found
+     * by nobody, ever, and for these ceilings it is worse than that: two of the three endpoints
+     * refuse in <em>silence</em>, so there is no {@code 429}, no log line and no user complaint.
+     * The counter is the only evidence the refusal exists at all, and a rule that does not select it
+     * makes the evidence unreadable. Silent squared.
+     *
+     * <p><strong>It asserts a naming convention, not a list.</strong> The expressions used to name
+     * the four kinds this feature shipped with, so a fifth would have tripped nothing and failed
+     * nothing — the exact "anchored to today's members" shape this project's own rule warns about.
+     * They now match {@code .*_recipient_(cooldown|window|daily)}, and this asserts that every kind
+     * a policy actually declares is matched by a selector that really appears in that file. Both
+     * halves matter: reading the selectors OUT OF the file is what stops this test from certifying
+     * a convention nobody enforces.
+     *
+     * <p><strong>Both selector spellings are harvested, and the second one is the fix to a refusal
+     * nobody could act on.</strong> The failure message below tells a reader whose kind fits no
+     * suffix to add a rule for it — and the natural spelling for a one-off kind is
+     * {@code kind="my_exact_kind"}, which the {@code =~}-only harvest did not see. The test then
+     * failed anyway, printing the same instruction to somebody who had just followed it. Fail-safe
+     * in direction, unperformable in content, which is this project's own third recorded instance
+     * of that mistake.
+     */
+    @Test
+    void everyRecipientKindIsSelectedByTheAlertRules() throws Exception {
+        var rules = Files.readString(Path.of("observability", "grafana", "provisioning",
+                "alerting", "rules.yml"), StandardCharsets.UTF_8);
+
+        // BOTH selector spellings, =~ and =. Harvesting only the regex form made this test tell a
+        // reader who had just written kind="my_exact_kind" - the natural spelling for a one-off
+        // kind that fits no suffix, and the very thing the failure message invites - to "add a
+        // rule" for a kind they had already added a rule for. Fail-safe, but a refusal may only
+        // prescribe an action its reader can perform. An exact match is quoted so it cannot then
+        // be read as a pattern.
+        var selectors = Pattern.compile("""
+                hamstrack_ratelimit_hit_total\\{kind=(~?)"([^"]+)"}""")
+                .matcher(rules).results()
+                .map(m -> m.group(1).isEmpty()
+                        ? Pattern.compile(Pattern.quote(m.group(2)))
+                        : Pattern.compile(m.group(2)))
+                .toList();
+
+        assertThat(selectors)
+                .as("no kind selector was found in rules.yml at all, so this test is guarding "
+                    + "nothing — the metric was renamed, or the rules moved, and either way the "
+                    + "refusal counters are now unmonitored")
+                .isNotEmpty();
+
+        var unmatched = new LinkedHashSet<String>();
+        for (var kind : recipientKinds()) {
+            if (selectors.stream().noneMatch(s -> s.matcher(kind).matches())) {
+                unmatched.add(kind);
+            }
+        }
+
+        assertThat(unmatched)
+                .as("these recipient-keyed refusal counters are selected by NO alert rule, so "
+                    + "nothing watches them. Where the refusal is silent that counter is the only "
+                    + "evidence the refusal happened at all, which makes an unmonitored kind "
+                    + "invisible twice over. The rules select by naming convention — name the tag "
+                    + "<thing>_recipient_cooldown / _recipient_window / _recipient_daily and it is "
+                    + "covered without editing rules.yml. If your kind genuinely cannot take one of "
+                    + "those suffixes, add a rule for it in the same commit; do NOT widen the "
+                    + "regexes to a list of names, which is the shape this test exists to prevent."
+                    + PROPAGATION_CHECKLIST)
+                .isEmpty();
+    }
+
+    /** The metric tags every registered policy declares — read off the beans, never listed here. */
+    private Set<String> recipientKinds() throws Exception {
+        var tag = ProductMetrics.RateLimitKind.class.getDeclaredField("tag");
+        tag.setAccessible(true);
+        var kinds = new LinkedHashSet<String>();
+        for (var policy : policies) {
+            for (var kind : new ProductMetrics.RateLimitKind[]{
+                    policy.cooldownKind(), policy.recipientVolumeKind()}) {
+                kinds.add((String) tag.get(kind));
+            }
+        }
+        assertThat(kinds)
+                .as("no MailThrottlePolicy bean is registered, so this test is guarding an empty "
+                    + "set")
+                .isNotEmpty();
+        return kinds;
     }
 
     // ------------------------------------------------------------------ probe machinery
