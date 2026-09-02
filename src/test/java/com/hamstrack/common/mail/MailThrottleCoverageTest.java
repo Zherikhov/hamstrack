@@ -217,10 +217,17 @@ class MailThrottleCoverageTest {
     @Test
     void everyPublicMailServiceSendMethodMapsToAnEmailType() {
         var metrics = mock(ProductMetrics.class);
+        // The dispatcher runs the task on THIS thread (Runnable::run), because the observation is
+        // the point: driving a mailer through the real mailExecutor would record the EmailType on a
+        // pool thread and turn this seal into a race. What is being measured is which type each
+        // mailer names, not where it names it from. Nothing is ever rejected by an inline executor,
+        // so the UndeliverableMail arm is unreachable here and a mock is honest about that.
         var probe = new MailService(stubSender(), appProperties, metrics,
                 new MailAsyncProperties(mailAsyncProperties.async(),
-                        new MailAsyncProperties.Critical(1, 0L)),
-                failedEmailWriter);
+                        new MailAsyncProperties.Critical(1, 0L),
+                        mailAsyncProperties.deadLetter()),
+                failedEmailWriter,
+                new MailDispatcher(Runnable::run, mock(UndeliverableMail.class)));
 
         var mailers = Arrays.stream(MailService.class.getDeclaredMethods())
                 .filter(m -> Modifier.isPublic(m.getModifiers()))

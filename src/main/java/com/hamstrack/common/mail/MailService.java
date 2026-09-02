@@ -12,9 +12,30 @@ import org.springframework.mail.MailPreparationException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.MimeMessageHelper;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+/**
+ * Builds the account's outbound mail and hands it to the pool.
+ *
+ * <h2>Every public {@code send*} method returns before any SMTP happens</h2>
+ * They construct a {@link MailTask} and give it to {@link MailDispatcher}; the socket work happens
+ * on a {@code mail-} thread, or never happens and is written down. This is a stronger statement
+ * than the {@code @Async} these methods used to carry, and the difference is the whole of HD-208:
+ * with {@code CallerRunsPolicy} on a bounded pool, a full queue turned the "async" dispatch into a
+ * synchronous send <em>on the caller's thread</em>, retries and all — up to ~34 s of a Tomcat
+ * worker, reachable from an unauthenticated endpoint. There is no such branch any more.
+ *
+ * <p>{@code @Async} could not have stayed even if the policy had: the identity of a queued message
+ * has to survive into the rejection handler and into {@code shutdownNow()}'s returned list for
+ * either loss to be recordable, and the {@code @Async} interceptor submits a {@code FutureTask}
+ * wrapping an opaque lambda. See {@link MailTask}.
+ *
+ * <p>What has <em>not</em> changed is where a send must be published from. Asynchrony is not what
+ * keeps SMTP out of a transaction or a cross-tenant lock — ordering is, and every mailer here is
+ * registered on {@code common.tx.AfterCommit} by its caller, sealed by
+ * {@code MailerAfterCommitCoverageTest}. Do not restore an argument that rests on the dispatch
+ * being asynchronous, even now that it reliably is.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -28,57 +49,69 @@ public class MailService {
     private final ProductMetrics metrics;
     private final MailAsyncProperties mailAsyncProperties;
     private final FailedEmailWriter failedEmailWriter;
+    private final MailDispatcher dispatcher;
 
     // Account-critical mail (verification + reset): a lost one leaves a user unable
     // to complete signup/recovery, so these retry then dead-letter. INVITE is
     // best-effort (log-only) by design.
-    private static boolean isCritical(EmailType type) {
+    //
+    // Package-private rather than private: UndeliverableMail forks on the same question for mail
+    // that never reaches a send at all, and it has to be the SAME question. A new EmailType must
+    // land on one side or the other exactly once — two copies of this method would let it be
+    // critical when a send fails and best-effort when a send never happens.
+    static boolean isCritical(EmailType type) {
         return type == EmailType.VERIFICATION || type == EmailType.PASSWORD_RESET;
     }
 
-    @Async("mailExecutor")
     public void sendVerificationEmail(String to, String token) {
-        // Links to the SPA page (not the API): mail scanners prefetch GET links,
-        // which would consume the one-time token before the user clicks
-        var link = appProperties.baseUrl() + "/verify-email?token=" + token;
-        var text = "Confirm your email address to activate your Hamstrack account:\n\n" + link
-                + "\n\nThis link expires in 24 hours."
-                + " If you didn't create a Hamstrack account, you can safely ignore this email.";
-        sendHtml(EmailType.VERIFICATION, to, "Confirm your Hamstrack email", text, verificationHtml(link));
+        var subject = "Confirm your Hamstrack email";
+        dispatcher.dispatch(new MailTask(EmailType.VERIFICATION, to, subject, () -> {
+            // Links to the SPA page (not the API): mail scanners prefetch GET links,
+            // which would consume the one-time token before the user clicks
+            var link = appProperties.baseUrl() + "/verify-email?token=" + token;
+            var text = "Confirm your email address to activate your Hamstrack account:\n\n" + link
+                    + "\n\nThis link expires in 24 hours."
+                    + " If you didn't create a Hamstrack account, you can safely ignore this email.";
+            sendHtml(EmailType.VERIFICATION, to, subject, text, verificationHtml(link));
+        }));
     }
 
-    @Async("mailExecutor")
     public void sendPasswordResetEmail(String to, String token) {
-        var link = appProperties.baseUrl() + "/reset-password?token=" + token;
-        send(EmailType.PASSWORD_RESET, to, "Reset your Hamstrack password",
-                "Click the link to reset your password:\n\n" + link
-                + "\n\nThis link expires in 1 hour.");
+        var subject = "Reset your Hamstrack password";
+        dispatcher.dispatch(new MailTask(EmailType.PASSWORD_RESET, to, subject, () -> {
+            var link = appProperties.baseUrl() + "/reset-password?token=" + token;
+            send(EmailType.PASSWORD_RESET, to, subject,
+                    "Click the link to reset your password:\n\n" + link
+                    + "\n\nThis link expires in 1 hour.");
+        }));
     }
 
     /**
-     * <strong>What kept an SMTP round trip out of a cross-tenant lock is no longer this
-     * {@code @Async}</strong> (HD-181, correcting what this javadoc used to claim). Its only caller
-     * is {@code WorkspaceService.inviteMember}, which takes
+     * <strong>What keeps an SMTP round trip out of a cross-tenant lock is the ordering, not the
+     * hand-off</strong> (HD-181, correcting what this javadoc once claimed). The only caller is
+     * {@code WorkspaceService.inviteMember}, which takes
      * {@code pg_advisory_xact_lock(hashtext(recipient_key))} in {@code RecipientMailThrottle} and
      * holds it until commit; a recipient address is something two tenants legitimately share, so a
      * send performed inside that section is a wait one tenant can impose on another simply by
-     * inviting the same person. This annotation was said to prevent that, and it does not: the
-     * {@code mailExecutor} pool is bounded with {@code CallerRunsPolicy}, so once its queue fills —
-     * under precisely the load that makes the lock matter — the "async" dispatch runs the send
-     * inline on the caller's thread, inside the lock, retries and all.
+     * inviting the same person. The old {@code @Async} was said to prevent that and did not — the
+     * pool ran {@code CallerRunsPolicy}, so once the queue filled (under precisely the load that
+     * makes the lock matter) the dispatch became an inline send on the caller's thread, inside the
+     * lock, retries and all.
      *
-     * <p>The ordering does it instead. The caller registers this send on
-     * {@code AfterCommit}, so it is dispatched after the commit that releases the advisory lock, and
-     * a caller-runs send then costs that one request its own latency rather than costing every
-     * tenant queued on the same recipient key. Keep {@code @Async} — it is worth a request's
-     * latency — but do not restore an argument that rests on it.
+     * <p>The caller registers this on {@code AfterCommit}, so it is dispatched after the commit
+     * that releases the advisory lock. HD-208 has since removed the inline branch as well, so the
+     * dispatch really is a hand-off now — but the reason the lock is safe is still the ordering, and
+     * an argument resting on the hand-off would go stale the next time the pool's policy is
+     * revisited.
      */
-    @Async("mailExecutor")
     public void sendWorkspaceInviteEmail(String to, String workspaceName, String token) {
-        var link = appProperties.baseUrl() + "/accept-invite?token=" + token;
-        send(EmailType.INVITE, to, "You've been invited to " + workspaceName + " on Hamstrack",
-                "You've been invited to join \"" + workspaceName + "\".\n\nAccept the invite:\n\n"
-                + link + "\n\nThis link expires in 7 days.");
+        var subject = "You've been invited to " + workspaceName + " on Hamstrack";
+        dispatcher.dispatch(new MailTask(EmailType.INVITE, to, subject, () -> {
+            var link = appProperties.baseUrl() + "/accept-invite?token=" + token;
+            send(EmailType.INVITE, to, subject,
+                    "You've been invited to join \"" + workspaceName + "\".\n\nAccept the invite:\n\n"
+                    + link + "\n\nThis link expires in 7 days.");
+        }));
     }
 
     private String verificationHtml(String link) {
@@ -170,16 +203,22 @@ public class MailService {
      * mail (invite) records the FAILURE metric and logs — no retry, no dead-letter,
      * unchanged behaviour.
      *
-     * <p>Runs on the {@code mailExecutor}, <strong>or on the calling thread when the queue is
-     * full</strong> — {@code CallerRunsPolicy} makes an {@code @Async} dispatch synchronous under
-     * exactly the load that fills the queue, so this loop and its retries can cost a request its
-     * own latency (HD-181, the same correction applied to {@code sendWorkspaceInviteEmail} and to
-     * {@code AsyncConfig}). The exception is observed and swallowed at the end on both paths, and
-     * "nothing awaits the async result" is the weaker half of why: on the caller-runs path there is
-     * a thread but no caller left to tell, because every send is dispatched from an
-     * {@code AfterCommit} effect, after the transaction it announces has already committed. Which
-     * is what makes {@link FailedEmailWriter} the record of a critical failure rather than the
-     * return value.
+     * <p><strong>Runs on a {@code mail-} thread and nowhere else</strong> (HD-208). It used to be
+     * able to run on the calling thread — {@code CallerRunsPolicy} made the dispatch synchronous
+     * under exactly the load that filled the queue, so this loop and its retries could cost a
+     * request tens of seconds. The pool now refuses instead, and a refused message is recorded by
+     * {@link UndeliverableMail} without ever reaching this method.
+     *
+     * <p>The exception is observed and swallowed at the end rather than returned, and "nothing
+     * awaits the async result" is only half of why: there is no caller left to tell either, because
+     * every send is dispatched from an {@code AfterCommit} effect, after the transaction it
+     * announces has already committed. Which is what makes {@link FailedEmailWriter} the record of
+     * a critical failure rather than the return value.
+     *
+     * <p>A row written from here always carries {@code attempts >= 1}. A row written by
+     * {@link UndeliverableMail} carries {@code attempts = 0} and a {@code last_error} that says so
+     * — the table holds "we tried and failed" and "we never tried" side by side, and a reader (or a
+     * future re-drive job) has to be able to tell them apart.
      */
     private void sendWithDurability(EmailType type, String to, String subject, SendAttempt attempt) {
         boolean critical = isCritical(type);
@@ -203,11 +242,19 @@ public class MailService {
 
         // All attempts exhausted.
         if (critical) {
-            log.error("Critical {} email to {} failed after {} attempt(s) — dead-lettering",
-                    type, to, maxAttempts, last);
+            // DOMAIN ONLY, never the whole address (HD-208 review). The full recipient is durable
+            // on the failed_email row this line is announcing, which is the argument
+            // UndeliverableMail makes for itself: a shipped, retained log must not carry the local
+            // part, and a log line is not where anybody re-drives a message from. These three lines
+            // predate that rule and were the last ones in the mail package still breaking it —
+            // reached, now, on every deploy that catches mail in flight, where they used to be
+            // reached only by a genuine SMTP failure.
+            log.error("Critical {} email to a {} address failed after {} attempt(s) — dead-lettering",
+                    type, MailAddresses.domainOf(to), maxAttempts, last);
             deadLetter(type, to, subject, maxAttempts, last);
         } else {
-            log.warn("Best-effort {} email to {} failed", type, to, last);
+            log.warn("Best-effort {} email to a {} address failed",
+                    type, MailAddresses.domainOf(to), last);
         }
     }
 
@@ -219,19 +266,23 @@ public class MailService {
             row.setSubject(truncate(subject, 255));
             row.setLastError(error == null ? null : truncate(String.valueOf(error.getMessage()), 1000));
             row.setAttempts(attempts);
-            // Its OWN transaction, never the caller's — see FailedEmailWriter. On the caller-runs
-            // path this runs inside an AfterCommit effect, where a PROPAGATION_REQUIRED save joins
-            // an already-committed transaction and is discarded at cleanup without throwing: no
-            // row, and not even the catch below to say so.
+            // Its OWN transaction, never the caller's — see FailedEmailWriter. This path always
+            // runs on a pool thread now (HD-208), where nothing is bound, but the writer is shared
+            // with UndeliverableMail, which is reached ON THE COMMITTING THREAD inside an
+            // AfterCommit effect — and there a PROPAGATION_REQUIRED save joins an already-committed
+            // transaction and is discarded at cleanup without throwing: no row, and not even the
+            // catch below to say so.
             failedEmailWriter.write(row);
         } catch (RuntimeException persistError) {
             // A dead-letter write failure must not propagate onto the async executor
             // (nothing awaits it); the ERROR log above + metric already captured it.
-            log.error("Failed to persist dead-letter row for {} email to {}", type, to, persistError);
+            log.error("Failed to persist dead-letter row for {} email to a {} address",
+                    type, MailAddresses.domainOf(to), persistError);
         }
     }
 
-    private static String truncate(String s, int max) {
+    /** Package-private: {@link UndeliverableMail} writes rows into the same columns. */
+    static String truncate(String s, int max) {
         if (s == null) return null;
         return s.length() <= max ? s : s.substring(0, max);
     }

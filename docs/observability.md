@@ -195,7 +195,7 @@ Prometheus names (Micrometer converts dots→underscores; counters get `_total`)
 | `hamstrack_projects_created_total` | counter | — | projects created |
 | `hamstrack_issues_created_total` | counter | `type`(issue-type name, from the admin catalog) | issues created |
 | `hamstrack_invites_sent_total` / `_accepted_total` / `_declined_total` | counter | — | workspace invites |
-| `hamstrack_email_sent_total` | counter | `type`(verification/password_reset/invite), `outcome`(success/failure) | outbound email |
+| `hamstrack_email_sent_total` | counter | `type`(verification/password_reset/invite), `outcome`(success/failure) | outbound email. `failure` covers **two** things: a send the SMTP host refused, and a message that was never attempted because the mail queue was full or a deploy's shutdown drain expired with it queued. Same tag on purpose — a mail that never left is still a mail that failed, and a separate tag would put it outside the `EmailFailures` alert. `failed_email` is where the two are told apart (`attempts = 0` and a `last_error` starting `NEVER ATTEMPTED [<reason>]` means it was never tried, and the bracketed reason says which of the three) |
 | `hamstrack_role_scope_violation_total` | counter | `source`(workspace_members/project_members/workspace_invites/default_project_role) | a stored `role_id` failed the scope/ownership assertion — see the alert below |
 | `hamstrack_db_statement_budget_exceeded_total` | counter | `method`(HTTP method), `route`(**mapped pattern**, e.g. `/api/workspaces/{workspaceId}/projects/{projectId}/reports/flow`, or `unmapped`) | a database statement PostgreSQL cancelled at `DB_STATEMENT_TIMEOUT_MS` — see the alert below. `route` is the templated pattern and never the request URI, which would carry workspace and project ids |
 | `hamstrack_attachments_uploaded_total` | counter | — | attachment uploads |
@@ -400,6 +400,27 @@ row of that rule rather than an exception to it.
 | MailDailyVolumeHigh | `sum(increase(hamstrack_email_sent_total{outcome="success"}[24h])) > 500` | 30m | warning |
 | InviteVolumeUnaccepted | 6h invitation acceptance ratio < 10% **and** > 200 invitations sent in 6h | 30m | warning |
 | InviteThrottleTripping | `sum(increase(hamstrack_ratelimit_hit_total{kind=~"invite_.*"}[15m])) > 20` | 5m | warning |
+
+**`EmailFailures` counts two different things, and the difference decides what you do**
+(HD-207/HD-208). A row in `failed_email` with `attempts >= 1` was *tried* and refused by the
+SMTP host — look at the mail provider. A row with `attempts = 0` and a `last_error` beginning
+`NEVER ATTEMPTED` was **never sent at all**, and the bracketed token that follows says which of
+the three ways: `[QUEUE_FULL]` the mail queue was full, `[POOL_SHUT_DOWN]` the dispatch arrived
+while the pool was stopping, `[SHUTDOWN_RESIDUE]` a deploy's shutdown drain expired with the
+message still queued. That token is what a `GROUP BY left(last_error, 40)` sorts a burst by —
+the sentence after it is written for a human reading one row, not a hundred. The second kind
+means the pool is saturated or a deploy landed on a backlog, not that mail is broken, and it
+is much more likely to succeed if re-driven. The rule's own `description` annotation carries
+the query that separates them, so a paged operator does not need this page. Both share
+`outcome="failure"` deliberately — a mail that never left is still a mail that failed, and a
+tag of its own would be a silent loss with this alert pointed away from it.
+
+**And this rule got noisier in 0.18.0, in exchange for a loss.** It is `> 0` with `for: 0m`,
+so now that an abandoned mail queue is *recorded* rather than discarded at shutdown, **any
+deploy landing on a non-empty queue fires it** — before, the same deploy was quiet and the
+mail was simply gone. One burst at a deploy timestamp, all never-attempted, is that: real
+(those users were told to check an inbox nothing arrived in), but not an outage. A rate that
+continues after the deploy is.
 
 **The three invitation rules are ranked, and the ranking is the point** (HD-190). A rule
 built on throttle refusals can only see an attacker who *hits* a ceiling; one who reads

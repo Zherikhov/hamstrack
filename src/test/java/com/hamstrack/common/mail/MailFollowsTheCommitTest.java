@@ -210,9 +210,11 @@ class MailFollowsTheCommitTest {
      * <p>{@code pg_try_advisory_xact_lock} rather than the blocking form on purpose: the failure to
      * report is "somebody else is holding this", not a test that hangs until the lock timeout.
      *
-     * <p>The claim this replaces is that {@code @Async} kept SMTP out of the lock. It never did —
-     * {@code mailExecutor} is bounded with a caller-runs policy, so a full queue runs the send
-     * inline, under exactly the load where a cross-tenant lock hold would hurt most.
+     * <p>The claim this replaces is that handing the send to the mail pool kept SMTP out of the lock.
+     * It never did — the pool was bounded with a caller-runs policy, so a full queue ran the send
+     * inline, under exactly the load where a cross-tenant lock hold would hurt most. HD-208 has
+     * since removed that branch, which is why this test asserts the ORDERING and not the hand-off:
+     * the ordering is a property of the call site and survives the next change to the pool.
      */
     @Test
     void theInviteSendHappensOutsideTheRecipientAdvisoryLock() {
@@ -236,10 +238,11 @@ class MailFollowsTheCommitTest {
                     + "while the invite mail was being sent, so the send is happening INSIDE the "
                     + "lock RecipientMailThrottle holds to commit. A recipient address is something "
                     + "two tenants legitimately share, so a wait held there is a wait one tenant "
-                    + "can impose on another by inviting the same person — and for a caller-runs "
-                    + "dispatch the wait is a whole SMTP round trip, retries and all. Nothing slow "
-                    + "may be added between the throttle and the commit; the send must stay "
-                    + "registered on AfterCommit.")
+                    + "can impose on another by inviting the same person. Nothing slow may be added "
+                    + "between the throttle and the commit; the send must stay registered on "
+                    + "AfterCommit. What may NOT be relied on instead is the pool's rejection "
+                    + "policy: it has already changed once (HD-208) and this assertion is about "
+                    + "the call site, which is where the guarantee has to live.")
                 .isTrue();
     }
 

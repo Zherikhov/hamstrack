@@ -1,5 +1,6 @@
 package com.hamstrack.common.mail;
 
+import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import com.hamstrack.common.tx.AfterCommit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -10,7 +11,6 @@ import org.springframework.mail.MailSendException;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
-import org.springframework.test.util.AopTestUtils;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -18,6 +18,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import jakarta.mail.internet.MimeMessage;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,18 +49,25 @@ import static org.mockito.ArgumentMatchers.any;
  * produces it. Hence a test rather than a reader.
  *
  * <p>What is at stake is not bookkeeping: the {@code failed_email} row is the only thing standing
- * between an SMTP outage and a user who can never finish signing up, and the caller-runs path this
+ * between an SMTP outage and a user who can never finish signing up, and the refusal path this
  * probe reproduces is reached under precisely the load an outage produces.
  *
- * <h2>How the probe reproduces it</h2>
- * The <em>unproxied</em> {@link MailService} is driven from inside an {@link AfterCommit} effect
- * with SMTP forced to fail. Unproxied is what makes it faithful: when {@code mailExecutor}'s queue
- * is full its caller-runs policy turns the {@code @Async} dispatch into an inline send on the
- * committing thread, which is this, exactly. The {@code @Async} hop would otherwise move the send
- * to a pool thread with nothing bound to it — the one arrangement in which the bug cannot happen.
+ * <h2>How the probe reaches that window, and why the door changed</h2>
+ * Originally this drove the <em>unproxied</em> {@link MailService} with SMTP forced to fail: when
+ * {@code mailExecutor}'s queue was full, {@code CallerRunsPolicy} turned the {@code @Async} dispatch
+ * into an inline send on the committing thread, so a dead-letter written after three failed attempts
+ * was written from inside the effect.
+ *
+ * <p><strong>HD-208 deleted that policy, and it did not delete the hazard.</strong> No request
+ * thread performs SMTP any more — but a dispatch the full pool <em>refuses</em> is still recorded on
+ * the committing thread, by {@code MailDispatcher} calling {@link UndeliverableMail#record} inside
+ * the same effect, and that call ends in the same {@link FailedEmailWriter}. So the probe now drives
+ * that call directly: it is the one a real refusal makes, on the thread a real refusal makes it
+ * from, and it enters the identical window. Relaxing {@code REQUIRES_NEW} still loses the row in
+ * silence, which is the property this file exists to hold.
  *
  * <p>Measured before the fix: <strong>0</strong> rows from inside the effect, <strong>1</strong> for
- * the same failure outside a transaction. Both directions are kept below, because a single "1" says
+ * the same write outside a transaction. Both directions are kept below, because a single "1" says
  * nothing — the control is what makes the effect the variable.
  */
 @SpringBootTest(properties = {
@@ -71,9 +79,10 @@ import static org.mockito.ArgumentMatchers.any;
 })
 class DeadLetterInsideAfterCommitTest {
 
-    @Autowired MailService mailService;
+
     @Autowired FailedEmailRepository failedEmailRepository;
     @Autowired TransactionTemplate txTemplate;
+    @Autowired UndeliverableMail undeliverableMail;
 
     @MockitoBean JavaMailSender mailSender;
 
@@ -99,12 +108,13 @@ class DeadLetterInsideAfterCommitTest {
      * from {@code REQUIRES_NEW}.
      */
     @Test
-    void aCriticalSendFailingInsideAnEffectStillLeavesItsDeadLetterRow() {
+    void aCriticalDeadLetterWrittenInsideAnEffectStillLands() {
         var address = address("inside-effect");
 
         txTemplate.executeWithoutResult(status ->
-                AfterCommit.run("a critical send, dispatched caller-runs from inside an effect",
-                        () -> unproxied().sendVerificationEmail(address, "token-" + UUID.randomUUID())));
+                AfterCommit.run("a critical dispatch refused by a full pool, from inside an effect",
+                        () -> undeliverableMail.record(
+                                criticalTaskTo(address), UndeliverableMail.Reason.QUEUE_FULL)));
 
         assertThat(rowsFor(address))
                 .as("""
@@ -126,7 +136,7 @@ class DeadLetterInsideAfterCommitTest {
                     entirely and reinstates this bug in silence.
 
                     This row is the only thing between an SMTP outage and a user who can never \
-                    finish signing up, and the caller-runs path that reaches this window is reached \
+                    finish signing up, and the refusal path that reaches this window is reached \
                     under exactly the load an outage produces.
 
                     MORE THAN ONE row is the opposite failure and does not belong to this write at \
@@ -137,22 +147,44 @@ class DeadLetterInsideAfterCommitTest {
 
     /**
      * The control, and it is not decoration: without it, a run of the test above that passes proves
-     * only that <em>something</em> wrote a row, and a run that fails could equally mean the SMTP
-     * injection stopped working or that critical mail stopped dead-lettering at all. Same mailer,
-     * same injected failure, no transaction anywhere — one row. The effect is the only variable
-     * between the two.
+     * only that <em>something</em> wrote a row, and a run that fails could equally mean critical
+     * mail stopped dead-lettering at all. Same call, same task, no transaction anywhere — one row.
+     * The effect is the only variable between the two.
      */
     @Test
-    void theSameFailureOutsideAnyTransactionAlsoLeavesExactlyOneRow() {
+    void theSameWriteOutsideAnyTransactionAlsoLeavesExactlyOneRow() {
         var address = address("no-transaction");
 
-        unproxied().sendVerificationEmail(address, "token-" + UUID.randomUUID());
+        undeliverableMail.record(criticalTaskTo(address), UndeliverableMail.Reason.QUEUE_FULL);
 
         assertThat(rowsFor(address))
-                .as("the probe's own premise: this mailer, with this injected SMTP failure, "
-                    + "dead-letters. If this is 0 the test above is measuring a broken probe "
-                    + "rather than a broken write")
+                .as("the probe's own premise: this call dead-letters. If this is 0 the test above "
+                    + "is measuring a broken probe rather than a broken write")
                 .isEqualTo(1);
+    }
+
+    /**
+     * The batch door into the same writer (HD-207's shutdown residue). It has its own
+     * {@code REQUIRES_NEW} and could lose it independently, and it runs at the one moment when a
+     * silently discarded write is least likely to be noticed by anybody.
+     */
+    @Test
+    void theBatchWriteInsideAnEffectAlsoLands() {
+        var first = address("batch-1");
+        var second = address("batch-2");
+
+        txTemplate.executeWithoutResult(status ->
+                AfterCommit.run("a shutdown residue recorded from inside an effect",
+                        () -> undeliverableMail.recordAll(
+                                List.of(criticalTaskTo(first), criticalTaskTo(second)),
+                                UndeliverableMail.Reason.SHUTDOWN_RESIDUE)));
+
+        assertThat(rowsFor(first) + rowsFor(second))
+                .as("recordAll carries its own @Transactional(REQUIRES_NEW) and is reached from "
+                    + "MailTaskExecutor.shutdown(), which may itself be running inside whatever the "
+                    + "container is doing at the time. A saveAll that joins a dead transaction is "
+                    + "discarded exactly as silently as a save")
+                .isEqualTo(2);
     }
 
     /**
@@ -194,13 +226,12 @@ class DeadLetterInsideAfterCommitTest {
     // ================================================================ probe machinery
 
     /**
-     * The real bean behind the {@code @Async} proxy. Calling through the proxy would hand the send
-     * to {@code mailExecutor}, i.e. to a thread with nothing bound to it — the one arrangement in
-     * which this bug is unreachable, and therefore the one that would make this file pass while
-     * proving nothing.
+     * A message of the kind that earns a row. The send body is never invoked — a refused dispatch
+     * is a message that reaches no SMTP at all, which is the whole point of the row it leaves.
      */
-    private MailService unproxied() {
-        return AopTestUtils.getTargetObject(mailService);
+    private static MailTask criticalTaskTo(String address) {
+        return new MailTask(EmailType.VERIFICATION, address, "Confirm your Hamstrack email",
+                () -> { throw new AssertionError("a refused dispatch must never run its send"); });
     }
 
     private long rowsFor(String address) {

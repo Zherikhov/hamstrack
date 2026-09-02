@@ -1,132 +1,126 @@
 package com.hamstrack.common.async;
 
 import com.hamstrack.common.config.MailAsyncProperties;
-import lombok.RequiredArgsConstructor;
+import com.hamstrack.common.mail.MailRejectedException;
+import com.hamstrack.common.mail.UndeliverableMail;
+import com.hamstrack.common.mail.UndeliverableMail.Reason;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskExecutor;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
-import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 
 /**
- * Dedicated bounded executor for {@code @Async} mail (HD-78). {@code @EnableAsync}
- * with no configured executor falls back to Spring's unbounded, thread-per-task
- * {@code SimpleAsyncTaskExecutor} — under an SMTP stall (now bounded by HD-76 to
- * ≤10s/send) that spawns a thread per queued email. A bounded pool gives an
- * explicit queue + rejection policy: while the pool is running, a full queue means
- * <em>backpressure</em> — the calling thread sends inline — rather than a dropped
- * message. Named {@code mailExecutor} and referenced by {@code @Async("mailExecutor")}
- * so mail can't starve any other future {@code @Async} work.
+ * Dedicated bounded executor for mail (HD-78, HD-181, HD-207, HD-208).
  *
- * <p><strong>"Rather than dropping mail" is true of a full queue and of nothing else.</strong>
- * Two other losses are real and neither is closed here: a submission arriving after
- * {@code shutdown()} has no pool to run on, and the queue's whole contents are
- * abandoned when the 15s drain below expires. See
- * {@link #callerRunsRefusingAfterShutdown()} for which of the two the rejection
- * handler covers and which it does not.
+ * <p>Without an explicit executor, {@code @EnableAsync} falls back to Spring's unbounded,
+ * thread-per-task {@code SimpleAsyncTaskExecutor} — under an SMTP stall (bounded by HD-76 to ≤10 s
+ * per attempt) that spawns a thread per queued email. A bounded pool gives an explicit queue and an
+ * explicit rejection policy, and gives mail a pool of its own so it cannot starve other
+ * asynchronous work.
  *
- * <p><strong>{@code @Async} on this executor is not a promise that anything is
- * asynchronous</strong> (HD-181). Backpressure is the same statement read from the
- * caller's side: when the queue is full the dispatch <em>becomes</em> a synchronous
- * send on the calling thread. So a caller may not treat {@code @Async} as proof that
- * something slow is off its own thread — under load it is not — and in particular may
- * not rely on it to keep a send out of a transaction or a lock. That is what
- * {@code com.hamstrack.common.tx.AfterCommit} is for, and why every mailer is now
- * registered there rather than called inline.
+ * <h2>A dispatch never becomes a send on the calling thread (HD-208)</h2>
+ * The pool used to run {@code CallerRunsPolicy}. That was chosen as backpressure — better to slow a
+ * caller down than to drop account-critical mail — and it was the right trade <em>at the time it
+ * was made</em>, when a dropped dispatch left nothing behind at all. It is no longer, for two
+ * reasons that both arrived after it:
  *
- * <p><strong>An unqualified {@code @Async} anywhere in the tree lands on this pool</strong>, and
- * it is never what its author meant. This bean is an {@code Executor}, so Boot's
+ * <ul>
+ *   <li><strong>Dropping stopped meaning losing.</strong> HD-78 gave mail retries and a
+ *       {@code failed_email} dead-letter table, so a refusal can now be <em>written down</em>. The
+ *       comparison is no longer "slow request versus lost email" but "slow request versus
+ *       dead-letter row", and the row is the better artefact of the two.</li>
+ *   <li><strong>What backpressure actually bought was negative.</strong> The pushback landed on
+ *       Tomcat workers, from {@code POST /api/auth/register} among others — unauthenticated, 15 per
+ *       minute per IP, critical mail — for up to a full retry budget each. It was self-amplifying
+ *       (a slower host fills the queue faster, which puts more workers on SMTP) and it was reachable
+ *       by anyone with a handful of source IPs or by one genuine SMTP outage meeting organic
+ *       traffic. On this deployment's box the cost is worse than the raw seconds suggest: measured
+ *       capacity is ~45 concurrent users on a 512 MB SerialGC heap, so held workers are scarce.</li>
+ * </ul>
+ *
+ * <p>So the handler below always throws, and {@code MailDispatcher} turns the throw into a durable
+ * record. The decision and its alternatives are ADR-0021
+ * ({@code docs/adr/0021-mail-rejection-dead-letters-instead-of-caller-runs.md}); it replaced a
+ * deliberate choice and was replaced deliberately.
+ *
+ * <p>One consequence is worth stating positively, because the old javadoc had to state its
+ * negation: <strong>a mail dispatch is now genuinely asynchronous</strong>. It used to be that
+ * {@code @Async} was not a promise of asynchrony — under exactly the load that mattered, it was a
+ * synchronous send — so no caller could rely on it to keep SMTP out of a transaction or a lock.
+ * That reliance is still not the mechanism to reach for ({@code common.tx.AfterCommit} is, and
+ * every mailer is registered there), but the dispatch itself no longer betrays it.
+ *
+ * <h2>What the queue's contents are worth at shutdown (HD-207)</h2>
+ * {@link MailTaskExecutor} is a {@code ThreadPoolTaskExecutor} that, once the drain window has
+ * expired, takes back what the drain did not reach and dead-letters it instead of abandoning it
+ * silently. That is why the queue can stay large enough to absorb a burst: its residue is durable,
+ * so its size no longer has to be an estimate of what fifteen seconds can flush.
+ *
+ * <h2>An unqualified {@code @Async} anywhere in the tree lands on this pool</h2>
+ * and it is never what its author meant. This bean is an {@code Executor}, so Boot's
  * {@code applicationTaskExecutor} backs off ({@code @ConditionalOnMissingBean(Executor.class)},
  * short of {@code spring.task.execution.mode=force}) and {@code mailExecutor} is left the unique
  * {@code TaskExecutor} that {@code @EnableAsync} resolves an unqualified {@code @Async} to. An
- * unrelated concern would then queue behind mail, inherit the caller-runs stall when the mail queue
- * fills, and meet the {@code RejectedExecutionException} below with no {@code AfterCommit} effect
- * around it to swallow the throw. Declaring a second executor does not repair it either: the lookup
- * becomes ambiguous, and with no bean named {@code taskExecutor} the interceptor falls back to a
- * fresh unbounded {@code SimpleAsyncTaskExecutor} — the thread-per-task behaviour HD-78 exists to
- * have removed. <strong>Qualify every {@code @Async}</strong>, and give a new asynchronous concern
- * its own bounded executor under its own name.
+ * unrelated concern would then queue behind mail, meet {@link MailRejectedException} with no
+ * {@code AfterCommit} effect around it to swallow the throw, and — because it is not a
+ * {@code MailTask} — be uncountable and unrecordable at shutdown, where it produces an ERROR saying
+ * only that it existed. Declaring a second executor does not repair it either: the lookup becomes
+ * ambiguous, and with no bean named {@code taskExecutor} the interceptor falls back to a fresh
+ * unbounded {@code SimpleAsyncTaskExecutor} — the thread-per-task behaviour HD-78 exists to have
+ * removed. <strong>Qualify every {@code @Async}</strong>, and give a new asynchronous concern its
+ * own bounded executor under its own name.
  */
 @Configuration
-@RequiredArgsConstructor
 public class AsyncConfig {
 
-    private final MailAsyncProperties properties;
-
+    /**
+     * @param undeliverable injected as a constructor argument, not looked up, and not through an
+     *                      {@code ObjectProvider}: the injection is what tells the container this
+     *                      bean depends on it, which is what makes this bean be destroyed
+     *                      <em>before</em> the writer and its {@code EntityManagerFactory}. The
+     *                      shutdown residue is written to the database from inside
+     *                      {@link MailTaskExecutor#shutdown()}, so that ordering is load-bearing
+     *                      rather than tidy.
+     */
     @Bean("mailExecutor")
-    public TaskExecutor mailExecutor() {
+    public TaskExecutor mailExecutor(MailAsyncProperties properties, UndeliverableMail undeliverable) {
         var async = properties.async();
-        var executor = new ThreadPoolTaskExecutor();
+        var executor = new MailTaskExecutor(undeliverable, async.shutdownDrainSeconds());
         executor.setCorePoolSize(async.corePoolSize());
         executor.setMaxPoolSize(async.maxPoolSize());
         executor.setQueueCapacity(async.queueCapacity());
         executor.setThreadNamePrefix("mail-");
-        // Backpressure while running (send on the caller thread when the queue is full, bounded by
-        // HD-76 SMTP timeouts); a refusal the caller can see once the pool is shut down.
-        executor.setRejectedExecutionHandler(callerRunsRefusingAfterShutdown());
-        // Flush in-flight mail on graceful shutdown, bounded so we never hang. NOT a guarantee that
-        // the queue drains — see the handler's javadoc for what this loses.
-        executor.setWaitForTasksToCompleteOnShutdown(true);
-        executor.setAwaitTerminationSeconds(15);
+        executor.setRejectedExecutionHandler(refuseAlways());
         executor.initialize();
         return executor;
     }
 
     /**
-     * {@code CallerRunsPolicy}'s two branches, with the silent one replaced by a refusal the caller
-     * can name (HD-181).
+     * <strong>Refuse; never run on the caller.</strong>
      *
-     * <h2>What this handler is reached for, which is not what shutdown mostly loses</h2>
-     * A {@code RejectedExecutionHandler} runs on <strong>submission</strong> and on nothing else. So
-     * the only shutdown loss it can see is the narrow one: a request still in flight during Tomcat's
-     * drain dispatches a send after {@code shutdown()} has been called, and there is no longer a pool
-     * to take it.
+     * <p>The two refusals are distinguished because they mean different things to whoever reads the
+     * {@code failed_email} row afterwards — a full queue is an overload, a shut-down pool is a
+     * deploy — and {@code MailDispatcher} is what turns either into that row. The reason travels on
+     * the exception rather than in its message so no reader has to parse English.
      *
-     * <p><strong>The larger loss happens where no handler is invoked, and this does not cover
-     * it.</strong> {@code setWaitForTasksToCompleteOnShutdown(true)} keeps the queue and waits
-     * {@code awaitTerminationSeconds}; when that expires the remaining tasks are abandoned as a
-     * block. At 10–34s per send a handful of workers flush a handful of messages in 15s, so a queue
-     * that is anywhere near its capacity loses the rest — already committed, already announced to
-     * their users, and gone with one generic line from Spring naming none of them. Sizing the queue
-     * to what the drain can actually flush, or dead-lettering what {@code shutdownNow()} hands back,
-     * is the fix for that and is filed separately. Nothing below helps with it.
+     * <p><strong>The question is asked once.</strong> Checking {@code isShutdown()} and then
+     * delegating to a policy asks it twice and can get two answers; that mattered when one branch
+     * ran the task, and the habit is kept now that neither does, because a handler with one exit is
+     * a handler with nothing to get wrong.
      *
-     * <h2>Why a throw rather than a discard</h2>
-     * {@code CallerRunsPolicy} discards silently once the pool is shut down. That mattered less when
-     * a lost dispatch and a rolled-back transaction failed together; now the row is committed and
-     * the caller has already been told the invite was sent, so the drop has to leave a trace — and a
-     * trace written <em>here</em> can only be anonymous, because a handler sees a {@code Runnable}
-     * and knows neither recipient nor mail type. Throwing gives the trace a name for free:
-     * {@code ThreadPoolTaskExecutor} wraps this as {@code TaskRejectedException}, which propagates
-     * back through the {@code @Async} proxy on the calling thread into
-     * {@code AfterCommit.runQuietly}, whose ERROR line already carries the description of the effect
-     * that was lost. Every mail dispatch is registered there, so what reaches this handler is
-     * swallowed rather than becoming a 500 — which is a property of how the submitters are written,
-     * not of the pool: an {@code @Async} that arrives here from outside an {@code AfterCommit}
-     * effect gets the throw raw, and the class javadoc says why an unqualified one would.
-     *
-     * <h2>Why both branches are written out rather than delegated</h2>
-     * Checking {@code isShutdown()} and then handing the task to the policy asks the same question
-     * twice and can get two answers: with shutdown starting in between, the policy discards the task
-     * on its own check and the branch that exists to report it has already been skipped — silence in
-     * exactly the case the report was for. Deciding once removes that. The surviving race resolves
-     * the safe way: a shutdown that begins after the check runs the send on the caller instead of
-     * dropping it, which for an already-committed message is the outcome to want.
-     *
-     * <p>The running branch is byte-identical to {@code CallerRunsPolicy}: the task runs on the
-     * calling thread. That is the backpressure the pool is configured for, and it is also why
-     * {@code @Async} is not a promise of asynchrony — see the class javadoc.
+     * <p><strong>What this handler is reached for, and what it cannot see.</strong> A
+     * {@code RejectedExecutionHandler} runs on submission and on nothing else, so the only shutdown
+     * loss it observes is the narrow one — a request still in flight during the container's drain,
+     * dispatching after {@code shutdown()} has been called. The larger loss, a full queue abandoned
+     * when the drain expires, happens where nothing is submitted and therefore where no handler is
+     * invoked; {@link MailTaskExecutor#shutdown()} is what covers that, and the two paths meet again
+     * at {@link UndeliverableMail}.
      */
-    private RejectedExecutionHandler callerRunsRefusingAfterShutdown() {
+    private RejectedExecutionHandler refuseAlways() {
         return (task, executor) -> {
-            if (executor.isShutdown()) {
-                throw new RejectedExecutionException(
-                        "mailExecutor is shut down — this email cannot be queued and will never be "
-                        + "sent. Any database row it was announcing is committed.");
-            }
-            task.run();
+            throw new MailRejectedException(
+                    executor.isShutdown() ? Reason.POOL_SHUT_DOWN : Reason.QUEUE_FULL);
         };
     }
 }

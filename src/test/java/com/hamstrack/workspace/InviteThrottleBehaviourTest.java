@@ -431,16 +431,17 @@ class InviteThrottleBehaviourTest {
         var invitesAfterFirst = inviteRowsFor(invitee);
         var eventsAfterFirst = eventRowsFor(invitee);
 
-        // Waited for rather than assumed: the send is registered on AfterCommit and dispatched
-        // @Async, so it lands on another thread some time after the 201. Letting it land BEFORE
-        // clearing the mock is what makes the assertion below a fact rather than a race won.
+        // Waited for rather than assumed: the send is registered on AfterCommit and then handed to
+        // mailExecutor, so it lands on another thread some time after the 201. Letting it land
+        // BEFORE clearing the mock is what makes the assertion below a fact rather than a race won.
         //
-        // This comment used to say @Async was "load-bearing" for keeping an SMTP round trip out of
-        // the per-recipient advisory lock. It never was, and HD-181 corrected it in the source:
-        // mailExecutor is bounded with a caller-runs policy, so a full queue runs the send INLINE
-        // on this thread — under exactly the load where a cross-tenant lock hold would hurt most.
-        // What keeps the send outside the lock is the ORDERING (registered on the commit that
-        // releases it), asserted in MailFollowsTheCommitTest against the lock itself.
+        // This comment used to say the asynchronous hand-off was "load-bearing" for keeping an SMTP
+        // round trip out of the per-recipient advisory lock. It never was, and HD-181 corrected it
+        // in the source: the pool was bounded with a caller-runs policy, so a full queue ran the
+        // send INLINE on this thread — under exactly the load where a cross-tenant lock hold would
+        // hurt most. HD-208 removed that branch, and the correction still stands: what keeps the
+        // send outside the lock is the ORDERING (registered on the commit that releases it),
+        // asserted in MailFollowsTheCommitTest against the lock itself.
         awaitOneMailAttempt();
         clearInvocations(mailSender);
 

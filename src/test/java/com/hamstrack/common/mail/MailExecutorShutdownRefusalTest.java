@@ -45,18 +45,26 @@ import static org.mockito.Mockito.verifyNoInteractions;
  * the refusal reaches somebody</strong> (HD-181).
  *
  * <h2>What changed and why it needed to</h2>
- * The pool's rejection handler is {@code CallerRunsPolicy}'s two branches with the silent one
- * replaced. While the pool runs, a full queue means backpressure — the send runs on the calling
- * thread. Once it is shut down, {@code CallerRunsPolicy} <em>discards the task and says nothing</em>,
- * and that mattered less when a lost dispatch and a rolled-back transaction failed together. Now
- * the row is committed and the user has already been told the invitation was sent, so the drop has
- * to leave a trace. The handler therefore throws {@link RejectedExecutionException}, which
- * {@code ThreadPoolTaskExecutor} wraps as {@link TaskRejectedException} on the calling thread.
+ * The pool's handler used to be {@code CallerRunsPolicy}: while the pool ran, a full queue meant the
+ * send happened on the calling thread; once it was shut down, the task was <em>discarded in
+ * silence</em>. That silence mattered less when a lost dispatch and a rolled-back transaction failed
+ * together. Now the row is committed and the user has already been told the invitation was sent, so
+ * the drop has to leave a trace. The handler therefore throws {@link RejectedExecutionException},
+ * which {@code ThreadPoolTaskExecutor} wraps as {@link TaskRejectedException} on the calling thread.
+ *
+ * <p>HD-208 has since removed the other branch as well — a full queue now refuses too, rather than
+ * sending on the caller — so <strong>this handler only ever throws</strong>. What differs between
+ * the two refusals is what {@code MailDispatcher} does with the throw, and that is decided by
+ * whether the message could be written down: <em>account-critical</em> mail gets a
+ * {@code failed_email} row and the caller is not disturbed, while <em>best-effort</em> mail has no
+ * row to leave, so the throw is rethrown to reach somebody. This file is the best-effort half —
+ * invite mail — which is why a throw is still the observable here.
  *
  * <p>The narrow window this covers is real: a request still in flight during Tomcat's drain
  * dispatches a send after {@code shutdown()} has been called. It is <strong>not</strong> the larger
- * shutdown loss — the queue's remaining contents abandoned when {@code awaitTerminationSeconds}
- * expires happens where no handler is invoked at all, and nothing here helps with it.
+ * shutdown loss — the queue's remaining contents when {@code shutdown-drain-seconds} expires happen
+ * where no handler is invoked at all. {@code MailShutdownResidueTest} covers that; the two meet at
+ * {@code UndeliverableMail} rather than being two mechanisms.
  *
  * <h2>The two halves, and why the second is the one that matters</h2>
  * A throw is only better than a discard if it reaches a reader. So this file asserts the throw
@@ -111,10 +119,12 @@ class MailExecutorShutdownRefusalTest {
     // ================================================================ the throw
 
     /**
-     * The handler's shutdown branch, at the dispatch. {@code CallerRunsPolicy} would return
-     * normally here and drop the message; the caller would have no way to know, and neither would
-     * anybody reading logs afterwards, because a handler sees a {@code Runnable} and knows neither
-     * the recipient nor the kind of mail.
+     * The handler's shutdown branch, at the dispatch, on <strong>best-effort</strong> mail — the
+     * kind that earns no {@code failed_email} row, so the throw is the only thing left.
+     * {@code CallerRunsPolicy} would have returned normally here and dropped the message; the
+     * caller would have had no way to know, and neither would anybody reading logs afterwards,
+     * because a handler sees a {@code Runnable} and — before {@link MailTask} — knew neither the
+     * recipient nor the kind of mail.
      */
     @Test
     void aDispatchAfterShutdownIsRefusedOnTheCallingThread() {
@@ -123,7 +133,7 @@ class MailExecutorShutdownRefusalTest {
         assertThatThrownBy(() -> mailService.sendWorkspaceInviteEmail(
                 "shutdown-probe@example.test", "Acme", "token-" + UUID.randomUUID()))
                 .as("a dispatch to a shut-down pool must surface to its caller. Discarding it — "
-                    + "which is what CallerRunsPolicy does in this branch — loses an email whose "
+                    + "which is what CallerRunsPolicy did in this branch — loses an email whose "
                     + "database row is already committed and whose user has already been told it "
                     + "was sent, and loses it with nothing written down anywhere")
                 .isInstanceOf(TaskRejectedException.class)
@@ -194,6 +204,47 @@ class MailExecutorShutdownRefusalTest {
                     + "above is the way to it.")
                 .doesNotContain(localPart)
                 .doesNotContain(invitee);
+
+        // ------------------------------------------------------------ and what the line CARRIES
+        //
+        // The assertions above read getFormattedMessage(), which is the line's TEXT. The address
+        // reached this same log anyway, for months, through the THROWABLE: AfterCommit logs the
+        // exception too, ThreadPoolTaskExecutor.execute wraps a rejection as
+        // TaskRejectedException("... did not accept task: " + task), and MailTask is a record whose
+        // generated toString printed recipient and subject. Every log.* call on the path was clean
+        // and the leak was in an argument, so a grep over format strings certified a clean pass
+        // over it. The fix is MailTask.toString(); this is what proves it is in force where it
+        // actually matters, through the real dispatcher, the real executor and the real logger.
+        assertThat(throwableTextOf(afterCommitLog.list.stream()
+                .filter(event -> event.getLevel() == Level.ERROR)
+                .findFirst()
+                .orElseThrow()))
+                .as("the exception attached to the ERROR is shipped and retained exactly as the "
+                    + "message is. It may name the mail kind and the domain; the local part is "
+                    + "what makes an address personal data, and the subject has a home on the "
+                    + "failed_email row")
+                .doesNotContain(localPart)
+                .doesNotContain(invitee)
+                .doesNotContain("You've been invited to")
+                .as("and it must still be worth reading — a redaction that empties the line is a "
+                    + "second way to lose the loss")
+                .contains("example.test");
+    }
+
+    /**
+     * Every message in the logged throwable's cause chain, which is where a {@code toString} of an
+     * argument ends up.
+     */
+    private static String throwableTextOf(ILoggingEvent event) {
+        var text = new StringBuilder();
+        for (var proxy = event.getThrowableProxy(); proxy != null; proxy = proxy.getCause()) {
+            text.append(proxy.getClassName()).append(": ").append(proxy.getMessage()).append('\n');
+        }
+        assertThat(text.length())
+                .as("premise: the ERROR really does carry a throwable. If it stops doing so this "
+                    + "assertion is passing over nothing")
+                .isPositive();
+        return text.toString();
     }
 
     // ================================================================ fixture

@@ -14,8 +14,11 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * <strong>HD-199 — the four security- and resource-load-bearing declarations in
+ * <strong>HD-199 — the security- and resource-load-bearing declarations in
  * {@code docker-compose.prod.yml} cannot be deleted quietly.</strong>
+ *
+ * <p>(Deliberately not "the four". A leading count goes stale one entry before the list
+ * does, and this one already gained a fifth in HD-207.)
  *
  * <p>Each of them is a line in a YAML file that no other test reads, that no compiler
  * checks, and whose absence is invisible until somebody measures the running container.
@@ -82,11 +85,24 @@ class ProdComposeContractTest {
             anything. Without it nothing distinguishes "the container is up" from "the \
             application is serving", and the ordering this file declares is not in force.
 
+              * stop_grace_period on app — how long the JVM gets between SIGTERM and \
+            SIGKILL (HD-207). Docker's default is TEN seconds, which is shorter than the \
+            mail executor's 15s shutdown drain, so without this line a deploy kills the \
+            process mid-drain and every queued account-critical email — password resets \
+            and verifications whose rows are COMMITTED and whose users have already been \
+            told to check their inbox — is lost with no failed_email row and no log line. \
+            The value is a CONTRACT: the app binds the SAME ${APP_STOP_GRACE_SECONDS} as \
+            app.mail.async.stop-grace-seconds and refuses the boot when the drain plus \
+            the residue write would not fit inside it. That is why the line must stay \
+            the variable form and not a literal — a literal is a number only this file \
+            knows, and the app would go on believing its own default while the container \
+            was killed at another.
+
             Full reasoning: docs/design/config-delivery-proposal.md §10.2.
             """;
 
     @Test
-    void prodComposeKeepsItsFourLoadBearingDeclarations() throws IOException {
+    void prodComposeKeepsItsLoadBearingDeclarations() throws IOException {
         var app = appService();
         var missing = new ArrayList<String>();
 
@@ -115,6 +131,15 @@ class ProdComposeContractTest {
         }
         if (!(app.get("healthcheck") instanceof Map<?, ?> hc) || hc.get("test") == null) {
             missing.add("app has no healthcheck with a `test`");
+        }
+
+        // Presence only, here. Whether it is still the ${APP_STOP_GRACE_SECONDS:-N}s form,
+        // and whether that N is the number application.properties falls back to, is checked
+        // in MailAsyncPropertiesTest next to the arithmetic that consumes it — that is the
+        // drift that matters (a grace SHORTER than the app believes it has boots clean,
+        // passes its own startup assertion, and is killed mid-drain).
+        if (app.get("stop_grace_period") == null) {
+            missing.add("app has no stop_grace_period");
         }
 
         assertThat(missing)

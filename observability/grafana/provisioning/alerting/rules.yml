@@ -203,7 +203,42 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Outbound email failures in the last 15m"
+          # NOT "outbound failures" any more: from HD-207/HD-208 this counter also covers mail
+          # that never left the process, and "outbound" is a claim about a category that a new
+          # member invalidated. Phrased as what the recipient experiences, which survives the
+          # next cause being added.
+          summary: "Email that did not reach its recipient in the last 15m"
+          # `description` is Grafana's second standard annotation and is rendered in the alert
+          # detail view and in notifications; `summary` alone is what a paged operator sees in
+          # a list. The older rules in this file put their whole playbook in `summary` because
+          # nothing else was being used — new explanatory text goes HERE, and the long-summary
+          # rules below are the legacy shape rather than the pattern to copy.
+          description: >-
+            Two different causes land on the same counter, and failed_email is what tells them
+            apart. A row with attempts >= 1 was TRIED and rejected by the SMTP host — look at the
+            mail provider. A row with attempts = 0 whose last_error starts "NEVER ATTEMPTED" was
+            never sent at all, and the bracketed token right after that prefix says which of the
+            three ways it happened: [QUEUE_FULL] the mail queue was full, [POOL_SHUT_DOWN] the
+            dispatch arrived while the pool was stopping, [SHUTDOWN_RESIDUE] a deploy's shutdown
+            drain expired with it still queued. The second kind means the pool is
+            saturated or a deploy landed on a backlog, not that the mail host is broken, and it is
+            much more likely to succeed if re-driven.
+            RUN THIS FIRST, it answers which one you have — the last_error prefix is what separates
+            the never-attempted causes from each other, so it is grouped on:
+            SELECT date_trunc('minute', created_at) AS minute, email_type, attempts = 0 AS never_attempted,
+            left(last_error, 40) AS why, count(*)
+            FROM failed_email WHERE created_at > now() - interval '30 minutes'
+            GROUP BY 1, 2, 3, 4 ORDER BY 1 DESC;
+            NOTE ON NOISE: this rule is `> 0` with `for: 0m`, so from HD-207 ANY DEPLOY THAT LANDS
+            ON A NON-EMPTY MAIL QUEUE PAGES, where before it exited quietly and lost the queue
+            instead. A single burst at a deploy timestamp, all never_attempted, all
+            "NEVER ATTEMPTED [SHUTDOWN_RESIDUE]" in last_error, is that — it is real (those users
+            were told to check an inbox nothing arrived in) but it is not an outage. A rate that
+            continues after the deploy is, and a burst of [QUEUE_FULL] outside a deploy is the pool
+            saturating rather than the mail host failing.
+            The same tag is used for both on purpose: a mail that never left is still a mail that
+            failed, and giving the drops a tag of their own would be a silent loss with this alert
+            pointed away from it.
         data:
           - refId: A
             relativeTimeRange: { from: 900, to: 0 }

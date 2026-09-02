@@ -407,15 +407,15 @@ public class WorkspaceService {
         // can impose on another by inviting the same person.
         //
         // WHAT KEEPS SMTP OUT OF THAT LOCK CHANGED IN HD-181, and the old reason was weaker than it
-        // read. It used to be "the send is @Async", but @Async is a hand-off to a BOUNDED pool whose
-        // rejection policy is CallerRunsPolicy: with the queue full — i.e. under exactly the load
-        // where this matters — the dispatch runs the send INLINE on this thread, which put a whole
+        // read. It used to be "the send is @Async", but that was a hand-off to a BOUNDED pool whose
+        // rejection policy was CallerRunsPolicy: with the queue full — i.e. under exactly the load
+        // where this matters — the dispatch ran the send INLINE on this thread, which put a whole
         // SMTP round trip (plus, for critical mail, its retries) inside this lock. The send is now
         // registered on AfterCommit, so it is ordered after the commit that releases the advisory
-        // lock, and a caller-runs send costs the caller latency rather than costing every tenant
-        // sharing this recipient key a lock hold. @Async still belongs on the mailer for latency;
-        // it is no longer what makes this section safe. What is still true, and is the rule to keep:
-        // nothing slow may be ADDED between this line and the commit.
+        // lock. HD-208 has additionally deleted the inline branch, so the hand-off is now a real
+        // hand-off — but do not restore the old argument on the strength of that: it would be a
+        // claim about the pool's current policy, and the ordering is what makes THIS section safe.
+        // What is still the rule to keep: nothing slow may be ADDED between this line and the commit.
         inviteThrottle.requireRecipientCeilings(actor.getId(), email, workspace.getId());
 
         var rawToken = TokenUtils.generateRawToken();

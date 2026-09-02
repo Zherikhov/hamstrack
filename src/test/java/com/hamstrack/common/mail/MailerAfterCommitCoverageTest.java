@@ -90,10 +90,13 @@ class MailerAfterCommitCoverageTest {
             An email cannot be unsent. A send published from inside a live transaction is published \
             before the database has kept its half, so ANY rollback taken afterwards — a constraint \
             violation, a late 409, a statement cancelled at the bound BoundedJpaTransactionManager \
-            applies — leaves the recipient holding a link whose row never existed. @Async does not \
-            help and never did: mailExecutor is bounded with a caller-runs policy, so under load \
-            the dispatch becomes a synchronous send on the calling thread, inside the transaction \
-            and inside whatever locks it holds.
+            applies — leaves the recipient holding a link whose row never existed. Handing the send \
+            to the mail pool does not help and never did: the pool used to be bounded with a \
+            caller-runs policy, so under load the dispatch became a synchronous send on the calling \
+            thread, inside the transaction and inside whatever locks it held. HD-208 removed that \
+            branch and it changes nothing here — an ordinary asynchronous dispatch published BEFORE \
+            the commit is still published before the database has kept its half, and the executor \
+            has no idea a rollback happened.
 
             Do this at the call site:
 

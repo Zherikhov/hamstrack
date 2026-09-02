@@ -101,12 +101,14 @@ import java.util.function.Supplier;
  * address is something two tenants legitimately share — so any wait held inside this section is a
  * wait one tenant can impose on another. Sending the mail itself is outside this section because
  * the call site registers it on {@code AfterCommit} (HD-181) — after the commit that releases this
- * lock. It is <strong>not</strong> {@code @Async} that keeps it out, as this paragraph used to say:
- * {@code mailExecutor} is bounded with {@code CallerRunsPolicy}, so a full queue turns the dispatch
- * into an inline send, and it does that under exactly the load where an SMTP round trip held across
- * tenants would hurt most. Either way the hazard is real and can be reintroduced without changing a
- * line in this file: what must not appear between {@code require...} and the commit is anything
- * slow, however it is spelled.
+ * lock. It is <strong>not</strong> the hand-off to the mail pool that keeps it out, as this
+ * paragraph used to say: that pool was bounded with {@code CallerRunsPolicy}, so a full queue turned
+ * the dispatch into an inline send, under exactly the load where an SMTP round trip held across
+ * tenants would hurt most. HD-208 has since removed the inline branch, so the hand-off no longer
+ * betrays that claim — but the claim is still the wrong one to rest on, because it is a property of
+ * the pool's current policy and not of this section. What must not appear between
+ * {@code require...} and the commit is anything slow, however it is spelled, and that rule survives
+ * any policy.
  *
  * <p>These ceilings are consequently <strong>cluster-wide and exact</strong> — the first limiter in
  * this product that does not divide by the replica count, because its state is in PostgreSQL. The

@@ -74,6 +74,11 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * exists for. The fix is {@code FailedEmailWriter} — {@code REQUIRES_NEW} in a bean of its own, so
  * the write suspends whatever is bound and commits on a transaction it owns.
  *
+ * <p>That caller-runs path is gone (HD-208) and <strong>the window is not</strong>, which is the
+ * more useful way to hold this: a mail dispatch the full pool <em>refuses</em> is recorded by
+ * {@code UndeliverableMail} on the committing thread, inside an effect, and reaches the same
+ * writer. The hazard belongs to the window, not to whichever caller happens to be standing in it.
+ *
  * <p><strong>That silence is a guard being disarmed, not a case nobody thought about.</strong>
  * Spring ships one written for this exact outcome: {@code SharedEntityManagerCreator} lists
  * {@code persist} among its {@code transactionRequiringMethods}, commented <em>"Otherwise, the

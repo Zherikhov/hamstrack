@@ -149,6 +149,27 @@ services:
     # reason the resize (HD-189) is worth more than it looks. The app states the
     # collector it actually got on its startup line (HD-179).
     mem_limit: ${APP_MEMORY_LIMIT:-1g}
+    # How long the app gets between SIGTERM and SIGKILL (HD-207). Docker's default is
+    # TEN seconds, which is shorter than the mail executor's 15s shutdown drain — so
+    # without this line a deploy kills the JVM part-way through that drain, and every
+    # account-critical email still queued (password resets and verifications whose rows
+    # are COMMITTED and whose users have already been told to check their inbox) is lost
+    # with nothing written down. The drain is followed by a batch write of the residue to
+    # failed_email; both steps have to fit in here.
+    #
+    # It is a CONTRACT with the application, not a spare number: the app binds the SAME
+    # variable as app.mail.async.stop-grace-seconds (through env_file: .env above) and
+    # refuses to start when the drain plus the residue write would not fit in it. Spelled
+    # as a variable for the reason mem_limit above is — a literal is a value your .env
+    # cannot reach — and here that is load-bearing twice over, because a literal would also
+    # be a number only THIS file knows: the app would go on believing 30s while the
+    # container was killed at 10, with nothing failing anywhere. One variable, both halves.
+    #
+    # So the operator dial for "let the mail drain take longer" is this line plus
+    # MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS, and the two agree by construction rather than by
+    # a hand-copy. MailAsyncPropertiesTest asserts the default below is the same number
+    # application.properties falls back to.
+    stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local
     healthcheck:

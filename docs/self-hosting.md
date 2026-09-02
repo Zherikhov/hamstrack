@@ -114,6 +114,11 @@ services:
       MAIL_PASSWORD: <your SMTP password>
       MAIL_SMTP_AUTH: "true"
       MAIL_STARTTLS: "true"
+      # Compose reads this for `stop_grace_period` below, and the APP has to be told the
+      # same number — this line is what tells it, exactly as with SEED_ADMIN_* above.
+      # The app waits for queued mail at shutdown and then writes what is left to
+      # `failed_email`, and it refuses to start if both steps would not fit in this.
+      APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}
     ports:
       - "8080:8080"
     # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so
@@ -121,6 +126,14 @@ services:
     # variable for the reason the `postgres` service below spells its dials that way —
     # a literal here is a value your `.env` cannot reach.
     mem_limit: ${APP_MEMORY_LIMIT:-1g}
+    # Also not optional: Docker's own default is TEN seconds between SIGTERM and
+    # SIGKILL, which is shorter than the 15 s the app spends flushing queued mail on
+    # shutdown. Without this line every `docker compose up -d` kills the JVM part-way
+    # through that flush and the queued password resets and verifications — rows already
+    # committed, users already told to check their inbox — are lost with nothing written
+    # down. Same variable as the environment line above, and for the same reason as
+    # `mem_limit`: a literal here is a value your `.env` cannot reach.
+    stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
     volumes:
       - attachments_data:/app/data/attachments
     healthcheck:
@@ -429,6 +442,7 @@ Full reference:
 |---|---|---|
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and the Quick-start snippet above (default `0.4`). **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
+| `APP_STOP_GRACE_SECONDS` | `30` | How many seconds the app container gets between `SIGTERM` and `SIGKILL`. **Read twice, which is the whole reason it is a variable**: Docker Compose puts it in `stop_grace_period`, and the application binds the same value as `app.mail.async.stop-grace-seconds` — it has to know its own grace, because it waits `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` for queued mail and then writes whatever is left to `failed_email`, and it **refuses to start** if those two steps would not fit. **Docker's own default is 10 s**, which is *shorter* than the 15 s drain, so a compose file with no `stop_grace_period` line kills the JVM mid-flush and loses the queued password resets and verifications with no row and no log line — see [Mail](#mail). **If you run your own Compose file rather than the bundled one, add the line there too** (the [Quick start](#quick-start) file shows both halves): setting this variable alone changes nothing Docker reads. Raise it before raising the drain, never after. **Valid range 1–600**; `900` is refused at boot, so a drain that needs more than ~598 s of grace is not expressible — which is well past anything the drain's own `@Max` of 120 s can ask for. **An empty value means different things depending on how it reaches the container, which is worth knowing before you blank the line rather than after.** In the bundled `docker-compose.prod.yml` the app reads it through `env_file: .env`, so `APP_STOP_GRACE_SECONDS=` arrives as an empty string, the `${…:30}` fallback in `application.properties` never applies, and **the app aborts the boot** (Compose still gives the container 30 s, so the two disagree). In the [Quick start](#quick-start) file on this page the app service names it explicitly as `APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}`, and Compose's `:-` substitutes for an empty value as well as an absent one — so there a blank renders `30` and the app boots normally. Either way the safe habit is the same: **leave the line out rather than blanking it**, because only one of the two arrangements tells you that you did something. Identical in `dc` and `cloud` |
 | `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. **The container limit also chooses the garbage collector, and nothing else here says so.** At `1g` the JVM sits below its "server-class machine" threshold and ergonomically selects **SerialGC** — single-threaded, stop-the-world — where at `2g`, same image and same flags, it selects **G1** (measured 2026-09-01 on `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, 2 CPUs). That is the most likely explanation of the 4.99 s GC pause the 2026-08-31 load run recorded on a `1g` container — the collector was not itself recorded that day, which is why the startup line names it now — so if long pauses rather than `OutOfMemoryError` are your symptom, this is the dial that changes the collector as well as the heap. The application's startup line names the collector it actually got — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
 | `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud` |
 | `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud` |
@@ -446,7 +460,10 @@ Full reference:
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
 | `MAIL_SMTP_CONNECT_TIMEOUT_MS` / `MAIL_SMTP_READ_TIMEOUT_MS` / `MAIL_SMTP_WRITE_TIMEOUT_MS` | `5000` / `10000` / `10000` | SMTP socket timeouts (ms) — a black-holed mail host fails a worker fast instead of hanging (connect / per-read / per-write) |
-| `MAIL_ASYNC_CORE_POOL` / `MAIL_ASYNC_MAX_POOL` / `MAIL_ASYNC_QUEUE_CAPACITY` | `2` / `5` / `100` | Bounded async mail executor — mail can't starve other `@Async` work or spawn a thread-per-task under an SMTP stall (`CallerRunsPolicy` backpressure) |
+| `MAIL_ASYNC_CORE_POOL` / `MAIL_ASYNC_MAX_POOL` / `MAIL_ASYNC_QUEUE_CAPACITY` | `2` / `5` / `100` | Bounded mail executor — mail can't starve other async work or spawn a thread-per-task under an SMTP stall. A full queue **drops and dead-letters** the message rather than sending it on the request thread, so a slow SMTP host cannot take Tomcat workers with it. Valid ranges 1–50 / 1–50 / 1–10000; the queue's practical ceiling is lower, because the drain plus a batch write of that many rows has to fit inside `APP_STOP_GRACE_SECONDS` (the app names all three when it refuses). A **blank** value stops the boot rather than restoring the default — these bind as `int`, so `MAIL_ASYNC_MAX_POOL=` is not "unset". Identical in `dc` and `cloud` |
+| `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` | `15` | How long shutdown waits for queued mail to flush before dead-lettering whatever is left. **Read together with `MAIL_ASYNC_QUEUE_CAPACITY` and `APP_STOP_GRACE_SECONDS`** — the drain plus the residue write must fit inside the stop grace, and the app refuses to start if they do not, naming all three. So **raising this alone is refused**: raise `APP_STOP_GRACE_SECONDS` in the same edit and one variable moves both the container's grace and the app's belief about it. **Valid range 1–120**, and at the default grace the practical ceiling is ~28 s — the declared range is reachable only by raising the grace with it. A **blank** value stops the boot rather than restoring the default. Identical in `dc` and `cloud` |
+| `MAIL_FAILED_EMAIL_RETENTION_DAYS` | `90` | How long a `failed_email` dead-letter row is kept before a daily sweep deletes it. Long on purpose: these rows are the only record that somebody's password reset never went, and they are what a re-drive reads. **New in 0.18.0, and the table had no sweep at all before** — which was safe only while a row cost an exhausted retry cycle; a row now also records a message that was never attempted, and those are written at request rate rather than at SMTP rate. **Valid range 7–3650**; the floor is a week rather than a day on purpose, so a default cannot quietly delete the evidence for an incident nobody looked at over a holiday. A **blank** value stops the boot rather than restoring the default. Identical in `dc` and `cloud` |
+| `MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR` | `500` | Per-instance hourly ceiling on `failed_email` rows for mail that was **never attempted** (queue full / pool shutting down). The other half of the row above: retention bounds the table in time, this bounds the rate, and without it a burst of refused dispatches can write hundreds of rows a minute — bounded only by the per-IP auth rate limit, i.e. not bounded at all across many IPs. Above the ceiling the loss is still logged at ERROR (type + recipient domain) and still reaches the caller's error line; it just stops being durable, and a line naming the suppressed count is logged when the hour rolls. **If you are hitting it, the mail pool is saturated — look there before raising this**, and if you raise it far, note that the retention sweep is an un-indexed `DELETE`. **Valid range 1–1000000**; a **blank** value stops the boot rather than restoring the default. Node-local, like the rate limiters — see [Optional toggles](#optional-toggles) for what that costs on N replicas. Identical in `dc` and `cloud` |
 | `MAIL_CRITICAL_MAX_ATTEMPTS` / `MAIL_CRITICAL_RETRY_BACKOFF_MS` | `3` / `2000` | CRITICAL mail (verification + password reset) retries with backoff, then dead-letters to `failed_email`; invite mail stays best-effort |
 | `STORAGE_TYPE` | `local` (dc) / `s3` (cloud) | Attachment storage backend |
 | `STORAGE_LOCAL_DIR` | `./data/attachments` | Local storage path (mount a volume) |
@@ -580,12 +597,62 @@ and CRITICAL-mail retry settings bound how mail is dispatched:
 | `MAIL_SMTP_WRITE_TIMEOUT_MS` | `10000` | per-write (send) timeout |
 | `MAIL_ASYNC_CORE_POOL` | `2` | steady-state mail-sender threads |
 | `MAIL_ASYNC_MAX_POOL` | `5` | max mail-sender threads under load |
-| `MAIL_ASYNC_QUEUE_CAPACITY` | `100` | queued mails before backpressure (`CallerRunsPolicy`) |
+| `MAIL_ASYNC_QUEUE_CAPACITY` | `100` | queued mails before new ones are dropped and dead-lettered |
+| `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` | `15` | graceful drain at shutdown, before the rest is dead-lettered |
+| `APP_STOP_GRACE_SECONDS` | `30` | the container's `stop_grace_period`, which the drain above has to fit inside |
 | `MAIL_CRITICAL_MAX_ATTEMPTS` | `3` | verification/reset send attempts before dead-lettering to `failed_email` |
 | `MAIL_CRITICAL_RETRY_BACKOFF_MS` | `2000` | base backoff between CRITICAL-mail retries |
+| `MAIL_FAILED_EMAIL_RETENTION_DAYS` | `90` | how long dead-letter rows are kept before a daily sweep |
+| `MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR` | `500` | per-instance hourly cap on rows for never-attempted mail |
 
 Only verification + password-reset mail is CRITICAL (retried, then
 dead-lettered); invite mail stays best-effort with no retry.
+
+**No request thread ever performs SMTP.** When the queue is full the message is
+dropped and — if it is CRITICAL — a `failed_email` row is written instead. That is a
+deliberate reversal of the older backpressure design: a slow mail host used to make
+each dispatch a synchronous send on a Tomcat worker for up to ~34 s, from endpoints
+including unauthenticated registration, which got worse the slower the host was. The
+trade is that a **best-effort** message (an invite) refused by a full queue is now
+dropped rather than sent slowly, and the only trace is a server-side ERROR: the
+invitation row is committed and the sender was already told it went. Re-send it.
+
+**`failed_email` now records two different things and says which.** A row with
+`attempts >= 1` means the send was tried and failed; a row with `attempts = 0` and a
+`last_error` beginning `NEVER ATTEMPTED` means the message was never sent at all, and
+the bracketed token after that prefix says which of the three ways — `[QUEUE_FULL]`,
+`[POOL_SHUT_DOWN]` or `[SHUTDOWN_RESIDUE]` (a deploy landing on a backlog). Sort a
+burst with `GROUP BY left(last_error, 40)`. The second kind is much more likely to
+succeed if you re-drive it. The
+table is swept daily (`MAIL_FAILED_EMAIL_RETENTION_DAYS`) and the never-attempted
+kind is rate-capped per instance (`MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR`), because a row
+of that kind costs one refused dispatch rather than one exhausted retry cycle.
+
+**Shutdown.** The app waits `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` for queued mail, then
+writes whatever is still queued to `failed_email` in one batch and logs the count. So
+raising `MAIL_ASYNC_QUEUE_CAPACITY` on its own is safe. What is **not** safe is a
+container stop grace shorter than the drain: the process is then killed part-way
+through and the queued mail is lost with no record. **Docker's own default grace is
+10 s — shorter than the drain** — so the bundled `docker-compose.prod.yml` and the
+[Quick start](#quick-start) file above both set
+`stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s` and pass the same variable to the
+app, which refuses to start if the drain plus the residue write would not fit inside
+it. Raise `APP_STOP_GRACE_SECONDS` first and `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS`
+second; the other order is refused at boot.
+
+**Running your own compose file rather than the bundled one?** Then your app container
+has Docker's 10 s grace and **this protection is not in force for you** — the app boots,
+its own startup check passes (it compares against the value it was *given*, not against
+what Docker will actually do), and every `docker compose up -d` SIGKILLs the JVM
+mid-drain. Add both lines to your `app` service: `stop_grace_period:
+${APP_STOP_GRACE_SECONDS:-30}s`, and `APP_STOP_GRACE_SECONDS:
+${APP_STOP_GRACE_SECONDS:-30}` under `environment:` so the application is told the same
+number. The [Quick start](#quick-start) file shows both.
+
+**In-flight sends are outside all of this.** The drain recovers what is still
+*queued*; the handful of messages a worker has already started (up to
+`MAIL_ASYNC_MAX_POOL`) are interrupted and get no row — the shutdown WARN names them
+as an upper bound and that line is their only record.
 
 **Local testing:** run [MailHog](https://github.com/mailhog/MailHog) (SMTP on
 `1025`, web UI on `8025`) and set `MAIL_HOST=mailhog`, `MAIL_PORT=1025` (no auth).
@@ -765,6 +832,17 @@ reports limiter deliberately, because removing that binding would raise the
 panel’s allowance to the search budget as a side effect — so **the lower
 configured value binds**, and lowering *either* property lowers the panel. If you
 tune one of the two, check what it does to the panel.
+
+**A node-local bound that is not a request limiter at all** is the dead-letter cap
+(`MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR`). It counts rows *this process* has written to
+`failed_email` for mail that was never attempted, so N replicas write up to N × the
+cap into one shared table — and a restart re-arms the window, which on a rolling
+deploy means the very event most likely to produce those rows also resets the counter
+that bounds them. Deliberately left that way: above the cap the loss is still logged
+at ERROR and still reaches the caller's error line, so a split ceiling costs disk and
+never visibility. Size the *table* against `cap × replicas`, not against `cap`.
+(Written without a number in front of it on purpose — the ordinals above go stale one
+entry before the list does.)
 
 **The invitation ceilings break the pattern, and that is the point.** They are three
 controls with two different homes. The **per-sender volume budget**
