@@ -402,6 +402,44 @@ makes an operator ask:
 > `Picked up JAVA_TOOL_OPTIONS: …`, which says a variable was *read* and not that it was
 > *applied*.
 
+## Releases that add a setting the deployment must set by hand
+
+The previous section is about a default that *moves* under an operator who never chose it.
+This one is its mirror: a setting that ships **inert**, where the shipped default is correct
+for every install except the one whose behaviour the release was written to change. Nothing
+is wrong afterwards, no query finds a bad row, and the feature simply does not appear —
+which reads as "not implemented yet" rather than "not configured", including to the people
+who built it.
+
+The tell is a value that cannot live in the repository at all. A hosted deployment's own
+`.env` on the box is never synced by a deploy — that is deliberate, and it is the whole
+reason a value belongs there rather than in a profile file that self-hosters also receive.
+So the repository can carry the *setting* and can never carry the *value*, and the only
+thing that closes the gap is a step in this list.
+
+**HD-193 is the worked example.** `PRIVACY_CONTACT_EMAIL` is empty by default in both
+deployment modes, deliberately: a value defaulted on the `cloud` profile would be published
+by every self-hoster running the prod compose file, routing a stranger's users' erasure
+requests into an inbox we do not operate. The consequence is that shipping the release
+without editing `/opt/hamstrack/.env` leaves the hosted instance answering an empty address
+on `GET /api/meta`, and its own Privacy Policy then points users at an Account page that
+tells them their installation's administrator handles it.
+
+Two lines, and the second is the one that makes the first checkable:
+
+1. **Set the value on the box before the deploy** — `PRIVACY_CONTACT_EMAIL` in
+   `/opt/hamstrack/.env`. A malformed value aborts startup rather than being published, so
+   this is also the moment a typo surfaces, not the next restart months later.
+2. **Verify it is in effect afterwards**, from outside:
+   ```
+   curl -s https://<host>/api/meta | jq -r .privacyContactEmail
+   ```
+   Empty output means the setting shipped and the value did not. *A setting is in the
+   repository* is not a finding; *a setting is in effect* is — the same rule §7 applies to
+   the deployed configuration, applied to the one class of value the repository is not
+   allowed to hold.
+
+
 ## Constraints on a populated table, and why they are free right now
 
 Adding a constraint to a table that already holds rows makes PostgreSQL validate

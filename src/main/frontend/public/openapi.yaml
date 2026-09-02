@@ -9460,6 +9460,13 @@ components:
         publicLandingEnabled: { type: boolean }
         termsAcceptanceRequired: { type: boolean }
         publicSignupEnabled: { type: boolean }
+        privacyContactEmail:
+          type: string
+          example: privacy@example.com
+          description: >-
+            Address for privacy and account-deletion requests. Always present:
+            the **empty string** when the operator has configured none, never
+            null.
         version: { type: string, example: 0.2.0 }
 
     RegisterRequest:

@@ -742,8 +742,10 @@ Within a single request, permissions are resolved once and reused, so a role cha
 | `GET` | `/meta` | — | Instance flags and version |
 
 ```json
-{ "publicLandingEnabled": true, "termsAcceptanceRequired": true, "publicSignupEnabled": true, "version": "0.2.0" }
+{ "publicLandingEnabled": true, "termsAcceptanceRequired": true, "publicSignupEnabled": true, "privacyContactEmail": "privacy@example.com", "version": "0.2.0" }
 ```
+
+`privacyContactEmail` is the address to write to for a privacy request — account deletion in particular. It is always present: the **empty string** when the operator has configured none, never null.
 
 ## Auth endpoints
 

@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import {
   Home, CheckSquare, Columns3, ListTodo, Rocket, BarChart3, Settings, Search,
-  Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid,
+  Plus, Info, LogOut, Settings as Gear, ChevronDown, LayoutGrid, UserRound,
   PanelLeftClose, PanelLeftOpen, Keyboard, type LucideIcon,
 } from 'lucide-react'
 import { apiGetProject, apiListWorkspaces, apiLogout } from '../api'
@@ -289,6 +289,11 @@ export default function NavRail() {
                 borderRadius: 10, overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.4)', zIndex: 40,
               }}
             >
+              {/* Account (HD-193 §9.1) — above "System administration", and
+                  ungated: every signed-in user has an account, and the deletion
+                  affordance it carries is the one path a user can reach.
+                  Absolute path (splat-route rule). */}
+              <MenuItem icon={UserRound} label="Account" onClick={() => { setMenuOpen(false); navigate('/account') }} />
               {user?.systemRole === 'ADMIN' && (
                 <MenuItem icon={Gear} label="System administration" onClick={() => { setMenuOpen(false); navigate('/admin') }} />
               )}

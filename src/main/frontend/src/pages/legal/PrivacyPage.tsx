@@ -4,7 +4,7 @@ import LegalLayout from './LegalLayout'
 // Draft policy — must be reviewed by a lawyer before public launch
 export default function PrivacyPage() {
   return (
-    <LegalLayout title="Privacy Policy" lastUpdated="2026-07-12">
+    <LegalLayout title="Privacy Policy" lastUpdated="2026-09-02">
       <p>
         This Privacy Policy explains how the operator of hamstrack.com ("we", "us") collects and
         processes personal data when you use the hosted Hamstrack service (the "Service"). It
@@ -56,12 +56,53 @@ export default function PrivacyPage() {
       </p>
       <p>We do not sell personal data and do not share it with third parties for their own purposes.</p>
 
+      {/*
+        HD-193 §4. Describes what the deletion procedure DOES, in the same words the
+        operator runbook implements, and stays silent on WHEN — no number of days, no
+        response deadline, no lawful basis, no named entity. Those four facts are HD-192's
+        and need a lawyer's input this page does not have. "within a reasonable period" is
+        the existing representation, carried through byte-identical and only repositioned:
+        replacing it with a number, or dropping it, would answer HD-192's question without
+        HD-192.
+
+        "Backups of the whole database are taken routinely" is load-bearing wording, not
+        style. PublishedClaimsTest fails any scanned surface that carries an opening
+        fragment of the canonical durability paragraph without carrying the whole of it,
+        and that paragraph belongs on the Cloud promise carriers, not on this page — so
+        the frequency word from its second sentence must not be echoed here. Do not
+        "improve" this line into the wording that paragraph uses.
+
+        The deletion pointer below names the Account page and NOTHING ELSE. This page is
+        routed in every installation, but section 10 is the hosted operator's own support
+        inbox — so a pointer to it would send a self-hoster's users, carrying their name,
+        address and user id, to a mailbox nobody can service on their behalf. The Account
+        page resolves the installation's own configured address, and names the local
+        administrator when none is set. Do not answer this by adding a self-hosted
+        paragraph here instead: these are the hosted Service's legal pages, and a DC
+        carve-out on them is a second, unreviewed representation of a controller this
+        operator is not.
+      */}
       <h2>5. Retention</h2>
       <p>
-        We keep your data for as long as your account exists. When you delete your account (or
-        request deletion), we delete or anonymize your personal data within a reasonable period,
-        except where we must retain it to comply with legal obligations. Content shared into a
-        workspace may remain visible to other members of that workspace as part of their data.
+        We keep your data for as long as your account exists. You can ask us to delete your
+        account from the Account page in the app — it tells you where to write. We confirm the
+        request by sending a code to the email address on the account before acting on it. We then
+        delete or anonymize your personal data within a reasonable period, except where we must
+        retain it to comply with legal obligations.
+      </p>
+      <p>
+        Deletion removes the personal data in your account record — your email address, display
+        name and sign-in credentials — and removes your address from our mail delivery logs. Work
+        you created inside a workspace (issues, comments and uploaded files) stays with that
+        workspace and is re-attributed to "Deleted user", so the team's history stays readable;
+        text other members wrote is not edited, and your name may remain where they typed it. A
+        workspace in which you are the only remaining member is deleted with its contents. Content
+        shared into a workspace may remain visible to other members of that workspace as part of
+        their data.
+      </p>
+      <p>
+        Backups of the whole database are taken routinely and are not edited. If we ever restore
+        one, we re-apply every completed deletion to the restored copy before it is used again.
       </p>
 
       <h2>6. Your rights</h2>

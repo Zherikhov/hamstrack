@@ -63,6 +63,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * mistaken for one. It says nothing about columns reached by any route other than a validated
  * request body.
  *
+ * <p><strong>And not every {@code @Email} it finds is a request field, which the opening
+ * paragraph's column argument does not reach.</strong> The scan is over production source, so it
+ * also covers an address that lands in no column at all — a bound {@code @ConfigurationProperties}
+ * value published on a public endpoint, for one. The width is still right there, for a plainer
+ * reason than the column: {@code @Email} accepts roughly 320 characters <em>wherever</em> it is
+ * written, so a field carrying only {@code @Email} is unbounded by construction and the 500 is
+ * merely the loudest of the ways that shows up. That is why the rule below is phrased about the
+ * annotation rather than about the table behind it, and why widening {@link #COLUMN_WIDTH} is the
+ * documented escape rather than an exemption list.
+ *
  * <p><strong>It reads declarations, not lines, and that is a correction rather than a
  * design.</strong> The first version matched {@code @Email} and {@code String} <em>on one
  * line</em> and claimed that a declaration spanning several would be "reported rather than
@@ -159,8 +169,8 @@ class EmailLengthBoundTest {
                         + "field that has left the scan is a field with no bound as far as this "
                         + "test is concerned, and the offender list below will be empty and "
                         + "green while it happens. Do not lower this number to make it pass — "
-                        + "find out which declaration stopped matching", checked, 6)
-                .isGreaterThanOrEqualTo(6);
+                        + "find out which declaration stopped matching", checked, 7)
+                .isGreaterThanOrEqualTo(7);
 
         assertThat(offenders)
                 .as("""

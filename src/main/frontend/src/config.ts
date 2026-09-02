@@ -13,6 +13,9 @@ export const useConfigStore = create<ConfigState>((set) => ({
     publicLandingEnabled: true,
     termsAcceptanceRequired: true,
     publicSignupEnabled: true,
+    // Unset is the honest default: with no address the Account page falls back
+    // to "handled by its administrator" rather than inventing a mailbox.
+    privacyContactEmail: '',
     version: '',
   },
   setConfig: (config) => set({ config }),

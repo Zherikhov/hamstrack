@@ -627,8 +627,9 @@ can run, and the drill log.
 
 The script, the units and the alert rules are in the repository; **§6.2 and §6.3 are
 the one-time steps that install them**, §6.4 is how each durability property is
-checked rather than assumed, and §6.6 is where a drill is recorded once it has been
-run. Nothing below is a report of work already done.
+checked rather than assumed, §6.7 is the gate that a restore is not finished until it
+passes, and the log subsections are where a run is recorded **after** it has happened.
+Nothing outside those logs is a report of work already done.
 
 ### 6.1 What runs where
 
@@ -762,10 +763,17 @@ meant a version history one week deep protecting an archive advertised as thirty
 deep — the shorter number silently became the real retention for anything overwritten.
 
 30 days is not "as long as feels safe": it brackets the window in which slow, silent
-logical corruption gets noticed on a product this size, it outlives a release cycle, and
-it is short enough that a GDPR erasure request needs no backup surgery at all. A longer
-horizon, if ever wanted, is a second lifecycle rule on a `weekly/` prefix — not a bigger
-number here.
+logical corruption gets noticed on a product this size, it outlives a release cycle, and it
+bounds how long an erased account can survive inside an archive. A longer horizon, if ever
+wanted, is a second lifecycle rule on a `weekly/` prefix — not a bigger number here.
+
+**What that window does not buy is an erasure that takes care of itself.** This paragraph used
+to end "short enough that a GDPR erasure request needs no backup surgery at all", which is true
+about *surgery* — dumps are never edited, and a `pg_dump` custom-format archive could not be
+edited in any sense worth relying on — and false about *nothing to do*. For the 30 days a dump
+lives, restoring it brings the erased person back whole. **§6.7 is the answer, and it is a gate
+on the restore rather than a change to the archive.** Retention bounds the exposure; the replay
+ends it.
 
 **3. Grant the instance role write-only access.** A **new** inline policy alongside the
 existing `attachments-s3`; do not merge them, the two grants have different lifetimes and
@@ -1206,6 +1214,193 @@ run, and it is the first one. Three things to read out of it:
   production database, and this drill — run *before* any squash work began — is what
   established that a restore of the pre-squash chain works, plus the scratch database
   HD-188's step 3 rehearses against (§6.5).
+
+### 6.7 Erasure: the ledger, and the gate on any production restore
+
+**Nothing in this subsection has been exercised.** The prefix it writes to exists (`manual/`,
+§6.1), no entry has ever been written, and no restore has yet been gated by it. The first walk
+will be the rehearsal in
+[`docs/design/account-deletion-proposal.md`](design/account-deletion-proposal.md) §12, and it is
+recorded in §6.8 once it has happened. Read the paragraphs below as the procedure, not as a
+report.
+
+**Why this exists.** An account erasure (the runbook is §11 of that document) edits the live
+database and nothing else. Backup objects are never edited — they are write-once by bucket
+policy and the instance cannot even read them — so **a dump taken before an erasure still
+contains the erased person in full: address, password hash, memberships, everything.** Restore
+that dump and the person is back. The published Privacy Policy answers this with a procedure
+rather than a promise about backups: *"Backups of the whole database are taken routinely and are
+not edited. If we ever restore one, we re-apply every completed deletion to the restored copy
+before it is used again."* **This section is the mechanism behind that sentence.** Without it,
+that sentence is a claim with nothing under it.
+
+#### The ledger
+
+One object per completed erasure, written at the end of the runbook, in
+**`s3://$BACKUP_BUCKET/manual/erasures/`**:
+
+```
+manual/erasures/erasure-<erased_at:YYYYMMDDTHHMMSSZ>-<request_id>.json
+manual/erasures/erasure-<erased_at:YYYYMMDDTHHMMSSZ>-<request_id>-keys.txt
+```
+
+The JSON carries, and carries nothing else:
+
+| Field | Value |
+|---|---|
+| `erased_at` | UTC, second precision, the commit of the scrub |
+| `user_id` | the scrubbed `users.id` |
+| `request_id` | the opaque id the operator assigned at intake |
+| `workspaces_deleted` | ids |
+| `workspaces_retained` | ids |
+| `ownership_transfers` | `{workspace_id: promoted_user_id}` |
+| `admin_appointments` | `{project_id: appointed_user_id}` |
+| `attachment_keys_deleted` | a count; the keys themselves are the sibling `-keys.txt` |
+| `operator` | who ran it |
+
+**It holds no email address, no display name and no IP, and the confirmation code never appears
+anywhere.** A compliance record that stores the datum it certifies as destroyed is a breach with
+paperwork. The replay does not need them: the address and display name are read out of the
+**restored row itself**, immediately before that row is scrubbed again.
+
+Two properties of *where* it lives, both load-bearing. It is **outside the database that gets
+restored** — a ledger inside it would be rolled back to its pre-erasure state by exactly the
+event it exists to survive. And it is in the **write-once** bucket: `manual/` is matched by no
+lifecycle rule carrying `NoncurrentVersionExpiration` (§6.1, and the check in §6.4 is phrased to
+prove that rather than something weaker), the instance may `PutObject` there and may neither
+read, overwrite nor delete, and only owner credentials can read it back.
+
+```bash
+# Append one entry. --if-none-match is what the DenyOverwriteOfBackups policy requires, and it
+# also makes a re-run of this command fail loudly instead of replacing an existing record.
+aws s3api put-object --bucket "$BACKUP_BUCKET" \
+  --key "manual/erasures/erasure-<TS>-<request_id>.json" \
+  --body ./erasure-<request_id>.json --if-none-match "*"
+aws s3api put-object --bucket "$BACKUP_BUCKET" \
+  --key "manual/erasures/erasure-<TS>-<request_id>-keys.txt" \
+  --body ./erase-<request_id>-keys.txt --if-none-match "*"
+```
+
+(Needs AWS CLI ≥ 2.19 for `--if-none-match`, the same floor §6.3 step (b) checks on the box. An
+older CLI exits 252 on the unknown option.)
+
+#### When an entry stops being replayable, and what may then be pruned
+
+**`manual/` is matched by no expiration rule — deliberately (§6.1) — so an entry written today
+is permanent unless somebody ends it. Its *purpose*, however, expires.** An entry is replayable
+only against a dump that predates its erasure, and no dump survives the `daily/` window
+(`Expiration.Days` 30, the longest horizon in §6.1; the EBS snapshots are shorter still). So
+**once `erased_at` is further in the past than that window, no restorable copy of the database
+predates the erasure and the entry can never be replayed again.**
+
+What is left after that is accountability, and accountability does not need the payload. The
+replay fields — `workspaces_deleted`, `workspaces_retained`, `ownership_transfers`,
+`admin_appointments` — plus the `-keys.txt` sibling are a permanent, growing map of who was
+handed which workspace and which project. Nothing in it is a disclosure problem on its own
+(those ids name people who were *promoted*, never the person erased, and no address or name is
+present anywhere in the ledger), but it is a governance graph that nobody chose to keep and that
+outlives every question it can answer.
+
+> **Past the retention horizon above, an entry may be pruned to `erased_at`, `user_id`,
+> `request_id` and `operator`, and its `-keys.txt` deleted.** What survives is the record that
+> this erasure happened, on this date, for this request, by this person — which is what an
+> auditor asks for — and what goes is a replay payload with nothing left to replay against.
+
+Pruning is an **owner** action and looks like a delete followed by a write, because the keys are
+write-once: `DenyOverwriteOfBackups` refuses any `PutObject` without `If-None-Match: *`, and the
+instance holds no `s3:DeleteObject` at all. That asymmetry is the point — the box can never
+shorten this record, and the only party who can is the one accountable for it.
+
+#### The gate
+
+> **A restored copy of the production database may not serve traffic until every ledger entry
+> newer than the dump has been re-applied to it.** Not "should"; the application does not come up
+> until it is done.
+
+The order that makes that enforceable — restore into a stack whose `app` service is **not
+running**, so there is no window in which the resurrected accounts can authenticate. On a
+rebuild onto a fresh box the same property has a different spelling: bring up the database,
+do the replay, and start `app` last. State it as the property, because the commands differ per
+recovery and the property does not — **no process serving the public may be connected to a
+restored database with an unreplayed ledger entry against it.**
+
+1. `docker compose -f docker-compose.prod.yml stop app` before the restore. Caddy answering 502
+   for a few minutes is the intended state; an app serving a pre-erasure database is not.
+2. `pg_restore` as usual.
+3. **List the entries to replay, and read their bodies — from a workstation, with owner
+   credentials.** The dump's own key carries a second-precision timestamp, and the ledger keys
+   sort lexicographically by `erased_at`, so choosing *which* entries is a listing rather than a
+   judgement call. **Reading them is not something the box can do**: the instance role holds
+   `s3:ListBucket` on `manual/*` and deliberately **no `s3:GetObject`** anywhere in this bucket
+   (§6.2 step 3), so a replay attempted from the box lists the entries successfully and then
+   403s on the first download — at the exact step the gate exists for, under incident pressure,
+   after the listing has already made it look like this is working.
+   ```bash
+   # ON A WORKSTATION, with the OWNER's credentials — not on the instance, not via SSM.
+   aws s3 ls "s3://$BACKUP_BUCKET/manual/erasures/" --region "$REGION"
+   # replay every entry whose erased_at is LATER than the timestamp in the restored dump's key
+   aws s3 cp "s3://$BACKUP_BUCKET/manual/erasures/<key>.json" - --region "$REGION"
+   ```
+4. **For each entry, oldest first**, against the restored database. **A replay is a run of §11
+   in §11's own order, not a shortcut through it** — the tempting abbreviation ("phases 3–6 and
+   8, then verify") runs the scrub *before its own gate*, on a database that is about to serve
+   production traffic, which is the one context where a missed row can never be found again and
+   nobody is watching:
+   - Skip the entry if the account is already erased there — the **self-referential** test from
+     the proposal's §5.1, `SELECT email = 'deleted+' || id::text || '@deleted.invalid' FROM users
+     WHERE id = '<user_id>'`, and **not** a `LIKE '%@deleted.invalid'` domain match, which
+     nothing in the product prevents a live account from satisfying. This is what makes the
+     replay idempotent and safe to re-run after an interruption.
+   - Re-apply the governance from the entry: promote each `ownership_transfers` target to the
+     built-in Owner role in its workspace, and each `admin_appointments` target to Team lead in
+     its project. **This part cannot be derived from the restored data** — the successor the
+     operator chose exists nowhere in a pre-erasure dump, and skipping it leaves a workspace
+     whose only Owner is about to be scrubbed.
+   - **Run §11 phase 1 in full, read-only, including its counts.** Not optional and not "the
+     operator already knows this account": what protects a name-keyed sweep from over-matching a
+     namesake is a number somebody read *before* the sweep ran, and a restore is precisely the
+     moment when nobody counts first. The subject is the entry's `user_id` — the one place `:uid` is
+     not derived from a verified address, and it needs no such derivation because the ledger is
+     our own record rather than a message from a stranger. `:addr`, `:name` and the workspace
+     lists come from the restored row exactly as the runbook derives them.
+   - Run phases 3–6. The workspaces in `workspaces_deleted` are deleted again, under phase 5's
+     guards. Phase 3's close-the-SSE-streams step has nothing to do here — `app` is stopped,
+     which is the same property that step buys during a live erasure.
+   - Run **phase 8a** (the address- and name-keyed checks) and read them against what this
+     replay's own phase 1 recorded — zero for the address-keyed, the recorded out-of-scope
+     totals for the name-keyed. Then **phase 8b**, the scrub.
+   - **Attachment objects are a no-op.** A database restore does not restore the object store,
+     and phase 7 already removed those objects and their versions; the `-keys.txt` sibling is
+     the record that it was done, not a list to re-delete.
+5. Verify with §11 phase 9 for each entry, then `docker compose -f docker-compose.prod.yml up -d
+   app`.
+6. Write what happened into §6.8 — including a replay, which is a run of the procedure like any
+   other.
+
+**§6.5 is a drill and no gate applies to it.** That container serves nobody, is bound to
+loopback, and is destroyed at step 8; a replay there would be work with no reader. Say it here
+rather than there because the failure this guards against is the opposite reading — somebody
+treating the drill as "the restore procedure" and carrying its *absence* of a replay into a
+production restore, which is the one place the replay is the whole point.
+
+### 6.8 Erasure drill log
+
+Append a row **after** each run — a rehearsal, a production erasure, or a replay — in the **past
+tense, with the date it happened**. A row written in advance is not a row, and a plan to rehearse
+is not a rehearsal.
+
+| Date | Kind (rehearsal / production / replay) | Subject | Workspaces deleted / retained | Object keys removed | Phase-9 result | Steps NOT walked | Operator |
+|---|---|---|---|---|---|---|---|
+| *(empty — no erasure, rehearsal or replay has been run)* | | | | | | | |
+
+Two rules the first entry will be judged against:
+
+- **A rehearsal's ledger entry is discarded, never uploaded.** The real ledger describes
+  erasures that happened in production; a row from a scratch container in it makes a restore
+  replay attempt work that has no subject.
+- **Name every step that did not run.** §6.6's first row is the model: it recorded that the
+  globals file was never applied, which is the only reason anybody knows the drill was walked in
+  part rather than in full. A pass that hides its gaps is worth less than a fail that names them.
 
 ---
 

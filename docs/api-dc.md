@@ -71,6 +71,7 @@ A self-hosted instance is configured through environment variables; a few of the
 | `PUBLIC_SIGNUP_ENABLED` (`app.registration.public-signup-enabled`) | `false` (DC) | Self-registration is **closed by default on DC**: `POST /auth/register` returns `403` and accounts are created by the admin (see [System administration](#system-administration)). Set `true` to re-open public registration |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | When `false`, no demo workspace is created on first login |
 | `PUBLIC_LANDING_ENABLED` | `true` | When `false`, `robots.txt` disallows all crawling and `sitemap.xml` returns `404` |
+| `PRIVACY_CONTACT_EMAIL` (`app.privacy.contact-email`) | empty | Address returned as `privacyContactEmail` by [`GET /meta`](#instance-metadata) — where a user is told to write for a privacy request, account deletion in particular. **Empty by default in both deployment modes**, and the field is then the empty string rather than absent, so a client always has something to read. Setting it **publishes that address on an unauthenticated endpoint** to anyone who can reach the instance — prefer a role address over a personal inbox. A malformed value **aborts startup** rather than being published: it must be a single address of at most 255 characters, and the characters `mailto:` treats as separators (`? & # % , ; < >`), whitespace, quotes and backslashes are refused. |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Reflected in the `expiresIn` field of login/refresh responses. Shorter = smaller replay window for a leaked token; the refresh cookie transparently renews it |
 | `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file business size limit enforced in-app (`413` when exceeded). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
 | `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet ceiling for a multipart request (DoS guard, `413` when exceeded). Match your reverse-proxy body-size limit to this |
@@ -784,8 +785,10 @@ Within a single request, permissions are resolved once and reused, so a role cha
 | `GET` | `/meta` | — | Instance flags and version |
 
 ```json
-{ "publicLandingEnabled": true, "termsAcceptanceRequired": true, "publicSignupEnabled": true, "version": "0.2.0" }
+{ "publicLandingEnabled": true, "termsAcceptanceRequired": true, "publicSignupEnabled": true, "privacyContactEmail": "privacy@example.com", "version": "0.2.0" }
 ```
+
+`privacyContactEmail` is the address to write to for a privacy request — account deletion in particular. It is always present: the **empty string** when the operator has configured none, never null (see [`PRIVACY_CONTACT_EMAIL`](#operator-settings-that-affect-the-api)).
 
 Values reflect the [operator's configuration](#operator-settings-that-affect-the-api) — clients should read them instead of assuming defaults.
 

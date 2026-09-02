@@ -13,6 +13,7 @@ import WelcomePage from './pages/welcome/WelcomePage'
 import JoinTeamPage from './pages/welcome/JoinTeamPage'
 import HomePage from './pages/HomePage'
 import MyWorkPage from './pages/MyWorkPage'
+import AccountPage from './pages/AccountPage'
 import BoardPage from './pages/BoardPage'
 import BacklogPage from './pages/BacklogPage'
 import ReleasesPage from './pages/ReleasesPage'
@@ -158,6 +159,11 @@ export default function App() {
             <Route element={<AppShell />}>
               <Route path="/home" element={<HomePage />} />
               <Route path="/my-work" element={<MyWorkPage />} />
+              {/* Account (HD-193 §9.1) — deliberately outside /w/:wsId: it is
+                  about the account, reads nothing tenant-scoped, and must be
+                  reachable for a user who has no workspace at all. No
+                  ParamKeyed for the same reason (it has no params to leak). */}
+              <Route path="/account" element={<AccountPage />} />
               <Route path="/workspaces" element={<WorkspacesPage />} />
               <Route path="/w/:wsId">
                 <Route index element={<ParamKeyed><WorkspaceHomePage /></ParamKeyed>} />

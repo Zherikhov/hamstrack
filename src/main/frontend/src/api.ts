@@ -197,6 +197,14 @@ export interface PublicConfig {
   publicLandingEnabled: boolean
   termsAcceptanceRequired: boolean
   publicSignupEnabled: boolean
+  /**
+   * Where a user writes to ask for their account to be deleted (HD-193 §10).
+   * **Empty string when the operator has not configured one** — the DC default.
+   * The Account page renders its deletion section either way (§9.3): a hidden
+   * affordance is unreachable for exactly the operators who did not know the
+   * property existed.
+   */
+  privacyContactEmail: string
   version: string
 }
 
