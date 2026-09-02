@@ -19,7 +19,9 @@ in the wrong direction. Where this map and a source doc disagree, the source doc
 
 ## 1. What Hamstrack IS (and is NOT)
 
-- **Is:** an **open-source, Jira-inspired task tracker** for teams — workspaces, projects,
+- **Is:** a **source-available** (Elastic License 2.0 — free to self-host, modify and use
+  commercially; may not be offered to third parties as a managed service), **Jira-inspired
+  task tracker** for teams — workspaces, projects,
   issues, boards/backlog, comments, attachments, a governed global taxonomy (statuses /
   priorities / issue types / custom fields bound to projects), issue hierarchy, full-text +
   structured search (HQL), saved filters, notifications, and a delegated admin model.

@@ -8,6 +8,8 @@ import Footer from '../components/Footer'
 //    dashboard). Neutral demo issue keys only — never a real customer's key. ──
 const TYPE = { bug: 'var(--color-error)', task: '#3B5BFD', story: '#7C6CF5' }
 
+const LICENSE_URL = 'https://github.com/Zherikhov/hamstrack/blob/main/LICENSE'
+
 const STATS = [
   { n: '7', label: 'Assigned to me', tint: '#3B5BFD' },
   { n: '5', label: 'Created by me', tint: 'var(--color-accent-2)' },
@@ -45,7 +47,7 @@ export default function LandingPage() {
   const publicSignupEnabled = useConfigStore((s) => s.config.publicSignupEnabled)
 
   useEffect(() => {
-    document.title = 'Hamstrack — Open-source task tracker'
+    document.title = 'Hamstrack — Source-available task tracker'
     return () => { document.title = 'Hamstrack' }
   }, [])
 
@@ -68,7 +70,7 @@ export default function LandingPage() {
           </header>
 
           <section className="lp-hero">
-            <span className="lp-eyebrow lp-anim-in" style={{ animationDelay: '.05s' }}>◆ open-source · self-host or cloud</span>
+            <span className="lp-eyebrow lp-anim-in" style={{ animationDelay: '.05s' }}>◆ source-available · self-host or cloud</span>
             <h1 className="lp-h1 lp-anim-in" style={{ animationDelay: '.12s' }}>The task tracker you can actually trust</h1>
             <p className="lp-lead lp-anim-in" style={{ animationDelay: '.2s' }}>
               A calm, work-centric home for your whole team — boards, backlog, workspaces and a
@@ -212,7 +214,7 @@ export default function LandingPage() {
                 <ul>
                   <li>Local or S3-compatible storage</li>
                   <li>No telemetry, no lock-in</li>
-                  <li>MIT-licensed core</li>
+                  <li>Free to run commercially, source included</li>
                 </ul>
               </div>
               <div className="lp-dcard brand">
@@ -226,12 +228,20 @@ export default function LandingPage() {
                 </ul>
               </div>
             </div>
+            {/* HD-194: the licence name and what it permits stay in one sentence. A badge
+                that names ELv2 in one place and a benefit in another is how the two drifted
+                apart and the product ended up claiming a licence it does not ship under. */}
+            <p className="lp-licence">
+              <a href={LICENSE_URL} target="_blank" rel="noreferrer">Source-available under the Elastic License 2.0</a>
+              {' '}— self-host it, modify it and use it commercially, free of charge. The one thing you
+              may not do is offer Hamstrack to third parties as a hosted or managed service.
+            </p>
           </section>
 
           <section className="lp-final">
             <div className="lp-finalbox">
               <h2>Start tracking in minutes</h2>
-              <p>{publicSignupEnabled ? 'Free to start. Open source forever.' : 'Open source forever. Sign in to get to work.'}</p>
+              <p>{publicSignupEnabled ? 'Free to start. Source available — self-host it any time.' : 'Source available — self-host it any time. Sign in to get to work.'}</p>
               {publicSignupEnabled
                 ? <Link to="/register" className="lp-btn lp-btn-primary lp-btn-lg">Get started — it's free</Link>
                 : <Link to="/login" className="lp-btn lp-btn-primary lp-btn-lg">Sign in</Link>}

@@ -7,7 +7,7 @@
 > its rationale is preserved in the Decisions Log for history.
 
 ## Product Context
-- **What this is:** Open-source task tracker, Jira-inspired but must not copy Jira's UI/implementation/naming. Core differentiator: safe AI-agent-driven self-service process customization (validators, transition rules, approval flows) with sandbox dry-run, human approval, and post-promotion rollback.
+- **What this is:** Source-available task tracker (Elastic License 2.0 — free to self-host, modify and use commercially; may not be resold as a managed service), Jira-inspired but must not copy Jira's UI/implementation/naming. Core differentiator: safe AI-agent-driven self-service process customization (validators, transition rules, approval flows) with sandbox dry-run, human approval, and post-promotion rollback.
 - **Who it's for:** Project owners and workspace admins at companies leaving Jira Data Center or evaluating new trackers — technical, skeptical buyers who have been burned by complexity and do not trust black-box AI by default.
 - **Space/industry:** B2B SaaS / dev & ops process tooling.
 - **Project type:** Web app (dashboard-style internal tool), dual-deployment — self-hosted DC-style and Cloud, same codebase.

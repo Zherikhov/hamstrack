@@ -18,9 +18,11 @@ export default function TermsPage() {
         operator of hamstrack.com ("we", "us").
       </p>
       <p>
-        Hamstrack is open-source software. These Terms apply only to the hosted Service at
-        hamstrack.com. Self-hosted installations of Hamstrack are governed by the software license
-        in the source repository, not by these Terms.
+        Hamstrack is source-available software, licensed under the Elastic License 2.0 — you may
+        self-host, modify and use it commercially, free of charge, but you may not offer it to third
+        parties as a hosted or managed service. These Terms apply only to the hosted Service at
+        hamstrack.com. Self-hosted installations of Hamstrack are governed by that license in the
+        source repository, not by these Terms.
       </p>
 
       <h2>2. Accounts</h2>

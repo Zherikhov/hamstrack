@@ -13,6 +13,14 @@ to *use* Hamstrack without operating it, use the hosted Cloud at
 Hamstrack ships as a single Docker image plus PostgreSQL. It runs the same core
 as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`).
 
+> **Licence — you may run this, including at work.** Hamstrack is **source-available**
+> under the [Elastic License 2.0](../LICENSE), which is *not* an OSI-approved
+> open-source licence. **You may** self-host it, modify it and use it commercially,
+> free of charge. **You may not** provide Hamstrack to third parties as a hosted or
+> managed service, circumvent its license-key functionality, or remove its licensing
+> and copyright notices. Everything on this page is something you are allowed to do;
+> [`LICENSE`](../LICENSE) is the full text.
+
 ## Contents
 
 - [Requirements](#requirements)

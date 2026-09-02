@@ -267,6 +267,11 @@ body {
 .lp-dcard ul { margin: 0; padding: 0; list-style: none; }
 .lp-dcard li { font-size: 13.5px; color: var(--color-text-secondary); padding: 6px 0 6px 24px; position: relative; }
 .lp-dcard li::before { content: "✓"; position: absolute; left: 0; color: var(--color-brand); font-weight: 700; }
+/* Licence note under the deploy cards (HD-194) — meta weight, deliberately not a ✓ bullet:
+   it carries a "may not" and the card lists are all permissions. */
+.lp-licence { max-width: 720px; margin: 24px auto 0; text-align: center; font-size: 13.5px; line-height: 1.6; color: var(--color-text-muted); }
+.lp-licence a { color: var(--color-brand); font-weight: 600; }
+.lp-licence a:hover { text-decoration: underline; }
 
 .lp-final { text-align: center; padding: 24px 0 0; }
 .lp-finalbox { background: var(--color-ink); border-radius: 20px; padding: 56px 24px; color: #fff; position: relative; overflow: hidden; }

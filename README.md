@@ -3,7 +3,12 @@
 [![Build](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml/badge.svg)](https://github.com/Zherikhov/hamstrack/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-Elastic%202.0-blue.svg)](LICENSE)
 
-**Hamstrack** is an open-source task tracker for software teams: workspaces, projects, kanban boards, backlog, workflows, comments, attachments and real-time updates — in a single deployable JAR.
+**Source-available under the [Elastic License 2.0](LICENSE)** — not an OSI-approved open-source licence.
+**You may** self-host, modify and use Hamstrack commercially, free of charge; **you may not** offer it to
+third parties as a hosted or managed service, circumvent its license-key functionality, or remove its
+licensing notices.
+
+**Hamstrack** is a source-available task tracker for software teams: workspaces, projects, kanban boards, backlog, workflows, comments, attachments and real-time updates — in a single deployable JAR.
 
 One codebase ships in two deployment models:
 
@@ -77,7 +82,9 @@ Issues and pull requests are welcome. CI runs the full test suite on every PR; d
 
 ## License
 
-[Elastic License 2.0](LICENSE) (ELv2).
+Hamstrack is **source-available** under the [Elastic License 2.0](LICENSE) (ELv2).
+ELv2 is not an OSI-approved open-source licence and Hamstrack is not open source:
+it carries a field-of-use restriction, spelled out below.
 
 You may freely use, copy, modify, and self-host Hamstrack — including for
 commercial purposes. You may **not** provide it to third parties as a hosted or

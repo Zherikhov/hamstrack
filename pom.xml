@@ -14,7 +14,7 @@
          git release tag (APP_VERSION build-arg → versions:set). Do not hand-bump. -->
     <version>0.0.0-DEV</version>
     <name>hamstrack</name>
-    <description>Hamstrack — open-source task tracker with AI agent support</description>
+    <description>Hamstrack — source-available task tracker with AI agent support</description>
     <url/>
     <licenses>
         <license>

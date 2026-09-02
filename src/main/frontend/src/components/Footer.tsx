@@ -12,7 +12,7 @@ export default function Footer() {
         style={{ maxWidth: 1080, padding: '24px 24px' }}
       >
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-          Hamstrack — open-source task tracker © 2026
+          Hamstrack — source-available task tracker © 2026
         </p>
         <nav className="flex items-center gap-4 text-sm">
           <Link to="/terms" className="hover:underline" style={{ color: 'var(--color-text-secondary)' }}>

@@ -3,6 +3,7 @@ import { X, BookOpen, Github, ExternalLink } from 'lucide-react'
 import { useConfigStore } from '../config'
 
 const REPO_URL = 'https://github.com/Zherikhov/hamstrack'
+const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`
 
 interface Props {
   onClose: () => void
@@ -61,8 +62,8 @@ export default function AboutModal({ onClose }: Props) {
 
           {/* Summary */}
           <p className="text-sm" style={{ color: 'var(--color-text-secondary)', lineHeight: 1.5 }}>
-            Open-source task tracker for teams — boards, backlog, workflows and
-            real-time collaboration. Runs self-hosted or in the cloud from the
+            Source-available task tracker for teams — boards, backlog, workflows
+            and real-time collaboration. Runs self-hosted or in the cloud from the
             same codebase.
           </p>
 
@@ -81,14 +82,34 @@ export default function AboutModal({ onClose }: Props) {
             </a>
           </div>
 
-          {/* Legal */}
+          {/* Licence & legal — HD-194: the licence name and what it permits are one
+              sentence, so a reader who never opens LICENSE still knows what they may do. */}
           <div
-            className="flex items-center gap-3 text-xs border-t pt-3"
-            style={{ borderColor: 'var(--color-border)', color: 'var(--color-text-muted)' }}
+            className="flex flex-col gap-2.5 border-t pt-3"
+            style={{ borderColor: 'var(--color-border)' }}
           >
-            <Link to="/terms" className="hover:underline" onClick={onClose}>Terms</Link>
-            <Link to="/privacy" className="hover:underline" onClick={onClose}>Privacy</Link>
-            <Link to="/cookies" className="hover:underline" onClick={onClose}>Cookies</Link>
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+              <a
+                href={LICENSE_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold hover:underline"
+                style={{ color: 'var(--color-brand)' }}
+              >
+                Elastic License 2.0
+              </a>
+              {' '}— source-available, not open source. Self-host, modify and use it commercially,
+              free of charge; you may not offer Hamstrack to third parties as a hosted or managed
+              service.
+            </p>
+            <div
+              className="flex items-center gap-3 text-xs"
+              style={{ color: 'var(--color-text-muted)' }}
+            >
+              <Link to="/terms" className="hover:underline" onClick={onClose}>Terms</Link>
+              <Link to="/privacy" className="hover:underline" onClick={onClose}>Privacy</Link>
+              <Link to="/cookies" className="hover:underline" onClick={onClose}>Cookies</Link>
+            </div>
           </div>
         </div>
       </div>
