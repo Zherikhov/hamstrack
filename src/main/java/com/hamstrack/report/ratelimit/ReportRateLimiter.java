@@ -57,7 +57,7 @@ public class ReportRateLimiter extends PerPrincipalMinuteBudget {
     }
 
     @Override
-    protected int limit() {
+    protected long limit() {
         return reportProperties.requestsPerMinute();
     }
 

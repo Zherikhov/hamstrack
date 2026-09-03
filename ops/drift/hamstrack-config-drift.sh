@@ -9,26 +9,39 @@
 # AND at the end of every apply-config.sh run, so the freshest reading is always the one
 # taken at the moment of a deploy.
 #
-# Three comparisons, and together they are the property. Each one catches a failure the
-# other two cannot see:
+# Four comparisons, and together they are the property. Each one catches a failure the
+# others cannot see:
 #
-#   files         re-hash every synced file against .deployed-manifest.sha256, and detect
-#                 files ADDED TO or REMOVED FROM a synced directory — somebody edited the
-#                 box after the deploy, including the incident edit that must be un-done.
-#   containers    each service's com.docker.compose.config-hash label on the RUNNING
-#                 container versus `docker compose config --hash '*'` — the file is right
-#                 and the container was never recreated.
-#   installed-ops /opt/hamstrack/ops/** versus the copies installed under /usr/local/bin
-#                 and /etc/systemd/system. The sync CANNOT install (§6.4), so the check has
-#                 to be able to say that it hasn't.
+#   files           re-hash every synced file against .deployed-manifest.sha256, and detect
+#                   files ADDED TO or REMOVED FROM a synced directory — somebody edited the
+#                   box after the deploy, including the incident edit that must be un-done.
+#   containers      each service's com.docker.compose.config-hash label on the RUNNING
+#                   container versus `docker compose config --hash '*'` — the file is right
+#                   and the container was never recreated.
+#   installed-ops   /opt/hamstrack/ops/** versus the copies installed under /usr/local/bin
+#                   and /etc/systemd/system. The sync CANNOT install (§6.4), so the check has
+#                   to be able to say that it hasn't.
+#   edge-body-limit the deployed Caddyfile carries a request_body/max_size block. The first
+#                   three scopes all compare the box against what a deploy PUT there; this
+#                   one is the opposite shape — the Caddyfile is one of the two paths the
+#                   applier hard-refuses to sync (it carries the hand-added Cloudflare
+#                   trusted_proxies block), so a repository that GAINS a body limit gives
+#                   production nothing until somebody performs the merge by hand. Nothing
+#                   fails when they don't: the app still refuses an over-sized upload, but
+#                   only AFTER Tomcat has streamed it to a temp file, on a lane that spends
+#                   no rate-limit budget at all (HD-191). A control whose absence is silent
+#                   is a control nobody has. This makes it loud.
 #
 # Checksums rather than a re-download: no network in the hourly path, no dependency on
 # codeload being up, and it answers the question that is actually asked. WHAT the deploy
 # applied is answered by .deployed-sha, which is published as a label.
 #
 # WHICH files differ goes to stdout and the journal, NEVER into a label. `scope` is a
-# closed three-valued enum; `sha` and `tag` change on a deploy, which is a handful of new
-# series a week against a 15-day retention — written down here because this project
+# closed enum whose values are the ones listed above and are added only by editing this
+# file (each addition is one series per box, which is why it is a closed set at all —
+# and docs/observability.md's metric table names them); `sha` and `tag` change on a deploy,
+# which is a handful of new series a week against a 15-day retention — written down here
+# because this project
 # otherwise forbids unbounded labels.
 set -euo pipefail
 
@@ -70,6 +83,7 @@ done
 DRIFT_FILES=1
 DRIFT_CONTAINERS=1
 DRIFT_INSTALLED=1
+DRIFT_EDGE_BODY=1
 DEPLOYED_SHA=unknown
 IMAGE_TAG=latest
 IMAGE_PINNED=0
@@ -102,6 +116,7 @@ write_metrics() {
     echo "hamstrack_config_drift{scope=\"files\"} $DRIFT_FILES"
     echo "hamstrack_config_drift{scope=\"containers\"} $DRIFT_CONTAINERS"
     echo "hamstrack_config_drift{scope=\"installed-ops\"} $DRIFT_INSTALLED"
+    echo "hamstrack_config_drift{scope=\"edge-body-limit\"} $DRIFT_EDGE_BODY"
     echo '# HELP hamstrack_config_deployed_info The commit whose configuration was last applied to this box.'
     echo '# TYPE hamstrack_config_deployed_info gauge'
     echo "hamstrack_config_deployed_info{sha=\"$(sanitize_label "$DEPLOYED_SHA")\"} 1"
@@ -117,7 +132,7 @@ write_metrics() {
   # looking installed. The file holds three flags, a timestamp, a sha and a tag — no secret.
   chmod 0644 "$tmp"
   mv -f "$tmp" "$out"   # atomic: a scrape must never see a half-written file
-  log "drift: files=$DRIFT_FILES containers=$DRIFT_CONTAINERS installed-ops=$DRIFT_INSTALLED sha=$DEPLOYED_SHA tag=$IMAGE_TAG pinned=$IMAGE_PINNED"
+  log "drift: files=$DRIFT_FILES containers=$DRIFT_CONTAINERS installed-ops=$DRIFT_INSTALLED edge-body-limit=$DRIFT_EDGE_BODY sha=$DEPLOYED_SHA tag=$IMAGE_TAG pinned=$IMAGE_PINNED"
 }
 trap write_metrics EXIT
 
@@ -339,6 +354,49 @@ check_installed_ops() {
   return 0
 }
 
+# --- scope 4: edge-body-limit ------------------------------------------------
+# The only scope that compares the box against the REPOSITORY'S INTENT rather than against
+# what a deploy placed. It has to be: apply-config.sh hard-refuses to sync a Caddyfile (the
+# production one carries the hand-added Cloudflare trusted_proxies block that this
+# repository's copy does not), so the body limit HD-191 added to the shipped Caddyfile
+# reaches a box only through a hand merge — and until it does, the app answers 413 after
+# Tomcat has already streamed and buffered the body, on the one lane no budget bounds.
+#
+# ABSENT IS NOT DRIFT, the rule installed-ops already uses. A box with no Caddyfile is not
+# running the bundled proxy — a self-hoster fronting the stack with nginx has nothing to
+# merge here and is told so once (docs/self-hosting.md tells them to set their own body
+# limit; this script cannot see somebody else's proxy config).
+#
+# The test is deliberately for the PRESENCE OF A BOUND and not for a particular value:
+# the value comes from ATTACHMENT_MAX_UPLOAD_SIZE at Caddy's start, and reading .env to
+# compare numbers would put an operator's setting into a log that travels back through SSM
+# into a public repository's Actions log. Presence is the whole of the question anyway —
+# nobody merges this block and then sets it wrong, they simply never merge it.
+check_edge_body_limit() {
+  local caddyfile="$TARGET/Caddyfile" body
+  if [ ! -f "$caddyfile" ]; then
+    log "edge-body-limit: $caddyfile is absent — this box does not run the bundled Caddy, so there is no body limit here to merge"
+    DRIFT_EDGE_BODY=0
+    return 0
+  fi
+  # Comments stripped first, so a block that is present only inside the explanatory comment
+  # (or one somebody commented OUT during an incident) reads as absent, which it is.
+  body="$(sed 's/^[[:space:]]*#.*$//; s/[[:space:]]#.*$//' "$caddyfile")"
+  if printf '%s\n' "$body" | grep -Eq '(^|[[:space:]])request_body([[:space:]]|\{|$)' \
+     && printf '%s\n' "$body" | grep -Eq '(^|[[:space:]])max_size[[:space:]]'; then
+    DRIFT_EDGE_BODY=0
+    log "edge-body-limit: the deployed Caddyfile bounds the request body"
+  else
+    DRIFT_EDGE_BODY=1
+    log "edge-body-limit: $caddyfile has no request_body/max_size block — over-sized uploads are"
+    log "edge-body-limit: refused by the app only AFTER it has read the whole body, and that lane"
+    log "edge-body-limit: spends no rate-limit budget. The applier never syncs this file: merge the"
+    log "edge-body-limit: block by hand (docs/ops-prod-hardening.md §2) and run 'up -d caddy', not 'restart'."
+  fi
+  return 0
+}
+
 check_files
 check_containers
 check_installed_ops
+check_edge_body_limit

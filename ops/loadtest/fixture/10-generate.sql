@@ -1015,8 +1015,13 @@ SELECT pg_temp.uuid7(t.ts), r.workspace_id, r.sprint_id, r.id,
 -- API so that the download path is exercised at least once, against objects that exist.
 -- ---------------------------------------------------------------------------
 
+-- workspace_id is NOT NULL from V26 (the tenant, denormalised onto the row so the storage
+-- counter's trigger learns it without walking two parents). It is taken from the issue, which
+-- is what the composite FK (issue_id, workspace_id) -> issues (id, workspace_id) requires.
+-- The counter rows in workspace_storage_usage need no statement here: the AFTER INSERT trigger
+-- maintains them, so the fixture's workspaces come out with true totals.
 INSERT INTO issue_attachments (id, issue_id, filename, storage_key, size_bytes,
-                               content_type, uploaded_by, created_at)
+                               content_type, uploaded_by, created_at, workspace_id)
 WITH src AS MATERIALIZED (
     SELECT i.id, i.workspace_id, i.number, i.reporter_id, i.created_at,
            random() AS r_has, random() AS r_size
@@ -1026,7 +1031,7 @@ SELECT pg_temp.uuid7(s.created_at), s.id,
        format('spec-%s.pdf', s.number),
        format('ws/%s/issues/%s/%s', s.workspace_id, s.id, gen_random_uuid()),
        (20000 + s.r_size * 400000)::bigint, 'application/pdf', s.reporter_id,
-       s.created_at
+       s.created_at, s.workspace_id
   FROM src s
  WHERE s.r_has < 0.05
  ORDER BY s.id;

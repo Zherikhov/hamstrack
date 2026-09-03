@@ -15,6 +15,7 @@ import type {
   FlowReport, ReportInterval, CycleTimeReport, AgingReport,
   SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
   InsightsDimension, InsightsMeasure, InsightsResponse,
+  WorkspaceStorageSummary, WorkspaceStorageByProject,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -25,10 +26,10 @@ const BASE = '/api'
 // call site is unchanged. The split exists because `queryClient.ts` has to test
 // for the error type, and importing `api.ts` from there closed the cycle
 // queryClient → api → auth → queryClient. apiError.ts says what that cost.
-import { ApiResponseError } from './apiError'
-import type { HqlError, ConflictInfo } from './apiError'
-export { ApiResponseError }
-export type { HqlError, ConflictInfo }
+import { ApiResponseError, STORAGE_QUOTA_EXCEEDED } from './apiError'
+import type { HqlError, ConflictInfo, StorageQuotaRefusal } from './apiError'
+export { ApiResponseError, STORAGE_QUOTA_EXCEEDED }
+export type { HqlError, ConflictInfo, StorageQuotaRefusal }
 
 /**
  * `errorType` / `projects` / `usage` off a ProblemDetail body.
@@ -55,8 +56,30 @@ function conflictOf(body: unknown, res: Response): ConflictInfo {
     }
     if (Array.isArray(b.projects)) info.projects = b.projects as ProjectRef[]
     if (b.usage && typeof b.usage === 'object') info.usage = b.usage as RoleUsage
+    if (info.errorType === STORAGE_QUOTA_EXCEEDED) info.storage = storageRefusalOf(b)
   }
   return info
+}
+
+/**
+ * The four byte figures on a `STORAGE_QUOTA_EXCEEDED` 409 (HD-191 §8.3) — **all
+ * four or none**.
+ *
+ * A partial read is refused rather than filled in, because every consumer of
+ * this shape does arithmetic with it ("used of quota", "this file needed") and a
+ * missing member coerced to `0` would render a confidently wrong sentence about
+ * somebody's data. Absent it, the caller falls back to the server's own `detail`,
+ * which already says the whole thing.
+ */
+function storageRefusalOf(b: Record<string, unknown>): StorageQuotaRefusal | undefined {
+  const keys = ['quotaBytes', 'usedBytes', 'availableBytes', 'fileBytes'] as const
+  if (!keys.every(k => typeof b[k] === 'number' && Number.isFinite(b[k] as number))) return undefined
+  return {
+    quotaBytes: b.quotaBytes as number,
+    usedBytes: b.usedBytes as number,
+    availableBytes: b.availableBytes as number,
+    fileBytes: b.fileBytes as number,
+  }
 }
 
 // A body carrying errorType is an HqlProblemDetail — pull the highlight fields.
@@ -338,6 +361,39 @@ export async function apiPreviewProjectAccess(
   return request(`/workspaces/${wsId}/project-access/preview`, {
     method: 'POST', body: JSON.stringify(payload),
   })
+}
+
+// ── Workspace storage (HD-191) ───────────────────────────────────────────────
+
+/**
+ * `GET /api/workspaces/{ws}/storage` — the summary, readable by **any member**
+ * (§6.6). No permission beyond membership, because it discloses nothing the
+ * upload door does not already hand the same person in a refusal body.
+ *
+ * **Deliberately unbudgeted** (§9.2): one primary-key read plus two properties,
+ * cheaper than the handler mapping that routes it, and it is the number shown
+ * beside the upload control — starving it would hide the quota from exactly the
+ * person about to meet it. So no 429 here. Tenancy is the usual shape: an
+ * unknown workspace and a non-member both answer **404**, never 403.
+ */
+export async function apiGetWorkspaceStorage(wsId: string): Promise<WorkspaceStorageSummary> {
+  return request(`/workspaces/${wsId}/storage`)
+}
+
+/**
+ * `GET /api/workspaces/{ws}/storage/projects` — the per-project breakdown,
+ * gated on `workspace.edit` (**403** for a proven member without it, **404** for
+ * a non-member).
+ *
+ * **429 + `Retry-After`** — this one IS budgeted, on the reports pot: it is a
+ * grouped aggregate over every attachment row in the workspace, i.e. O(tenant
+ * content), which is that budget's denomination. Its sibling summary is not, and
+ * the asymmetry is safe in the direction that matters: a caller refused here who
+ * falls back to the cheap read gets *less* information, never a way around the
+ * bound.
+ */
+export async function apiGetWorkspaceStorageByProject(wsId: string): Promise<WorkspaceStorageByProject> {
+  return request(`/workspaces/${wsId}/storage/projects`)
 }
 
 // ── Onboarding (first-login: create or join a team) ──────────────────────────
@@ -655,6 +711,19 @@ export async function apiListAttachments(wsId: string, projectId: string, number
   return request(`/workspaces/${wsId}/projects/${projectId}/issues/${number}/attachments`)
 }
 
+/**
+ * Upload one file. Refusals a caller must tell apart (HD-191 §6.4, in the order
+ * the server applies them): **400** empty · **413** over the per-file limit ·
+ * **415** disallowed extension · **404** tenancy · **403** missing
+ * `attachment.create` · **409** archived project · **429** budget · **409**
+ * storage quota.
+ *
+ * The two 409s are told apart by `errorType`, and only the quota one carries it
+ * ({@link STORAGE_QUOTA_EXCEEDED}, with `ApiResponseError.storage`). The two
+ * 429s are told apart by `detail` alone — one is a request count, the other a
+ * byte rate — and both carry `Retry-After`, which the quota 409 deliberately
+ * does not: waiting frees no bytes.
+ */
 export async function apiUploadAttachment(wsId: string, projectId: string, number: number, file: File): Promise<Attachment> {
   const form = new FormData()
   form.append('file', file)

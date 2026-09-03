@@ -749,11 +749,12 @@ groups:
       # count() — would render the branch against an instance with no scope and hand the
       # reader the wrong first move, or none. The scope is the only label that makes this
       # alert actionable. Each scope has a different first move, so the summary names one
-      # and never a legend covering all three. The `else` makes the branch total, which is
-      # truthful only while `scope` has exactly the three values hamstrack-config-drift.sh
-      # emits: a fourth would be described as an uninstalled ops artefact. If you add a
-      # scope to the .prom, add its arm here in the same commit. WHAT differs is in the
-      # journal and in the script's stdout, never in a label.
+      # and never a legend covering every scope at once. The `else` makes the branch total,
+      # and its arm is installed-ops — which means an UNNAMED scope is described as an
+      # uninstalled ops artefact and sends the reader to the wrong step. So: if you add a
+      # scope to the .prom, add its arm here in the same commit. That has already been paid
+      # once (edge-body-limit, HD-191). WHAT differs is in the journal and in the script's
+      # stdout, never in a label.
       - uid: hamstrack-config-drift
         title: ConfigDrift
         condition: B
@@ -763,7 +764,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: '{{ if eq $labels.scope "files" }}A synced file in /opt/hamstrack differs from the commit that was deployed — an edit made on the box, which the next deploy will overwrite. Re-deploy to restore it, or commit it{{ else if eq $labels.scope "containers" }}A container is running a service definition that is not the one on disk in /opt/hamstrack — the file was replaced and the stack was never brought up. Run the deploy again{{ else }}An ops artefact installed under /usr/local/bin or /etc/systemd/system differs from the copy in /opt/hamstrack/ops — a deploy places files and never installs them, so the install step in docs/ops-prod-hardening.md §6.3 is what closes this{{ end }}; journalctl -u hamstrack-config-drift names what differs'
+          summary: '{{ if eq $labels.scope "files" }}A synced file in /opt/hamstrack differs from the commit that was deployed — an edit made on the box, which the next deploy will overwrite. Re-deploy to restore it, or commit it{{ else if eq $labels.scope "containers" }}A container is running a service definition that is not the one on disk in /opt/hamstrack — the file was replaced and the stack was never brought up. Run the deploy again{{ else if eq $labels.scope "edge-body-limit" }}The deployed Caddyfile has no request_body/max_size block, so nothing bounds an upload before the app has read the whole body — a lane that spends no rate-limit budget. A deploy never syncs the Caddyfile: merge the block by hand (docs/ops-prod-hardening.md §2) and bring caddy up with `up -d`, not `restart`{{ else }}An ops artefact installed under /usr/local/bin or /etc/systemd/system differs from the copy in /opt/hamstrack/ops — a deploy places files and never installs them, so the install step in docs/ops-prod-hardening.md §6.3 is what closes this{{ end }}; journalctl -u hamstrack-config-drift names what differs'
         data:
           - refId: A
             relativeTimeRange: { from: 3600, to: 0 }
@@ -1234,6 +1235,218 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: gt, params: [1800] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # ────────────────────────────────────────────────────────────────────────────────
+      # STORAGE QUOTA (HD-191). Four rules, and they are a set: the first says a tenant is
+      # already stuck, the second says one is about to be, the third says the number the
+      # quota is enforcing is not true, and the fourth says the third has stopped looking.
+      #
+      # NO RULE HERE CAN NAME A WORKSPACE, and that is a constraint on the metrics rather
+      # than an oversight in the rules: no meter in this product carries a workspace id, a
+      # user id or any tenant-identifying value, because a Grafana alert carries its series
+      # labels into alert state and out through the email contact point. The "which
+      # workspace" question is answered against the database, and each summary below
+      # carries the query.
+      # ────────────────────────────────────────────────────────────────────────────────
+
+      # RULE 1: A TENANT IS BLOCKED AND NOBODY TOLD YOU.
+      #
+      # A quota refusal is a clean 409. It appears in no error rate, no 5xx panel and no log
+      # anybody watches, so this counter is the ONLY signal that a workspace has stopped being
+      # able to upload. Any sustained rate means somebody is hitting a wall right now.
+      #
+      # noDataState/execErrState STAY OK, and that is a decision rather than the default being
+      # left in place. The category rule at MailRecipientConcentration says a rule whose failure
+      # mode is ABSENCE must treat NoData as firing - and this rule's failure mode is not
+      # absence. What it watches is a POSITIVE RATE on a counter Micrometer registers at boot,
+      # so on a healthy instance the series is present and reads zero; "no series" here does not
+      # mean the witness is gone, it means the application is not being scraped at all, which is
+      # AppDown's job and would arrive here only as a second copy of that page. The rule one
+      # level up - StorageDriftGaugeStale - is the one in the absence category, because a frozen
+      # gauge is indistinguishable from a calm one, and it is set accordingly.
+      - uid: hamstrack-storage-quota-refusals
+        title: StorageQuotaRefusals
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "Attachment uploads are being refused because a workspace has filled its storage quota, and have been for a quarter of an hour. This is a clean 409, so it shows up in no error rate and no log - this counter is the only thing that can tell you. The refusal deliberately prescribes no action to the person who sees it (they may hold no permission to delete anything, and the space may be in a project they cannot see), so somebody is stuck until an operator acts. NEXT STEP, and the metric cannot do it for you because no meter may carry a workspace id: run against the database - SELECT workspace_id, bytes_used, attachment_count FROM workspace_storage_usage ORDER BY bytes_used DESC LIMIT 20; then decide whether to raise STORAGE_QUOTA_WORKSPACE_BYTES or to ask that workspace's owners to free space, which they can do from Workspace settings then Storage. Raising the value takes effect on the next request and nothing is cached"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(rate(hamstrack_storage_quota_refused_total[15m]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 2: SOMEBODY IS ABOUT TO BE BLOCKED.
+      #
+      # Fires BEFORE rule 1, which is the entire point of having a threshold: a quota whose
+      # first symptom is a refusal is a quota nobody could have planned around.
+      #
+      # max(), NEVER sum(). Every replica computes the same install-wide number from the same
+      # table, so the series are duplicates rather than shards - summing them would multiply
+      # the fill level by the replica count and page at a third of the real threshold. Same
+      # division hamstrack_mail_anonymous_recipient_max uses, for the same reason.
+      - uid: hamstrack-storage-fill-high
+        title: StorageFillHigh
+        condition: B
+        for: 1h
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "The fullest workspace on this instance is over 90 percent of its storage quota. Nothing is refused yet - this fires before StorageQuotaRefusals on purpose, so there is time to act before somebody's upload fails. The number is install-wide and identical on every replica, so alert on max and never on sum. NEXT STEP: SELECT workspace_id, bytes_used, attachment_count FROM workspace_storage_usage ORDER BY bytes_used DESC LIMIT 20; The value is refreshed on the reconcile schedule rather than at scrape, so it is as old as the last pass - if it looks stale, check StorageDriftGaugeStale, which is watching exactly that"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(hamstrack_storage_quota_fill_max)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0.9] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 3: THE QUOTA IS ENFORCING A NUMBER THAT IS NOT TRUE.
+      #
+      # workspace_storage_usage.bytes_used is maintained by a row trigger on
+      # issue_attachments and is supposed to equal SUM(size_bytes) for the workspace at every
+      # commit boundary - including through ON DELETE CASCADE, which is the whole reason it is
+      # a trigger and not a service-level decrement. Drift is expected to be exactly zero, so
+      # any value here is a real finding: something wrote or deleted attachment rows outside
+      # the trigger (a restore, a hand-run DELETE, a bulk path), or the trigger is gone.
+      #
+      # 1 MiB rather than zero so that a pass which straddles a live upload does not page
+      # anybody; the reconciler takes the same row lock an upload takes, so this should be
+      # exact, and the tolerance is for the operator's sleep rather than for the mechanism.
+      - uid: hamstrack-storage-usage-counter-drift
+        title: StorageUsageCounterDrift
+        condition: B
+        for: 10m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: "The stored per-workspace byte counter disagreed with the attachment rows it is supposed to equal by more than a megabyte, and the reconciler corrected it. That number is what the storage quota enforces, so while it was wrong some workspace was being refused uploads it should have been allowed, or allowed uploads past its ceiling. Drift is expected to be zero - the counter is maintained by a database trigger that follows every INSERT, DELETE and cascade - so this means rows moved outside it. Look for a WARN from WorkspaceStorageReconciler naming the size of the correction. Check that the trigger still exists by selecting tgname from pg_trigger for the issue_attachments relation; you are looking for trg_issue_attachments_storage_usage. If it is missing, the counter has been a one-way ratchet since it went, and the nightly pass is the only thing that has been fixing it"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(hamstrack_storage_drift_bytes)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [1048576] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # RULE 4: THE WITNESS'S OWN WITNESS - the MailConcentrationGaugeStale shape, one feature
+      # over.
+      #
+      # hamstrack_storage_drift_bytes and hamstrack_storage_quota_fill_max are both written by
+      # the reconcile pass into last-write-wins AtomicLongs. Their failure mode is SILENT
+      # rather than absent: a reconciler that stops running leaves both FROZEN at their last
+      # values, which on any healthy instance are 0 and something calm - so rules 2 and 3 go
+      # quiet together and read exactly like a clean instance. This is the only rule that can
+      # tell the difference.
+      #
+      # 90000s = 25 hours, i.e. ONE missed daily pass, which tolerates a deploy and a slow
+      # night. The age counts from PROCESS START until the first successful pass and has no
+      # sentinel branch, so an instance whose reconciler never runs at all still ages into this
+      # rule - the mistake that made "never worked, not once" permanently unalertable on the
+      # mail gauge, avoided here by construction rather than by remembering. An EMPTY
+      # STORAGE_QUOTA_RECONCILE_CRON therefore fires this rule on purpose: disabling the
+      # witness is allowed and is not allowed to be silent.
+      #
+      # max() AND NOT min(), AND THE APP HAS TO COOPERATE FOR THAT TO WORK. Only one replica
+      # gets the advisory lock each night; the others defer. A deferring replica STAMPS THE
+      # GAUGE ANYWAY (WorkspaceStorageReconciler) precisely because this rule takes the max: a
+      # replica that correctly stood aside is not stale, and without that stamp one node would
+      # stamp while N-1 aged from process start, so this rule would fire on every multi-replica
+      # install after 25h and never clear. An always-firing rule gets silenced, and silencing
+      # THIS one removes the only detector of a genuinely dead reconciler. Do not "fix" that by
+      # switching to min() instead: min() is satisfied by any single fresh replica, so one
+      # restarted node would suppress this for 25h with nothing reconciling at all.
+      #
+      # noDataState/execErrState are NOT OK here, and the reason is the CATEGORY stated at
+      # MailRecipientConcentration above: a rule whose failure mode is ABSENCE rather than
+      # noise must treat NoData and Error as firing, because for such a rule "no series" is not
+      # "nothing is wrong", it is "the thing that would have told you is gone". This rule is the
+      # sole witness to a frozen gauge, and a frozen gauge is indistinguishable from a healthy
+      # one - so an absent age series is exactly the state it exists to catch. It shipped at OK
+      # and that was the rule opting out of a category its own file declares.
+      - uid: hamstrack-storage-drift-gauge-stale
+        title: StorageDriftGaugeStale
+        condition: B
+        for: 30m
+        noDataState: NoData
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "The storage reconcile pass has not completed for over 25 hours, so hamstrack_storage_drift_bytes and hamstrack_storage_quota_fill_max are FROZEN rather than low, and StorageUsageCounterDrift and StorageFillHigh are both reading stale numbers that cannot be trusted. Two ordinary causes and they need different answers. Either the pass is failing - look for a WARN from WorkspaceStorageReconciler naming the exception - or STORAGE_QUOTA_RECONCILE_CRON was deliberately emptied, in which case this rule firing is the documented consequence of that choice and the fix is to set a cron or to silence this rule on purpose. The counter itself is unaffected either way: it is maintained by a database trigger, not by the pass, and the quota is still enforced against it"
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max(hamstrack_storage_drift_refreshed_at_age_seconds)'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [90000] }
                   operator: { type: and }
                   query: { params: [] }
                   reducer: { type: last, params: [] }

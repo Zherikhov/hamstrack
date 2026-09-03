@@ -3,12 +3,13 @@ import { Link } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { X, Trash2, Paperclip, Plus, CornerDownRight, MoreHorizontal } from 'lucide-react'
 import {
-  ApiResponseError,
+  ApiResponseError, STORAGE_QUOTA_EXCEEDED,
   apiGetIssue, apiUpdateIssue, apiDeleteIssue, apiListIssues,
   apiListComments, apiCreateComment, apiDeleteComment,
   apiListAttachments, apiUploadAttachment, apiDownloadAttachment, apiDeleteAttachment,
   apiGetIssueHistory, apiListWorkspaceMembers, apiGetIssueChildren,
 } from '../api'
+import type { StorageQuotaRefusal } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
@@ -21,6 +22,11 @@ import {
 } from '../components/sprints'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { useProjectPermissions } from '../hooks/usePermissions'
+import { useInvalidateWorkspaceStorage, useWorkspaceStorage } from '../hooks/useWorkspaceStorage'
+import {
+  StorageQuotaRefusalNotice, hasQuota, quotaBlockFor, storageWarning,
+} from '../components/storage'
+import { formatBytes } from '../lib/bytes'
 import { Markdown, MarkdownToolbar } from '../components/markdown'
 import { isMoveAllowed } from '../lib/transitions'
 import { PROSE_MAX_LENGTH } from '../lib/limits'
@@ -32,12 +38,6 @@ import type {
 
 function fieldValuesOf(issue: Issue): Record<string, FieldValue> {
   return Object.fromEntries(issue.fields.map(f => [f.fieldId, f.value]))
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 // A parent key is "<projectKey>-<number>"; the trailing segment is the number.
@@ -340,6 +340,25 @@ export default function IssueDetail({
   const [dragOver, setDragOver] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // ── Storage quota (HD-191 §12.1) ──
+  // The summary shares ONE cache entry with Workspace settings → Storage, so
+  // opening an issue from that page costs no second request. A refusal, though,
+  // is rendered from the 409's OWN body: this cache is a minute old by design,
+  // and the figures the server refused on are the ones the sentence must name.
+  const storage = useWorkspaceStorage(wsId)
+  const invalidateStorage = useInvalidateWorkspaceStorage(wsId)
+  const [quotaRefusal, setQuotaRefusal] =
+    useState<{ detail: string; refusal?: StorageQuotaRefusal } | null>(null)
+  // Seconds left on an upload BUDGET (429). Only this one counts down: the quota
+  // 409 carries no `Retry-After` because waiting frees no bytes.
+  const [pausedSeconds, setPausedSeconds] = useState(0)
+
+  useEffect(() => {
+    if (pausedSeconds <= 0) return
+    const timer = setTimeout(() => setPausedSeconds(s => Math.max(0, s - 1)), 1000)
+    return () => clearTimeout(timer)
+  }, [pausedSeconds])
+
   useEffect(() => {
     apiListWorkspaceMembers(wsId).then(setMembers).catch(() => {})
   }, [wsId])
@@ -513,20 +532,53 @@ export default function IssueDetail({
   async function uploadFiles(files: File[]) {
     // Guards the button AND the whole-panel file drop, which has no button to
     // disable — the drop zone is the second door onto the same effect.
-    if (files.length === 0 || !canAttach) return
+    if (files.length === 0 || !canAttach || pausedSeconds > 0) return
     setFileError('')
-    setUploading(true)
+    setQuotaRefusal(null)
     const errors: string[] = []
+
+    // A file that cannot fit is refused here, with a sentence naming both
+    // numbers, instead of being sent and refused. Only ever a courtesy — the
+    // server holds the guarantee and checks the parsed size — so a stale summary
+    // costs a round trip, never a wrong outcome.
+    const sendable: File[] = []
     for (const file of files) {
+      const blocked = quotaBlockFor(storage.data, file)
+      if (blocked) errors.push(blocked)
+      else sendable.push(file)
+    }
+
+    setUploading(true)
+    for (const file of sendable) {
       try {
         const att = await apiUploadAttachment(wsId, projectId, issueNumber, file)
         setAttachments(prev => [...prev, att])
       } catch (err: unknown) {
+        if (err instanceof ApiResponseError && err.errorType === STORAGE_QUOTA_EXCEEDED) {
+          // Not a rate limit and deliberately carrying no `Retry-After`: nothing
+          // about waiting frees a byte, so this renders as what it is and the
+          // rest of the batch is not attempted — every one of them would meet
+          // the same wall and produce the same sentence N times.
+          setQuotaRefusal({ detail: err.message, refusal: err.storage })
+          break
+        }
+        if (err instanceof ApiResponseError && err.status === 429) {
+          // A per-principal budget — the one refusal here that retrying really
+          // does fix, and the header says when. Two different budgets can answer
+          // (request count, uploaded bytes); they are told apart by `detail`,
+          // which is why it is rendered rather than paraphrased.
+          setPausedSeconds(Math.max(1, Math.min(err.retryAfter ?? 60, 300)))
+          errors.push(err.message)
+          break
+        }
         errors.push(`${file.name}: ${err instanceof Error ? err.message : 'upload failed'}`)
       }
     }
     setFileError(errors.join(' · '))
     setUploading(false)
+    // Anything that reached the server moved the total, and a refusal is the
+    // strongest evidence there is that the cached one was out of date.
+    if (sendable.length > 0) await invalidateStorage()
   }
 
   async function handleUploadFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -566,6 +618,9 @@ export default function IssueDetail({
   async function handleDeleteAttachment(attachmentId: string) {
     await apiDeleteAttachment(wsId, projectId, issueNumber, attachmentId)
     setAttachments(prev => prev.filter(a => a.id !== attachmentId))
+    // The counter falls in the same transaction as the row, so the workspace is
+    // credited before the blob delete is even attempted — re-read it.
+    await invalidateStorage()
   }
 
   // An issue "can have children" iff the project's type set offers a type
@@ -666,6 +721,14 @@ export default function IssueDetail({
   const canDeleteIssue = permissions.canOwn('issue.delete', isReporter)
   const canComment = permissions.can('comment.create')
   const canAttach = permissions.can('attachment.create')
+
+  // The storage chrome beside the upload control. `storageLine` is null below
+  // the warn threshold and null when the instance enforces no quota — the
+  // absence IS the rule, not a loading state. `quotaFull` disables the control
+  // rather than letting a click become a silent no-op.
+  const storageSummary = storage.data
+  const storageLine = storageWarning(storageSummary)
+  const quotaFull = hasQuota(storageSummary) && storageSummary.availableBytes <= 0
 
   // ── Inline versions (HD-32) ──
   // Project-scoped content with its own endpoint/key (never in ProjectConfig, so
@@ -1645,19 +1708,48 @@ export default function IssueDetail({
 
           {fileError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{fileError}</p>}
 
+          {/* The workspace's remaining storage, and ONLY at or above the
+              operator's own warn threshold — a storage figure on every issue
+              page is noise, and with no quota configured there is no threshold
+              to be above, so there is nothing true to say here either. The
+              settings page is where the number lives in both cases. */}
+          {storageLine && (
+            <p className="text-xs" style={{
+              color: quotaFull ? 'var(--color-warning)' : 'var(--color-text-secondary)',
+            }}>
+              {storageLine}
+            </p>
+          )}
+
+          {quotaRefusal && (
+            <StorageQuotaRefusalNotice detail={quotaRefusal.detail} refusal={quotaRefusal.refusal} />
+          )}
+
           <div>
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadFile} />
-            {/* A permanent slot in the Files section: disabled, not removed. */}
+            {/* A permanent slot in the Files section: disabled, not removed. It
+                goes disabled for three different reasons and each says which:
+                no grant, no room, or a budget that has not reset yet. */}
             <Button
               variant="ghost"
               size="sm"
-              disabled={!canAttach}
-              title={canAttach ? undefined : 'You don’t have permission to attach files to this issue'}
+              disabled={!canAttach || quotaFull || pausedSeconds > 0}
+              title={
+                !canAttach ? 'You don’t have permission to attach files to this issue'
+                  : quotaFull ? (storageLine ?? undefined)
+                    : pausedSeconds > 0 ? `Retry in ${pausedSeconds}s`
+                      : undefined
+              }
               onClick={() => fileInputRef.current?.click()}
               loading={uploading}
             >
               <Paperclip size={13} /> Attach file
             </Button>
+            {pausedSeconds > 0 && (
+              <span className="text-xs ml-2" style={{ color: 'var(--color-text-secondary)' }}>
+                Retry in {pausedSeconds}s.
+              </span>
+            )}
           </div>
         </div>
 

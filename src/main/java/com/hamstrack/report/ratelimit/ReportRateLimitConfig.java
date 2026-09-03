@@ -104,11 +104,35 @@ public class ReportRateLimitConfig implements WebMvcConfigurer {
      */
     static final String INSIGHTS_PATH = "/api/workspaces/*/search/insights";
 
+    /**
+     * The workspace storage BREAKDOWN (HD-191 §9.2) — a third pattern that is neither a report
+     * nor a search, and belongs here for the reason the other two do: <strong>a budget is earned
+     * by the work a handler does, not by where it is mounted.</strong>
+     *
+     * <p>{@code GET …/storage/projects} is a grouped aggregate over every attachment row in the
+     * workspace — O(workspace content), unbounded by what it returns, which is the reports
+     * budget's exact denomination. It is charged to the reports pot rather than given a fourth
+     * one because it is the same person doing the same kind of thing (reading an aggregate of
+     * their own tenant), and 60/minute is far above any human reading a settings page.
+     *
+     * <p><strong>Its sibling {@code GET …/storage} — the summary — is deliberately NOT here, and
+     * that is an exemption with a reason rather than an omission.</strong> The summary is one
+     * primary-key read plus two configuration properties: cheaper than any endpoint currently
+     * behind a budget, cheaper than the handler mapping that routes it. It is also the number
+     * the SPA shows beside the upload control, so starving it would hide the quota from the
+     * person about to hit it. The asymmetry is safe in the direction that matters — a caller
+     * refused on the expensive breakdown who falls back to the cheap summary gets <em>less</em>
+     * information, not a way around the bound. The reverse asymmetry, where a refusal on a cheap
+     * read pushes a client onto an expensive sibling, is the one {@code PlanningThrottleParityTest}
+     * forbids, and it does not exist here.
+     */
+    static final String STORAGE_BREAKDOWN_PATH = "/api/workspaces/*/storage/projects";
+
     private final ReportRateLimiter reportRateLimiter;
 
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(new PrincipalThrottleInterceptor(reportRateLimiter))
-                .addPathPatterns(REPORTS_PATH, INSIGHTS_PATH);
+                .addPathPatterns(REPORTS_PATH, INSIGHTS_PATH, STORAGE_BREAKDOWN_PATH);
     }
 }

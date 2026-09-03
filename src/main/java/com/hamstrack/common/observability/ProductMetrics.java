@@ -5,6 +5,7 @@ import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.issue.repository.IssueRepository;
 import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.repository.WorkspaceStorageUsageRepository;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
@@ -108,7 +109,18 @@ public class ProductMetrics {
         // silent - register answers 429 - so they are a corroborating signal rather than the only
         // evidence; a rate on them is somebody walking spellings of one inbox through signup.
         REGISTRATION_VERIFICATION_RECIPIENT_COOLDOWN("registration_verification_recipient_cooldown"),
-        REGISTRATION_VERIFICATION_RECIPIENT_WINDOW("registration_verification_recipient_window");
+        REGISTRATION_VERIFICATION_RECIPIENT_WINDOW("registration_verification_recipient_window"),
+        // ---- The write surface (HD-191). Two constants rather than one, because they mean
+        // different things to whoever reads the alert: a rate on the first is a client that lost
+        // its debounce or a script driving the issue API; a rate on the second is somebody moving
+        // VOLUME, which is the shape that costs money on Cloud. Sharing a tag would make the two
+        // indistinguishable at exactly the moment the difference decides what to do.
+        //
+        // Neither of these is the storage quota. A refusal here says a caller went too fast and
+        // will be served again next minute; hamstrack.storage.quota_refused says a TENANT is
+        // stuck until somebody frees space or raises a number.
+        WRITE_REQUESTS("write_requests"),
+        UPLOAD_BYTES("upload_bytes");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }
@@ -243,11 +255,47 @@ public class ProductMetrics {
     private final AtomicLong anonymousMailConcentrationRefreshedAt =
             new AtomicLong(Instant.now().getEpochSecond());
 
+    /** {@code hamstrack.storage.quota_refused} — see {@link #storageQuotaRefused()}. */
+    private final Counter storageQuotaRefused;
+
+    /**
+     * Backing value of {@code hamstrack.storage.quota_fill_max} — the fullest workspace on the
+     * instance as a 0..1 fraction of the configured quota. Refreshed by
+     * {@code WorkspaceStorageReconciler} rather than evaluated at scrape, because it is a
+     * {@code MAX} over the counter table and the fill number is a trend rather than a tick.
+     */
+    private final AtomicLong storageQuotaFillMaxPermille = new AtomicLong();
+
+    /**
+     * Backing value of {@code hamstrack.storage.drift_bytes} — the largest absolute
+     * counter-versus-rows delta the last reconcile pass found.
+     */
+    private final AtomicLong storageDriftBytes = new AtomicLong();
+
+    /**
+     * When the two gauges above were last <em>successfully</em> refreshed — <strong>seeded with
+     * process start, not with zero, and with no sentinel branch.</strong>
+     *
+     * <p>Verbatim the trap {@link #anonymousMailConcentrationRefreshedAt} documents, and the
+     * reason it is repeated rather than assumed: both gauges above are last-write-wins, so a
+     * reconciler that stops running (a bad cron, a permissions problem, an
+     * {@code app.storage.quota.reconcile-cron} deliberately emptied) leaves them FROZEN at their
+     * last value — almost certainly a calm one — and a frozen number reads exactly like a healthy
+     * instance. A reconciler that has never succeeded is the worse half of that, and seeding this
+     * at zero would publish "never once refreshed" as an age of ~56 years, which sounds alertable
+     * until you notice the opposite mistake is the easy one: any sentinel BELOW the threshold
+     * makes the worst state the silent one. Process start makes never-ran and stopped-running
+     * indistinguishable, which is correct — they have the same remedy — and
+     * {@code StorageDriftGaugeStale} is the rule that reads it.
+     */
+    private final AtomicLong storageDriftRefreshedAt = new AtomicLong(Instant.now().getEpochSecond());
+
     public ProductMetrics(MeterRegistry registry,
                           UserRepository userRepository,
                           WorkspaceRepository workspaceRepository,
                           ProjectRepository projectRepository,
-                          IssueRepository issueRepository) {
+                          IssueRepository issueRepository,
+                          WorkspaceStorageUsageRepository storageUsageRepository) {
         this.registry = registry;
 
         this.usersRegistered = Counter.builder("hamstrack.users.registered")
@@ -308,6 +356,62 @@ public class ProductMetrics {
                 .description("Total projects").register(registry);
         Gauge.builder("hamstrack.issues.total", issueRepository, IssueRepository::count)
                 .description("Total issues").register(registry);
+
+        // --- storage quota (HD-191) ---
+
+        // THE ONLY SIGNAL THAT A TENANT IS STUCK. A quota refusal is a clean 409, so it appears
+        // in no error rate, no 5xx panel and no log an operator watches; without this counter the
+        // first anybody hears of a full workspace is a support message.
+        this.storageQuotaRefused = Counter.builder("hamstrack.storage.quota_refused")
+                .description("Attachment uploads refused because the workspace storage quota was full")
+                .register(registry);
+
+        // Scrape-time: one row per workspace, so this is a cheap SUM over a tiny table — the same
+        // class of query as the counts above, unlike the two reconciler-fed gauges below.
+        //
+        // NO baseUnit ON THIS ONE, deliberately, and it is not an omission. Micrometer's Prometheus
+        // naming convention appends the base unit unless the name already ends with it, so
+        // `.baseUnit("bytes")` here would export hamstrack_storage_bytes_used_total_BYTES — a name
+        // no dashboard, alert rule or document in this repository uses. The sibling gauge below
+        // keeps its baseUnit precisely because its name already ends in _bytes and the convention
+        // therefore leaves it alone. Check the exported name, not the declared one.
+        Gauge.builder("hamstrack.storage.bytes_used_total", storageUsageRepository,
+                        WorkspaceStorageUsageRepository::totalBytesUsed)
+                .description("Attachment bytes occupied across every workspace on this instance")
+                .register(registry);
+
+        // Stored as permille so the AtomicLong carries a fraction without a second field; the
+        // gauge publishes the 0..1 number the alert threshold is written against.
+        //
+        // EVERY REPLICA COMPUTES THE SAME INSTALL-WIDE NUMBER, exactly as
+        // hamstrack.mail.anonymous_recipient_max does — the series are duplicates, not shards, so
+        // an alert takes max() and NEVER sum(). Summing would multiply the fill level by the
+        // replica count and page at a third of the real threshold.
+        Gauge.builder("hamstrack.storage.quota_fill_max", storageQuotaFillMaxPermille,
+                        permille -> permille.get() / 1000.0)
+                .description("Fullest workspace as a 0..1 fraction of the configured quota; "
+                             + "refreshed on the reconcile schedule, identical on every replica "
+                             + "(alert with max(), never sum())")
+                .register(registry);
+
+        Gauge.builder("hamstrack.storage.drift_bytes", storageDriftBytes, AtomicLong::get)
+                .description("Largest absolute difference the last reconcile pass found between "
+                             + "workspace_storage_usage.bytes_used and the attachment rows it "
+                             + "claims to equal")
+                .baseUnit("bytes")
+                .register(registry);
+
+        // The freshness of the two gauges above, and the only thing that can tell a clean instance
+        // from a reconciler that stopped. Evaluated at scrape (arithmetic on a long, not a query)
+        // so it keeps RISING while the reconciler is failing, instead of freezing beside the values
+        // it describes. NO SENTINEL BRANCH — see storageDriftRefreshedAt's javadoc.
+        Gauge.builder("hamstrack.storage.drift_refreshed_at_age_seconds", storageDriftRefreshedAt,
+                        at -> (double) (Instant.now().getEpochSecond() - at.get()))
+                .description("Seconds since the storage reconcile pass last completed; counts from "
+                             + "process start until the first successful pass, so a reconciler "
+                             + "that never runs still ages")
+                .baseUnit("seconds")
+                .register(registry);
     }
 
     // --- auth ---
@@ -378,6 +482,51 @@ public class ProductMetrics {
      */
     public void anonymousMailConcentrationRefreshed() {
         anonymousMailConcentrationRefreshedAt.set(Instant.now().getEpochSecond());
+    }
+
+    // --- storage quota (HD-191) ---
+
+    /**
+     * {@code hamstrack.storage.quota_refused} — at the 409, and nowhere else.
+     *
+     * <p>No workspace label, per the cardinality rule at the top of this class: an operator who
+     * needs to know <em>which</em> workspace queries {@code workspace_storage_usage}, and
+     * {@code docs/self-hosting.md} carries that query. The counter answers "is anybody stuck",
+     * which is the question an alert can act on.
+     */
+    public void storageQuotaRefused() {
+        storageQuotaRefused.increment();
+    }
+
+    /**
+     * {@code hamstrack.storage.drift_bytes} — the largest absolute delta one reconcile pass
+     * corrected. Zero is the expected value: the trigger is the mechanism and the reconciler is
+     * only the witness, so anything else means the quota has been enforcing a number that is not
+     * true.
+     */
+    public void storageDrift(long maxAbsoluteDeltaBytes) {
+        storageDriftBytes.set(maxAbsoluteDeltaBytes);
+    }
+
+    /**
+     * {@code hamstrack.storage.quota_fill_max} — the fullest workspace as a 0..1 fraction.
+     * Fires the alert that arrives <em>before</em> the refusals do, which is the entire purpose
+     * of having a threshold.
+     */
+    public void storageQuotaFillMax(double fraction) {
+        storageQuotaFillMaxPermille.set(Math.round(fraction * 1000));
+    }
+
+    /**
+     * Stamps {@code hamstrack.storage.drift_refreshed_at_age_seconds} — called only after a
+     * reconcile pass that actually completed.
+     *
+     * <p>A separate call rather than a side effect of the two setters above, for
+     * {@link #anonymousMailConcentrationRefreshed()}'s reason: a future caller that sets a value
+     * from somewhere other than a fresh pass must not be able to certify it as fresh by accident.
+     */
+    public void storageReconcileCompleted() {
+        storageDriftRefreshedAt.set(Instant.now().getEpochSecond());
     }
 
     // --- workspace / project / issue ---

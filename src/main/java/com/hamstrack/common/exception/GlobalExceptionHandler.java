@@ -11,6 +11,7 @@ import com.hamstrack.workspace.exception.ReactivatedProjectDefaultsException;
 import com.hamstrack.workspace.exception.RoleInUseException;
 import com.hamstrack.workspace.exception.RoleLimitReachedException;
 import com.hamstrack.workspace.exception.SelfHeldRoleException;
+import com.hamstrack.workspace.exception.StorageQuotaExceededException;
 import com.hamstrack.search.HqlSemanticException;
 import com.hamstrack.search.parser.HqlParseException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -74,6 +75,10 @@ import java.util.stream.Collectors;
  * ({@code ResponseEntityExceptionHandler}'s class-level {@code @ExceptionHandler}) — and
  * note that this paragraph is a count, so it goes stale one handler before the list does:
  * if you take over a third, name it here.
+ *
+ * <p>{@link #handleStorageQuotaExceeded} (HD-191) is <strong>not</strong> a third: it is a
+ * Hamstrack type, absent from that list, so it changes no existing response anywhere — it gives
+ * a body to a 409 this class did not previously produce. The count above stays at two.
  *
  * <p>Ordered at {@code HIGHEST_PRECEDENCE + 100} rather than the bare minimum: it beats
  * Boot's order-0 advice just as reliably while leaving room for an advice that ever needs
@@ -184,6 +189,38 @@ public class GlobalExceptionHandler {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
         problem.setProperty("errorType", ex.getErrorType());
         problem.setProperty("usage", ex.getUsage());
+        return ResponseEntity.status(ex.getStatus()).body(problem);
+    }
+
+    /**
+     * More specific than the {@code AppException} handler — publishes the four figures the
+     * refusal is made of, so a client renders it from the body rather than from a cached
+     * summary that may be stale (HD-191 §8.3).
+     *
+     * <p>Discloses nothing beyond what the sentence already says, and the sentence is
+     * deliberately what it says: a single tenant-wide aggregate with no per-project resolution,
+     * handed to a member of that tenant who holds {@code attachment.create} in it. The
+     * project-level breakdown is a different endpoint behind {@code workspace.edit}. Same
+     * argument, same shape, as {@link #handleRoleInUse}.
+     *
+     * <p><strong>No {@code Retry-After}, and that is the load-bearing difference from
+     * {@link #handleRateLimited}.</strong> Waiting frees no bytes, so a retry hint here would be
+     * an instruction that cannot work.
+     *
+     * <p>The metric is emitted here rather than at the throw site because this is the one place
+     * every path to that 409 passes through, and a quota refusal is a clean 4xx that appears in
+     * no error rate — {@code hamstrack.storage.quota_refused} is the only signal an operator has
+     * that a tenant is stuck.
+     */
+    @ExceptionHandler(StorageQuotaExceededException.class)
+    public ResponseEntity<ProblemDetail> handleStorageQuotaExceeded(StorageQuotaExceededException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
+        problem.setProperty("quotaBytes", ex.getQuotaBytes());
+        problem.setProperty("usedBytes", ex.getUsedBytes());
+        problem.setProperty("availableBytes", ex.getAvailableBytes());
+        problem.setProperty("fileBytes", ex.getFileBytes());
+        productMetrics.storageQuotaRefused();
         return ResponseEntity.status(ex.getStatus()).body(problem);
     }
 

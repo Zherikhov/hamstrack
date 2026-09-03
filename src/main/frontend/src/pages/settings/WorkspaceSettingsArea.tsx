@@ -15,6 +15,7 @@ import WorkspaceLabelsPage from './WorkspaceLabelsPage'
 import WorkspacePeoplePage from './WorkspacePeoplePage'
 import WorkspaceRolesPage from './WorkspaceRolesPage'
 import WorkspaceGeneralPage from './WorkspaceGeneralPage'
+import WorkspaceStoragePage from './WorkspaceStoragePage'
 
 // The People/Roles pair is gated on the permissions the SERVER checks, not on a
 // role name: People renders for anyone who can act on a member, Roles only for a
@@ -34,6 +35,12 @@ const SECTIONS: SettingsSection[] = [
   // carries the workspace rename and the project-access mode, which apply to
   // every project in the workspace at once.
   { path: 'general', label: 'General', end: false, permission: 'workspace.edit' as const },
+  // Storage (HD-191). Same gate as General — the per-project breakdown names
+  // projects and their volumes, which is disclosure across a project boundary.
+  // The tab is here whether or not the instance enforces a quota: usage is
+  // counted and reported either way, and a page that appeared only once a limit
+  // existed would be unreachable for the operator deciding whether to set one.
+  { path: 'storage', label: 'Storage', end: false, permission: 'workspace.edit' as const },
   { path: '', label: 'Projects', end: true },
   { path: 'people', label: 'People', end: false, permission: 'workspace.member.manage' as const },
   { path: 'roles', label: 'Roles', end: false, permission: 'workspace.role.manage' as const },
@@ -117,6 +124,7 @@ export default function WorkspaceSettingsArea() {
               <Route path="labels" element={<WorkspaceLabelsPage />} />
               <Route path="people" element={<WorkspacePeoplePage />} />
               <Route path="general" element={<WorkspaceGeneralPage />} />
+              <Route path="storage" element={<WorkspaceStoragePage />} />
               <Route path="roles" element={<WorkspaceRolesPage />} />
               <Route path="*" element={<Navigate to={base} replace />} />
             </Routes>

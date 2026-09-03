@@ -1,5 +1,32 @@
 # SITE_ADDRESS is injected from .env (see .env.prod.example). Its host(s) must
 # match the host in APP_BASE_URL. Example: "example.com, www.example.com".
 {$SITE_ADDRESS} {
+    # THE UPLOAD CEILING, ENFORCED AT THE EDGE — and this is the only place it can be
+    # enforced before the bytes are spent (HD-191).
+    #
+    # Spring resolves multipart EAGERLY: DispatcherServlet.checkMultipart parses the request
+    # before getHandler(), so Tomcat has already streamed the part to a temp file by the time
+    # any interceptor, any budget or any Hamstrack code sees it. A body over
+    # ATTACHMENT_MAX_UPLOAD_SIZE therefore costs the app a full socket read plus a temp-file
+    # write and then answers 413 from the exception handler — having spent no write unit and
+    # no upload byte, because no handler was ever mapped. In-process that lane cannot be made
+    # to cost anything (the app's own controls run after the parse); here it costs the sender
+    # a connection and the app nothing at all.
+    #
+    # TIED TO THE SAME VARIABLE THE SERVLET CEILING READS
+    # (spring.servlet.multipart.max-request-size, application.properties). One number, set in
+    # one place, so raising the app limit without raising the proxy limit — the standing
+    # mistake this pairing exists to prevent — is not expressible in .env.
+    #
+    # THE UNITS DIFFER AND THE DIRECTION IS DELIBERATE. Caddy reads `MB` as 10^6 bytes and
+    # Spring reads it as 2^20, so `25MB` is 25,000,000 here and 26,214,400 in the app: the
+    # edge is ~5% TIGHTER than the servlet ceiling, which is the safe direction — nothing the
+    # servlet would have accepted is refused here first by more than that margin, and nothing
+    # the servlet would refuse reaches it. Keep ATTACHMENT_MAX_FILE_SIZE comfortably below
+    # ATTACHMENT_MAX_UPLOAD_SIZE (the shipped defaults leave 20MB against 25MB) or write the
+    # value as a plain byte count, which is the one spelling Caddy and Spring read identically.
+    request_body {
+        max_size {$ATTACHMENT_MAX_UPLOAD_SIZE:25MB}
+    }
     reverse_proxy app:8080
 }

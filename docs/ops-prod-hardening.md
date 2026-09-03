@@ -109,6 +109,11 @@ Dashboard only, ~2 minutes. Order matters:
 
    # Site address comes from SITE_ADDRESS in .env — do NOT hardcode the domain.
    {$SITE_ADDRESS} {
+       # The upload ceiling, enforced at the edge (HD-191). Same variable the app's
+       # servlet multipart cap reads, passed to this container by docker-compose.prod.yml.
+       request_body {
+           max_size {$ATTACHMENT_MAX_UPLOAD_SIZE:25MB}
+       }
        reverse_proxy app:8080
    }
    ```
@@ -118,8 +123,24 @@ Dashboard only, ~2 minutes. Order matters:
    first, since the caddy service uses `${SITE_ADDRESS:?…}` fail-fast). Merge this
    block into the existing Caddyfile; don't overwrite it with the repo template.
 
-   Then `docker compose -f docker-compose.prod.yml restart caddy` and verify
-   login still works and `docker compose logs app` shows distinct client IPs.
+   **The `request_body` block has to be added BY HAND on this box**, and that follows from
+   §6.2 rather than being an oversight: `/opt/hamstrack/Caddyfile` is one of the two paths a
+   deploy never syncs, precisely because it carries the `trusted_proxies` block above. So the
+   repository gaining a body limit does not give this box one. Until it is added here, an
+   over-sized upload is refused by the application *after* Tomcat has streamed it to a temp
+   file — a lane that spends no rate-limit budget at all, because Spring resolves multipart
+   before it maps a handler. Its absence is **reported rather than remembered**: the hourly
+   drift check (`ops/drift/hamstrack-config-drift.sh`, §7) publishes
+   `hamstrack_config_drift{scope="edge-body-limit"} 1` for a box whose `Caddyfile` carries no
+   `request_body`/`max_size`, so `ConfigDrift` fires until the merge is done.
+
+   Then `docker compose -f docker-compose.prod.yml up -d caddy` — an **`up`, not a
+   `restart`**: `restart` restarts the *existing* container and does not re-create it from the
+   compose file, so it would not pick up the `ATTACHMENT_MAX_UPLOAD_SIZE` environment entry
+   the synced compose file declares, the placeholder would silently fall back to `25MB`, and a
+   box that raised the app ceiling would sit behind an edge quietly tighter than the app. Then
+   verify login still works, `docker compose logs app` shows distinct client IPs, and an
+   upload near the ceiling still succeeds.
 4. Certificate renewal: Let's Encrypt HTTP-01 keeps working through the proxy
    (CF passes `/.well-known/acme-challenge/`); nothing to change.
 

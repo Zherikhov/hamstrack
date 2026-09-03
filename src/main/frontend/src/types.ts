@@ -1812,3 +1812,76 @@ export interface SearchSchemaInsights {
   measures: InsightsMeasure[];
   dimensions: InsightsDimension[];
 }
+
+// ── Workspace storage (HD-191) ───────────────────────────────────────────────
+
+/**
+ * `GET /api/workspaces/{ws}/storage` — what a workspace has spent of its
+ * attachment allowance. Readable by **any member**, deliberately: these are the
+ * same figures the quota refusal already hands the same person, and a member who
+ * cannot see how full the workspace is cannot tell "I am blocked" from "the
+ * server is broken" (§5.5, §6.6).
+ *
+ * **The three nullable fields are null together, and only when `quotaEnabled` is
+ * false.** They are absent rather than sentinel-valued so no client can render
+ * `-1 GB remaining`; a surface reads `quotaEnabled` first and treats a null as
+ * "there is no ceiling to be a fraction of", never as zero.
+ *
+ * `usedBytes`, `attachmentCount` and `maxFileBytes` are answered in every
+ * deployment, quota or no quota — usage is counted, reported and reconciled even
+ * when nothing is enforced (§6.9), which is what lets the Storage page exist for
+ * the operator who is still deciding whether to set a limit.
+ */
+export interface WorkspaceStorageSummary {
+  quotaEnabled: boolean;
+  /** Null when `quotaEnabled` is false. */
+  quotaBytes: number | null;
+  usedBytes: number;
+  /**
+   * Null when `quotaEnabled` is false, and **clamped at zero** — never negative,
+   * because "-2.1 GB remaining" is not a number anyone can act on. So it is not
+   * `quotaBytes - usedBytes` and must not be re-derived as one: a workspace past
+   * its ceiling reports `0` here and says so through `percentUsed` instead.
+   */
+  availableBytes: number | null;
+  attachmentCount: number;
+  /**
+   * Null when `quotaEnabled` is false, and **not capped at 100**: a quota
+   * lowered below current usage answers something like `112`, and that number is
+   * the only explanation on screen for why uploads are being refused.
+   */
+  percentUsed: number | null;
+  /** The fill level at which surfaces start saying so. Always present. */
+  warnAtPercent: number;
+  /** `app.attachments.max-file-size` — the per-file bound, a different limit. */
+  maxFileBytes: number;
+  /** The usage counter row's `updated_at`. */
+  asOf: string;
+}
+
+/** One project's share of the workspace total. */
+export interface WorkspaceStorageProjectRow {
+  projectId: string;
+  key: string;
+  name: string;
+  bytes: number;
+  attachmentCount: number;
+}
+
+/**
+ * `GET /api/workspaces/{ws}/storage/projects` — "where did the space go", gated
+ * on `workspace.edit` because naming projects and their volumes is real
+ * disclosure across a project boundary (§6.6).
+ *
+ * **`unattributedBytes` is published, not folded away.** It is the counter total
+ * minus the sum of the rows, so a non-zero value is exactly the drift an
+ * operator needs to see; silently normalising it would make the page lie in the
+ * one state it exists for.
+ */
+export interface WorkspaceStorageByProject {
+  asOf: string;
+  totalBytes: number;
+  unattributedBytes: number;
+  /** Bytes descending. */
+  projects: WorkspaceStorageProjectRow[];
+}

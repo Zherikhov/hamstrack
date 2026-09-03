@@ -44,6 +44,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Account addresses become case-insensitive in 0.18.0](#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
   - [Free text is bounded from 0.18.0](#free-text-is-bounded-from-0180)
+  - [Attachment storage is capped per workspace from 0.18.0](#attachment-storage-is-capped-per-workspace-from-0180)
 - [Backups](#backups)
   - [By hand](#by-hand)
   - [On a schedule](#on-a-schedule)
@@ -500,16 +501,91 @@ Full reference:
 | `AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW` | `5` | How many of **each** kind of auth mail — reset, verification, registration — one address may receive per **window**, across everybody who asked. Separate buckets per kind, so a stranger flooding one flow cannot suppress the other; counts are taken per `email_type` for exactly that reason. **`POST /api/auth/register` has a bucket of its own** — it used to share the verification one, and that was the hole rather than the economy: `resend-verification` records its slot *before* the account lookup and unconditionally (it must, or the row itself answers whether the address is registered), so at an address with **no account** it sends no mail, logs nothing, and still filled register's ceiling. Five such requests an hour therefore locked every spelling of a stranger's inbox out of signup, for free and with no signal on either side. **So this number is per bucket, there are three of them, and each is spent over its own window — the bound on one inbox is a sum of rates, not a multiple of this number.** At the default of `5`: **20** reset emails an hour (a quarter-hour window refills four times inside one), **5** verification and **5** registration = **30 auth emails an hour into a single inbox**. **The windows are fixed, are not configurable, and are not the same width: 15 minutes for password reset, 1 hour for verification, 1 hour for registration.** Reset is narrower because a ceiling on a **recovery** flow is also a denial of it — anybody can type your users' addresses into forgot-password, so whoever fills that window decides how long that person cannot reset their own password, and nothing tells them. But **sustained denial is achievable at every width** (no per-address ceiling can be built that cannot be filled), so a wide window buys no prevention — only a higher effort for the attacker. What it really buys is the mail bound, and what it costs is the length of a **hit-and-run** lockout: five requests, fired once, buy the whole window. 20 reset mails an hour into one inbox is a nuisance and still a factor of 3 under the deliverability number; an hour of silent lockout bought for five requests is not. Verification keeps the hour: it locks nobody out of an account they already hold. **Raising this moves two things in opposite directions** — more mail one address can be sent in a window, *and* less ability for somebody to withhold that address's own recovery for the rest of it — so move it in small steps. Valid range 1–1000; `0` fails startup. **Leave the line out to get the default.** ⚠️ **The refusal is invisible on two of the three endpoints, and the sustained attack is invisible on all of them** — see the note under this table |
 | `ROLES_MAX_CUSTOM_PER_WORKSPACE` | `50` | Custom roles per workspace, counted across **both** scopes (workspace + project) with `built_in = false`; the 8 built-in templates belong to no workspace and never count. Creating past the cap is a 409 `ROLE_LIMIT_REACHED`. **A sprawl guard, never a licence check** — custom roles are a product feature, not a plan feature, so this is identical in `dc` and `cloud` and is never profile-gated. Valid range 1–500; an out-of-range value fails startup instead of being clamped. The count is taken under a row lock on the workspace, so the cap is exact rather than advisory — which also makes a duplicate one of the calls that can lose a lock race and answer a retryable `409` + `Retry-After` (bounded by `DB_LOCK_TIMEOUT_MS`) |
 | `DEFAULT_PROJECT_ACCESS_MODE` | `OPEN` | Project-access mode a **newly created** workspace starts in. `OPEN` — everyone in the workspace can work in every project through its default role; add someone to a project only to give them a *different* role. `STRICT` — only people added to a project can change anything in it (everyone can still **see** every project: it narrows writes, never reads). Applies at creation only and **never moves an existing workspace** — change one in Workspace settings → General. Demo seeding uses the same code path, so `STRICT` gives you a strict demo workspace too. Identical in `dc` and `cloud`: access modes are a product feature, not a plan feature. An unrecognised value **aborts startup** rather than falling back |
-| `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay ≤ `ATTACHMENT_MAX_UPLOAD_SIZE` |
-| `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). Match your reverse-proxy body limit to this |
+| `ATTACHMENT_MAX_FILE_SIZE` | `20MB` | Per-file size limit enforced in-app (the business limit; kept app-side so a future admin setting can tune it). Must stay **at least 5% below** `ATTACHMENT_MAX_UPLOAD_SIZE`, and **the boot refuses the pair** if it is not — equality is not enough, because the bundled Caddy reads that same variable and reads `MB` as 10⁶ where Spring reads 2²⁰, so `25MB`/`25MB` would leave the top ~4.6% of the size range this instance advertises refused at the edge with a bare `413` and no Hamstrack error body |
+| `ATTACHMENT_MAX_UPLOAD_SIZE` | `25MB` | Hard servlet/DoS ceiling (multipart parse limit). **Read twice — by the application and by the bundled Caddy**, whose `request_body max_size` comes from this same variable, so raising it moves both and they cannot drift. That edge limit is the only bound on an oversized body: Spring resolves multipart *before* it maps a handler, so a body over the ceiling is streamed to a temp file and refused with `413` without spending any rate-limit budget at all — the proxy refuses it before the application reads a byte. Caddy reads `MB` as 10⁶ and Spring as 2²⁰, so the edge sits ~5% tighter than the servlet ceiling (the safe direction); keep `ATTACHMENT_MAX_FILE_SIZE` comfortably below this — the boot refuses a pair that is not at least 5% apart — or write both as plain byte counts, which the two read identically. **No typo here can leave an unbounded proxy in front of a bounded app**: `DataSize` accepts at most a two-letter unit, so `25MiB` or `25G` fails the *application's* boot, and a value Caddy cannot parse fails *Caddy's* start. Both misparse directions fail closed; what a typo costs you is a stack that will not start. **If you front the stack with your own proxy**, set its body limit yourself — see [TLS & reverse proxy](#tls--reverse-proxy) |
 | `ATTACHMENT_ALLOWED_EXTENSIONS` | (images, pdf, office, text, zip…) | Comma-separated allow-list of uploadable file extensions (case-insensitive) |
+| `STORAGE_QUOTA_ENABLED` | `true` | Whether a workspace's total attachment storage is **capped**. `ATTACHMENT_MAX_FILE_SIZE` above refuses one large file; nothing refused the ten-thousandth small one until this existed. **This is deliberately NOT under `RATE_LIMIT_ENABLED`** — folding them together would mean that removing a bound on your disk requires disabling brute-force protection on your login page, and that debugging a rate limiter requires removing the disk bound. Two kinds of control, two switches; `RATE_LIMIT_ENABLED=false` does **not** stop the quota refusing uploads. Setting this `false` disables the **refusal**, not the bookkeeping: usage is still counted, still shown on Workspace settings → Storage and still reconciled — an instance that turns the quota on later must not resume from a blank number, and the figure you need in order to *choose* a quota is the one you already use. **Cluster-wide and exact** (state in PostgreSQL, like the recipient-keyed mail ceilings and unlike every in-memory budget), so it neither divides by replica count nor re-arms on a redeploy |
+| `STORAGE_QUOTA_WORKSPACE_BYTES` | `100GB` self-hosted · `10GB` Cloud | The ceiling itself, per workspace. Same code, same table, same `409` in both models — only the number differs, and it differs because what it protects differs: on a self-hosted install you own the disk, signup is closed by default and there are no strangers, so the number is a **safety net against runaway growth**; on Cloud signup is public, the backend is S3 where every byte stored *and* every request made is billed, and a workspace is what a stranger gets for the price of one disposable mailbox. Past it an upload answers **`409` `STORAGE_QUOTA_EXCEEDED`** carrying `quotaBytes`/`usedBytes`/`availableBytes`/`fileBytes`, and **no `Retry-After`** — waiting never frees a byte, so a retry hint would be an instruction that cannot work. **It bounds growth and deletes nothing**: no path deletes, archives or expires an attachment because of this setting, and reads and downloads are never quota-gated, so a full workspace stays fully readable. Must be **≥ `ATTACHMENT_MAX_FILE_SIZE`** — a quota smaller than one permitted file admits nothing at all, and the boot **refuses that pair** rather than letting the first upload after a deploy discover it. ⚠️ **Which of the two defaults you get follows `SPRING_PROFILES_ACTIVE`, not the fact that you are self-hosting**: `.env.prod.example` ships `cloud`, so an install that never changed that line is on the **10 GB** ceiling while this row quotes 100 GB. Set the profile to `dc`, or set this value explicitly — an explicit value wins over both defaults and cannot be surprised by a profile. ⚠️ **Before lowering it, or enabling it on an install that already has content**, see the note under this table: a quota introduced silently at a value somebody is already past is indistinguishable from an outage |
+| `STORAGE_QUOTA_WARN_PERCENT` | `80` | The share of the quota at which the app starts **saying so** — the line beside the upload control and the level `StorageFillHigh` is sized against. It changes no server behaviour: nothing is refused, narrowed or slowed at this threshold. It exists so the first thing a team hears about the ceiling is not a refusal. Valid range 1–99 |
+| `STORAGE_QUOTA_RECONCILE_CRON` | `0 20 3 * * *` | When to re-check that the stored counter still equals the attachment rows it claims to count. The counter is maintained by a **database trigger** — that is the mechanism; this is only the **witness**, and drift is expected to be exactly zero. Spring cron syntax (six fields, seconds first). **An empty value disables the schedule**, which is a supported choice and is **not silent**: `hamstrack_storage_drift_refreshed_at_age_seconds` then rises from process start and `StorageDriftGaugeStale` fires, which is the documented consequence of the setting rather than an accident. An **invalid** cron still fails the boot — a typo is not a decision. Disabling it does not disable the counter or the quota |
+| `WRITE_REQUESTS_PER_MINUTE` | `180` | How many **mutating** requests **one user** may make per minute across `…/workspaces/*/projects/*/issues/**` — issue create/update/delete, comment create/update/delete, attachment upload/delete and backlog rank. `GET` on the same path is **not** counted: the binding is method-conditioned, so board and issue reads are untouched. It covers **all** mutating verbs and not only `POST`, because a client refused on the create simply retries with the patch, and an update is not the cheap half — it writes history rows, bumps a version and fans out SSE and notifications to every watcher. Until this existed the entire write surface had no budget of any kind while reads and authentication had three. `180` is 3/s sustained, sized against the SPA's inline-edit saves and board drags. Past it: `429` + `Retry-After`. Counted **in memory, per node**, so N replicas allow up to N × this. Valid range 1–10000; **no "unlimited"** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED`. **Leave the line out to get the default — `WRITE_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 180** |
+| `WRITE_UPLOAD_BYTES_PER_MINUTE` | `250MB` | How many uploaded **bytes** one user may push per minute, summed over the **parsed** sizes of their uploads — never a client-declared `Content-Length`, which is a number the client sets. A separate denomination because **neither other control bounds bytes**: the request budget above counts requests, and one 20 MB upload is not one comment; the workspace quota counts *cumulative* bytes and never sees churn, since upload → delete → upload leaves the workspace total exactly where it started while billing every PUT and every stored byte in between. Past it: `429` + `Retry-After` (unlike the quota's `409`, the wait here is real — the window does empty). Must be **≥ `ATTACHMENT_MAX_FILE_SIZE`**, or a file this instance permits could never be uploaded and every attempt would answer `429` telling the caller to wait for room a fixed one-minute window can never make; the boot **refuses that pair**. In memory, per node. Off switch: `RATE_LIMIT_ENABLED`. **Empty stops the boot rather than restoring 250MB** |
 | `PUBLIC_SIGNUP_ENABLED` | `false` | Self-registration is **closed by default** on self-hosted installs — create accounts in the Admin console (Users → New user → share the setup link, no email needed). Set `true` to let anyone register |
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `PRIVACY_CONTACT_EMAIL` | *(empty)* | Address the in-app **Account** page tells a user to write to when they want their account deleted. It is served on the **public, unauthenticated** `GET /api/meta`, so whatever you set here is **published** to anyone who can reach the instance — use an address you are willing to have on the open internet, and expect it to be scraped like any address on a web page. Empty is the default and a supported answer: it does **not** hide the deletion section, which still explains what deletion does and tells the user this installation's administrator handles the request — an affordance that appeared only where somebody remembered to set a variable would be missing for exactly the operators who did not know it existed. Nothing here creates or monitors a mailbox, and the product promises no reply time: the deletion itself is carried out by the operator, out of band. A malformed value **aborts startup** rather than being published: it must be a single address of at most 255 characters, and the characters `mailto:` treats as separators (`? & # % , ; < >`), whitespace, quotes and backslashes are refused. |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
-| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search and report budgets and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`); see the rate-limiting section |
+| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search, report and **write** budgets (`WRITE_REQUESTS_PER_MINUTE`, `WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`); see the rate-limiting section. It does **not** reach the workspace storage quota (`STORAGE_QUOTA_ENABLED`, its own switch) or the backlog-rebalance cooldown (no switch at all) |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required. `SEED_ADMIN_PASSWORD` is capped at **72 UTF-8 bytes** — BCrypt's own ceiling, so it is the cap on every password the application stores, and bytes are not characters (Cyrillic costs 2 each, CJK 3, emoji 4). A longer value **aborts startup** rather than being truncated, but only where it would actually create the account: email set, over the limit, and nobody at that address yet |
+
+### Turning the storage quota on where there is already content
+
+`STORAGE_QUOTA_WORKSPACE_BYTES` takes effect on the **next request** — nothing is cached,
+nothing is migrated, and nothing warns anybody. So enabling it (or lowering it) on an
+instance that already holds attachments can stop every upload in a workspace the moment the
+deploy completes, and from the inside that is indistinguishable from an outage: the people
+affected get a `409` naming two numbers, and the refusal deliberately tells them to do
+nothing, because there is no action every reader of it can perform.
+
+Do it in two changes rather than one:
+
+```sql
+-- What your workspaces already hold. Run this BEFORE you choose a number.
+SELECT workspace_id, bytes_used, attachment_count, updated_at
+  FROM workspace_storage_usage
+ ORDER BY bytes_used DESC
+ LIMIT 20;
+```
+
+1. Set `STORAGE_QUOTA_WORKSPACE_BYTES` **above the largest existing workspace** and deploy.
+2. Watch `hamstrack_storage_quota_fill_max` (Grafana; `StorageFillHigh` fires at 0.9) for a
+   week, and `hamstrack_storage_quota_refused_total` for zero.
+3. Lower it deliberately, as its own change, once you know what the distribution looks like.
+
+The reverse direction needs no ceremony: **raising** the quota is immediate and affects
+nothing else. And `STORAGE_QUOTA_ENABLED=false` is always available as the fast way out — it
+stops the refusals while leaving the usage numbers, which are the ones you need in order to
+pick a value.
+
+### Attachments where the row and the object disagree (orphans)
+
+**The quota counts attachment *rows*, and rows and stored objects can each exist without the
+other.** Two paths produce a mismatch, and they run in opposite directions:
+
+- **An orphan object** — a delete succeeds and the follow-up blob deletion fails. The row is
+  gone, the object is not (logged at ERROR, never allowed to fail the request). Your store
+  charges for it; the quota does not, because the row it counted is gone. This one is in the
+  tenant's favour.
+- **An orphan row, which is the expensive one** — an upload's blob write **fails**, and the
+  compensating row delete then fails too (logged at **WARN**, carrying the workspace id and
+  the byte count for exactly this reason). There is no object: the store is what failed. What
+  survives is a row holding `size_bytes` for a file that was never written, so the workspace
+  **pays quota for nothing**, and the nightly reconciler cannot see it — it compares the
+  counter against the rows, the row exists, so the counter is correct and there is no drift to
+  report. Nothing else will ever notice. The remedy is to delete that row (its id is in the
+  log line) and the trigger returns the bytes.
+
+Neither is visible to the quota — it counts rows — and your store still charges for the first.
+There is no online sweeper on purpose: an interface method that lists a bucket invites a caller
+that pages it on a request thread. It is an operator procedure, and the live key set comes
+out of the database:
+
+```sql
+-- The keys that SHOULD exist for one workspace.
+SELECT storage_key FROM issue_attachments WHERE workspace_id = '<workspace-uuid>';
+```
+
+- **Local disk (`STORAGE_TYPE=local`)** — walk `ws/<workspace-uuid>/` under
+  `STORAGE_LOCAL_DIR`, subtract the keys above, delete the difference.
+- **S3 (`STORAGE_TYPE=s3`)** — list with `list-object-versions`, not `list-objects`, and
+  delete **every version and every delete marker**: on a versioned bucket a plain
+  `DeleteObject` writes a marker and keeps paying for the object underneath it.
+
+Do it with the application stopped, or accept that an upload in flight will look like an
+orphan. Sweeping the **store** never touches `workspace_storage_usage`: the counter follows
+rows, so deleting objects that no row names changes nothing the quota enforces. The other
+direction is the one that does — deleting a stranded **row** (the WARN case above) returns its
+bytes to the workspace, because the same trigger that counted them decrements them.
 
 Every variable the **application** reads is wired to a Spring property via a
 placeholder in `application.properties` (e.g. `DB_URL` → `spring.datasource.url`,
@@ -547,9 +623,22 @@ volumes:
 ```caddy
 # Caddyfile
 tracker.example.com {
+    # Match the upload ceiling. The repository's own Caddyfile takes this from
+    # {$ATTACHMENT_MAX_UPLOAD_SIZE:25MB} so the two cannot drift; a literal is fine
+    # if you keep your own file. Note the units: Caddy reads MB as 10^6 where the
+    # application reads it as 2^20, so this sits ~5% below the servlet ceiling.
+    request_body {
+        max_size 25MB
+    }
     reverse_proxy app:8080
 }
 ```
+
+**Set a body limit whichever proxy you use.** It is not only about rejecting junk earlier:
+Spring parses a multipart upload *before* it maps a handler, so an over-sized body reaches the
+application, is streamed to a temp file and is refused with `413` having spent **no** rate-limit
+budget — the one upload lane the application's own controls cannot charge for. The proxy is
+where that is refused cheaply.
 
 **nginx** (host-level, app published on `127.0.0.1:8080`):
 
@@ -771,9 +860,13 @@ STORAGE_S3_SECRET_KEY=...
 Two layers guard uploads:
 
 - **`ATTACHMENT_MAX_UPLOAD_SIZE`** (default `25MB`) is the hard servlet ceiling —
-  the multipart parser rejects anything larger at parse time (DoS guard). If you
-  raise it, bump your reverse proxy's body limit to match (nginx
-  `client_max_body_size`); Caddy has no default limit.
+  the multipart parser rejects anything larger at parse time (DoS guard). **The bundled
+  Caddy reads the same variable** (`request_body max_size` in the repository's
+  `Caddyfile`), so raising it moves the proxy limit with it. Caddy has no default limit
+  of its own, which is why the shipped file sets one: a body over the ceiling that
+  reaches the application has already been streamed to a temp file before any handler,
+  budget or permission check sees it. With your own proxy, set the limit yourself
+  (nginx `client_max_body_size`).
 - **`ATTACHMENT_MAX_FILE_SIZE`** (default `20MB`, must stay ≤ the ceiling) is the
   per-file business limit, enforced in the app so a future in-app admin setting
   can tune it without a redeploy.
@@ -799,7 +892,7 @@ Rate-limit tuning (all optional; defaults shown):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off every limiter that has an off switch, in one go: the auth budgets in this table, `REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE` the invitation ceilings (`INVITE_MAX_PER_SENDER_PER_HOUR` / `_PER_DAY`, `INVITE_RECIPIENT_COOLDOWN_MINUTES`, `INVITE_MAX_PER_RECIPIENT_PER_DAY`) and the auth-mail ceilings (`AUTH_MAIL_RECIPIENT_COOLDOWN_MINUTES`, `AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. One limiter is deliberately outside it: the backlog-rebalance cooldown, a fixed internal safety valve that protects the database from a whole-table rewrite storm and has no environment variable of its own. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
+| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off every limiter that has an off switch, in one go: the auth budgets in this table, `REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE`, `WRITE_REQUESTS_PER_MINUTE`, `WRITE_UPLOAD_BYTES_PER_MINUTE`, the invitation ceilings (`INVITE_MAX_PER_SENDER_PER_HOUR` / `_PER_DAY`, `INVITE_RECIPIENT_COOLDOWN_MINUTES`, `INVITE_MAX_PER_RECIPIENT_PER_DAY`) and the auth-mail ceilings (`AUTH_MAIL_RECIPIENT_COOLDOWN_MINUTES`, `AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. **A control that carries a switch of its own, or carries none at all, is outside this one**, and this is the list to read before assuming otherwise: the backlog-rebalance cooldown, a fixed internal safety valve that protects the database from a whole-table rewrite storm and has no environment variable of its own; and the **workspace storage quota** (`STORAGE_QUOTA_ENABLED`), which carries its own switch because removing a bound on your disk must not require disabling brute-force protection on your login page. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` | `15` | per-IP request budget/min across login, register, verify, resend, forgot & reset |
 | `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` | `5` | failed logins for one account before backoff starts |
 | `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` | `30` | first backoff delay (doubles on each further failure) |
@@ -844,6 +937,26 @@ reports limiter deliberately, because removing that binding would raise the
 panel’s allowance to the search budget as a side effect — so **the lower
 configured value binds**, and lowering *either* property lowers the panel. If you
 tune one of the two, check what it does to the panel.
+
+**The per-principal write budgets** (`WRITE_REQUESTS_PER_MINUTE`,
+`WRITE_UPLOAD_BYTES_PER_MINUTE`) are node-local on exactly the same terms and degrade the
+same way. They bound the mutating side of the API — everything under
+`/api/workspaces/*/projects/*/issues/**` for `POST`/`PUT`/`PATCH`/`DELETE`, plus the
+uploaded-byte total spent at the attachment door — and they are two properties rather than
+one because a request count does not bound bytes and most mutations carry none. `GET` on
+the same path is deliberately outside both; the binding is method-conditioned, so board and
+issue reads are never charged.
+
+**The workspace storage quota is the exception in the other direction, and it must stay
+one.** `STORAGE_QUOTA_WORKSPACE_BYTES` is **cluster-wide and exact** — its state is a row
+in PostgreSQL (`workspace_storage_usage`), maintained by a database trigger — so N replicas
+do not multiply it and a redeploy does not re-arm it. That is the requirement rather than an
+optimisation, and the reason is the same one the recipient-keyed mail ceilings give one
+paragraph down: **a bound on a bill may not divide by replica count, and a bound that resets
+on deploy is a bound the other side waits out.** It is also the one limiter here with an off
+switch of its own (`STORAGE_QUOTA_ENABLED`) rather than sharing `RATE_LIMIT_ENABLED` —
+removing a bound on your disk should not require disabling brute-force protection on your
+login page. If you scale out, do not "fix" the asymmetry by moving it into memory.
 
 **A node-local bound that is not a request limiter at all** is the dead-letter cap
 (`MAIL_NEVER_ATTEMPTED_MAX_PER_HOUR`). It counts rows *this process* has written to
@@ -1191,6 +1304,15 @@ changed": clear the address problem, pull again, and re-invite anyone whose link
 nothing is rewritten, but a description or comment already longer than the new bound refuses
 **every** save of that record — including one that changes something else — until somebody
 shortens it. There is a query there too, and on an ordinary install it returns zeros.
+
+**The same release also puts a ceiling on how much attachment storage one workspace may hold,
+and it arrives switched on:**
+[Attachment storage is capped per workspace from 0.18.0](#attachment-storage-is-capped-per-workspace-from-0180).
+An install whose largest workspace is under the ceiling sees nothing at all; one that is already
+over it has every new upload in that workspace refused with a `409` the moment the deploy
+completes — and because a `409` is a clean refusal it appears in no error rate and no log. There
+is a query there that answers "am I affected" before you pull, and the ceiling you get
+(100 GB or 10 GB) follows `SPRING_PROFILES_ACTIVE`, not the fact that you are self-hosting.
 
 **And the same release bounds and tunes the database container, which is the one change here
 that lands differently depending on how big your host is:**
@@ -2114,6 +2236,66 @@ non-zero answer from it is a list to re-check with the first query, not a list o
 Text-area custom field values and field-definition `config` are deliberately not in the query:
 they are stored inside JSONB documents rather than in a prose column. Both behave the same way —
 refused on save, unchanged in storage, fixed by shortening once.
+
+### Attachment storage is capped per workspace from 0.18.0
+
+Before 0.18.0 nothing bounded how much attachment storage one workspace could occupy:
+`ATTACHMENT_MAX_FILE_SIZE` refused one large file and nothing refused the ten-thousandth
+small one. From 0.18.0 there is a per-workspace ceiling and **it arrives switched on**
+(`STORAGE_QUOTA_ENABLED` defaults to `true`), so it applies at the container restart your
+upgrade performs, to an install whose `.env` names neither variable.
+
+**The break-even is one number.** A workspace holding **less** than the ceiling sees no
+change of any kind — no refusal, nothing slower, nothing hidden. A workspace already holding
+**more** has every new upload in it answered `409 STORAGE_QUOTA_EXCEEDED` from the moment the
+deploy completes, with no warning to anyone and no entry in any error rate, because a `409` is
+a clean refusal rather than a fault. Existing files stay readable and downloadable and
+nothing is deleted, archived or expired; only new uploads are refused.
+
+The ceiling is **100 GB self-hosted, 10 GB on the `cloud` profile**, and *which one you get
+follows `SPRING_PROFILES_ACTIVE`*. `.env.prod.example` ships `cloud`, so an install that
+never changed that line is on the **10 GB** ceiling while this page quotes 100 GB — the most
+likely way to be surprised by this change is to be on the wrong profile rather than to be a
+large install.
+
+**Am I affected? One query, before you pull.** It works on any 0.17.x instance (the counter
+table does not exist yet, so it counts the rows directly):
+
+```bash
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
+SELECT i.workspace_id,
+       pg_size_pretty(SUM(a.size_bytes)) AS attachments
+  FROM issue_attachments a
+  JOIN issues i ON i.id = a.issue_id
+ GROUP BY i.workspace_id
+ ORDER BY SUM(a.size_bytes) DESC
+ LIMIT 20;
+SQL
+```
+
+Zero rows, or a largest workspace comfortably under your ceiling, means this change is
+invisible to you. Otherwise pick one of two values and put it in `.env` **before** the pull:
+
+| Situation | Line to add |
+|---|---|
+| Largest workspace is over the ceiling and you want the cap anyway | `STORAGE_QUOTA_WORKSPACE_BYTES=` a value above it (e.g. `500GB`) |
+| You are self-hosting and `.env` still says `SPRING_PROFILES_ACTIVE=cloud` | `SPRING_PROFILES_ACTIVE=dc` — and read [the deployment-model note](#configuration): the profile also decides public signup and where attachments are stored |
+| You do not want a ceiling at all | `STORAGE_QUOTA_ENABLED=false` |
+
+`STORAGE_QUOTA_ENABLED=false` stops the refusals and keeps the bookkeeping: usage is still
+counted and still shown on **Workspace settings → Storage**, which is the figure you need in
+order to choose a number later. Once you know the distribution, lower the ceiling deliberately
+as its own change — the procedure is
+[Turning the storage quota on where there is already content](#turning-the-storage-quota-on-where-there-is-already-content).
+
+After the upgrade the same question is one primary-key read per workspace:
+
+```sql
+SELECT workspace_id, bytes_used, attachment_count, updated_at
+  FROM workspace_storage_usage
+ ORDER BY bytes_used DESC
+ LIMIT 20;
+```
 
 ## Backups
 

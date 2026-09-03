@@ -8,7 +8,7 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A per-principal, per-minute fixed window — the mechanism behind every expensive-surface budget
@@ -34,6 +34,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * otherwise be an authenticated log-flooding vector (disk on DC, ingest cost on Cloud);
  * {@link ProductMetrics#rateLimitHit} has bounded cardinality and is alertable, and the per-request
  * detail stays at DEBUG naming only ids.
+ *
+ * <p><strong>Not every budget built on this class is a path binding, and the seal for one that is
+ * not lives elsewhere</strong> (HD-191). The reports, search and write budgets are spent by
+ * {@link PrincipalThrottleInterceptor} against a registered pattern, and
+ * {@code ThrottleCoverageTest} seals that set. {@code UploadByteBudget} cannot be: its cost is
+ * {@code MultipartFile.getSize()}, and an interceptor has neither the parsed part nor a reason to
+ * look at one — exactly as the invitation ceilings cannot be, because theirs is keyed on the
+ * recipient. Its seal is {@code AttachmentDoorsTest}, on the axis of {@code FileStorage.store}
+ * call sites rather than of paths.
  */
 @Slf4j
 public abstract class PerPrincipalMinuteBudget {
@@ -50,8 +59,18 @@ public abstract class PerPrincipalMinuteBudget {
     /** Whether limiting is on at all — {@code app.rate-limit.enabled}, the app-wide master switch. */
     protected abstract boolean enabled();
 
-    /** How many requests one principal may make against this surface per minute. */
-    protected abstract int limit();
+    /**
+     * How many UNITS of this surface one principal may spend per minute.
+     *
+     * <p><strong>{@code long}, and a "unit" is not always a request</strong> (HD-191). Three
+     * budgets denominate in requests and one — {@code UploadByteBudget} — denominates in BYTES,
+     * where a per-minute allowance runs to hundreds of millions and an {@code int} is a ceiling
+     * of about 2 GB that nothing in the configuration would warn anybody about. One mechanism,
+     * two denominations: the window arithmetic, the eviction sweep, the {@code Retry-After}
+     * computation and the metric-not-a-log-line refusal are the same in both, which is this
+     * class's own argument for not copying the loop.
+     */
+    protected abstract long limit();
 
     /** The metric tag this surface's refusals are counted under. */
     protected abstract RateLimitKind kind();
@@ -67,13 +86,32 @@ public abstract class PerPrincipalMinuteBudget {
      * key, which would let one anonymous request exhaust everybody's budget.
      */
     public void require(UUID userId) {
+        require(userId, 1);
+    }
+
+    /**
+     * Spend {@code cost} units of {@code userId}'s budget, or refuse with a 429 naming how long
+     * to wait.
+     *
+     * <p>The costed form exists for the upload-byte budget, whose unit is a byte and whose cost
+     * is {@code MultipartFile.getSize()} — the PARSED size, never a client-declared
+     * {@code Content-Length}. A budget that trusted the header would be a budget the client
+     * sets.
+     *
+     * <p><strong>A single spend can exceed the whole budget, and that is the intended
+     * behaviour.</strong> The comparison is against the running total, so an upload larger than
+     * the per-minute allowance is refused outright rather than being admitted "because the
+     * window was empty" — and the configuration that would make every legal file do that is
+     * refused at startup instead ({@code StorageQuotaConsistency}).
+     */
+    public void require(UUID userId, long cost) {
         if (!enabled() || userId == null) {
             return;
         }
         long nowMinute = Instant.now().getEpochSecond() / 60;
         var window = windows.compute(userId, (id, existing) ->
                 (existing == null || existing.epochMinute != nowMinute) ? new Window(nowMinute) : existing);
-        if (window.count.incrementAndGet() <= limit()) {
+        if (window.count.addAndGet(cost) <= limit()) {
             return;
         }
         long retryAfter = Math.max((nowMinute + 1) * 60 - Instant.now().getEpochSecond(), 1);
@@ -95,7 +133,7 @@ public abstract class PerPrincipalMinuteBudget {
 
     private static final class Window {
         final long epochMinute;
-        final AtomicInteger count = new AtomicInteger();
+        final AtomicLong count = new AtomicLong();
 
         Window(long epochMinute) {
             this.epochMinute = epochMinute;

@@ -1,6 +1,7 @@
 package com.hamstrack.report;
 
 import com.hamstrack.common.ratelimit.PrincipalThrottleInterceptor;
+import com.hamstrack.common.ratelimit.WriteRateLimitConfig;
 import com.hamstrack.report.ratelimit.ReportRateLimitConfig;
 import com.hamstrack.report.ratelimit.ReportRateLimiter;
 import com.hamstrack.search.ratelimit.SearchRateLimitConfig;
@@ -152,7 +153,18 @@ class ThrottleCoverageTest {
               8. docs/hql-search-maintainers-guide.md                    — the ratelimit/** row of the
                  package table
               9. src/main/frontend/src/api.ts                            — the 429 comments on the
-                 search, insights and saved-filter callers
+                 search, insights, saved-filter, storage-breakdown and attachment-upload callers
+             10. src/main/java/.../common/config/WriteProperties.java    — the two write budgets
+                 (requests and BYTES), and common/config/StorageQuotaProperties.java for the quota
+                 that is deliberately NOT under the master switch
+             11. src/main/resources/application.properties               — the app.write.* and
+                 app.storage.quota.* blocks, AND both lists in the app.rate-limit.enabled block:
+                 the numbered enumeration of what it turns off, and the "deliberately outside it"
+                 list, which now has two entries
+             12. src/main/resources/application-cloud.properties         — the 10GB quota override
+             13. .env.prod.example                                       — the Write-budget and
+                 Storage-quota sections
+             14. observability/grafana/provisioning/alerting/rules.yml   — the four Storage* rules
 
             Two claims to re-check rather than copy, because both have been false in this tree \
             already: "the whole X surface" (insights is a report OUTSIDE .../reports/**) and "the \
@@ -180,8 +192,29 @@ class ThrottleCoverageTest {
             com.hamstrack.common.mail.MailThrottleCoverageTest, which inverts the axis from PATH \
             to MAILER: every ProductMetrics.EmailType is either recipient-throttled or exempt with \
             a written reason, so a fourth kind of outbound mail fails one test that names what to \
-            do. If you are adding an expensive surface, ask BOTH questions — is it a path that \
-            needs a budget, and does it send mail to an address the caller chose?
+            do.
+
+            AND THERE IS NOW A THIRD AXIS (HD-191). Handing bytes to FileStorage is neither a \
+            path question nor a mail question: the upload-byte budget's cost is \
+            MultipartFile.getSize(), which an interceptor cannot see, and the workspace storage \
+            quota needs a RESOLVED workspace, so neither is expressible as a registered pattern \
+            and neither appears in the seal above. Their seal is \
+            com.hamstrack.issue.AttachmentDoorsTest, which inverts the axis to STORAGE CALL \
+            SITES: every call site of FileStorage.store is preceded, in the same METHOD, by a \
+            quota reservation and a byte spend.
+
+            The fourth axis, and the reason the write budget is not fully sealed here: the write \
+            registration is METHOD-CONDITIONED, and a path-shaped assertion cannot express \
+            "every mutating handler is covered, every read on the same path is not". \
+            com.hamstrack.common.ratelimit.WriteThrottleCoverageTest owns that, over every \
+            mutating handler under /api/workspaces/**, with an EXEMPT set populated by category \
+            and one written reason each.
+
+            So if you are adding an expensive surface, ask THREE questions — is it a path that \
+            needs a budget, does it send mail to an address the caller chose, and does it hand \
+            bytes to FileStorage? And if it is a WRITE, ask the fourth: is it under a \
+            method-conditioned binding, or does it belong in WriteThrottleCoverageTest's EXEMPT \
+            set with a reason?
             """;
 
     @Autowired
@@ -192,6 +225,10 @@ class ThrottleCoverageTest {
 
     @Autowired
     SearchRateLimitConfig searchRateLimitConfig;
+
+    /** HD-191 — the third configurer, and the first one whose binding is method-conditioned. */
+    @Autowired
+    WriteRateLimitConfig writeRateLimitConfig;
 
     @Test
     void everyReportAndSearchHandlerSitsBehindAPerPrincipalThrottle() throws Exception {
@@ -265,8 +302,20 @@ class ThrottleCoverageTest {
     }
 
     /**
-     * <strong>The throttled path set is sealed: exactly four patterns, two per budget</strong>
-     * (HD-140 R6 round 4, item 3).
+     * <strong>The throttled path set is sealed — every pattern each configurer registers, asserted
+     * exactly</strong> (HD-140 R6 round 4, item 3; extended by HD-191).
+     *
+     * <p>Deliberately not introduced by a count. The sentence this replaced said "exactly four
+     * patterns, two per budget", and it was false the moment a third budget arrived — a number
+     * goes stale one entry before the list does, which is a rule this repository has already paid
+     * for twice.</p>
+     *
+     * <p>Nor does the assertion below seal every LIMITER; it seals the path bindings. Three
+     * limiters in the product are not path bindings at all (the recipient-keyed mail ceilings, the
+     * upload-byte budget, the storage quota) and one is a path binding whose method condition this
+     * cannot see. {@link #PROPAGATION_CHECKLIST} names the sibling seal for each.</p>
+     *
+     * <p>Original argument, unchanged:</p>
      *
      * <p>The sibling test above asks "is every handler covered?", which is the safety property. This
      * one asks the documentation property, which is different and had been failing quietly: <em>has
@@ -295,10 +344,14 @@ class ThrottleCoverageTest {
                     + " Note in particular that it is NOT only .../reports/**: the Insights panel"
                     + " is a report bound explicitly, which is why 'the whole reports surface' and"
                     + " 'the only bound on the work a report does' were both false for two rounds."
+                    + " Nor is it only REPORTS: the workspace storage BREAKDOWN is on this budget"
+                    + " (HD-191), because it is a grouped aggregate over every attachment row in"
+                    + " the workspace — O(workspace content), which is this pot's denomination."
                     + PROPAGATION_CHECKLIST)
                 .containsExactlyInAnyOrder(
                         "/api/workspaces/*/projects/*/reports/**",
-                        "/api/workspaces/*/search/insights");
+                        "/api/workspaces/*/search/insights",
+                        "/api/workspaces/*/storage/projects");
 
         assertThat(registeredPatterns(searchRateLimitConfig))
                 .as("the SEARCH budget covers a different set of paths than the documents say."
@@ -309,6 +362,18 @@ class ThrottleCoverageTest {
                 .containsExactlyInAnyOrder(
                         "/api/workspaces/*/search/**",
                         "/api/workspaces/*/filters/**");
+
+        assertThat(registeredPatterns(writeRateLimitConfig))
+                .as("the WRITE budget covers a different set of paths than the documents say."
+                    + " It is ONE pattern on purpose — the mutating content surface as a category,"
+                    + " not a list of today's endpoints — and it is deliberately NOT"
+                    + " /api/workspaces/**, which would charge one pot for administrative writes,"
+                    + " membership writes and saved-filter writes that are already bounded"
+                    + " elsewhere or on a different axis. It is also the first registration in this"
+                    + " file whose binding is METHOD-CONDITIONED, so this assertion is only half of"
+                    + " its seal: WriteThrottleCoverageTest owns the other half, on the method axis."
+                    + PROPAGATION_CHECKLIST)
+                .containsExactlyInAnyOrder("/api/workspaces/*/projects/*/issues/**");
     }
 
     /**

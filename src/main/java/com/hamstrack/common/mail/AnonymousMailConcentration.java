@@ -85,8 +85,10 @@ import java.time.Instant;
  *
  * <ul>
  *   <li>the exception is caught and logged at {@code WARN} rather than killing the scheduler
- *       thread — {@code @Scheduled} suppresses nothing, and a thrown task on a single-threaded
- *       scheduler is a stall the other jobs inherit;</li>
+ *       thread — {@code @Scheduled} suppresses nothing, and a thrown task spends one of the FEW
+ *       threads every scheduled job in this product shares
+ *       ({@code spring.task.scheduling.pool.size} is a small pool and not a thread per job,
+ *       whatever it is sized to), which the other jobs inherit as a delay;</li>
  *   <li>{@code hamstrack.mail.anonymous_recipient_max_age_seconds} carries how long ago the value
  *       was last <em>successfully</em> refreshed, so a rule can distinguish "quiet" from "stale";
  *       {@code MailConcentrationGaugeStale} in {@code rules.yml} is that rule;</li>
@@ -150,8 +152,11 @@ public class AnonymousMailConcentration {
         } catch (RuntimeException e) {
             // NOT rethrown, and the WARN is the whole of the handling. Rethrowing would leave the
             // gauge frozen at its last value exactly as this catch does — @Scheduled has nothing to
-            // retry with — while additionally spending the single scheduler thread on a stack
-            // trace the other seven @Scheduled classes wait behind. What actually makes the failure
+            // retry with — while additionally spending one of the FEW threads every @Scheduled job
+            // in this product shares (spring.task.scheduling.pool.size, a small pool and not a
+            // thread per job; it was literally one thread until HD-191 sized it, and this comment
+            // said "the other seven classes wait behind" — a count that was stale two jobs before
+            // the sentence was). What actually makes the failure
             // visible is that the age gauge stops being reset, which is a monotonically rising
             // number a rule can see; this line is for the operator who then asks why.
             log.warn("anonymous mail concentration gauge not refreshed; "

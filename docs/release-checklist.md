@@ -367,9 +367,30 @@ not be left to discover:
 > upgrade. Details:
 > [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
 
-0.18.0 changes a resource default of its own, in the database container this time. It is in
-this class for the reason the section opens with: it improves the small host it was measured
-on and takes something away from a larger one, and neither direction produces an error.
+0.18.0 changes resource defaults of its own. One is in the database container; the other is a
+setting that **did not exist before the release and arrives switched on**, which is the sharper
+member of this class: there is no old value to compare against, so nothing in an operator's
+`.env` and nothing in their memory can tell them a ceiling appeared.
+
+> **Attachment storage is now capped per workspace (`STORAGE_QUOTA_ENABLED` `true`,
+> `STORAGE_QUOTA_WORKSPACE_BYTES` `100GB` self-hosted / `10GB` on the `cloud` profile).**
+> Nothing bounded a workspace's total attachment storage before this release. From now on a
+> workspace already holding **more** than the ceiling has every new upload in it refused with
+> **`409` `STORAGE_QUOTA_EXCEEDED`** the moment the deploy completes — and because that is a
+> clean refusal it appears in no error rate and no log. A workspace under the ceiling sees no
+> change at all; nothing is deleted, archived or expired, and existing files stay readable and
+> downloadable either way. **Check before you pull** — on 0.17.x the answer comes from the rows:
+> `SELECT i.workspace_id, pg_size_pretty(SUM(a.size_bytes)) FROM issue_attachments a JOIN issues i ON i.id = a.issue_id GROUP BY i.workspace_id ORDER BY SUM(a.size_bytes) DESC LIMIT 20;`
+> If your largest workspace is over the ceiling, set `STORAGE_QUOTA_WORKSPACE_BYTES` above it in
+> `.env` (or `STORAGE_QUOTA_ENABLED=false`) before upgrading, then lower it deliberately as its
+> own change. **Which default you get follows `SPRING_PROFILES_ACTIVE`, not the fact that you are
+> self-hosting** — `.env.prod.example` ships `cloud`, so an install that never changed that line
+> is on the 10 GB ceiling. Details:
+> [Attachment storage is capped per workspace from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#attachment-storage-is-capped-per-workspace-from-0180).
+
+The database one is in this class for the reason the section opens with: it improves the small
+host it was measured on and takes something away from a larger one, and neither direction
+produces an error.
 
 > **PostgreSQL is bounded and tuned (`POSTGRES_MEMORY_LIMIT` `512m`,
 > `POSTGRES_EFFECTIVE_CACHE_SIZE` `512MB`).** If you run the bundled `docker-compose.prod.yml`,

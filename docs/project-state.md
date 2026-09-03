@@ -341,9 +341,9 @@ These are policy, not backlog, and they are enforced structurally rather than an
 
 ### Throttling, config and the rule behind them
 
-Two per-principal budgets, both in-memory per node, both switched off by `app.rate-limit.enabled`:
+The per-principal budgets this subsystem owns are in-memory per node and switched off by `app.rate-limit.enabled` (a count here would go stale one entry before the list does — HD-191 added two more, on the write surface):
 
-- **`app.reports.requests-per-minute`** (`REPORTS_REQUESTS_PER_MINUTE`, default 60) over `…/projects/*/reports/**` **plus** `…/search/insights`, which is bound explicitly because it is a report that does not live under that path.
+- **`app.reports.requests-per-minute`** (`REPORTS_REQUESTS_PER_MINUTE`, default 60) over `…/projects/*/reports/**` **plus** `…/search/insights` **plus** `…/workspaces/*/storage/projects` (HD-191), each bound explicitly because it is O(tenant content) work that does not live under that path — the storage breakdown is a grouped aggregate over every attachment row in the workspace, which is this budget's exact denomination.
 - **`app.search.requests-per-minute`** (`SEARCH_REQUESTS_PER_MINUTE`, default 120) over `…/search/**` **and** `…/filters/**`. A separate pot because somebody typing in a search box legitimately fires several requests a minute and must not be starved to protect charts.
 
 **Insights is inside both patterns and spends both; the lower configured value binds.** It sits on the reports limiter deliberately — removing that binding would raise the panel's allowance to the search budget as a side effect.
@@ -387,6 +387,20 @@ The defect this closes: a notification's `title` and `body` are **denormalised c
 
 **Known residual, recorded rather than hidden — and it is a coupling, not a leak.** `CommentService.applyMentions` builds its candidate set from *every* workspace member, with no project-access check. That was first written up as "a member can be mentioned into a project they cannot open", and **the premise is false**: the `Permission` catalog has no read/view constant, `WorkspaceAccessService.resolveProject` resolves a non-OPEN project rather than refusing it, and `fallback` returns an empty `PermissionSet` — so a workspace member can already read every project's issues and comments and only lacks the ability to *act*. A mention discloses nothing they could not fetch directly. What is real is the latent coupling: **the day a read permission enters the catalog, the workspace-wide candidate set becomes a disclosure**, and whoever adds it owns narrowing this picker in the same change. This ticket's claim is exactly "workspace membership", and the column added is deliberately `workspace_id`, not `project_id`.
 
+## Write budget & workspace storage quota (HD-191, V26)
+
+Two controls that look alike and defend different things. **The write budget is keyed on the actor** and defends the instance — connection pool, CPU, store requests, SSE and notification fan-out. **The storage quota is keyed on the tenant** and defends the bill and the disk. Neither substitutes for the other: one member can exhaust a shared workspace quota entirely within their own budget, and the quota never sees churn (upload → delete → upload leaves the total where it started while every stored byte in between has been paid for). Removing either leaves a real hole.
+
+**API (new).** `GET /api/workspaces/{wsId}/storage` — any member, unbudgeted, one primary-key read plus two properties; returns `quotaEnabled` and usage, with `quotaBytes`/`availableBytes`/`percentUsed` **`null` rather than a sentinel** when the quota is off, so clients narrow on the flag. `GET /api/workspaces/{wsId}/storage/projects` — `workspace.edit` (real disclosure: project names and volumes), on the **reports** budget, publishing `unattributedBytes` rather than normalising it away. Both resolve through `WorkspaceAccessService.requireMember`, so non-existence and non-membership are both 404; the single 403 in the feature is a proven member without `workspace.edit` on the breakdown.
+
+**API (changed).** `POST …/issues/{n}/attachments` gains **409 `STORAGE_QUOTA_EXCEEDED`** carrying `quotaBytes`, `usedBytes`, `availableBytes` and `fileBytes` — **not** a 429 and with **no `Retry-After`**, because waiting frees no bytes and 413 is already taken twice by the per-file ceilings. Every mutating handler under `…/projects/*/issues/**` gains **429 + `Retry-After`** from the write budget; the upload additionally spends the byte budget, whose 429 is told from the request one by `detail`.
+
+**Config** (`docs/api-dc.md` operator table, `.env.prod.example`, `docs/self-hosting.md`): `WRITE_REQUESTS_PER_MINUTE` (180), `WRITE_UPLOAD_BYTES_PER_MINUTE` (250MB), `STORAGE_QUOTA_ENABLED` (true), `STORAGE_QUOTA_WORKSPACE_BYTES` (100GB base, **10GB in the `cloud` profile** — differs by property, never by code path), `STORAGE_QUOTA_WARN_PERCENT` (80), `STORAGE_QUOTA_RECONCILE_CRON`. The two budgets are under `app.rate-limit.enabled`; **the quota deliberately is not** — folding it in would mean removing a disk bound requires disabling brute-force protection on the login page. That is the second control outside the master switch, and the claim to carry forward is the *property* (a bound with its own switch, or with none, is outside it), not the number.
+
+**Accounting.** Usage is a counter row in `workspace_storage_usage` maintained by a database trigger — so it follows FK cascades the application does not participate in, it is **cluster-wide and exact** rather than node-local like the budgets, and there is no managed entity that can clobber it (the `issue_seq` scar, answered structurally). It counts **rows**, not objects in the store, so a blob orphaned by a failed delete is invisible to it; a reconciler re-derives the total on a schedule and publishes the drift.
+
+**Where this is documented:** `openapi.yaml` (the two operations, `WorkspaceStorageResponse` / `ProjectStorageEntry` / `WorkspaceStorageByProjectResponse` / `StorageQuotaProblemDetail`, the `WriteThrottled` response, the upload's 409/429 and the info-description rate-limit prose) · `docs/api-cloud.md` + `docs/api-dc.md` (*Workspace storage* under Workspaces, the *Attachments* refusal ordering, *Rate limits*, and on DC the six operator rows) · `docs/self-hosting.md` · `.env.prod.example` · `application.properties` + `application-cloud.properties` · `docs/design/write-budget-and-storage-quota-proposal.md`. The authoritative propagation list for a change to a *throttled path* remains `ThrottleCoverageTest.PROPAGATION_CHECKLIST`.
+
 ## Phase 3 API surface
 
 The user-facing REST reference lives in `docs/api-cloud.md` / `docs/api-dc.md` and `src/main/frontend/public/openapi.yaml`. Quick internal map (roles in parens):
@@ -417,10 +431,13 @@ GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments           # lis
 PATCH  /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments/{id}      # update (author only)
 DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{n}/comments/{id}      # soft delete (author only)
 
-POST   /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments        # upload (multipart, field "file")
+POST   /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments        # upload; 409 STORAGE_QUOTA_EXCEEDED, 429 write+byte budget
 GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments        # list
 GET    /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # download (Content-Disposition: attachment)
 DELETE /api/workspaces/{wsId}/projects/{pId}/issues/{n}/attachments/{id}   # delete (uploader or project MANAGER)
+
+GET    /api/workspaces/{wsId}/storage                      # attachment-storage usage + ceiling (any member; unbudgeted)
+GET    /api/workspaces/{wsId}/storage/projects             # the same total by project (workspace.edit; on the reports budget)
 ```
 
 Since M1 the taxonomy is NOT seeded per workspace — it lives in the global catalog (V6 seeds Bug/Task/Story/Epic, To Do/In Progress/Done, Urgent…None, "Default workflow", "Default priorities") and reaches projects through bindings; see the Admin console section.

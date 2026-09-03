@@ -54,7 +54,7 @@ public class SearchRateLimiter extends PerPrincipalMinuteBudget {
     }
 
     @Override
-    protected int limit() {
+    protected long limit() {
         return searchProperties.requestsPerMinute();
     }
 

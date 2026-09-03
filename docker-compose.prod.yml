@@ -292,6 +292,13 @@ services:
     image: caddy:2-alpine
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:?set SITE_ADDRESS in .env}
+      # The edge body limit the Caddyfile reads (HD-191). Same variable the app's servlet
+      # multipart ceiling reads, so the two cannot drift: an operator who raises the upload
+      # ceiling raises the proxy with it, in one line, without knowing this file exists.
+      # Quoted because compose rejects a non-string environment value, and defaulted here as
+      # well as in the Caddyfile so an operator who never sets it gets the same 25MB in both
+      # places rather than an unbounded proxy in front of a bounded app.
+      ATTACHMENT_MAX_UPLOAD_SIZE: "${ATTACHMENT_MAX_UPLOAD_SIZE:-25MB}"
     ports:
       - "80:80"
       - "443:443"

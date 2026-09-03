@@ -5,6 +5,7 @@ import com.hamstrack.common.config.AttachmentProperties;
 import com.hamstrack.common.event.AttachmentAdded;
 import com.hamstrack.common.event.AttachmentDeleted;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.ratelimit.UploadByteBudget;
 import com.hamstrack.common.security.Permission;
 import com.hamstrack.common.storage.FileStorage;
 import com.hamstrack.common.tx.AfterCommit;
@@ -14,6 +15,7 @@ import com.hamstrack.issue.entity.IssueAttachment;
 import com.hamstrack.issue.exception.AttachmentNotFoundException;
 import com.hamstrack.issue.repository.IssueAttachmentRepository;
 import com.hamstrack.workspace.service.WorkspaceAccessService;
+import com.hamstrack.workspace.service.WorkspaceStorageService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -44,6 +46,10 @@ public class AttachmentService {
     private final ProductMetrics metrics;
     private final AttachmentProperties attachmentProperties;
     private final TransactionTemplate txTemplate;
+    /** HD-191: the per-principal byte budget, spent before any DB work. */
+    private final UploadByteBudget uploadByteBudget;
+    /** HD-191: the per-workspace quota reservation, spent inside the reserve transaction. */
+    private final WorkspaceStorageService workspaceStorage;
 
     public record AttachmentDownload(String filename, String contentType, long sizeBytes, InputStream stream) {}
 
@@ -66,6 +72,78 @@ public class AttachmentService {
      * </ol>
      * Because {@code @Transactional} self-invocation would bypass the proxy, the two
      * DB steps run via {@link TransactionTemplate} rather than same-bean calls.
+     *
+     * <p><strong>Two HD-191 controls are spent here, in two different places, for two
+     * different reasons.</strong> The per-principal byte budget is spent in the cheap
+     * pre-check phase — before any DB work, so a refused upload takes no lock and touches
+     * no row — and that is safe despite running before tenancy resolution because its key
+     * is the CALLER: the 429 is identical for a real workspace, a nonexistent one and
+     * somebody else's, so the 404-for-all-three contract is untouched. The workspace quota
+     * reservation is spent INSIDE step 1's transaction, after tenancy, after the permission
+     * and after the archived check, and before the row is saved — which is what makes
+     * "<strong>no byte of a refused upload is ever passed to {@code FileStorage}</strong>"
+     * true by construction rather than by ordering luck: {@code fileStorage.store} is only
+     * reached after that transaction commits.
+     *
+     * <p>The resulting refusal order on this door is
+     * {@code 400 empty} → {@code 413 too large} → {@code 415 bad extension} →
+     * {@code 429} byte budget → {@code 404} non-member/unknown issue →
+     * {@code 403} missing {@code attachment.create} → {@code 409} archived project →
+     * {@code 409} quota — the budget FOURTH, before tenancy, because it is spent in the
+     * pre-check phase above and not inside the transaction. That position is safe rather
+     * than merely convenient: the budget is keyed on the CALLER, so its 429 is byte-for-byte
+     * identical for a real workspace, a nonexistent one and somebody else's, and a refusal
+     * that cannot vary with the target discloses nothing about it — the 404-for-all-three
+     * contract survives a 429 arriving first. Cheapest first is the other half: the request
+     * that is refused here has taken no lock and read no row. Three rules pin the rest and
+     * all predate this ticket: a 403 must never depend on project state (so the permission
+     * precedes the archived check), a refused request must not have paid for a lock (so
+     * every cheap check precedes the reservation), and between the two 409s archived comes
+     * first — it is about <em>this</em> project, it needs no lock, and a quota message on an
+     * archived project would send the reader to fix the wrong thing. The order is asserted
+     * by {@code WriteBudgetTest.theByteBudgetIsSpentBeforeTenancyAndItsRefusalNamesNoTarget},
+     * so this list cannot go stale silently again — it already did once, naming the 429
+     * seventh while the code spent it fourth.
+     *
+     * <p><strong>What neither control bounds, stated so nobody re-derives it from a
+     * surprise.</strong> {@code spring.servlet.multipart.resolve-lazily} is unset, so multipart
+     * resolution is EAGER: {@code DispatcherServlet.checkMultipart} parses the request before
+     * {@code getHandler()}, therefore before every interceptor and before this method. Two
+     * consequences, and the second is the one that is easy to write backwards:
+     * <ul>
+     *   <li><strong>A body over {@code spring.servlet.multipart.max-request-size} is refused by
+     *       the parser, so no handler is ever mapped, so NEITHER budget is spent.</strong> Tomcat
+     *       streams and buffers until the cap trips and the 413 comes from the exception handler
+     *       — one socket read and one temp file, charged to nobody. In-process that is the
+     *       cheapest lane on this door and the only one with no bound at all.</li>
+     *   <li><strong>Under the cap, the budgets bound the rate at which uploads are ACCEPTED, not
+     *       the rate at which bytes are ingested</strong> — a request that ends in 429 has
+     *       already been parsed.</li>
+     * </ul>
+     *
+     * <p>So the bound on the pre-parse lane lives at the EDGE, which is the only place a body can
+     * be refused before this process allocates anything for it: the shipped {@code Caddyfile}
+     * sets {@code request_body max_size} from {@code ATTACHMENT_MAX_UPLOAD_SIZE} — the same
+     * variable that feeds the servlet ceiling, so the two cannot drift — and
+     * {@code docs/self-hosting.md} tells an operator fronting the stack with their own proxy to
+     * match it.
+     *
+     * <p><strong>Deliberately not also closed with a servlet {@code Filter}.</strong> The option
+     * is real — a filter runs before {@code checkMultipart} and the {@code SecurityContext} is
+     * already populated, so the pre-parse lane could be made to cost a write unit — and it is
+     * declined for three reasons rather than overlooked. <em>(a)</em> It gives one budget two
+     * spend sites: {@code PrincipalThrottleInterceptor} already charges every {@code POST} under
+     * {@code /api/workspaces/*}{@code /projects/*}{@code /issues/**}, so the filter double-charges
+     * unless a request attribute tells the interceptor to stand down — and then "is this handler
+     * throttled?" stops being the type question {@code WriteThrottleCoverageTest} reads off the
+     * real handler chain. <em>(b)</em> An exception thrown from a filter never reaches the
+     * {@code HandlerExceptionResolver} chain, so the shared 429 + {@code Retry-After} body would
+     * have to be rendered a second time by hand beside the one {@code GlobalExceptionHandler}
+     * produces — one declared control with two refusal shapes, which is ADR-0018's mistake in a
+     * different costume. <em>(c)</em> It could only ever bound a COUNT: before the parse the only
+     * size available is the client-declared {@code Content-Length}, absent entirely under chunked
+     * encoding, and that is exactly the number this door refuses to trust. Bytes are bounded
+     * where bytes can be refused, which is the proxy.
      */
     public AttachmentResponse upload(User actor, UUID workspaceId, UUID projectId, long issueNumber, MultipartFile file) {
         // Cheap pre-checks (no DB) so an empty upload never reserves a row.
@@ -73,6 +151,9 @@ public class AttachmentService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "File is empty");
         }
         validateUpload(file);
+        // The PARSED size, never a client-declared Content-Length — a budget that trusted the
+        // header would be a budget the client sets.
+        uploadByteBudget.require(actor.getId(), file.getSize());
 
         // Step 1 — short tx: resolve (tenant scoping) + persist the row, assemble the
         // response, and commit. The key is server-generated from the resolved ids.
@@ -82,10 +163,20 @@ public class AttachmentService {
             ictx.permissions().require(Permission.ATTACHMENT_CREATE);
             var issue = ictx.issue();
             requireNotArchived(issue);
+            // The quota reservation: bound, then lock, then compare. It takes the RESOLVED
+            // context and not an id, so "keyed on the workspace requireIssue proved, never on the
+            // one in the URL" is enforced by the signature rather than by this comment — reading
+            // the wrong tenant's total is worse than having no quota at all. Throws 409
+            // STORAGE_QUOTA_EXCEEDED, which rolls this transaction back: no row, no blob, no
+            // counter change.
+            workspaceStorage.reserve(ictx.workspaceContext(), file.getSize());
 
             var filename = sanitizeFilename(file.getOriginalFilename());
             var attachment = new IssueAttachment();
             attachment.setIssue(issue);
+            // Denormalised tenant (V26). The composite FK (issue_id, workspace_id) means a
+            // value that disagreed with the issue's would be refused by the database.
+            attachment.setWorkspaceId(ictx.workspace().getId());
             attachment.setFilename(filename);
             attachment.setSizeBytes(file.getSize());
             // Never trust the client Content-Type: derive a safe one from the filename.
@@ -112,7 +203,7 @@ public class AttachmentService {
             // it, never fail the request on it), at WARN because this one leaves a row an operator
             // can find rather than a blob only the log names.
             compensateFailedUpload(actor, workspaceId, projectId, issueNumber,
-                    reserved.attachmentId(), reserved.storageKey());
+                    reserved.attachmentId(), reserved.storageKey(), reserved.sizeBytes());
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store file");
         }
 
@@ -129,8 +220,17 @@ public class AttachmentService {
     // Compensating delete for a failed store — a short tx that re-resolves the issue
     // (tenant scoping) and removes only the reserved attachment belonging to it. Never
     // a global deleteById, so a race can't delete another issue's/tenant's row.
+    //
+    // WHEN THIS COMPENSATION ITSELF FAILS, THE ARTEFACT IS AN ORPHAN *ROW*, NOT AN ORPHAN BLOB —
+    // the store is what failed, so there is nothing in the backend — and it is the expensive
+    // direction: the row keeps its size_bytes, the trigger has already counted them, and the
+    // workspace pays quota for a blob that was never written. The reconciler cannot see it,
+    // because it compares the counter against the ROWS and the row exists, so counter == rows and
+    // there is no drift to correct. Nothing else will ever notice, which is why the WARN carries
+    // the workspace and the byte count: they are the only way an operator can find and correct
+    // the stranded reservation, and docs/self-hosting.md's orphans section names this line.
     private void compensateFailedUpload(User actor, UUID workspaceId, UUID projectId, long issueNumber,
-                                        UUID attachmentId, String storageKey) {
+                                        UUID attachmentId, String storageKey, long sizeBytes) {
         try {
             txTemplate.executeWithoutResult(status -> {
                 var issue = workspaceAccess.requireIssue(actor, workspaceId, projectId, issueNumber).issue();
@@ -138,8 +238,12 @@ public class AttachmentService {
                         .ifPresent(attachmentRepository::delete);
             });
         } catch (RuntimeException ce) {
-            log.warn("Failed to compensate (delete) orphaned attachment {} key {}",
-                    attachmentId, storageKey, ce);
+            log.warn("Failed to compensate (delete) attachment row {} after a failed store; "
+                     + "workspace {} now holds {} bytes of storage quota for a blob that was never "
+                     + "written (key {}). This is invisible to WorkspaceStorageReconciler — the row "
+                     + "exists, so the counter agrees with it — and only deleting the row returns "
+                     + "the quota",
+                    attachmentId, workspaceId, sizeBytes, storageKey, ce);
         }
     }
 

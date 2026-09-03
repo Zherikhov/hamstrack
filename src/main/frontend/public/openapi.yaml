@@ -215,8 +215,30 @@ info:
     destination inbox rather than the spelling of the address) and a per-sender
     hourly/daily volume budget — and answers `429` + `Retry-After` past any of
     them. Those are spent **after** the workspace is resolved, the deliberate
-    opposite of the two budgets above: a workspace the caller cannot see answers
-    `404` even when the caller is over a ceiling. See `inviteMember`.
+    opposite of every per-principal budget on this API: a workspace the caller
+    cannot see answers `404` even when the caller is over a ceiling. See
+    `inviteMember`.
+
+    **Writing costs a budget too.** Every **mutating** request under
+    `…/projects/*/issues/**` — issue, comment, attachment and backlog-rank
+    writes — spends a per-principal budget
+    (`app.write.requests-per-minute`, 180/min by default); it is
+    method-conditioned, so reads on the same paths cost nothing. Uploading an
+    attachment additionally spends a per-principal **byte** budget
+    (`app.write.upload-bytes-per-minute`, 250 MB/min by default), summed over
+    the parsed sizes of the caller's files, because a request count does not
+    bound bytes. Both answer `429` + `Retry-After` and both are keyed on the
+    caller, so neither refusal discloses anything about a workspace.
+
+
+    **One refusal in this area is deliberately not a throttle.** A workspace has
+    a ceiling on the attachment storage it may hold, and an upload that would
+    cross it answers `409` with `errorType: "STORAGE_QUOTA_EXCEEDED"` and
+    **no** `Retry-After` — waiting frees no bytes, so a client that retries it
+    the way it retries a `429` loops for ever. Read the position in advance from
+    `GET /workspaces/{workspaceId}/storage`. That quota also has an off switch
+    of its own rather than sharing `app.rate-limit.enabled`: a throttle that
+    refills and a bound on stored bytes are different kinds of control.
   contact:
     name: Hamstrack
     url: https://github.com/Zherikhov/hamstrack
@@ -243,7 +265,7 @@ tags:
       *I* do here?") is not here: it rides `myPermissions` on each workspace and
       project response.
   - name: Workspaces
-    description: Tenancy boundary — members, invites
+    description: Tenancy boundary — members, invites, attachment storage usage
   - name: Roles
     description: >-
       The workspace's roles — the eight built-in templates every workspace
@@ -2197,6 +2219,83 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/RoleConflict' }
 
+  /workspaces/{workspaceId}/storage:
+    get:
+      tags: [Workspaces]
+      summary: Workspace storage usage
+      description: >-
+        How much attachment storage this workspace occupies, and how much it may
+        occupy. Open to **any member** and gated by nothing else: it returns the
+        same figures the quota refusal
+        (`409 STORAGE_QUOTA_EXCEEDED` on `uploadAttachment`) already hands the
+        same person, so withholding them would only stop a member telling "I am
+        blocked" from "the server is broken". The breakdown that names projects
+        is a different operation behind `workspace.edit`.
+
+
+        **Read `quotaEnabled` first and narrow on it.** With the quota switched
+        off there is no ceiling, so `quotaBytes`, `availableBytes` and
+        `percentUsed` are `null` rather than a sentinel — a `-1` is a number a
+        client eventually renders as "-1 GB remaining", and a `0` reads as
+        "full". Usage itself is always counted and always reported, whether or
+        not anything is being refused.
+
+
+        **Deliberately not throttled**, and that is an exemption with a reason
+        rather than an omission: one primary-key read plus two configuration
+        values, cheaper than the handler mapping that routes it, and it is the
+        figure a client shows beside the upload control. The asymmetry with the
+        breakdown runs the safe way — a caller refused on the expensive read who
+        falls back to this one gets *less* information, never a way round the
+        bound.
+      operationId: getWorkspaceStorage
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceStorageResponse' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workspaces/{workspaceId}/storage/projects:
+    get:
+      tags: [Workspaces]
+      summary: Workspace storage by project
+      description: >-
+        The same total, broken down by project, `bytes` descending. Requires
+        **`workspace.edit`** because this is real disclosure: it names projects
+        and their volumes, including projects the caller is not a member of. A
+        proven member without the permission gets `403` naming it; a non-member
+        and an unknown workspace are both `404`, as everywhere in this API.
+
+
+        **On the reports budget** (`app.reports.requests-per-minute`, 60/min by
+        default), spent from the same pot as `…/reports/**` and
+        `POST …/search/insights` — the response is small but the work is a
+        grouped aggregate over every attachment row in the workspace, which is
+        that budget's denomination. Past it: `429` + `Retry-After`.
+
+
+        `unattributedBytes` is published rather than folded away: it is the
+        counter's total minus what the rows add up to, i.e. exactly the drift
+        between what the quota enforces and what the attachment rows say, and it
+        is the one state this operation exists to make visible. It can be
+        negative.
+      operationId: getWorkspaceStorageByProject
+      parameters:
+        - $ref: '#/components/parameters/workspaceId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkspaceStorageByProjectResponse' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
   /workspaces/accept-invite:
     post:
       tags: [Workspaces]
@@ -3560,6 +3659,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '422': { $ref: '#/components/responses/UnprocessableReference' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
     get:
       tags: [Issues]
       summary: List issues
@@ -3802,6 +3902,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
     delete:
       tags: [Issues]
       summary: Delete an issue
@@ -3820,6 +3921,7 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/rank:
     post:
@@ -3912,10 +4014,17 @@ paths:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '429':
           description: >-
-            The project's ranks were just re-spaced — this request would have
-            triggered a second whole-project rebalance inside the 60 s cooldown.
-            A **retryable throttle, not a fault**: nothing was moved, and
-            retrying after the number of seconds in `Retry-After` succeeds.
+            **Two causes on this endpoint, told apart by `detail`.** Either the
+            project's ranks were just re-spaced — this request would have
+            triggered a second whole-project rebalance inside the 60 s cooldown
+            — or the caller has spent the per-principal **write budget** shared
+            by every mutating call under `…/projects/*/issues/**`
+            (`Too many write requests — retry in Ns`,
+            `app.write.requests-per-minute`, 180/min by default). The first is
+            keyed on the project and has no off switch; the second is keyed on
+            the caller and goes away with `app.rate-limit.enabled=false`.
+            Either way a **retryable throttle, not a fault**: nothing was moved,
+            and retrying after the number of seconds in `Retry-After` succeeds.
           headers:
             Retry-After:
               description: Seconds to wait before retrying
@@ -4006,6 +4115,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/ProjectArchived' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
     get:
       tags: [Comments]
       summary: List comments
@@ -4070,6 +4180,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/ProjectArchived' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
     delete:
       tags: [Comments]
       summary: Delete a comment (soft)
@@ -4103,6 +4214,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/ProjectArchived' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
 
   /workspaces/{workspaceId}/projects/{projectId}/issues/{number}/attachments:
     post:
@@ -4116,6 +4228,18 @@ paths:
         gif, webp, bmp, svg, pdf, txt, csv, log, md, json, doc, docx, xls, xlsx, ppt, pptx, zip)
         or the upload is rejected with `415`. The stored/returned `contentType` is derived from
         the filename on the server — the client-supplied header is ignored.
+
+
+        Beyond those two per-file ceilings the **workspace** has a total
+        attachment-storage ceiling: an upload that would cross it is refused
+        with `409` and `errorType: "STORAGE_QUOTA_EXCEEDED"`, which is **not** a
+        throttle and carries no `Retry-After`. The upload also spends two
+        per-principal budgets — a write-request budget shared with every other
+        mutating call under `…/projects/*/issues/**`, and an upload-**byte**
+        budget summed over the parsed sizes of this caller's files — either of
+        which answers `429` + `Retry-After`. See the `409` and `429` responses
+        below, and `GET /workspaces/{workspaceId}/storage` for the figures
+        before the fact.
       operationId: uploadAttachment
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -4140,6 +4264,50 @@ paths:
               schema: { $ref: '#/components/schemas/AttachmentResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            **Three different refusals share this status on this operation, and
+            only two of them are worth retrying.** Sort them in this order:
+            `Retry-After` present means lock contention — retry the identical
+            request unchanged; otherwise `errorType: "STORAGE_QUOTA_EXCEEDED"`
+            means the workspace has no attachment storage left, and **retrying
+            that one never succeeds** (a quota does not refill — the remedy is
+            fewer stored bytes); anything else is the archived project, which
+            carries neither and is fixed by unarchiving it.
+
+
+            The quota refusal carries `quotaBytes`, `usedBytes`,
+            `availableBytes` and `fileBytes`, and it happens **before a single
+            byte reaches the file store**: nothing is written — no attachment
+            row, no file, no change to the usage counter. Show
+            `GET /workspaces/{workspaceId}/storage` beside the upload control to
+            state the position before the refusal rather than after it.
+          content:
+            application/problem+json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/StorageQuotaProblemDetail'
+                  - $ref: '#/components/schemas/ProblemDetail'
+        '429':
+          description: >-
+            A per-principal budget is exhausted. **Two causes, told apart by
+            `detail`, both carrying `Retry-After`:** the write budget
+            (`Too many write requests — retry in Ns`,
+            `app.write.requests-per-minute`, 180/min by default, counted over
+            every mutating request under `…/projects/*/issues/**`) and the
+            upload-byte budget (`Too many uploaded bytes — retry in Ns`,
+            `app.write.upload-bytes-per-minute`, 250 MB/min by default, summed
+            over the **parsed** sizes of this caller's uploads). Both are
+            retryable and neither discloses anything: they are keyed on the
+            caller, never on the workspace. Do not confuse either with the
+            quota `409` above, which is not a throttle.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
         '413':
           description: >-
             File exceeds a size ceiling. The wording says which one: the in-app
@@ -4211,6 +4379,7 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/WriteThrottled' }
 
   /workspaces/{workspaceId}/labels:
     get:
@@ -8526,6 +8695,33 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
+    WriteThrottled:
+      description: >-
+        **The per-principal write budget is exhausted** —
+        `app.write.requests-per-minute` (180/min by default), counted over
+        every **mutating** request under
+        `/api/workspaces/*/projects/*/issues/**`: issue, comment, attachment and
+        backlog-rank writes. It is method-conditioned, so `GET`s on the same
+        paths cost nothing, and it covers `PATCH` and `DELETE` as well as
+        `POST` — a budget that stopped only creation would simply move the
+        caller to the update.
+
+
+        `detail` is `Too many write requests — retry in Ns` and `Retry-After`
+        carries the same N. A retryable throttle, not a fault: nothing was
+        written, and the identical request succeeds after the wait. The counter
+        is keyed on the caller and lives in memory on each app node, so a
+        deployment running several instances gives each caller that budget per
+        instance — a bound on abuse, never a quota to quote. Switched off
+        wholesale by `app.rate-limit.enabled=false`.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/ProblemDetail' }
+
     TooManyRequests:
       description: Rate limited — retry after the number of seconds in the `Retry-After` header
       headers:
@@ -9331,6 +9527,74 @@ components:
                 variant it lists only the projects that block the adoption, which
                 may be a subset of what the first `409` named.
               items: { $ref: '#/components/schemas/ProjectRef' }
+
+    StorageQuotaProblemDetail:
+      description: >-
+        The `409` body of an upload refused because the workspace has no room
+        left. **The refusal a client is most likely to get wrong**, so the rule
+        is stated plainly: this is not a throttle, it carries **no**
+        `Retry-After`, and **an identical retry fails identically for ever**.
+        Waiting frees no bytes; only deleting attachments does.
+
+
+        It is deliberately not a `413` (that says *this file* is too large, is
+        already answered twice by this operation, and the file here is very
+        often well inside the per-file limit) and deliberately not a `429`
+        (which promises that waiting helps).
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            errorType:
+              type: string
+              enum: [STORAGE_QUOTA_EXCEEDED]
+              description: >-
+                Always present on this body, and the supported way to tell it
+                from the other `409` this operation answers — an archived
+                project, which carries no `errorType` — and from the retryable
+                lock-contention `409`, which carries `Retry-After`. Per the
+                API-wide rule, read an **absent** `errorType` as "not this
+                refusal" rather than as an unrecognised one.
+              example: STORAGE_QUOTA_EXCEEDED
+            quotaBytes:
+              type: integer
+              format: int64
+              description: The workspace ceiling that was applied.
+              example: 10737418240
+            usedBytes:
+              type: integer
+              format: int64
+              description: What the workspace already holds.
+              example: 10510925824
+            availableBytes:
+              type: integer
+              format: int64
+              description: >-
+                `quotaBytes - usedBytes`, clamped at 0 — usage can exceed the
+                ceiling after an operator lowers it, and "-2.1 GB available" is
+                not a number anyone can act on.
+              example: 226492416
+            fileBytes:
+              type: integer
+              format: int64
+              description: >-
+                The size of the refused file, as **parsed** — never a
+                client-declared `Content-Length`.
+              example: 13002342
+            detail:
+              type: string
+              description: >-
+                A sentence to render verbatim. It describes the situation and
+                **dispatches nobody**, on purpose: this refusal has no reader
+                guaranteed to be able to act on it (a contributor cannot delete
+                other people's attachments, the space is often in a project they
+                cannot see, and "ask your administrator" is a dead end in both
+                deployment models). Prose for a human — branch on `errorType`
+                and compute from the four byte figures.
+              example: >-
+                This workspace has used all of its attachment storage (9.8 GB of
+                10 GB). This file needs 12.4 MB. Storage is freed by deleting
+                attachments that are no longer needed.
 
     ReactivatedDefaultProblemDetail:
       description: >-
@@ -10668,6 +10932,146 @@ components:
             Empty is the normal answer, and this is the one number here that is
             re-derived and enforced under the write.
           items: { $ref: '#/components/schemas/ProjectRef' }
+
+    WorkspaceStorageResponse:
+      type: object
+      description: >-
+        **How much attachment storage this workspace uses, and how much it may
+        use.** The body of `GET /workspaces/{workspaceId}/storage`, open to any
+        member.
+
+
+        **Narrow on `quotaEnabled`.** The three ceiling-derived fields are
+        `null` when it is `false` — absent numbers rather than a sentinel, so no
+        client can render "-1 GB remaining" or read a `0` as "full". Everything
+        that describes usage rather than the ceiling is always present: usage is
+        counted, reported and reconciled whether or not anything is being
+        refused.
+
+
+        Bytes are raw integers throughout; formatting is the client's business.
+      properties:
+        quotaEnabled:
+          type: boolean
+          description: >-
+            Whether a ceiling is being enforced on this instance. When `false`
+            nothing is refused, and `quotaBytes`, `availableBytes` and
+            `percentUsed` are `null`.
+          example: true
+        quotaBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: The ceiling for one workspace. `null` when `quotaEnabled` is `false`.
+          example: 107374182400
+        usedBytes:
+          type: integer
+          format: int64
+          description: >-
+            Total size of the workspace's live attachment rows. Always present.
+            It counts rows rather than objects in the file store, so a blob left
+            behind by a failed delete is invisible to it.
+          example: 8321499136
+        availableBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: >-
+            `quotaBytes - usedBytes`, clamped at 0 (usage can legitimately
+            exceed the ceiling after an operator lowers it). `null` when
+            `quotaEnabled` is `false`.
+          example: 99052683264
+        attachmentCount:
+          type: integer
+          format: int64
+          description: How many attachment rows those bytes are spread over.
+          example: 1842
+        percentUsed:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            Share of the ceiling in use. **Not clamped at 100** — lowering the
+            quota below current usage is a legitimate operator action, and
+            clamping would hide the state that explains why uploads are being
+            refused. `null` when `quotaEnabled` is `false`.
+          example: 7.75
+        warnAtPercent:
+          type: integer
+          description: >-
+            The share at which a client should start saying so. It changes no
+            server behaviour: nothing is refused, narrowed or slowed at this
+            level. It exists so the first thing a workspace hears about its
+            ceiling is not a refusal.
+          example: 80
+        maxFileBytes:
+          type: integer
+          format: int64
+          description: >-
+            The per-file ceiling (`413` past it), carried here so one response
+            answers both "will this file be accepted" questions.
+          example: 20971520
+        asOf:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            When the usage counter last changed. `null` for a workspace that has
+            never held an attachment.
+
+    ProjectStorageEntry:
+      type: object
+      description: One project's share of the workspace's attachment bytes.
+      properties:
+        projectId:
+          type: string
+          format: uuid
+        key:
+          type: string
+          example: HD
+        name:
+          type: string
+          example: Hamstrack
+        bytes:
+          type: integer
+          format: int64
+          example: 5348024320
+        attachmentCount:
+          type: integer
+          format: int64
+          example: 902
+
+    WorkspaceStorageByProjectResponse:
+      type: object
+      description: >-
+        **Where the space went.** The body of
+        `GET /workspaces/{workspaceId}/storage/projects`, behind
+        `workspace.edit`.
+      properties:
+        asOf:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the usage counter last changed. Null for a workspace that has never held an attachment.
+        totalBytes:
+          type: integer
+          format: int64
+          description: The counter's own total — the number the quota is enforced against.
+          example: 8321499136
+        unattributedBytes:
+          type: integer
+          format: int64
+          description: >-
+            `totalBytes` minus the sum of `projects[].bytes`, i.e. the drift
+            between what the quota enforces and what the attachment rows say.
+            **Published rather than normalised away**, because a non-zero value
+            is the one state this operation exists to make visible, and it can
+            be negative.
+          example: 0
+        projects:
+          type: array
+          description: Projects of this workspace holding attachments, `bytes` descending. Empty when the workspace holds none.
+          items: { $ref: '#/components/schemas/ProjectStorageEntry' }
 
     WorkspaceMemberResponse:
       type: object

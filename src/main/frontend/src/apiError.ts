@@ -68,6 +68,49 @@ export interface ConflictInfo {
   projects?: ProjectRef[]
   /** Where the role is still in play — attached to a `ROLE_IN_USE` refusal. */
   usage?: RoleUsage
+  /** The four figures a {@link STORAGE_QUOTA_EXCEEDED} refusal carries. */
+  storage?: StorageQuotaRefusal
+}
+
+/**
+ * The `errorType` on the 409 an upload gets when the workspace has no room
+ * left (HD-191 §5.5).
+ *
+ * A named constant rather than a literal at each branch, because two surfaces
+ * compare against it — the upload door and the storage read that follows the
+ * refusal — and a typo in one of them fails the way this class is built to
+ * prevent: silently, by falling through to "render `detail`, offer nothing".
+ */
+export const STORAGE_QUOTA_EXCEEDED = 'STORAGE_QUOTA_EXCEEDED'
+
+/**
+ * The ProblemDetail extensions on that 409 — bytes, raw, all four together or
+ * not at all.
+ *
+ * **It carries no `Retry-After`, and that is the contract, not an omission.**
+ * Waiting never frees a byte, so the refusal is deliberately not a rate limit
+ * and a client must not render it as one. Nor may a client add a call to
+ * action: the reader may hold no delete grant, and the space may be in a project
+ * they cannot see, so a refusal that dispatched them would be dispatching them
+ * nowhere.
+ *
+ * Read these **instead of** a cached storage summary when rendering the
+ * refusal: the summary may be minutes old, and these figures are the ones the
+ * server actually refused on.
+ */
+export interface StorageQuotaRefusal {
+  quotaBytes: number
+  usedBytes: number
+  /**
+   * **Clamped at zero by the server**, deliberately: a quota lowered below
+   * current usage makes the difference negative, and "-2.1 GB available" is a
+   * number no reader can act on. So this is not `quotaBytes - usedBytes` and
+   * must not be re-derived as one — `usedBytes > quotaBytes` is the state that
+   * says a workspace is past its ceiling.
+   */
+  availableBytes: number
+  /** The parsed size of the file that was refused — never a client-declared length. */
+  fileBytes: number
 }
 
 export class ApiResponseError extends Error implements ConflictInfo {
@@ -83,6 +126,8 @@ export class ApiResponseError extends Error implements ConflictInfo {
   errorType?: string
   projects?: ProjectRef[]
   usage?: RoleUsage
+  /** Set only when `errorType === STORAGE_QUOTA_EXCEEDED` and all four figures parsed. */
+  storage?: StorageQuotaRefusal
   /**
    * The `{name: message}` ProblemDetail extension carried by **any 400 raised by a
    * declared constraint**, keyed by the name of the item that was refused — a
@@ -128,5 +173,6 @@ export class ApiResponseError extends Error implements ConflictInfo {
     this.errorType = conflict?.errorType
     this.projects = conflict?.projects
     this.usage = conflict?.usage
+    this.storage = conflict?.storage
   }
 }

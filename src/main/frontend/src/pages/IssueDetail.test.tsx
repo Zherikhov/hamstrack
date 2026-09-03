@@ -96,6 +96,19 @@ let attachments: Attachment[] = []
 
 vi.mock('../api', () => ({
   ApiResponseError: class ApiResponseError extends Error { status = 0 },
+  // HD-191: the Files section reads the workspace's storage summary. Quota off
+  // here, so no storage chrome is drawn and these cases stay about their own
+  // subject — the branch itself is pinned in `IssueDetail.storage.test.tsx`.
+  // The discriminator is stubbed with its real value on purpose: left
+  // `undefined`, `err.errorType === STORAGE_QUOTA_EXCEEDED` would be true for
+  // every error that carries no discriminator at all.
+  STORAGE_QUOTA_EXCEEDED: 'STORAGE_QUOTA_EXCEEDED',
+  apiGetWorkspaceStorage: vi.fn(async () => ({
+    quotaEnabled: false, quotaBytes: null, usedBytes: 0, availableBytes: null,
+    attachmentCount: 0, percentUsed: null, warnAtPercent: 80,
+    maxFileBytes: 25 * 1024 * 1024, asOf: '2026-09-03T10:00:00Z',
+  })),
+  apiGetWorkspaceStorageByProject: vi.fn(),
   apiGetIssue: vi.fn(async () => issueResponse),
   apiUpdateIssue: vi.fn(),
   apiDeleteIssue: vi.fn(),
