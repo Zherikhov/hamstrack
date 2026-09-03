@@ -25,6 +25,7 @@ import org.mockito.Mockito;
 import jakarta.mail.internet.MimeMessage;
 import jakarta.servlet.http.Cookie;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
@@ -197,6 +198,102 @@ class AuthFlowsTest {
                         .contentType(APPLICATION_JSON)
                         .content("{\"token\":\"" + raw + "\",\"newPassword\":\"second-new-pw-2\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    /**
+     * HD-183 — <strong>a link is single-use; the SET of live links was not.</strong>
+     *
+     * <p>The shipped ceilings allow five simultaneously valid one-hour links per address and the
+     * "Send another link" button produces them, so an unused sibling copied out of the inbox used
+     * to survive the very reset performed to defeat it. Asserted on the refusal the API actually
+     * returns — not on a row or a constraint, because a reset marks {@code used_at} rather than
+     * deleting and a flush-deferred violation would be raised outside any assertion here anyway.
+     */
+    @Test
+    void completingAResetRetiresEveryOtherOutstandingLinkForThatUser() throws Exception {
+        var email = email();
+        var user = activeUser(email, "old-password-1");
+        var first = issueReset(user, Instant.now().plusSeconds(3600), null);
+        var second = issueReset(user, Instant.now().plusSeconds(3600), null);
+        // a bystander's live link, to prove the sweep is scoped to one user
+        var bystander = activeUser(email(), "old-password-1");
+        var bystanderLink = issueReset(bystander, Instant.now().plusSeconds(3600), null);
+
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + second + "\",\"newPassword\":\"second-new-pw-2\"}"))
+                .andExpect(status().isOk());
+
+        // the sibling nobody spent must now be refused
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + first + "\",\"newPassword\":\"attacker-pw-3\"}"))
+                .andExpect(status().isBadRequest());
+
+        // and it really did not take the account: the password set through the spent link stands
+        mockMvc.perform(post("/api/auth/login")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"email\":\"" + email + "\",\"password\":\"attacker-pw-3\"}"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/auth/login")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"email\":\"" + email + "\",\"password\":\"second-new-pw-2\"}"))
+                .andExpect(status().isOk());
+
+        // another account's outstanding link is untouched
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + bystanderLink + "\",\"newPassword\":\"bystander-pw-4\"}"))
+                .andExpect(status().isOk());
+    }
+
+    /**
+     * HD-183 — the sweep is blind to which door minted the row, <strong>on purpose</strong>, so an
+     * administrator's 7-day setup link ({@code AdminUserService.generateSetupLink}, same table,
+     * longer TTL) dies with the rest. The admin re-issues one from the console; the reasoning is
+     * on {@code PasswordResetRepository.invalidateOtherOutstanding}. If that ever becomes a
+     * deliberate exemption, this test is the place that has to say so first.
+     */
+    @Test
+    void completingAResetAlsoRetiresALongLivedAdminSetupLink() throws Exception {
+        var user = activeUser(email(), "old-password-1");
+        var setupLink = issueReset(user, Instant.now().plus(Duration.ofDays(7)), null);
+        var selfService = issueReset(user, Instant.now().plusSeconds(3600), null);
+
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + selfService + "\",\"newPassword\":\"self-service-pw-5\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + setupLink + "\",\"newPassword\":\"setup-pw-6\"}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    /**
+     * HD-183 — <strong>the counterpart prohibition</strong>: the sweep is earned by proving
+     * possession of a token, so it lives only on the redeem path. Doing it at MINT time reads like
+     * the same fix and is a worse bug — {@code /api/auth/forgot-password} is unauthenticated, so
+     * an attacker naming a victim's address could void the link the victim is holding, which is a
+     * free denial-of-recovery. This test fails the moment somebody "improves" it into the mint
+     * path.
+     */
+    @Test
+    void requestingAnotherLinkDoesNotKillTheOneAlreadySent() throws Exception {
+        var email = email();
+        var user = activeUser(email, "old-password-1");
+        var alreadySent = issueReset(user, Instant.now().plusSeconds(3600), null);
+
+        mockMvc.perform(post("/api/auth/forgot-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"email\":\"" + email + "\"}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/auth/reset-password")
+                        .contentType(APPLICATION_JSON)
+                        .content("{\"token\":\"" + alreadySent + "\",\"newPassword\":\"still-valid-pw-7\"}"))
+                .andExpect(status().isOk());
     }
 
     @Test

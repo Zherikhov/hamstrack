@@ -23,7 +23,25 @@ const buttonVariants: Record<ButtonVariant, string> = {
   danger: 'text-white',
 }
 
-export function Button({ variant = 'secondary', size = 'md', loading, children, className, style, ...props }: ButtonProps) {
+/**
+ * The shared button.
+ *
+ * **`disabled` is destructured out of `props` on purpose (HD-183).** It used to be
+ * left in, so `disabled={loading || props.disabled}` was computed correctly and then
+ * overwritten by the very next `{...props}` — last JSX prop wins — so every caller
+ * that passes *both* silently lost the loading guard: a spinner on a button that is
+ * still clickable. That is a re-entrancy hole, not a cosmetic one. On
+ * {@link ForgotPasswordPage}, where this was the only guard, five impatient clicks
+ * spend a third of the per-IP `/api/auth/*` budget and earn the user a 429 on their
+ * own next attempt; elsewhere it is a second sprint completion, a duplicate comment
+ * or a second invitation acceptance. Around forty call sites pass both, so the fix
+ * belongs here and nowhere else — a per-caller workaround is one the next caller
+ * will not copy.
+ *
+ * A caller that wants a button clickable *while* it loads must therefore not pass
+ * `loading`; there is deliberately no third state.
+ */
+export function Button({ variant = 'secondary', size = 'md', loading, children, className, style, disabled, ...props }: ButtonProps) {
   const styles: React.CSSProperties = { ...style }
 
   if (variant === 'primary') {
@@ -51,7 +69,7 @@ export function Button({ variant = 'secondary', size = 'md', loading, children, 
         className,
       )}
       style={styles}
-      disabled={loading || props.disabled}
+      disabled={loading || disabled}
       {...props}
     >
       {loading && <span className="mono text-xs">…</span>}

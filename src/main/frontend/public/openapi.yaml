@@ -823,12 +823,29 @@ paths:
       tags: [Auth]
       summary: Set a new password with the emailed token
       description: |
-        Revokes all active sessions on success. Returns `422` when
-        `newPassword` cannot be stored as sent — because it is a value this
-        project itself published, or because it costs more than 72 UTF-8 bytes.
-        Every refusal on that status happens **before the token is consumed**,
-        so the same link can be re-used with a different password (see that
-        response).
+        Revokes all active sessions on success, and retires every other
+        outstanding password-reset link for that account: redeeming any such
+        link ends the whole outstanding set, whichever door minted it — a
+        sibling link presented afterwards answers the `400` below. What a
+        completed reset withdraws is the account's outstanding right to set a
+        password without knowing the current one, so the longer-lived setup
+        link an administrator generates
+        (`POST /admin/users`, `POST /admin/users/{id}/setup-link`) is retired
+        by it too; an administrator who still needs one issues a fresh link.
+
+
+        Asking for a link retires nothing. `POST /auth/forgot-password` leaves
+        links already sent working, deliberately — it takes no authentication,
+        so a request that voided earlier links would let anybody who can type
+        an address kill the real recipient's. The retirement is earned by
+        proving possession of a token, and only there.
+
+
+        Returns `422` when `newPassword` cannot be stored as sent — because it
+        is a value this project itself published, or because it costs more than
+        72 UTF-8 bytes. Every refusal on that status happens **before the token
+        is consumed**, so the same link can be re-used with a different password
+        (see that response).
       operationId: resetPassword
       security: []
       requestBody:
@@ -3342,6 +3359,12 @@ paths:
         self-registration is disabled there.
 
 
+        The link is a password-reset link like any other, so it is also retired
+        early: completing any reset on that account ends every outstanding link
+        it holds (see `POST /auth/reset-password`). Issue a fresh one with
+        `POST /admin/users/{id}/setup-link` when that happens.
+
+
         The address is matched case-insensitively, exactly as on
         `POST /auth/register`: `Ivan@example.com` and `ivan@example.com`
         cannot both be accounts, and the second is a `409`.
@@ -3378,6 +3401,12 @@ paths:
     post:
       tags: [Admin]
       summary: Regenerate a user's one-time setup link (admin)
+      description: |
+        Mints a fresh `setupLink` (`/reset-password?token=`, valid 7 days) and
+        sends no email. Previously issued links stay usable until somebody
+        completes a reset on the account, which retires all of them at once
+        (see `POST /auth/reset-password`) — issuing a link never invalidates
+        one.
       operationId: adminRegenerateSetupLink
       parameters: [ { $ref: '#/components/parameters/adminId' } ]
       responses:

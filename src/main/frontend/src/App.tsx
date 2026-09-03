@@ -7,6 +7,7 @@ import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import VerifyEmailPage from './pages/VerifyEmailPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
+import ForgotPasswordPage from './pages/ForgotPasswordPage'
 import WorkspacesPage from './pages/WorkspacesPage'
 import WorkspaceHomePage from './pages/WorkspaceHomePage'
 import WelcomePage from './pages/welcome/WelcomePage'
@@ -145,6 +146,7 @@ export default function App() {
           <Route path="/login" element={<LoginPage />} />
           <Route path="/register" element={<RequirePublicSignup><RegisterPage /></RequirePublicSignup>} />
           <Route path="/verify-email" element={<VerifyEmailPage />} />
+          <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/terms" element={<TermsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />

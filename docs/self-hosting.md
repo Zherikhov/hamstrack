@@ -814,6 +814,23 @@ valid 7 days) — copy it and hand it to the person over your own channel. They
 open it, choose a password, and sign in. Regenerate the link anytime, and
 disable or promote accounts from the same screen.
 
+**Completing a password reset stops that account's other setup links.** A setup link is
+one of the account's password-reset links with a longer life, so as soon as anyone
+finishes a reset on that account — through a setup link or through **Forgot password**
+— every other outstanding link for it stops working, and a recipient who opens one
+afterwards meets the same refusal as an expired token. Usually there is nothing to do
+about that: somebody who went through forgot-password first already has the password
+they chose and needs nothing further from you. If they still need a link, regenerate it.
+
+**Regenerating does not stop the previous link.** Issuing a link never invalidates one,
+deliberately — retirement is earned by proving possession of a token, and only there. So
+the links accumulate: regenerate five times and that account is holding five live ones,
+each a seven-day right to set its password without knowing the current one. On a
+self-hosted install these links *are* the onboarding path, so that stack is yours to keep
+track of — hand out as few as you can. The [`password_resets`
+sweep](#what-rotating-jwt_secret-does-and-what-it-does-not) is what ends a whole
+accumulated set at once, and it is what "revoke every unused setup link" means there.
+
 > Prefer open registration? Set `PUBLIC_SIGNUP_ENABLED=true` and anyone can
 > register + verify their email themselves (SMTP required for the verification
 > mail). New accounts are regular users until an admin promotes them.

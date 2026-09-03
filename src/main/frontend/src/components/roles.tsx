@@ -362,11 +362,19 @@ export function Chip({ children, tone = 'neutral', title }: {
  * are open strings that a workspace may define, so nothing branches on the value.
  * A `null` role is the server refusing to describe a corrupt row; it renders as
  * "unknown role" and never guesses a substitute.
+ *
+ * **The tooltip describes the state and prescribes nothing** (HD-183). It used to
+ * end "ask an administrator to check it", which names a person the reader may not
+ * be able to reach — on Cloud the operator is unreachable by definition — and this
+ * label is rendered on read-only surfaces too, where no control on screen acts on
+ * it. Where a repair *is* reachable, the screen that owns it says so itself (the
+ * project default on `ProjectPeoplePage`); a shared label cannot know that and
+ * must not guess.
  */
 export function RoleLabel({ role }: { role: string | null | undefined }) {
   if (!role) {
     return (
-      <span className="text-xs italic" title="The stored role for this member could not be read — ask an administrator to check it."
+      <span className="text-xs italic" title="The stored role for this member could not be read, so it cannot be named here. Their access is unchanged."
             style={{ color: 'var(--color-text-muted)' }}>
         unknown role
       </span>

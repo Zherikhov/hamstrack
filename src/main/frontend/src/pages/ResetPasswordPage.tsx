@@ -21,6 +21,25 @@ import { Button, Input } from '../components/ui'
  * as "this link is invalid or has expired". Since HD-171 the same status also
  * answers an over-long `newPassword`, and telling that user their link expired
  * sends them to fetch a new one that will fail identically.
+ *
+ * <p><strong>A dead link sends the reader to the forgot-password form, not to a
+ * person</strong> (HD-183). The expired-link sentence used to end "Ask your
+ * administrator for a new one", which failed the project's rule that *a refusal
+ * may only prescribe an action its reader can perform* — in both directions at
+ * once. On Cloud the reader hears "administrator" as their workspace owner, who
+ * has no mechanism to mint a reset link for anybody; the only person who does is
+ * a **system** administrator, and a Cloud tenant cannot reach one. And even on a
+ * self-hosted install where that person exists, sending the reader to a human is
+ * wrong when the remedy is theirs to take. The replacement names that remedy and
+ * links straight to it, in one sentence that is true in DC and in Cloud — this
+ * page deliberately does **not** branch on deployment mode, for the same reason
+ * `GlobalExceptionHandler` ships one mode-agnostic sentence rather than two.
+ *
+ * <p>The click only became possible with HD-183's other half: `POST
+ * /api/auth/forgot-password` had existed since the auth slice shipped and had no
+ * UI at all — no form, no route, no link from sign-in — so until
+ * {@link ForgotPasswordPage} there was genuinely nothing here to link to, and the
+ * old sentence was the more honest half of a product with no self-service reset.
  */
 export default function ResetPasswordPage() {
   const navigate = useNavigate()
@@ -30,6 +49,10 @@ export default function ResetPasswordPage() {
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [error, setError] = useState('')
+  // The dead-link refusal is state rather than a string, because its remedy is a
+  // link the reader clicks — a sentence that carries an <a> cannot live in the
+  // same slot as a plain message.
+  const [linkRefused, setLinkRefused] = useState(false)
   const [passwordFieldError, setPasswordFieldError] = useState('')
   const [loading, setLoading] = useState(false)
   const [done, setDone] = useState(false)
@@ -45,6 +68,7 @@ export default function ResetPasswordPage() {
       return
     }
     setError('')
+    setLinkRefused(false)
     setPasswordFieldError('')
     setLoading(true)
     try {
@@ -57,12 +81,10 @@ export default function ResetPasswordPage() {
       const named = err instanceof ApiResponseError ? err.errors?.newPassword : undefined
       if (named) {
         setPasswordFieldError(named)
+      } else if (err instanceof ApiResponseError && err.status === 400) {
+        setLinkRefused(true)
       } else {
-        setError(
-          err instanceof ApiResponseError && err.status === 400
-            ? 'This link is invalid or has expired. Ask your administrator for a new one.'
-            : err instanceof Error ? err.message : 'Could not set your password',
-        )
+        setError(err instanceof Error ? err.message : 'Could not set your password')
       }
     } finally {
       setLoading(false)
@@ -88,10 +110,20 @@ export default function ResetPasswordPage() {
     </div>
   )
 
+  // The remedy for every dead link on this page, written once: the reader asks
+  // for another one themselves. Both callers state what is wrong with the link
+  // they arrived on and then end in this clause, so the two refusals differ only
+  // in the diagnosis and never in the action.
+  const requestNewLink = (
+    <Link to="/forgot-password" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+      request a new one
+    </Link>
+  )
+
   if (!token) {
     return shell(
       <p className="text-sm text-center" style={{ color: 'var(--color-error)' }}>
-        This link is incomplete — the token is missing.
+        This link is incomplete — the token is missing, so {requestNewLink}.
       </p>,
     )
   }
@@ -141,7 +173,20 @@ export default function ResetPasswordPage() {
           required
           error={mismatch ? 'Passwords do not match' : undefined}
         />
-        {error && <p className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {/* Both refusals are `role="alert"`, like the sibling on ForgotPasswordPage:
+            each appears only after a submit, in place of the confirmation the reader
+            was waiting for, and neither moves focus. Without the live region a
+            screen-reader user hears the button stop loading and is told nothing else
+            — and on the dead-link branch what they miss is the link to the remedy,
+            which is the whole of HD-183's fix. The two are mutually exclusive by
+            construction (`submit` clears both, then sets exactly one), so there is
+            never a second alert competing to be announced. */}
+        {linkRefused && (
+          <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error)' }}>
+            This link is invalid or has expired — {requestNewLink}.
+          </p>
+        )}
+        {error && <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>}
         <Button
           type="submit"
           variant="primary"

@@ -200,11 +200,35 @@ export default function ProjectPeoplePage() {
               </p>
             ) : fallback.unresolvable ? (
               <div className="mt-2">
+                {/* HD-183 — a description, not an errand. This used to say "ask a
+                    system administrator to check the project's default role",
+                    which on Cloud names somebody the reader cannot reach, and on
+                    any install sends them away from the control that fixes it: the
+                    project default is settable right below, and a project override
+                    short-circuits the chain whichever link of it is unreadable. If
+                    the reader lacks project.member.manage, that button carries its
+                    own explanation — so the sentence describes the state and points
+                    at the mechanism, and never at a person. Compare
+                    RemoveMemberDialog's adoptionUnreadable, which prescribes
+                    nothing because nothing on that screen can help.
+
+                    The verb is "makes this project use", not "replaces the stored
+                    value": `resolveDefaultRole` reports unresolvable for whichever
+                    link of the chain it reaches FIRST, so the corrupt row may be the
+                    WORKSPACE default — and a project override then supersedes that row
+                    rather than rewriting it, leaving it corrupt and still surfacing on
+                    workspace settings. "Replaces" is exact for one of the two cases and
+                    a false all-clear for the other, so the sentence claims only the
+                    effect they share, which is also the effect the reader came for. The
+                    dialog below already handles both states correctly; it was only this
+                    sentence that over-claimed. */}
                 <Notice tone="danger">
                   <span className="text-sm">
                     The role this project hands out by default is stored as something this workspace
-                    cannot describe. Nobody’s access has changed, but it cannot be named here — ask a
-                    system administrator to check the project’s default role.
+                    cannot describe, so it cannot be named here. Nobody’s access has changed, and
+                    people listed below are unaffected — their roles are read from their own rows.
+                    Setting a default with <b>Change default access</b> makes this project use one
+                    that can be read.
                   </span>
                 </Notice>
               </div>

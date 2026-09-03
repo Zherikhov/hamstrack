@@ -32,6 +32,19 @@ export { ApiResponseError, STORAGE_QUOTA_EXCEEDED }
 export type { HqlError, ConflictInfo, StorageQuotaRefusal }
 
 /**
+ * The longest wait this client will carry out of a `Retry-After` header, in seconds.
+ *
+ * **A mirror, like everything in `lib/limits.ts`**: it is one day because that is
+ * `MailThrottlePolicy.MAX_CEILING_WINDOW`, the widest window any throttle policy in this
+ * product may declare (enforced at bean creation, so a policy asking for more fails to
+ * start). Nothing mechanical keeps the two sides equal — widen the Java constant and this
+ * one has to move with it, or a legitimate refusal starts arriving here truncated.
+ *
+ * It is a **ceiling on rendering**, not a claim about our limiters: see `conflictOf`.
+ */
+const RETRY_AFTER_MAX_SECONDS = 86_400
+
+/**
  * `errorType` / `projects` / `usage` off a ProblemDetail body.
  *
  * Deliberately tolerant: an `errorType` this build has never heard of is carried
@@ -43,8 +56,42 @@ function conflictOf(body: unknown, res: Response): ConflictInfo {
   const info: ConflictInfo = {}
   const header = res.headers.get('Retry-After')
   if (header) {
+    // Clamped, because every consumer of this number RENDERS it — in a sentence
+    // ("try again in N seconds") or as a countdown — and the header is written by
+    // servers we do not all control: our own limiters, but also any proxy or load
+    // balancer in front of them. `0` becomes "in 0 seconds" (an instruction to do
+    // the thing that was just refused), `2.5` becomes "2.5 seconds", and a value in
+    // the millions renders verbatim. So this is a GUARD ON WHAT CAN BE RENDERED
+    // — against a garbled, absurd or hostile header — and not a statement about how
+    // long this product's own windows are. Round UP, never understating the wait;
+    // floor at one second, so it is never a no-op; and cap at
+    // `RETRY_AFTER_MAX_SECONDS`, which is the widest window any policy here is
+    // ALLOWED to declare rather than the widest one configured today. The HTTP-date
+    // form of `Retry-After` is still dropped by `Number.isFinite` — no Hamstrack
+    // endpoint sends it, and a wrong parse would be rendered to a user as fact.
+    //
+    // The cap was 3600 until HD-183, under a comment claiming an hour was "longer
+    // than any window this product actually has". It was not: the invitation
+    // recipient-volume refusal computes its `Retry-After` from a deadline inside
+    // `MailThrottlePolicy.MAX_CEILING_WINDOW` (a DAY), so it can legitimately ask for
+    // most of 86400 — and clamping that to 3600 UNDERSTATES the wait, the one
+    // direction the round-up above exists to forbid. It was latent only because the
+    // single screen that can receive such a refusal (`WorkspacePeoplePage`) renders
+    // the server's `detail` sentence and never this number, i.e. the safety rested
+    // on one call site's discipline instead of on the clamp. A bound justified by
+    // what our windows happen to be goes stale silently; one justified by what a
+    // window may be does not.
+    //
+    // What the wider cap deliberately does NOT do is make a long wait legible: this
+    // field is seconds by contract, read by five call sites (three of which drive a
+    // per-second countdown), so "about a day" is a decision for a rendering layer,
+    // not for the parser. Every door that renders the raw number today is fed by a
+    // short window; a screen that can receive a long one prints `detail`, which
+    // already names the wait in words.
     const seconds = Number(header)
-    if (Number.isFinite(seconds) && seconds >= 0) info.retryAfter = seconds
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      info.retryAfter = Math.min(Math.max(Math.ceil(seconds), 1), RETRY_AFTER_MAX_SECONDS)
+    }
   }
   if (body && typeof body === 'object') {
     const b = body as Record<string, unknown>
@@ -262,6 +309,41 @@ export async function apiVerifyEmail(token: string) {
 
 export async function apiResendVerification(email: string) {
   return request<{ message: string }>('/auth/resend-verification', {
+    method: 'POST',
+    body: JSON.stringify({ email }),
+  })
+}
+
+/**
+ * Asks for a password-reset link to be mailed to `email`.
+ *
+ * **The answer is uniform on purpose and says nothing about the address.** The
+ * server spends the per-address mail ceiling *before* it looks the account up, and
+ * records it either way, then always answers `200 {message}`. So the **body** is
+ * identical for a registered and an unregistered address, and — because that
+ * ceiling is spent before the lookup — a request it refused is indistinguishable
+ * from one it allowed: the refusal sends no mail and still answers the same 200,
+ * so not even "refused" can be read as "registered". A caller therefore renders its
+ * own neutral sentence and never branches on the response.
+ *
+ * **The two branches are NOT equal in duration, and no caller may claim they are.**
+ * The known branch pays a `SecureRandom` token, a SHA-256 hash and an `INSERT` into
+ * `password_resets` that the unknown branch never does; on top of that,
+ * `FailedEmailWriter`'s javadoc records a larger asymmetry it lists as still open —
+ * an address-correlated park, bounded only by the unset Hikari connection-timeout,
+ * on the known branch alone. What makes sampling impractical here is the
+ * **per-address ceiling** (a handful of requests per window, counted across
+ * everybody who asks), not equal work. That is a weaker claim than "constant time",
+ * and it is the true one — do not upgrade it in a comment, a document or a test
+ * failure message, where the next reader will take it as settled.
+ *
+ * The one refusal that does reach a caller is the per-IP `429` on `/api/auth/*`,
+ * which carries `Retry-After` (`ApiResponseError.retryAfter`) and is genuinely
+ * retryable — waiting is the whole remedy. It is about this browser's request rate
+ * and not about the address, which is the only reason it is safe to render.
+ */
+export async function apiForgotPassword(email: string) {
+  return request<{ message: string }>('/auth/forgot-password', {
     method: 'POST',
     body: JSON.stringify({ email }),
   })

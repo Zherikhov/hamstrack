@@ -372,7 +372,8 @@ public class AuthService {
         if (reset.isExpired() || reset.isUsed()) {
             throw new InvalidTokenException();
         }
-        reset.setUsedAt(Instant.now());
+        var now = Instant.now();
+        reset.setUsedAt(now);
         passwordResetRepository.save(reset);
 
         var user = reset.getUser();
@@ -381,6 +382,19 @@ public class AuthService {
 
         // Invalidate all existing refresh tokens after password change
         refreshTokenRepository.deleteAllByUser(user);
+        // HD-183 — AND EVERY OTHER OUTSTANDING RESET LINK, which is the same statement about a
+        // different credential. The line above retires the sessions that existed before this
+        // reset; on its own it left behind the thing that mints new ones. Each link is single-use,
+        // but the ceilings allow five live at once and "Send another link" produces them, so an
+        // unused sibling copied out of the inbox survives the reset that was performed to defeat
+        // it and re-takes the account within its remaining hour. See
+        // PasswordResetRepository.invalidateOtherOutstanding for the full argument, including WHY
+        // THIS MAY NEVER MOVE TO THE MINT PATH (it would let an unauthenticated caller void a
+        // victim's live link) and why an administrator's 7-day setup link is swept too.
+        //
+        // Placed here, after the token that authorized this call has already been marked used and
+        // beside the other revocation, so the two revocations are read as one act.
+        passwordResetRepository.invalidateOtherOutstanding(user, reset.getId(), now);
         metrics.passwordReset(PasswordResetPhase.COMPLETED);
     }
 

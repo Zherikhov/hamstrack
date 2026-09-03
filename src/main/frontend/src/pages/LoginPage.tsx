@@ -50,13 +50,36 @@ export default function LoginPage() {
   }
 
   async function resend() {
+    // Clear the sign-in error first (HD-183): it is the reason this control is on
+    // screen at all, and leaving it there puts "Verification email sent" directly
+    // beneath "Email not verified" — two contradictory sentences, one of them
+    // describing a state that no longer holds. `submit` has always cleared it; this
+    // path forgot to.
+    setError('')
     setResendState('sending')
     try {
       await apiResendVerification(email)
       setResendState('sent')
-    } catch {
+    } catch (err: unknown) {
       setResendState('idle')
-      setError('Failed to send verification email — try again')
+      // HD-183, same rule as the reset page: an instruction that fails
+      // identically the moment it is followed is not a remedy. The refusal this
+      // control meets most often is the per-IP budget on `/api/auth/*`, where
+      // retrying *now* is exactly what cannot work — so when the server says how
+      // long to wait, the sentence says it too.
+      //
+      // Gated on the STATUS, not merely on the presence of `retryAfter` (HD-183):
+      // `Retry-After` is a general HTTP header, so a proxy answering 503 with one
+      // during a deploy would otherwise render "too many requests from this device"
+      // — blaming the reader for an outage they did not cause.
+      const seconds = err instanceof ApiResponseError && err.status === 429
+        ? err.retryAfter
+        : undefined
+      setError(
+        seconds !== undefined
+          ? `Too many requests from this device — try again in ${seconds} second${seconds === 1 ? '' : 's'}.`
+          : 'Could not send the verification email — try again.',
+      )
     }
   }
 
@@ -137,6 +160,15 @@ export default function LoginPage() {
               Sign in
             </Button>
           </form>
+          {/* HD-183 — the only entry point to /forgot-password that a user who
+              has no link at all can find. Unconditional: it is not gated on
+              `publicSignupEnabled`, because an account an administrator created
+              can be locked out exactly like a self-registered one. */}
+          <p className="text-xs text-center">
+            <Link to="/forgot-password" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+              Forgot your password?
+            </Link>
+          </p>
         </div>
 
         {publicSignupEnabled && (
