@@ -1355,10 +1355,13 @@ before upgrading across a minor version.
 upgrade deliberately by bumping the value. `0.4` instead auto-tracks the newest 0.4.x on
 each `docker compose pull`.
 
-**Downgrades are not supported.** Flyway migrations are forward-only, and a newer
-release may change the schema in ways an older image can't read (`ddl-auto` is
-`validate`, so it will refuse to start rather than corrupt data). Always take a
-backup before a minor upgrade so you can roll back by restoring it.
+**Downgrades are not supported.** Flyway migrations are forward-only, and
+`ddl-auto=validate` does **not** object to a schema that has *more* than the entities
+declare — so an older image usually starts cleanly and then fails at the first write to a
+table a newer migration constrained. Going back to 0.17.0 or earlier after 0.18.0 is the
+worked example: `issue_attachments.workspace_id` is `NOT NULL` with no default, and the
+older image's INSERT omits it, so attachment upload fails while everything else looks
+healthy. Take a backup before a minor upgrade and restore it if you need to go back.
 
 ### Applying repository configuration
 
