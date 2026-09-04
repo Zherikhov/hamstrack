@@ -302,11 +302,12 @@ And the heap line:
 > Details:
 > [The heap is bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
 
-And the taxonomy foreign keys, which is the one line here that can stop a **startup** — so it
-carries the repair, not just the diagnosis. A DC operator whose data is clean never sees any of
-it; one whose data is not meets Flyway failing `V19` with no repair SQL anywhere they would
-think to look, and "a refusal must name an action its reader can perform" applies to a failed
-boot at least as much as to a `409`:
+And the taxonomy foreign keys — a line that can stop a **startup**, which is a shape rather
+than a slot: 0.18.0 has one of its own further down, and any release can add the next. What a
+line in that shape owes its reader is the **repair**, not just the diagnosis. A DC operator
+whose data is clean never sees any of it; one whose data is not meets Flyway failing `V19` with
+no repair SQL anywhere they would think to look, and "a refusal must name an action its reader
+can perform" applies to a failed boot at least as much as to a `409`:
 
 > **`issues.type_id` and `issues.status_id` now have foreign keys.** The database enforces that
 > no issue can point at a status or issue type that does not exist. **If your database already
@@ -367,13 +368,18 @@ not be left to discover:
 > upgrade. Details:
 > [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
 
-0.18.0 changes resource defaults of its own. One is in the database container; the other is a
-setting that **did not exist before the release and arrives switched on**, which is the sharper
-member of this class: there is no old value to compare against, so nothing in an operator's
-`.env` and nothing in their memory can tell them a ceiling appeared.
+0.18.0 changes resource defaults of its own — in the database container, and in settings that **did
+not exist before the release and arrive switched on**, which is the sharper member of this class:
+there is no old value to compare against, so nothing in an operator's `.env` and nothing in their
+memory can tell them a ceiling appeared. Each of those also introduces a number an operator may
+type, and **a number this product reads at startup is a number it can refuse at startup** — so
+every line below whose remedy is "put a value in `.env`" says in its first sentence what a value
+that cannot work does to the container.
 
 > **Attachment storage is now capped per workspace (`STORAGE_QUOTA_ENABLED` `true`,
-> `STORAGE_QUOTA_WORKSPACE_BYTES` `100GB` self-hosted / `10GB` on the `cloud` profile).**
+> `STORAGE_QUOTA_WORKSPACE_BYTES` `100GB` self-hosted / `10GB` on the `cloud` profile) — and if you
+> set that ceiling yourself, a value below `ATTACHMENT_MAX_FILE_SIZE`, or a blank one, stops the
+> container at boot rather than being discovered by the first upload.**
 > Nothing bounded a workspace's total attachment storage before this release. From now on a
 > workspace already holding **more** than the ceiling has every new upload in it refused with
 > **`409` `STORAGE_QUOTA_EXCEEDED`** the moment the deploy completes — and because that is a
@@ -383,7 +389,11 @@ member of this class: there is no old value to compare against, so nothing in an
 > `SELECT i.workspace_id, pg_size_pretty(SUM(a.size_bytes)) FROM issue_attachments a JOIN issues i ON i.id = a.issue_id GROUP BY i.workspace_id ORDER BY SUM(a.size_bytes) DESC LIMIT 20;`
 > If your largest workspace is over the ceiling, set `STORAGE_QUOTA_WORKSPACE_BYTES` above it in
 > `.env` (or `STORAGE_QUOTA_ENABLED=false`) before upgrading, then lower it deliberately as its
-> own change. **Which default you get follows `SPRING_PROFILES_ACTIVE`, not the fact that you are
+> own change. **That value is validated at startup even when the quota is switched off** — a
+> ceiling below `ATTACHMENT_MAX_FILE_SIZE` would admit no file at all, so the container refuses to
+> start naming both numbers rather than answering `409` on a workspace that is visibly empty; a
+> blank `STORAGE_QUOTA_WORKSPACE_BYTES=` stops the boot too, so remove the line to get the default
+> back. **Which default you get follows `SPRING_PROFILES_ACTIVE`, not the fact that you are
 > self-hosting** — `.env.prod.example` ships `cloud`, so an install that never changed that line
 > is on the 10 GB ceiling. Details:
 > [Attachment storage is capped per workspace from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#attachment-storage-is-capped-per-workspace-from-0180).
@@ -402,7 +412,10 @@ produces an error.
 > plus the page cache this database can expect (4 GB host → `1GB`, 8 GB → `2GB`, dedicated
 > database host → ~75% of RAM) and `docker compose up -d`. On a 1–2 GB host that also runs the
 > app, leave the defaults: correcting the `4GB` claim is what this change is for. Under 1 GB,
-> lower all three server dials instead — the linked section carries the values. **Also raise
+> lower all three server dials instead — the linked section carries the values. **A value the
+> server cannot parse stops the `postgres` container while `docker compose up -d` still exits
+> `0`** — this dial is read by the database rather than by the application, so nothing in the
+> shell tells you: change one at a time and read `docker compose ps` afterwards. **Also raise
 > `POSTGRES_MEMORY_LIMIT` if you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or
 > `DB_POOL_MAX_SIZE`** — `work_mem` is charged per sort node per backend, so both it and the
 > pool size multiply straight into that ceiling: `4MB × ~4 nodes × ~12 backends` ≈ ~190 MB at
@@ -417,7 +430,8 @@ box too small to have been slow yesterday is exactly the one that meets it today
 
 > **Reports, searches and the planning (Backlog) reads are now bounded by how many run AT ONCE,
 > not only by how often they are asked for (`EXPENSIVE_READ_MAX_IN_FLIGHT`, default 6 of a pool
-> of 10; 3 per user).**
+> of 10; 3 per user) — and if you pin that share yourself, a value that is not strictly below
+> `DB_POOL_MAX_SIZE`, or a blank one, stops the container at boot.**
 > Before 0.18.0 nothing bounded concurrency on that surface, and one user inside their
 > documented per-minute allowance could hold the whole connection pool — measured, not
 > theorised: every other endpoint on the instance then failed after waiting 30 s for a
@@ -497,6 +511,139 @@ Two lines, and the second is the one that makes the first checkable:
    repository* is not a finding; *a setting is in effect* is — the same rule §7 applies to
    the deployed configuration, applied to the one class of value the repository is not
    allowed to hold.
+
+
+## Releases that apply a new rule to data you already have
+
+The two sections above are about a value *moving* under an operator — a default that was resized,
+a function that now derives something differently. This one is about a **rule that did not exist
+being applied to rows written before it did**. Nothing is resized and nothing is re-derived; the
+data is exactly what it was yesterday, and the release decides that some of it is no longer
+acceptable. The failure therefore lands where the operator cannot have anticipated it: on records
+that were fine when they were written.
+
+Two shapes, and the release notes owe a different sentence to each:
+
+- **The rule is enforced by the database, so the upgrade refuses.** Nothing is applied, the
+  container exits, and the instance stays on the old image. Loud, recoverable, and what the
+  operator needs from the release body is the repair — "a refusal must name an action its reader
+  can perform" applies to a failed boot at least as much as to a `409`.
+- **The rule is enforced by the API, so nothing refuses until somebody saves.** The upgrade
+  succeeds, every existing value is still stored and still readable, and the refusal arrives days
+  later on a record nobody thinks of as unusual. This one has no failed boot to attach itself to,
+  which is exactly why it needs a line: met without warning it reads as a bug in the editor.
+
+**Both of 0.18.0's members of this class went without a paste-ready line until HD-228**, and the
+mechanism is worth recording because it is not carelessness: this file had a section for a changed
+default and a section for a changed derivation, and a change that fits neither has nowhere to be
+written down. **A blurb with no home is a blurb nobody writes.** It was also the second time this
+link was found broken by hand, so the correspondence is now a test rather than a review item —
+`UpgradeNotesCoverageTest` pairs every versioned `## Upgrading` subsection of
+`docs/self-hosting.md` with the blurb carrying its anchor, in both directions, and its failure
+message is the checklist.
+
+Ready to paste. The account one first, because it is the one that can stop the upgrade:
+
+> **0.18.0 will not start on a `users` table holding an address that is not already lower-case —
+> including a single one that collides with nothing.** The release adds `UNIQUE (lower(email))` to
+> `users`, and the migration that adds it (`V23`) **refuses instead of folding anything**: no index
+> is created, no account is changed or deleted, and — because PostgreSQL writes the schema-history
+> row in the same transaction — nothing is recorded either, so there is no failed migration to
+> `flyway repair`. Fix the data and start the container again. The message begins
+> `HD-167 V23 aborted` and carries both counts, the queries that find the rows, and the statements
+> in the one order that works.
+>
+> **On an install whose `users` table only Hamstrack has ever written the answer is zero, and one
+> query proves it before you pull:**
+> `SELECT id, email, status, created_at FROM users WHERE email <> lower(email) ORDER BY created_at;`
+> Every account the product creates is lower-cased at signup, so a row appears here only if some
+> other writer touched the table — an import, a support script, a dump edited by hand.
+>
+> **The upgrade will not fold them for you, on purpose.** `Bob@x.com` and `bob@x.com` are two
+> different mailboxes on any RFC-compliant mail server, so folding an address in place decides
+> **which mailbox can reset that account's password** — your decision about your people, not a
+> migration's. If the query returns rows: resolve every colliding pair **first** (re-address or
+> disable, never delete — `issues.reporter_id`, `comments.author_id`, `invited_by` and the
+> `created_by` columns all reference `users` with no `ON DELETE`), **then** fold what is left with
+> `UPDATE users SET email = lower(email) WHERE email <> lower(email);`. That order is load-bearing:
+> at that moment the new index does not exist, so a blind fold across a colliding pair *succeeds*
+> in producing two identical addresses and is only then refused by the older byte-exact constraint,
+> with an error that reads like a different bug.
+>
+> **Signing in does not change**, deliberately — login still matches your address exactly, and no
+> stored address is rewritten, re-cased or merged by the upgrade. A row that is not its own
+> lower-case form is already broken today (it can neither log in nor receive a reset mail); what is
+> new is that it would silently occupy the folded address, making the correct spelling
+> unregisterable for the person who holds it.
+>
+> **The same release makes pending invitations case-insensitive too, and that half deletes rather
+> than refuses.** On upgrade `workspace_invites` loses every **unaccepted** row whose address is not
+> already lower-case, and then, where a workspace holds several unaccepted invitations for one
+> folded address, all but the newest. Accepted invitations are never touched and nobody loses access
+> they already have — the only visible effect is a link that stops working, fixed by inviting the
+> person again — and from now on a workspace may hold **one standing invitation per address**, a
+> second attempt answering `409` instead of quietly creating a duplicate. **It commits before the
+> account check runs**, and Flyway wraps each migration rather than the upgrade as a whole, so an
+> upgrade halted by the address refusal has already deleted those invitations while every later
+> change in 0.18.0 has not run at all: "the upgrade failed" does not mean "nothing changed".
+> Details:
+> [Account addresses become case-insensitive in 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull).
+
+The locale-folding procedure that line sends a reader to for a collision —
+[Duplicate accounts after an upgrade](self-hosting.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
+— deliberately gets **no line of its own**. It is a remedy rather than a change, it describes
+behaviour 0.16.0 already fixed, and in this release it is reachable only through the refusal above,
+which is where a reader needs it. One sentence of its reasoning is also false when it is arrived at
+from here — it tells the operator to give the survivor *the duplicate's* address, because after a
+locale fold that is the spelling the current build just wrote, whereas on this path both spellings
+are old and the duplicate's may be the wrong one — and that correction is carried inline in both
+sections rather than in a release body, because it is a property of the procedure and not of this
+release.
+
+And the free-text bounds, which refuse nothing at upgrade time and are for that reason the easier of
+the two to leave out:
+
+> **Every block of free text is now bounded, and the bound applies to text you already have.** An
+> issue or project description, a comment body, a workflow description and a text-area custom field
+> value are capped at **10 000 characters** from 0.18.0 (a field definition's `config` at 20 000
+> serialized, refused with `422`); before this release the API bounded none of them and the only
+> ceiling anywhere was the database column. Over-long is an ordinary field-anchored **`400`** naming
+> the field that was too long.
+>
+> **Nothing is migrated, truncated, rewritten or deleted.** There is no migration behind this. Every
+> stored value stays exactly as it is and is read back in full — on the board, in the issue view,
+> through the API, in a database dump. Only a *write* carrying an over-long value is refused.
+>
+> **The part to publish: a record whose stored text is already over the bound refuses EVERY save
+> until somebody shortens it** — including a save that changes something else entirely, because the
+> editor submits the whole record. A 15 000-character description means that issue's status,
+> assignee and due date cannot be changed through the UI either, and the message names
+> `description` although nobody touched it. It is self-healing: shorten the text once and that
+> record saves normally from then on. If the content is worth keeping — a log, a dump, a long
+> specification — attach it as a file and leave a line in the description instead.
+>
+> **Size it before you upgrade.** Nothing here is destructive, so this is planning rather than
+> safety:
+>
+> ```sql
+> SELECT 'issues' AS t, count(*) FROM issues WHERE length(description) > 10000
+> UNION ALL SELECT 'issue_comments', count(*) FROM issue_comments WHERE length(body) > 10000
+> UNION ALL SELECT 'projects', count(*) FROM projects WHERE length(description) > 10000
+> UNION ALL SELECT 'workflows', count(*) FROM workflows WHERE length(description) > 10000;
+> ```
+>
+> **Treat that number as a floor, not as an answer:** PostgreSQL's `length()` counts characters and
+> the server counts UTF-16 code units, so an emoji-heavy 8 000-character description is around
+> 14 000 units — refused, and counted as fine by the query. Run it with `octet_length(...)` in place
+> of `length(...)` if you want a result where zero really means zero.
+>
+> **For integrators, the same sweep replaced a `500` with a refusal wherever an over-long value used
+> to reach the database.** An email address longer than 255 characters and an out-of-range search
+> parameter are now ordinary `400`s naming what was refused; a password longer than **72 UTF-8
+> bytes** answers `422` (that is BCrypt's limit and it counts bytes, so about 37 characters of
+> Cyrillic or 19 of emoji reach it). Nothing that was accepted before is refused now except by
+> length. Details:
+> [Free text is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#free-text-is-bounded-from-0180).
 
 
 ## Constraints on a populated table, and why they are free right now
@@ -759,8 +906,13 @@ is now rejected, a new mode. Additive endpoints do not need a line each; the API
 already has them.
 
 **A changed default belongs here too, and is the entry most easily missed** — nothing was
-added, nothing was rejected, and the diff reads as configuration. See "Releases that change
-a resource default" above, which carries this release's lines ready to paste.
+added, nothing was rejected, and the diff reads as configuration. **So does a rule applied to
+data somebody already has**, which is missed the same way and for the opposite reason: the
+diff reads as validation. Each class section above carries its own release's lines ready to
+paste, and every anchored `## Upgrading` subsection of `docs/self-hosting.md` must be reachable
+from one of them — `UpgradeNotesCoverageTest` fails when one is not, in either direction, so
+the question "did every change get a line" is answered by the suite rather than by re-reading
+two files side by side.
 
 Below is that text for the **roles & permissions** release (HD-123, V13–V16), which is also
 the worked example of the shape. See "Releases carrying a destructive migration" above for

@@ -2373,6 +2373,15 @@ invisible to you. Otherwise pick one of two values and put it in `.env` **before
 | You are self-hosting and `.env` still says `SPRING_PROFILES_ACTIVE=cloud` | `SPRING_PROFILES_ACTIVE=dc` — and read [the deployment-model note](#configuration): the profile also decides public signup and where attachments are stored |
 | You do not want a ceiling at all | `STORAGE_QUOTA_ENABLED=false` |
 
+**Whatever you type there is checked at boot, and a value that cannot work stops the container
+rather than the first upload.** `STORAGE_QUOTA_WORKSPACE_BYTES` must be at least
+`ATTACHMENT_MAX_FILE_SIZE` — a ceiling smaller than one permitted file admits nothing at all —
+and the check runs **even when `STORAGE_QUOTA_ENABLED=false`**, because a number that is only
+validated while a switch is on is a number that is wrong the moment somebody turns the switch on.
+A **blank** `STORAGE_QUOTA_WORKSPACE_BYTES=` stops the boot too rather than restoring the default:
+remove the line to get the default back. The startup message names both numbers and the variable
+to change.
+
 `STORAGE_QUOTA_ENABLED=false` stops the refusals and keeps the bookkeeping: usage is still
 counted and still shown on **Workspace settings → Storage**, which is the figure you need in
 order to choose a number later. Once you know the distribution, lower the ceiling deliberately
