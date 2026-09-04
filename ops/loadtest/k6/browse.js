@@ -70,7 +70,7 @@ export const options = {
       startTime: '0s',
     },
   },
-  thresholds: thresholdsFor([CLASS.BROWSE, CLASS.SSE]),
+  thresholds: thresholdsFor([CLASS.BROWSE, CLASS.PLANNING, CLASS.SSE]),
   // Connection reuse on, like a browser. Turning it off would measure TCP setup and
   // attribute it to the application.
   noConnectionReuse: false,
@@ -110,16 +110,35 @@ function boardPage(fx, p) {
 // BacklogPage: the backlog section plus one sprint section. Both are capped at
 // AGILE_SECTION_MAX_ISSUES and the planning view assembles (open sprints + 1) of them, so
 // asking for two is the cheap end of what this screen does.
+//
+// THE TWO .../backlog/... READS ARE CLASS.PLANNING, NOT CLASS.BROWSE (HD-174).
+//
+// They used to be `browse`, and that was correct until the product budgeted them. Since
+// HD-174 they carry a per-principal minute budget (PLANNING_REQUESTS_PER_MINUTE, 240) AND a
+// permit from the expensive-read occupancy share, so a 429 on either can be the product
+// working as designed. Two things broke while they stayed in `browse`: the class's threshold
+// rationale ("nothing in the product budgets ordinary browsing") became false, and probe P1's
+// victim class — whose staying inside its target IS P1's success criterion — became partly
+// bounded, so a P1 pass stopped meaning what it says.
+//
+// The /sprints read stays in `browse` deliberately: it is NOT on the planning pattern
+// (/api/workspaces/*/projects/*/backlog/**), and putting it here would make this class a
+// screen rather than a budget, which is the mistake being corrected.
+//
+// ARRIVAL RATE, CHECKED RATHER THAN ASSUMED: a browse VU thinks 4-8 s and rolls into this
+// function 25% of the time, so it produces roughly 5 planning requests a minute — two orders
+// of magnitude below the 240/min entitlement. IT MUST STAY THAT WAY, or the ladder measures
+// the limiter instead of the app.
 // ---------------------------------------------------------------------------
 function backlogPage(fx, p) {
   const b = `/api/workspaces/${fx.wsId}/projects/${p}`;
   get(`${BASE_URL}${b}/sprints`, CLASS.BROWSE, { page: 'backlog' });
-  get(`${BASE_URL}${b}/backlog/sections/backlog`, CLASS.BROWSE, { page: 'backlog' });
+  get(`${BASE_URL}${b}/backlog/sections/backlog`, CLASS.PLANNING, { page: 'backlog' });
   // THIS project's open sprints, not the big project's. Asking project X for a sprint that
   // belongs to project LDA is a 404 — correct, cheap, and averaged straight into this
   // class's p95, which is the deflation hs_unexpected_404 exists to catch. It did.
   const s = pick((fx.openSprintsByProject || {})[p] || []);
-  if (s) get(`${BASE_URL}${b}/backlog/sections/${s}`, CLASS.BROWSE, { page: 'backlog' });
+  if (s) get(`${BASE_URL}${b}/backlog/sections/${s}`, CLASS.PLANNING, { page: 'backlog' });
 }
 
 // ---------------------------------------------------------------------------

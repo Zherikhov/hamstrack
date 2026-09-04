@@ -2,6 +2,7 @@ package com.hamstrack.report;
 
 import com.hamstrack.common.ratelimit.PrincipalThrottleInterceptor;
 import com.hamstrack.common.ratelimit.WriteRateLimitConfig;
+import com.hamstrack.issue.ratelimit.PlanningRateLimitConfig;
 import com.hamstrack.report.ratelimit.ReportRateLimitConfig;
 import com.hamstrack.report.ratelimit.ReportRateLimiter;
 import com.hamstrack.search.ratelimit.SearchRateLimitConfig;
@@ -37,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <strong>Every expensive handler is behind a budget — asked of the handler mapping, not of a
  * config file</strong> (HD-140 R6 round 2, security item 15).
  *
- * <p>Both throttles are path bindings, which is the right shape: a new report under
+ * <p>Every throttle here is a path binding, which is the right shape: a new report under
  * {@code …/reports/**} inherits its budget the moment its {@code @GetMapping} exists. But a path
  * binding covers exactly the paths it names, and this epic has now produced three endpoints that
  * landed <em>outside</em> the pattern that was supposed to cover them — the Insights panel, which
@@ -175,11 +176,17 @@ class ThrottleCoverageTest {
 
               1. src/main/java/.../common/config/SearchProperties.java   — the enumeration on
                  requestsPerMinute (the source of truth the others were reconciled TO), and the
-                 javadoc on ReportRateLimitConfig.REPORTS_PATH / INSIGHTS_PATH for the reports side
-              2. src/main/resources/application.properties               — the app.reports.* and
-                 app.search.* comment blocks AND the numbered list above app.rate-limit.enabled
-              3. .env.prod.example                                       — the REPORTS_REQUESTS_PER_MINUTE
-                 and SEARCH_REQUESTS_PER_MINUTE blocks (the one missed last time)
+                 javadoc on ReportRateLimitConfig.REPORTS_PATH / INSIGHTS_PATH for the reports side;
+                 common/config/PlanningProperties.java for the planning side, which additionally
+                 carries the DERIVATION of its number (the SPA traffic model) — kept once, there,
+                 so a future reader can CHECK 240 rather than re-guess it
+              2. src/main/resources/application.properties               — the app.reports.*,
+                 app.search.* and app.planning.* comment blocks AND the numbered list above
+                 app.rate-limit.enabled
+              3. .env.prod.example                                       — the REPORTS_REQUESTS_PER_MINUTE,
+                 SEARCH_REQUESTS_PER_MINUTE and PLANNING_REQUESTS_PER_MINUTE blocks (this file is
+                 the one missed last time), AND the master-switch section's list of what
+                 RATE_LIMIT_ENABLED=false turns off
               4. docs/self-hosting.md                                    — the operator table rows and
                  the "this one is node-local too" prose below them (deliberately de-ordinalised:
                  the ordinals went stale one entry before the list did, so do not renumber it back)
@@ -189,7 +196,8 @@ class ThrottleCoverageTest {
                  429 responses (NOT the copy in src/main/resources/static, which the Vite build
                  overwrites from public/)
               7. docs/project-state.md                                   — the "Config:" line of the
-                 search section
+                 search section AND the bulleted budget list under "Throttling, config and the
+                 rule behind them", which enumerates every per-principal pot
               8. docs/hql-search-maintainers-guide.md                    — EVERY claim in that file
                  about what an endpoint on the search surface inherits, which is NOT one row: the
                  package table states it three times (the controller row, the filter/** row, the
@@ -199,7 +207,12 @@ class ThrottleCoverageTest {
                  exact shape of the gap it produced: the named row got fixed and the other four
                  did not
               9. src/main/frontend/src/api.ts                            — the 429 comments on the
-                 search, insights, saved-filter, storage-breakdown and attachment-upload callers
+                 search, insights, saved-filter, storage-breakdown, attachment-upload and the
+                 three BACKLOG callers. And on the planning surface the CLIENT owes one more
+                 thing than a comment: a 429 of any kind on a section refresh must NOT invalidate
+                 the aggregate, or a refusal on the cheap request provokes the expensive one —
+                 the same asymmetry PlanningThrottleParityTest forbids, arriving through the
+                 error path instead of through the registration (components/sprints.tsx)
              10. src/main/java/.../common/config/WriteProperties.java    — the two write budgets
                  (requests and BYTES), and common/config/StorageQuotaProperties.java for the quota
                  that is deliberately NOT under the master switch
@@ -232,7 +245,14 @@ class ThrottleCoverageTest {
              19. ops/loadtest/k6/probes.js + ops/loadtest/RESULTS-TEMPLATE.md — probe P1's stated
                  prediction, which this product DELIBERATELY falsified: a harness that keeps
                  documenting a prediction the product set out to break reads as the product being
-                 wrong
+                 wrong. AND THE VICTIM CLASS ITSELF (HD-174): P1's criterion is "the victim's
+                 browse class stays inside its target", so a budgeted endpoint inside that class
+                 makes a pass stop meaning what it says. k6/lib/classes.js + k6/browse.js +
+                 README.md's targets table and browse rationale are part of this entry — the
+                 rationale sentence must describe how the CLASS is composed ("browse is composed
+                 only of reads the product does not budget"), never make a claim about the
+                 product ("nothing in the product budgets ordinary browsing"), which was true
+                 when written and false one release later
              20. THE THREE BOUNDS ON HOW LONG A PERMIT MAY BE HELD, if you touch acquisition or
                  release: TomcatUploadTimeoutCustomizer (in the app, so every deployment has it),
                  PerPrincipalInFlightLimit.sweepStalePermits + its metric, and read_body in the
@@ -302,12 +322,34 @@ class ThrottleCoverageTest {
             and if so is it inside the occupancy share? A rate budget spends the same unit whether \
             a request takes 8 ms or 8 s, so its protection evaporates exactly as the instance \
             slows down; app.expensive-read.max-in-flight is what keeps the interactive API's \
-            connections out of one surface's reach. Registering the path in ReportRateLimitConfig \
-            or SearchRateLimitConfig buys BOTH controls in one edit — that is why there is no \
-            second pattern list — and everyExpensiveReadHandlerIsAlsoConcurrencyBounded is what \
-            fires when a new handler lands under those packages with only half of them. If it is \
-            asynchronous, noExpensiveReadHandlerIsAsynchronous fires instead, and says what the \
-            permit is owed.
+            connections out of one surface's reach. Registering the path in ANY of the \
+            *RateLimitConfig classes buys BOTH controls in one edit — that is why no configurer \
+            has a second pattern list for occupancy — and \
+            everyExpensiveReadHandlerIsAlsoConcurrencyBounded is what fires when a new handler \
+            lands with only half of them. If it is asynchronous, \
+            noExpensiveReadHandlerIsAsynchronous fires instead, and says what the permit is owed. \
+            A NEW SURFACE JOINS THE EXISTING SHARE AND DOES NOT GET ONE OF ITS OWN (ADR-0031): a \
+            second ceiling turns ExpensiveReadShare's derive-from-the-pool default into a \
+            PARTITION, which on a pool of 4 is 1 permit per surface and serialises a whole \
+            surface instance-wide — and a literal that must sit below the pool has crash-looped \
+            every small self-host once already.
+
+            AND THE SIXTH (HD-174): IS IT A PLANNING READ — does it assemble a project's sections, \
+            or run an unconditional, cap-blind aggregation over one of them? A budget is earned by \
+            the work a handler does, not by where it is mounted; register it in \
+            PlanningRateLimitConfig, which carries both controls on one interceptor and one \
+            pattern (/api/workspaces/*/projects/*/backlog/**). Its own rate pot at 240/min rather \
+            than the reports pot, because a card dragged ACROSS sections costs two section \
+            refreshes and 60/min would refuse an ordinary grooming session inside three minutes — \
+            a 429 mid-drag reads as a product defect, where a 429 on a report is a delay. NOTE \
+            WHAT IS DELIBERATELY NOT ON IT, so the next reader does not "fix" the omission: \
+            GET .../issues (board + list) and GET .../sprints are a WEAKER case — not because \
+            their work is bounded by what they return (no filtered, ordered, capped query's work \
+            is) but because neither runs an unconditional project-wide aggregation. Extending the \
+            pattern to them is an argument to be made on their own worst case. The planning \
+            surface's own seal is PlanningThrottleParityTest, which derives its handler set from \
+            the pattern constant AND from the registrations rather than from URI literals, so a \
+            fourth planning read inherits the claim by existing.
             """;
 
     @Autowired
@@ -322,6 +364,17 @@ class ThrottleCoverageTest {
     /** HD-191 — the third configurer, and the first one whose binding is method-conditioned. */
     @Autowired
     WriteRateLimitConfig writeRateLimitConfig;
+
+    /**
+     * HD-174 — the fourth configurer, and the first one added to this seal <em>after</em>
+     * {@link #expensiveReadSurface()} started deriving its scope from the registrations. That
+     * derivation is why this ticket was a small diff: the three {@code BacklogController} handlers
+     * entered {@link #everyExpensiveReadHandlerIsAlsoConcurrencyBounded()} and
+     * {@link #noExpensiveReadHandlerIsAsynchronous()} with no edit to either tripwire, and only
+     * the sealed set below had to change.
+     */
+    @Autowired
+    PlanningRateLimitConfig planningRateLimitConfig;
 
     /**
      * EVERY configurer in the context, not the three above. {@link #expensiveReadSurface()} derives
@@ -648,6 +701,22 @@ class ThrottleCoverageTest {
                     + " its seal: WriteThrottleCoverageTest owns the other half, on the method axis."
                     + PROPAGATION_CHECKLIST)
                 .containsExactlyInAnyOrder("/api/workspaces/*/projects/*/issues/**");
+
+        assertThat(registeredPatterns(planningRateLimitConfig))
+                .as("the PLANNING budget covers a different set of paths than the documents say."
+                    + " It is ONE pattern on purpose — the planning surface as a category, so the"
+                    + " aggregate GET .../backlog and every section read under it are budgeted by"
+                    + " the same registration and a fourth planning read inherits both controls"
+                    + " the moment its @GetMapping exists. It is deliberately NOT"
+                    + " /api/workspaces/*/projects/*/**, which would charge one pot for issues,"
+                    + " versions, components and config that are bounded elsewhere or on a"
+                    + " different axis; and it deliberately does not reach GET .../issues or"
+                    + " GET .../sprints, which are a WEAKER case because neither runs an"
+                    + " unconditional project-wide aggregation — not because their work is bounded"
+                    + " by what they return, which is not true of any filtered, ordered, capped"
+                    + " query."
+                    + PROPAGATION_CHECKLIST)
+                .containsExactlyInAnyOrder("/api/workspaces/*/projects/*/backlog/**");
     }
 
     /**
@@ -746,8 +815,10 @@ class ThrottleCoverageTest {
      * </ul>
      *
      * <p>The second half is read from the interceptor registrations of <em>every</em>
-     * {@link WebMvcConfigurer} in the context rather than from the three this class autowires, so a
-     * fourth configurer is in scope by existing. That is the rule this file keeps re-learning: a
+     * {@link WebMvcConfigurer} in the context rather than from the ones this class autowires — a
+     * count here would go stale one configurer before the list does, which is why this sentence
+     * says "every" — so a new configurer is in scope by existing. That is the rule this file
+     * keeps re-learning: a
      * throttle is earned by the work a handler does, not by where it is mounted, and two lists that
      * happen to agree are one commit away from not agreeing.
      */

@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { hashKey, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Flag } from 'lucide-react'
 import {
   ApiResponseError, apiGetBacklogSection, apiGetBacklogView, apiGetProject, sprintsApi,
 } from '../api'
+import { isCapacityFailure, isOverloadFailure, isThrottleRefusal } from '../apiError'
 import type { BacklogViewOptions, CreateSprintPayload, StartSprintPayload, UpdateSprintPayload } from '../api'
 import {
   backlogViewKey, projectIssuesKeyPrefix, sprintsKey,
@@ -51,6 +52,53 @@ export function apiErrorText(e: unknown, fallback: string): string {
 /** A 409 on a drag means the caller's view of the list is stale — refresh, don't fight. */
 export function isStaleListError(e: unknown): boolean {
   return e instanceof ApiResponseError && e.status === 409
+}
+
+/**
+ * **A refusal must never cost more than the thing it refused** (HD-174 §5.4).
+ *
+ * The predicates themselves live in the leaf `apiError.ts` — the rule is about a
+ * status class and every surface that can be refused reads it, not just this
+ * one — and are re-exported here so the planning call sites keep one import.
+ *
+ * The planning surface carries a per-minute budget AND an occupancy permit, so a
+ * cheap section refresh can be refused three ways: `TOO_MANY_IN_FLIGHT`,
+ * `EXPENSIVE_SURFACE_BUSY`, and the per-minute budget 429 that carries no
+ * `errorType` at all. Those three are told apart from each other by `errorType`
+ * and **never** by the status (`api.ts`'s retry rule is the place that does it);
+ * what they have in common — the only thing {@link isThrottleRefusal} needs — is
+ * that the server has just declined to do a **12-statement** read, and that
+ * escalating to the `12 + N`-statement aggregate would answer a refusal of the
+ * cheap request by issuing the expensive one.
+ *
+ * {@link isOverloadFailure} is the same obligation reached by a different
+ * route: a saturated instance answers a request for reasons *outside* the
+ * planning surface — the pool exhausted by writes, a `connectionTimeout`
+ * expiring, an edge that stopped waiting — with a 502/503/504 and no 429
+ * anywhere. Escalating to the aggregate there is the identical mistake. A 500 is
+ * deliberately excluded: it is a bug on one request, and a fresh view is worth
+ * having.
+ */
+export { isThrottleRefusal, isOverloadFailure, isCapacityFailure }
+
+/**
+ * What to SHOW for a capacity failure — and why it is not one sentence.
+ *
+ * A 429 comes with a ProblemDetail the server wrote for a reader, and that
+ * sentence is the one to render: it says what was refused without prescribing an
+ * action its reader may be unable to perform (the caller of a busy-surface 429
+ * may hold no permit at all). A 502/503/504 carries nothing of the kind — an
+ * edge's body is an HTML page or empty, and `Bad Gateway` is a status line, not
+ * a sentence — so the client supplies one, and it says the *other* fact: the
+ * server is overloaded, rather than having declined this request.
+ */
+export const OVERLOADED_TEXT =
+  'The server is overloaded and could not answer. Nothing was changed — try again in a moment.'
+
+export function capacityRefusalText(e: unknown): string {
+  return isThrottleRefusal(e)
+    ? apiErrorText(e, 'The server is busy right now.')
+    : OVERLOADED_TEXT
 }
 
 /**
@@ -268,6 +316,24 @@ export function useBacklogView(
   const key = useMemo(() => backlogViewKey(wsId, projectId, filters), [wsId, projectId, filters])
   const [refreshingSection, setRefreshingSection] = useState<string | null>(null)
   const [sectionError, setSectionError] = useState<string>('')
+  /**
+   * Section id → the refusal's own sentence, for every section this hook knows
+   * to be showing data older than the server's (HD-174 §5.4).
+   *
+   * Per-section rather than one banner, because the honest statement names WHICH
+   * section is stale: a planner who just dragged a card is looking at one, and a
+   * global "something failed" over a board that silently kept its old rows is
+   * the bug this map exists to stop.
+   */
+  const [staleSections, setStaleSections] = useState<Record<string, string>>({})
+
+  const clearStale = useCallback((sectionId: string) => {
+    setStaleSections(prev => {
+      if (!(sectionId in prev)) return prev
+      const { [sectionId]: _gone, ...rest } = prev
+      return rest
+    })
+  }, [])
 
   const query = useQuery({
     queryKey: key,
@@ -275,8 +341,72 @@ export function useBacklogView(
     enabled: !!wsId && !!projectId,
   })
 
-  const refreshSection = useCallback(async (sectionId: string) => {
-    if (!wsId || !projectId) return
+  /**
+   * **A stale marker is a statement about what the server last answered, so it
+   * has to end when the server answers.**
+   *
+   * It was cleared in exactly one place — a successful per-section refresh — which
+   * made it a latch one layer above the skip predicate in `lib/issueEvents.ts`:
+   * refuse a section, then let the aggregate come back by ANY other path (an SSE
+   * invalidation, a window focus, a remount) and the section still warned "these
+   * rows may be out of date" over rows that were the server's latest. Only the
+   * per-section *Try again* cleared it, so a warning that had already been
+   * answered stayed on screen indefinitely, and the hook's own contract below —
+   * *a section in here is showing data it could not confirm* — was false. It
+   * fails safe and it still has to go: a notice nobody can make go away by being
+   * right is one people learn to ignore.
+   *
+   * The aggregate answers for **every** section in one response, so its success
+   * confirms all of them and the whole map goes.
+   *
+   * Read off the CACHE's own event stream, and specifically off `manual`, for two
+   * reasons that both bite:
+   *
+   *  - `refreshSection` writes its patch with `setQueryData`, which advances
+   *    `dataUpdatedAt` exactly like a fetch would — so a timestamp comparison
+   *    would let a successful refresh of section A clear section B's marker, and
+   *    `refreshSections` marks B in the very gesture that refuses A. One
+   *    section's answer is not another's. `QueryClient.setQueryData` tags its
+   *    dispatch `manual: true`; a fetch does not, and that flag is the only
+   *    place the two are distinguishable.
+   *  - a render-time comparison of `isFetching` would need the component to
+   *    actually render while the fetch is in flight, which React is free not to
+   *    do when a refetch starts and settles inside one batch — a refetch nobody
+   *    re-rendered for is still a refetch, and it still answered.
+   */
+  const queryHash = hashKey(key)
+  useEffect(() => {
+    return qc.getQueryCache().subscribe(event => {
+      if (event.type !== 'updated' || event.query.queryHash !== queryHash) return
+      const action = event.action as { type: string; manual?: boolean }
+      if (action.type !== 'success' || action.manual) return
+      setStaleSections(prev => (Object.keys(prev).length === 0 ? prev : {}))
+    })
+  }, [qc, queryHash])
+
+  // A filter change is a different question, and the sections it will be
+  // answered with were never refused. The map is component state while the key
+  // is not, so without this the marker outlives the view it described.
+  //
+  // Depends on the key's CONTENT (`queryHash`), never on the array's identity: a
+  // caller that does not memoize `filters` (`useBacklogView(ws, p, {})`, which is
+  // every test in this repo) hands us a fresh object each render, so an identity
+  // dependency would clear the map on EVERY render — deleting the warning in the
+  // same tick the refusal wrote it. That is this round's bug arriving through the
+  // fix for it, and it is why the dependency is a hash and not the key.
+  useEffect(() => {
+    setStaleSections(prev => (Object.keys(prev).length === 0 ? prev : {}))
+  }, [queryHash])
+
+  /**
+   * @returns `false` when the server has no room for the work — it refused the
+   *   refresh (a 429 of any kind) or it is overloaded (502/503/504) — so a
+   *   caller with more sections to refresh can stop asking. Every other outcome
+   *   — success, a vanished section, a genuine failure — is `true`, because none
+   *   of them says anything about whether the next request is welcome.
+   */
+  const refreshSection = useCallback(async (sectionId: string): Promise<boolean> => {
+    if (!wsId || !projectId) return true
     setRefreshingSection(sectionId)
     setSectionError('')
     try {
@@ -311,27 +441,85 @@ export function useBacklogView(
           }),
         }
       })
+      clearStale(sectionId)
     } catch (e) {
+      // ── The capacity branch (HD-174 §5.4) ───────────────────────────────────
+      // A 429 says the server has just declined to do a 12-statement read; a
+      // 502/503/504 says it is saturated for a reason that never reached the
+      // planning throttle at all (the pool exhausted by writes, a Hikari
+      // connectionTimeout expiring, an edge that gave up). Both are states in
+      // which asking for something BIGGER is the wrong move, and only one of
+      // them produces a 429 — a guard written about the refusal alone leaves the
+      // failure a busy instance actually hands back on the escalating path. The
+      // fallback below answers a failed refresh by invalidating the VIEW key,
+      // which refetches the `12 + N`-statement aggregate — 32 statements on one
+      // connection at `AGILE_MAX_OPEN_SPRINTS=20`. Doing that here would make a
+      // refusal of the cheap request provoke the expensive one, per refused
+      // section, per planner, at exactly the moment the instance is saturated.
+      //
+      // So: no invalidate, no retry (`api.ts` already spent the only automatic
+      // one there is), and the section keeps the rows it has. The write that
+      // preceded this refresh COMMITTED — the refusal is on the read that
+      // follows it — so rolling anything back would show the planner a move that
+      // did happen as if it had not. What is left is to say so: the section is
+      // marked stale with the refusal's own sentence when there is one (a 429
+      // carries a ProblemDetail written for a reader; an overloaded edge carries
+      // an HTML page, so `capacityRefusalText` says the other fact instead), and
+      // the section's existing refresh control is the manual retry.
+      if (isCapacityFailure(e)) {
+        setStaleSections(prev => ({ ...prev, [sectionId]: capacityRefusalText(e) }))
+        return false
+      }
       // A 404 is not a failure worth reporting: the section is gone (its sprint
       // was deleted under us), so drop it by refetching the view instead of
       // telling the planner that something went wrong.
       if (!(e instanceof ApiResponseError && e.status === 404)) {
         setSectionError(apiErrorText(e, 'Could not refresh this section'))
       }
-      // A section that can't be patched must not stay silently stale.
+      // A section that can't be patched must not stay silently stale. Unchanged
+      // for every failure that is not a capacity one — a network blip, or a 500,
+      // which is a bug on this one request rather than a server with no room:
+      // one aggregate is still the right way to become current after those.
+      clearStale(sectionId)
       qc.invalidateQueries({ queryKey: key })
     } finally {
       setRefreshingSection(null)
     }
+    return true
     // `filters` is the object the caller memoizes into `key`; depending on it
     // whole keeps this callback honest if the filter set ever grows, which a
     // hand-listed subset would not.
-  }, [qc, wsId, projectId, key, filters])
+  }, [qc, wsId, projectId, key, filters, clearStale])
 
-  /** Refresh the (at most two) sections a move touched — never the whole view. */
+  /**
+   * Refresh the (at most two) sections a move touched — never the whole view.
+   *
+   * Sequential by design: both fetches are on the occupancy-bounded planning
+   * surface, and firing them together would take the caller's burst from one
+   * in-flight planning read to two. (§3.3 of HD-174's proposal argues the
+   * per-principal ceiling of 3 on the strength of that "one" — parallelising
+   * this loop is what would re-open it.)
+   *
+   * **A refusal stops the loop.** If the server just declined a 12-statement
+   * read, the second section's refresh would be one more request onto the
+   * surface that is already refusing, so the remaining sections are marked
+   * stale with the same sentence rather than asked for. The user's screen still
+   * tells the truth about all of them; the server is asked for none of it.
+   */
   const refreshSections = useCallback(async (sectionIds: (string | null | undefined)[]) => {
     const unique = [...new Set(sectionIds.filter((s): s is string => !!s))]
-    for (const id of unique) await refreshSection(id)
+    for (const [i, id] of unique.entries()) {
+      if (await refreshSection(id)) continue
+      const rest = unique.slice(i + 1)
+      if (rest.length) {
+        setStaleSections(prev => {
+          const carried = prev[id]
+          if (!carried) return prev
+          return { ...prev, ...Object.fromEntries(rest.map(other => [other, carried])) }
+        })
+      }
+      return
+    }
   }, [refreshSection])
 
   return {
@@ -341,6 +529,19 @@ export function useBacklogView(
     refreshSections,
     refreshingSection,
     sectionError,
+    /**
+     * Section id → why its rows may be older than the server's. A section in
+     * here is showing data it could not confirm, and saying nothing about that
+     * would be the same defect one layer down from the one this hook was built
+     * for: a section that describes itself wrongly and looks fine doing it.
+     *
+     * An entry lasts exactly as long as that sentence stays true: it is dropped
+     * by a successful refresh of its own section, by any successful fetch of the
+     * aggregate (which answers for every section at once, whoever asked for it),
+     * and by a filter change. It is emphatically not a latch — see the effects
+     * above.
+     */
+    staleSections,
     clearSectionError: () => setSectionError(''),
   }
 }

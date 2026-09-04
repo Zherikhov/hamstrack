@@ -49,6 +49,16 @@ const PROBE = (__ENV.PROBE || 'p1').toLowerCase();
 //   rather than as a pass, and report the number below, which is what makes the difference
 //   legible.
 //
+//   THE VICTIM CLASS MUST CONTAIN NO BUDGETED ENDPOINT, AND SINCE HD-174 THAT IS A
+//   CONSTRAINT RATHER THAN AN OBSERVATION. P1's whole criterion is "the victim's `browse`
+//   class stays inside its target", so a victim partly ON the bounded surface makes a pass
+//   stop meaning what it says: the victim would be refused BY DESIGN and the probe would
+//   report the bulkhead as victim degradation. victimBrowse below therefore issues only
+//   .../issues, .../issues/{n} and .../issues/{n}/comments — none of them budgeted, none of
+//   them holding an expensive-read permit. It is NOT the browse MIX (browse.js), whose
+//   BacklogPage reads moved to CLASS.PLANNING for exactly this reason. Do not "make the
+//   victim more realistic" by calling backlogPage() here without re-reading this paragraph.
+//
 //   REPORT REGARDLESS: the REAL MEAN CONNECTION-HOLD TIME PER REQUEST CLASS, from Hikari's
 //   `hikaricp_connections_usage_seconds`, and `hamstrack_expensive_read_in_flight` (max over
 //   replicas, never sum). The first is what the original arithmetic could only estimate; the
@@ -262,6 +272,8 @@ export function entitledReport(fx) {
     CLASS.REPORT, { probe: PROBE, role: 'entitled' });
 }
 
+// Deliberately three UNBUDGETED reads. See the P1 header: the victim class is the
+// measurement, so it must contain nothing the product refuses on purpose.
 export function victimBrowse(fx) {
   const b = `/api/workspaces/${fx.wsId}/projects/${fx.bigProjectId}`;
   const n = randomIssueNumber(fx, fx.bigProjectId);

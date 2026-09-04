@@ -5,7 +5,7 @@ import {
   AlertTriangle, ChevronDown, ChevronRight, Filter, GripVertical, MoreHorizontal, Plus,
   RefreshCw,
 } from 'lucide-react'
-import { apiGetProjectConfig, apiRankIssue } from '../api'
+import { ApiResponseError, apiGetProjectConfig, apiRankIssue } from '../api'
 import type { LabelMatch, RankIssuePayload } from '../api'
 import { useAuthStore } from '../auth'
 import { forgetProject } from '../recentProjects'
@@ -20,8 +20,8 @@ import { FixVersionFilter } from '../components/versions'
 import {
   BACKLOG_SECTION, CLOSED_SPRINT_HINT, CompleteSprintDialog, DeleteSprintDialog,
   SprintFormDialog, SprintPointsBadge, SprintStateBadge, StartSprintDialog, StoryPointsChip,
-  apiErrorText, formatDaysRemaining, formatSprintRange, isSprintClosed, isStaleListError,
-  useBacklogView, useSprintMutations,
+  apiErrorText, capacityRefusalText, formatDaysRemaining, formatSprintRange, isCapacityFailure,
+  isSprintClosed, isStaleListError, isThrottleRefusal, useBacklogView, useSprintMutations,
 } from '../components/sprints'
 import { CAPABILITY, CapabilityOffState, DELIVERY_SETTINGS_TAB } from '../components/delivery'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
@@ -153,12 +153,32 @@ export default function BacklogPage() {
 
   const view = useBacklogView(wsId, projectId, filters)
   const data = view.data
+  /**
+   * The aggregate could not be answered because the server has no room — it
+   * refused (429) or it is overloaded (502/503/504). HD-174 gave this endpoint
+   * three new ways to fail and `queryClient.ts` correctly never retries a 429,
+   * so without this branch the query lands in `isError` and the page tells a
+   * planner their project was deleted (below) while `forgetProject` drops it
+   * from the recency journal. Any tenant saturating the shared expensive-read
+   * share — reports, search, another team's planning — would do that to every
+   * other team's Backlog.
+   */
+  const capacityError = view.isError && isCapacityFailure(view.error) ? view.error : null
+  /**
+   * The only two answers that actually mean "this project is not yours to see
+   * any more": the resource is gone, or membership was revoked. Everything else
+   * — a refusal, an overloaded instance, a 500, a dropped connection — says
+   * nothing about the project, and forgetting it on those is how a busy minute
+   * silently rewrites the recency journal.
+   */
+  const accessGone = view.isError && view.error instanceof ApiResponseError
+    && (view.error.status === 404 || view.error.status === 403)
 
   // Project gone or access revoked — drop it from the recency journal so the
   // "/" redirect stops pointing here
   useEffect(() => {
-    if (view.isError && user && projectId) forgetProject(user.id, projectId)
-  }, [view.isError, user, projectId])
+    if (accessGone && user && projectId) forgetProject(user.id, projectId)
+  }, [accessGone, user, projectId])
 
   // ── Drag state ──────────────────────────────────────────────────────────────
   // `dragging` is the issue under the pointer plus the section it came from;
@@ -449,14 +469,69 @@ export default function BacklogPage() {
 
   const panelOpen = openIssueNumber !== undefined
 
-  if (view.isError) {
+  /**
+   * **Cached rows do not make a refusal a smaller fact — they make it a quieter
+   * one.** React Query v5 keeps `data` and flips `status` to `error` on a
+   * *refetch* failure, so every branch below that is guarded by `!data` is a
+   * branch that stops firing the moment the planner has been on this page long
+   * enough to have rows. A 404 or 403 arriving mid-session — the project deleted
+   * under them, or their access revoked — then took neither the capacity branch
+   * nor the not-found branch and fell straight through to a normal-looking
+   * backlog: no message anywhere, while `forgetProject` quietly dropped the
+   * project and every request the page made kept 404ing.
+   *
+   * So the three failure statements are ordered by what they mean rather than by
+   * whether anything is cached:
+   *
+   *  1. `accessGone` — the rows on screen are rows this reader no longer has,
+   *     so they go with the message. This is the ONE case where cached data is
+   *     not worth keeping, and it is the only one where the page sends the
+   *     reader somewhere else.
+   *  2. capacity — no rows: a full panel; with rows: the stale banner further
+   *     down, because they are old, not wrong.
+   *  3. anything else (a 500, a dropped connection) — the same shape as 2.
+   */
+  if (accessGone) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-3">
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
           Project not found — it may have been deleted, or your access was removed.
         </p>
-        <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}`, { state: { showAll: true } })}>
+        <Button variant="secondary" size="sm"
+                onClick={() => navigate(`/w/${wsId}`, { state: { showAll: true } })}>
           Go to projects
+        </Button>
+      </div>
+    )
+  }
+
+  // The server has no room and there is nothing cached to show. Say exactly
+  // that — and nothing about this project: both controls are spent in an
+  // interceptor BEFORE the workspace or the project is resolved, so this
+  // response is evidence about the instance, never about what exists or who is
+  // a member. The only offer is a manual retry of the SAME view (never
+  // something more expensive), and it waits out `Retry-After` first.
+  if (capacityError && !data) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-6">
+        <CapacityNotice
+          error={capacityError}
+          onRetry={() => void view.refetch()}
+          retrying={view.isFetching}
+        />
+      </div>
+    )
+  }
+
+  if (view.isError && !data) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3">
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+          The backlog could not be loaded.
+        </p>
+        <Button variant="secondary" size="sm" disabled={view.isFetching}
+                onClick={() => void view.refetch()}>
+          Try again
         </Button>
       </div>
     )
@@ -547,6 +622,34 @@ export default function BacklogPage() {
           </span>
         </div>
 
+        {/* The view itself could not be refreshed, but there are rows on screen
+            from the last answer the server did give. They are stale, not wrong —
+            so they stay, and the page says so above them rather than blanking a
+            planning meeting's screen. Outside the scroll area on purpose: a
+            planner reading the bottom of a long backlog must not have to scroll
+            up to find out that what they are reading is old. */}
+        {view.isError && data && (
+          <div className="px-5 py-2 flex-shrink-0" style={{ background: 'white' }}>
+            {capacityError ? (
+              <CapacityNotice
+                error={capacityError}
+                onRetry={() => void view.refetch()}
+                retrying={view.isFetching}
+                stale
+              />
+            ) : (
+              // Not a refusal and not a revocation — a 500, a dropped connection.
+              // The rows stay for the same reason, and so does the sentence: the
+              // third of the three messages `data` used to suppress.
+              <RefreshFailedNotice
+                error={view.error}
+                onRetry={() => void view.refetch()}
+                retrying={view.isFetching}
+              />
+            )}
+          </div>
+        )}
+
         {/* Sections */}
         <div className="flex-1 overflow-y-auto" style={{ background: 'var(--color-surface)' }}>
           {view.isLoading ? (
@@ -589,7 +692,8 @@ export default function BacklogPage() {
                   collapsed={!!collapsed[section.sprint.id]}
                   onToggle={() => setCollapsed(c => ({ ...c, [section.sprint.id]: !c[section.sprint.id] }))}
                   refreshing={view.refreshingSection === section.sprint.id}
-                  onRefresh={() => view.refreshSection(section.sprint.id)}
+                  onRefresh={() => void view.refreshSection(section.sprint.id)}
+                  stale={view.staleSections[section.sprint.id]}
                   emptyText={
                     canAssignSprints && !sprintsReadOnly
                       ? 'Drag issues here from the backlog to plan this sprint.'
@@ -664,7 +768,8 @@ export default function BacklogPage() {
                 collapsed={!!collapsed[BACKLOG_SECTION]}
                 onToggle={() => setCollapsed(c => ({ ...c, [BACKLOG_SECTION]: !c[BACKLOG_SECTION] }))}
                 refreshing={view.refreshingSection === BACKLOG_SECTION}
-                onRefresh={() => view.refreshSection(BACKLOG_SECTION)}
+                onRefresh={() => void view.refreshSection(BACKLOG_SECTION)}
+                stale={view.staleSections[BACKLOG_SECTION]}
                 emptyText={anyFilterActive ? 'No issues match the filter.' : 'The backlog is empty.'}
                 wsId={wsId}
                 issueTypes={issueTypes}
@@ -853,10 +958,126 @@ function applyMove(view: BacklogView, issue: Issue, from: string, to: string, in
   }
 }
 
+// ── The aggregate's own capacity refusal ──────────────────────────────────────
+
+/**
+ * What the planner sees when the **aggregate** could not be answered because the
+ * server has no room (HD-174 §5.4, extended).
+ *
+ * Three rules, each of which this page got wrong in one direction or another
+ * before:
+ *
+ *  • **Never paraphrase a refusal into a claim the response does not support.**
+ *    The throttle is spent in an interceptor before the workspace or project is
+ *    resolved, so a 429 here is evidence about the instance and none whatsoever
+ *    about whether this project exists or who may see it. "Project not found" is
+ *    the wrong sentence twice over — it names a cause the server never gave, and
+ *    it sends the reader somewhere else.
+ *  • **The two capacity states are one branch and two sentences.** *The server
+ *    declined this request* and *the server is overloaded* are different facts,
+ *    and only the first comes with a sentence the server wrote
+ *    (`capacityRefusalText`).
+ *  • **The only offer is a retry of the SAME read**, held back until
+ *    `Retry-After` has elapsed. Answering a refusal by re-asking immediately, or
+ *    by asking for something bigger, is the asymmetry the whole ticket exists to
+ *    forbid.
+ */
+function CapacityNotice({ error, onRetry, retrying, stale }: {
+  error: unknown
+  onRetry: () => void
+  /** A retry is already in flight — the button must not queue a second one. */
+  retrying: boolean
+  /** There are rows on screen from an earlier answer: they are old, not absent. */
+  stale?: boolean
+}) {
+  const retryAfter = error instanceof ApiResponseError ? error.retryAfter : undefined
+  const initial = Number.isFinite(retryAfter) ? Math.max(0, Math.ceil(retryAfter!)) : 0
+  const [left, setLeft] = useState(initial)
+  // A fresh refusal restarts the countdown rather than leaving a stale one
+  // ticking towards a button that would only be refused again.
+  useEffect(() => setLeft(initial), [initial])
+  useEffect(() => {
+    if (left <= 0) return
+    const t = setTimeout(() => setLeft(n => n - 1), 1000)
+    return () => clearTimeout(t)
+  }, [left])
+
+  const declined = isThrottleRefusal(error)
+  const headline = stale
+    ? (declined
+      ? 'Not refreshed — the server declined the request, so these rows may be out of date.'
+      : 'Not refreshed — the server is overloaded, so these rows may be out of date.')
+    : (declined
+      ? 'The server declined this request — the backlog was not loaded.'
+      : 'The server is overloaded — the backlog was not loaded.')
+
+  return (
+    <NoticeBar action={
+      <Button size="sm" onClick={onRetry} disabled={retrying || left > 0}>
+        {left > 0 ? <>Try again in <span className="mono">{left}</span>s</> : 'Try again'}
+      </Button>
+    }>
+      <b>{headline}</b> {capacityRefusalText(error)}{' '}
+      {declined && (
+        <>This is counted before any project is looked up, so it says nothing about this
+          project in particular.</>
+      )}
+    </NoticeBar>
+  )
+}
+
+/**
+ * The shared shell — one warning bar, `role="status"` so a reader who is not
+ * looking at this strip is still told, and every colour a token so the whole
+ * thing re-skins with the palette (DESIGN.md). `maxWidth` is inline on purpose:
+ * `max-w-*` is shadowed by our `@theme --spacing-*` scale and would resolve to
+ * 32px.
+ */
+function NoticeBar({ children, action }: { children: React.ReactNode; action: React.ReactNode }) {
+  return (
+    <div role="status" className="flex items-center gap-2 flex-wrap rounded-md px-3 py-2 text-xs"
+         style={{
+           background: 'color-mix(in srgb, var(--color-warning) 10%, white)',
+           color: 'var(--color-text-secondary)',
+           maxWidth: 620,
+         }}>
+      <AlertTriangle size={13} style={{ color: 'var(--color-warning-ink)', flexShrink: 0 }} />
+      <span style={{ minWidth: 0 }}>{children}</span>
+      {action}
+    </div>
+  )
+}
+
+/**
+ * The refresh failed for a reason that is neither a refusal nor a revocation —
+ * a 500, a dropped connection, anything `queryClient.ts` will have already
+ * retried once.
+ *
+ * It exists because `data` must not buy silence. The capacity states got their
+ * banner and the gone-project got its panel, and everything else fell through to
+ * a backlog that looked freshly loaded and was not. No countdown here: nothing
+ * handed us a wait, and the automatic retry has already been spent, so the offer
+ * is simply to ask again.
+ */
+function RefreshFailedNotice({ error, onRetry, retrying }: {
+  error: unknown
+  onRetry: () => void
+  retrying: boolean
+}) {
+  return (
+    <NoticeBar action={
+      <Button size="sm" onClick={onRetry} disabled={retrying}>Try again</Button>
+    }>
+      <b>Not refreshed — these rows may be out of date.</b>{' '}
+      {apiErrorText(error, 'The backlog could not be refreshed.')}
+    </NoticeBar>
+  )
+}
+
 // ── Section shell ─────────────────────────────────────────────────────────────
 
 function SectionCard({
-  sectionId, header, section, collapsed, onToggle, refreshing, onRefresh, emptyText,
+  sectionId, header, section, collapsed, onToggle, refreshing, onRefresh, stale, emptyText,
   wsId, issueTypes, openIssueNumber, onOpenIssue,
   dragging, dropAt, onDragStartIssue, onDragEnd, onRowDragOver, onSectionDragOver, onSectionDrop,
   canRank, menuTargets, onMoveWithin, onMoveToSection,
@@ -868,6 +1089,12 @@ function SectionCard({
   onToggle: () => void
   refreshing: boolean
   onRefresh: () => void
+  /**
+   * The refusal's own sentence, when the server declined to refresh this
+   * section (HD-174 §5.4). Present ⇒ the rows below are the last ones the
+   * server confirmed and may be older than the server's.
+   */
+  stale?: string
   emptyText: string
   wsId: string | undefined
   issueTypes: IssueType[]
@@ -927,6 +1154,34 @@ function SectionCard({
           <RefreshCw size={13} className={refreshing ? 'animate-spin' : undefined} />
         </button>
       </div>
+
+      {/* The server declined to refresh this section (HD-174 §5.4). Rendered
+          OUTSIDE the collapse, because a collapsed section is stale too and the
+          planner has no other way to find out. Deliberately no rollback and no
+          automatic retry: the write that preceded the refused refresh
+          committed, so these rows are stale rather than wrong, and `api.ts` has
+          already spent the one automatic retry that exists.
+
+          The sentence is the SERVER's — this frame adds only what the client
+          knows (which section, and that it was not refreshed). None of the three
+          refusals may be paraphrased into a call to action here: the caller of a
+          busy-surface 429 may hold no permit at all, so telling them to slow
+          down would name a remedy they cannot perform. */}
+      {stale && (
+        <div role="status" className="flex items-center gap-2 flex-wrap mx-3 my-2 rounded-md px-3 py-2 text-xs"
+             style={{
+               background: 'color-mix(in srgb, var(--color-warning) 10%, white)',
+               color: 'var(--color-text-secondary)',
+             }}>
+          <AlertTriangle size={13} style={{ color: 'var(--color-warning-ink)', flexShrink: 0 }} />
+          <span>
+            <b>Not refreshed — these rows may be out of date.</b> {stale}
+          </span>
+          <Button size="sm" onClick={onRefresh} disabled={refreshing}>
+            Try again
+          </Button>
+        </div>
+      )}
 
       {!collapsed && (
         <div className="flex flex-col" style={{ padding: '4px 0 6px' }}>

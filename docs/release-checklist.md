@@ -415,8 +415,9 @@ inheriting: it does not merely resize something, it introduces a **refusal that 
 on endpoints that always answered. Its break-even is not a host size — it is concurrency, and a
 box too small to have been slow yesterday is exactly the one that meets it today:
 
-> **Reports and searches are now bounded by how many run AT ONCE, not only by how often they
-> are asked for (`EXPENSIVE_READ_MAX_IN_FLIGHT`, default 6 of a pool of 10; 3 per user).**
+> **Reports, searches and the planning (Backlog) reads are now bounded by how many run AT ONCE,
+> not only by how often they are asked for (`EXPENSIVE_READ_MAX_IN_FLIGHT`, default 6 of a pool
+> of 10; 3 per user).**
 > Before 0.18.0 nothing bounded concurrency on that surface, and one user inside their
 > documented per-minute allowance could hold the whole connection pool — measured, not
 > theorised: every other endpoint on the instance then failed after waiting 30 s for a
@@ -424,6 +425,13 @@ box too small to have been slow yesterday is exactly the one that meets it today
 > **`429`** with `Retry-After: 1` and `errorType` `TOO_MANY_IN_FLIGHT` (your own requests) or
 > `EXPENSIVE_SURFACE_BUSY` (the instance's). **On a small busy instance this is a `429` where
 > yesterday there was a slow `200`** — nothing was computed and the identical retry succeeds.
+> **On the planning reads it is a refusal where yesterday there was none at all**:
+> `GET …/projects/*/backlog` and its section refreshes were unbudgeted before this release and
+> now carry both this share and a per-principal budget of their own
+> (`PLANNING_REQUESTS_PER_MINUTE`, 240 a minute, in memory per app node, under
+> `RATE_LIMIT_ENABLED`), so the Backlog page can answer `429` where it always answered `200`.
+> And because the share is **one** share, planning traffic can be the reason a colleague's
+> **report** is refused, and the reverse — the intended trade, not a defect to chase.
 > The trade is deliberate: the expensive surface refuses in milliseconds so the rest of the API
 > keeps its connections. To give reports more room, raise `DB_POOL_MAX_SIZE` **first** and then
 > `EXPENSIVE_READ_MAX_IN_FLIGHT` (an explicit value must stay strictly below the pool, or the app

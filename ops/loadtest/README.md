@@ -37,7 +37,8 @@ teardown, published abort conditions, a recorded configuration fingerprint. **Th
 must be the box run, and the numbers are void the moment its configuration moves.**
 
 **It does not turn off a single limiter.** Not the per-IP auth budget, not the per-principal
-search and report budgets, not the rank-rebalance cooldown, not the statement timeout. A run
+search, report or planning budgets, not the expensive-read occupancy share, not the
+rank-rebalance cooldown, not the statement timeout. A run
 with the throttles disabled measures a product nobody ships. The harness reaches saturation
 with **enough distinct principals** instead (one account per virtual user), and what the
 limiters do is a **result**, not an obstacle.
@@ -104,6 +105,7 @@ ops/loadtest/
 │   ├── refresh-tokens.js      BETWEEN STAGES: spends the whole file's single-use refresh
 │   │                          chain in one pass (~1 min) and rewrites tokens.json
 │   ├── browse.js              mix 1: what most people actually do (+ one held SSE per VU)
+│                              its BacklogPage reads are CLASS.PLANNING, not CLASS.BROWSE
 │   ├── report-search.js       mix 2: the expensive surface
 │   ├── write.js               mix 3: the only mix that takes row locks
 │   ├── probes.js              P1 entitlement · P2 report heap · L limiter
@@ -699,9 +701,16 @@ browse mix with **only** `http_req_duration{class:browse,phase:hold}`, which is 
 deleting `phase` from `record()` passed an entire browse ladder (exit 0) while failing the
 write mix (exit 6). **Every class with a latency target now also declares
 `hs_refused_429{class:…,phase:hold}`** — a Rate that `record()` samples on *every* response,
-so a read-only mix carries a witness too. It is a real target as well as a witness: nothing
-in the product budgets ordinary browsing or writing per principal, so a `browse` 429 above 1%
-is a finding about what sits in front of the app.
+so a read-only mix carries a witness too. It is a real target as well as a witness — and what
+it *means* depends on the class, which is a property of how the classes are **composed** rather
+than a claim about the product. **The `browse` and `write` classes are deliberately composed
+only of requests the product does not budget per principal**, so a 429 there is a finding about
+what sits in front of the app (a limiter, a proxy, the edge). The claim-shaped version of that
+sentence — *"nothing in the product budgets ordinary browsing"* — used to stand here and was
+falsified one release later by HD-174, which budgeted the two `.../backlog/...` reads this mix
+used to file under `browse`; they are now `CLASS.PLANNING`. On `planning`, `search` and
+`report` a 429 **can** be the product working as designed, so read `hs_occupancy_429` and
+`hs_minute_budget_429` before concluding anything.
 
 The sabotage that proves it, on a **non-production** instance, one short stage per mix:
 
@@ -739,6 +748,7 @@ all-passing, must find nothing.
 | class | p95 | p99 | error budget |
 |---|---|---|---|
 | `browse` | 600 ms | 1500 ms | 5xx = **0**; no unexpected 4xx; 429 ≤ 1% |
+| `planning` | 1200 ms | 3000 ms | 5xx = **0**; 429 ≤ 1%; occupancy 429 ≤ 1% |
 | `search` | 1500 ms | 4000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
 | `report` | 3000 ms | 8000 ms | 422 `STATEMENT_BUDGET_EXCEEDED` = **0**; 429 ≤ 1% |
 | `write` | 800 ms | 2500 ms | 5xx = **0**; 429 ≤ 1%; 409 ≤ 1%; rank-rebalance 429 ≤ 2% |

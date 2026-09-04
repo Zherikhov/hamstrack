@@ -54,12 +54,28 @@ import java.util.UUID;
  * refreshed must still carry them, and must adopt a newer value if the operator retuned
  * in between.
  *
- * <p><strong>Throttle: none, deliberately, and as parity with the aggregate rather than
- * as an omission.</strong> A budget is earned by the work a handler does, not by where it
- * is mounted — this repo has already paid a review round for the opposite assumption — so
- * this is a decision recorded rather than a default inherited. Today no planning read has
- * a per-principal budget: {@code ThrottleCoverageTest} seals the throttled path set and
- * none of its patterns matches {@code …/projects/*}{@code /backlog}.
+ * <p><strong>Throttle: BOTH controls, on every planning read, from one
+ * registration</strong> (HD-174). {@code PlanningRateLimitConfig} binds
+ * {@code /api/workspaces/*}{@code /projects/*}{@code /backlog/**} to a single
+ * {@code PrincipalThrottleInterceptor} carrying (a) the planning budget —
+ * {@code app.planning.requests-per-minute}, default 240, its own pot rather than the
+ * reports one because a card dragged across sections costs two section refreshes and
+ * 60/min would 429 an ordinary grooming session — and (b) the shared expensive-read
+ * occupancy bound, {@code app.expensive-read.max-in-flight}, which is the half that
+ * matters here: {@code BacklogService.view} holds ONE pool connection across
+ * {@code 12 + N} statements, 32 at {@code AGILE_MAX_OPEN_SPRINTS=20}, and
+ * {@code DB_STATEMENT_TIMEOUT_MS} bounds each of them and not their sum. Past either:
+ * {@code 429} — with {@code Retry-After} and no {@code errorType} for the budget, or
+ * {@code errorType} {@code TOO_MANY_IN_FLIGHT} / {@code EXPENSIVE_SURFACE_BUSY} with
+ * {@code Retry-After: 1} for the permit. <strong>A refusal is never a narrowed section, a
+ * smaller {@code sectionCap} or a truncated view</strong>: the honesty protocol below is a
+ * statement about the data, and a throttle must not become the thing that changes it.
+ *
+ * <p>One pattern, so a fourth planning read is covered the moment its {@code @GetMapping}
+ * exists — a budget is earned by the work a handler does, not by where it is mounted, and
+ * this repo has already paid a review round for the opposite assumption. The occupancy
+ * share is the EXISTING one rather than a second (ADR-0031), so this added no number that
+ * has to sit below {@code DB_POOL_MAX_SIZE} and no new way to fail a boot.
  *
  * <p><strong>What a section fetch divides, and what it repeats.</strong> It divides the row
  * assembly and the response: the aggregate runs one row query per open section and
@@ -84,28 +100,40 @@ import java.util.UUID;
  * unconditional and cap-blind, a row query is unbounded in work only as its filters happen
  * to fall.
  *
- * <p>None of which changes the decision, only its reasoning. Throttling the section
- * endpoint alone would still be worse than throttling neither: a client refused on a
- * section falls back to the whole-view refetch, which runs the same aggregation anyway and
- * ships every section's rows with it. The invariant to keep is therefore a property of the
- * planning surface and not a list of today's paths — <em>every planning read carries the
- * same interceptor chain</em> — and {@code PlanningThrottleParityTest} holds it, so
- * "no budget" cannot quietly become an asymmetry.
+ * <p>None of which changed the decision, only its reasoning — and the decision it produced
+ * is why HD-174 budgeted the whole surface in one pattern rather than the aggregate alone.
+ * Throttling the section endpoint alone would still be worse than throttling neither: a
+ * client refused on a section falls back to the whole-view refetch, which runs the same
+ * aggregation anyway and ships every section's rows with it. <strong>That asymmetry has an
+ * error-path twin the client owes an answer to</strong>: a section refresh whose catch
+ * invalidates the aggregate turns a cheap refusal into the expensive request, so a 429 of
+ * any kind on a section must leave the section stale rather than provoke a
+ * {@code GET …/backlog}. The invariant to keep is a property of the planning surface and
+ * not a list of today's paths — <em>every planning read carries the same interceptor chain,
+ * carrying the planning budget AND an occupancy bound</em> — and
+ * {@code PlanningThrottleParityTest} holds it over a set derived from the registrations, so
+ * a fourth planning read cannot quietly become an asymmetry.
  *
- * <p><strong>The follow-up (HD-174) is earned by the grouped stats query, not by response
- * size.</strong> A budget for {@code /api/workspaces/*}{@code /projects/*}{@code /backlog/**}
- * with a pot of its own is the shape in
- * {@code docs/design/backlog-section-refresh-proposal.md} §8, and it is a sealed-set edit
- * with a propagation checklist attached, so it does not belong in a defect fix. Whoever
- * takes it should know that {@code GET …/issues} and the board list are a <em>weaker</em>
- * case than the planning reads — weaker because neither runs an unconditional project-wide
- * aggregation, <strong>not</strong> because their work is bounded by what they return, which
- * is not true of any filtered, ordered, capped query. Whether they belong on the same pot is
- * that ticket's question and this javadoc deliberately does not pre-answer it.
+ * <p><strong>The budget was earned by the grouped stats query, not by response size</strong>
+ * — HD-174, landed, with the pot and the pattern that
+ * {@code docs/design/backlog-section-refresh-proposal.md} §8 recommended. What it
+ * deliberately did NOT take in is {@code GET …/issues} (board + list) and
+ * {@code GET …/sprints}: they are a <em>weaker</em> case — weaker because neither runs an
+ * unconditional project-wide aggregation, <strong>not</strong> because their work is
+ * bounded by what they return, which is not true of any filtered, ordered, capped query.
+ * Extending the pattern to them is an argument to be made on their own worst case, so the
+ * omission is reasoned rather than forgotten and is not to be "fixed" by widening the
+ * pattern.
  *
- * <p><strong>DC / Cloud: uniform.</strong> No new property, no env var, no profile gate,
- * no conditional bean — {@code app.agile.*} is a family of DoS guards with identical values
- * in both modes, and nothing here touches storage, email, auth or billing.
+ * <p><strong>DC / Cloud: uniform.</strong> No profile gate and no conditional bean. There
+ * IS a new property — {@code app.planning.requests-per-minute}, env
+ * {@code PLANNING_REQUESTS_PER_MINUTE} — but it is a <em>product</em> property rather than a
+ * plan one: it ships with the same default in both modes, is never varied per tenant, and
+ * joins {@code app.agile.*} as a family of DoS guards with identical values in both. The
+ * occupancy bound it sits beside brings no dial of its own at all. Nothing here touches
+ * storage, email, auth or billing, so the two modes differ in no observable way on this
+ * surface — the conclusion is unchanged; only the reason it holds is narrower than "nothing
+ * was configured".
  */
 @RestController
 @RequestMapping("/api/workspaces/{workspaceId}/projects/{projectId}/backlog")

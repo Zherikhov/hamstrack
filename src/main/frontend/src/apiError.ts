@@ -205,3 +205,67 @@ export class ApiResponseError extends Error implements ConflictInfo {
     this.storage = conflict?.storage
   }
 }
+
+/**
+ * **A refusal must never cost more than the thing it refused** (HD-174 §5.4).
+ *
+ * The server has just declined to do work. Told from every other failure by the
+ * **status**, on purpose, and deliberately wider than the refusals that exist
+ * today: the expensive surfaces answer 429 with three different `errorType`s
+ * (the per-minute budget carrying none at all, {@link TOO_MANY_IN_FLIGHT} and
+ * {@link EXPENSIVE_SURFACE_BUSY}), and a fourth nobody has written yet inherits
+ * the safe answer here rather than the escalating one.
+ *
+ * What a caller owes a request that took this branch is the same everywhere it
+ * is asked: **do not answer it by issuing something more expensive**, and do not
+ * retry it. By the time an error reaches this predicate, `api.ts` has already
+ * made the one automatic retry it will ever make (`TOO_MANY_IN_FLIGHT`, once)
+ * and that retry has failed.
+ *
+ * A leaf-module predicate rather than a planning-surface one: the rule is about
+ * a *status class*, and every surface that can be refused reads it — the
+ * planning aggregate, its per-section refresh and the SSE fan-out that would
+ * otherwise re-ask a surface which has just said no.
+ */
+export function isThrottleRefusal(e: unknown): boolean {
+  return e instanceof ApiResponseError && e.status === 429
+}
+
+/**
+ * **Saturation does not always produce a 429.** The failure a busy instance
+ * hands back for a reason *outside* the throttled surface — the connection pool
+ * exhausted by writes, a Hikari `connectionTimeout` expiring, an edge that gave
+ * up waiting — is a 502/503/504, and in that state asking for something bigger
+ * is exactly as wrong as it is after a refusal.
+ *
+ * **500 is deliberately NOT here**, and that is the whole distinction: a 500 is
+ * a genuine bug on one request, where a fresh read is worth having and may well
+ * succeed. An overloaded server is not going to be helped by being asked for
+ * more.
+ *
+ * That last sentence binds the **automatic** layer as hard as the hand-written
+ * ones: `queryClient.ts` reads this predicate so its global single retry cannot
+ * hold the opposite opinion about the same three statuses — a retry is one more
+ * of the request that just failed, from every open tab, at the moment there is
+ * least room for it.
+ */
+export function isOverloadFailure(e: unknown): boolean {
+  return e instanceof ApiResponseError
+    && (e.status === 502 || e.status === 503 || e.status === 504)
+}
+
+/**
+ * The union: **the server has no room**, whether because it refused the work
+ * ({@link isThrottleRefusal}) or because it is overloaded
+ * ({@link isOverloadFailure}).
+ *
+ * One branch, two sentences. Code branches on this — the escalation rule is
+ * identical for both — but a reader must never be told the same thing for both:
+ * *"the server declined this request"* and *"the server is overloaded"* are
+ * different facts, and only the first one comes with a sentence the server
+ * itself wrote. Keep the two predicates reachable at every site that renders
+ * copy.
+ */
+export function isCapacityFailure(e: unknown): boolean {
+  return isThrottleRefusal(e) || isOverloadFailure(e)
+}

@@ -201,8 +201,18 @@ public class BacklogService {
      * unconditional, cap-blind term: it reads and groups a whole section whatever the filters
      * say and whatever the cap is. So refreshing every section of a view one at a time ships
      * the same bytes as one {@code GET …/backlog} while running that aggregation once per
-     * section rather than once. That is why a budget belongs to the whole planning surface
-     * rather than to this endpoint (HD-174).
+     * section rather than once. That is why the budget belongs to the whole planning surface
+     * rather than to this endpoint, and why it is one pattern
+     * ({@code PlanningRateLimitConfig.PLANNING_PATH}) covering the aggregate and every
+     * section alike — the reasoning is unchanged from when HD-174 was a follow-up; only the
+     * tense is.
+     *
+     * <p><strong>And the occupancy half is earned here too, on a term a rate cannot
+     * see.</strong> This method is {@code @Transactional(readOnly = true)} over its whole
+     * body, so one pool connection is held across every statement above — 11–12 for a
+     * section, {@code 12 + N} for {@link #view}. {@code DB_STATEMENT_TIMEOUT_MS} bounds each
+     * statement and nothing bounds their sum, which is why the planning surface takes a
+     * permit from the shared expensive-read share (ADR-0031) as well as spending a budget.
      *
      * <p>Not to be paraphrased as "everything else is bounded by what it returns" — it is
      * not. {@code findSectionIssues} is capped in OUTPUT only: a {@code LIMIT} bounds what

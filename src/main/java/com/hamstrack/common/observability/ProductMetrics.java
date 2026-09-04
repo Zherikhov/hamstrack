@@ -67,6 +67,21 @@ public class ProductMetrics {
         // rate here is a client that lost its debounce, or somebody replaying a 50-predicate
         // query, and telling those apart from report load matters for the alert.
         SEARCH_REQUESTS("search_requests"),
+        // Per-principal budget across the whole PLANNING surface (PlanningRateLimiter, HD-174):
+        // GET .../projects/*/backlog and every section read under it. Separate from the two above
+        // for the same reason they are separate from each other — the normal traffic has a
+        // different shape, and so does the finding. A sustained rate here is a client in a loop on
+        // an INTERACTIVE gesture (240/min is ~3.4x the busiest single tab a facilitator produces,
+        // and a person cannot drag cards faster than they can drag cards), so it is a client
+        // defect far more often than it is load. NOTHING WATCHES THIS TODAY: there is no alert
+        // rule on it, exactly as there is none on report_requests or search_requests, and that
+        // absence is recorded in docs/observability.md rather than left for a reader to discover.
+        //
+        // It is NOT the number that says the planning surface is hurting the instance. That one is
+        // hamstrack_expensive_read_in_flight and expensive_read_surface_full below, which since
+        // HD-174 cover the planning reads too: a rate spends the same unit whether a request takes
+        // 8 ms or 8 s, and a planning aggregate holds one connection across up to 32 statements.
+        PLANNING_REQUESTS("planning_requests"),
         // ---- The invitation ceilings (HD-190). Three constants rather than one, because they
         // mean three different things to whoever reads the alert, and the kind label is the only
         // thing distinguishing them: no meter here may carry an address or an id.
@@ -475,14 +490,25 @@ public class ProductMetrics {
      * NAME lives here — the cardinality/privacy rule at the top of this class is enforceable only
      * while every meter name in the product is in one file. No labels: occupancy is an instance
      * property, and a per-principal breakdown would be the unbounded label this class forbids.
+     *
+     * <p><strong>The HELP text below is published, and it is this gauge's second description.</strong>
+     * It ships in {@code /actuator/prometheus} and is what an operator reads beside the number in
+     * Grafana, so it is the operator-facing twin of this gauge's row in
+     * {@code docs/observability.md} — a surface joining or leaving the share is an edit to BOTH.
+     * It names the membership as a <em>category</em> ("every read that holds a connection while it
+     * works") rather than only as today's list, because a description naming fewer surfaces than
+     * the bound actually covers tells an operator that the missing one is not on it.
      */
     public void registerExpensiveReadInFlight(java.util.function.IntSupplier occupancy) {
         Gauge.builder("hamstrack.expensive_read.in_flight", occupancy,
                         supplier -> (double) supplier.getAsInt())
-                .description("Requests currently in flight on the expensive-read surface (reports, "
-                             + "HQL search, saved filters, storage breakdown), out of "
-                             + "app.expensive-read.max-in-flight; per replica, so alert with "
-                             + "max() and never sum()")
+                .description("Requests currently in flight on the expensive-read surface - every "
+                             + "read that holds a connection while it works, today reports, HQL "
+                             + "search, saved filters, the storage breakdown and the planning "
+                             + "reads - out of app.expensive-read.max-in-flight. Read the "
+                             + "membership as a category: it has grown once already, and an "
+                             + "enumeration goes stale one entry before the list does. Per "
+                             + "replica, so alert with max() and never sum()")
                 .register(registry);
     }
 

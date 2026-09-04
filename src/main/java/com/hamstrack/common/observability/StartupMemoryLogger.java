@@ -82,11 +82,20 @@ import java.util.List;
  * If it silently vanished, an operator would get an empty grep — an absent value wearing the
  * face of a passed check, which is the exact failure the fingerprint's own rules forbid.
  *
- * <p>{@code app.reports.max-rows} rides along because it is the one product setting reasoned
- * <em>against</em> the heap (~1.9 KB of transient heap per shipped row, worst case, so 20 000
- * rows is ~38 MB of whatever number precedes it on this line). An operator comparing the two
- * is exactly this line's reader, and making them look in two places to do it is how the pair
+ * <p>{@code app.reports.max-rows} rides along because it is the product setting most often
+ * reasoned <em>against</em> the heap (~1.9 KB of transient heap per shipped row, worst case, so
+ * 20 000 rows is ~38 MB of whatever number precedes it on this line). An operator comparing the
+ * two is exactly this line's reader, and making them look in two places to do it is how the pair
  * drifts.
+ *
+ * <p><strong>It is not the only such setting, and this line does not claim to enumerate them.</strong>
+ * {@code app.agile.section-max-issues} × ({@code app.agile.max-open-sprints-per-project} + 1) is a
+ * second row cap costed in the same ~1.9 KB against the same heap, ceilinged at the same 20 000
+ * rows, and since HD-174 both are drawn from the one occupancy share
+ * ({@code app.expensive-read.max-in-flight}), so the instance-wide figure is that share times the
+ * larger of them. Printing every one of them would turn a line an operator greps into a list that
+ * goes stale one entry before it does; each carries its own arithmetic in its own
+ * {@code @ConfigurationProperties}, and this line prints the heap they are all measured against.
  *
  * <p><strong>Identical in {@code dc} and {@code cloud}</strong>, with no profile gate: how
  * much heap a JVM got is a property of the box it runs on, not of the deployment model. It

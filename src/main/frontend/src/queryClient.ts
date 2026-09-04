@@ -3,7 +3,7 @@ import { QueryClient } from '@tanstack/react-query'
 // reaches this file, and that cycle fails silently in the exact direction this
 // predicate exists to prevent. apiError.ts carries the full reasoning;
 // moduleGraph.test.ts fails if the cycle comes back.
-import { ApiResponseError } from './apiError'
+import { ApiResponseError, isOverloadFailure } from './apiError'
 
 /**
  * Statuses an automatic retry must never touch, and the reason each one is here.
@@ -30,8 +30,23 @@ import { ApiResponseError } from './apiError'
  *    that retry has already happened and failed, so retrying here would be the
  *    second — which is the one nobody wants.
  *
- * Everything else keeps the historical behaviour: exactly one retry, which is
- * what a transient 5xx or a dropped connection deserves.
+ *  • **502 / 503 / 504** — the failure a saturated instance hands back for a
+ *    reason that never reached a throttle at all: the pool exhausted by writes,
+ *    a Hikari `connectionTimeout` expiring, an edge that gave up waiting. The
+ *    doctrine `isOverloadFailure` is written under says that in this state
+ *    *asking for something bigger is exactly as wrong as it is after a refusal*,
+ *    and an automatic retry is asking for one more of the request that just
+ *    failed — from every open tab, at the moment the instance has least room.
+ *    Two layers must not hold opposite opinions about one status class: the
+ *    surfaces that render these failures branch on the shared predicate, so this
+ *    one calls it rather than restating its list.
+ *
+ * **500 is deliberately NOT among them**, here as at every other site that reads
+ * the predicate: a 500 is a bug on one request, a second attempt may well
+ * succeed, and it is the case the historical single retry exists for. A dropped
+ * connection (a bare `TypeError`) keeps its retry for the same reason. Losing
+ * either would widen this rule into "never retry anything", which it has never
+ * been.
  *
  * This predicate is the load-bearing mechanism. Per-query `retry: false` on the
  * expensive surfaces (reports, insights, search) is now a *narrowing* of it —
@@ -39,7 +54,8 @@ import { ApiResponseError } from './apiError'
  * thing that keeps a 422 from being re-spent.
  */
 function isNeverRetryable(error: unknown): boolean {
-  return error instanceof ApiResponseError && (error.status === 422 || error.status === 429)
+  return (error instanceof ApiResponseError && (error.status === 422 || error.status === 429))
+    || isOverloadFailure(error)
 }
 
 /**

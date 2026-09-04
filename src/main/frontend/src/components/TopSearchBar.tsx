@@ -1,11 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useSSE } from '../hooks/useSSE'
 import { useCurrentProject } from '../hooks/useCurrentProject'
 import { useUiStore } from '../uiStore'
 import { apiSearchSchema } from '../api'
-import { projectIssuesKeyPrefix } from '../lib/queryKeys'
+import { createIssueEventInvalidator } from '../lib/issueEvents'
 import NotificationBell from './NotificationBell'
 import ProjectSwitcher from './ProjectSwitcher'
 import HqlInput from './HqlInput'
@@ -48,19 +48,31 @@ export default function TopSearchBar({ wsId }: Props) {
     navigate(`/w/${searchWsId}/search${qs}`)
   }
 
+  /**
+   * The SSE fan-out's invalidation policy, in one place (see
+   * `lib/issueEvents.ts`). It exists because this handler crosses principals:
+   * one member's write reaches every connected member's tabs, and invalidating
+   * the whole issue prefix from here would spend each of THEIR expensive-read
+   * budgets on the planning aggregate. Ordinary lists still refresh instantly;
+   * the planning namespace is coalesced, and skipped outright while it is
+   * sitting in a capacity refusal.
+   */
+  const issueEvents = useMemo(() => createIssueEventInvalidator(qc), [qc])
+  useEffect(() => () => issueEvents.dispose(), [issueEvents])
+
   useSSE(wsId, {
     ISSUE_CREATED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
+      issueEvents.issueChanged(wsId, d.projectId)
     },
     ISSUE_UPDATED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }
-      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
+      issueEvents.issueChanged(wsId, d.projectId)
       qc.invalidateQueries({ queryKey: ['issue', wsId, d.projectId, d.issueNumber] })
     },
     ISSUE_DELETED: (data: unknown) => {
       const d = data as { projectId: string }
-      qc.invalidateQueries({ queryKey: projectIssuesKeyPrefix(wsId, d.projectId) })
+      issueEvents.issueChanged(wsId, d.projectId)
     },
     COMMENT_ADDED: (data: unknown) => {
       const d = data as { projectId: string; issueNumber: number }

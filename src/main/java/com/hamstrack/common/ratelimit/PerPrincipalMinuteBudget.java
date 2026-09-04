@@ -11,8 +11,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * A per-principal, per-minute fixed window — the mechanism behind every expensive-surface budget
- * in the app (reports, and as of HD-140 R6 round 2 the search surface as well).
+ * A per-principal, per-minute fixed window — the mechanism behind every per-principal budget in
+ * the app, whatever surface grows one. Written as a category rather than as today's roster on
+ * purpose: this sentence named one budget, then two, and was stale again within a release.
  *
  * <p><strong>Shared rather than copied.</strong> The second budget was originally going to be a
  * second copy of this loop; a throttle whose counting, eviction, refusal shape and
@@ -36,8 +37,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * detail stays at DEBUG naming only ids.
  *
  * <p><strong>Not every budget built on this class is a path binding, and the seal for one that is
- * not lives elsewhere</strong> (HD-191). The reports, search and write budgets are spent by
- * {@link PrincipalThrottleInterceptor} against a registered pattern, and
+ * not lives elsewhere</strong> (HD-191). A budget whose unit is a request is spent by
+ * {@link PrincipalThrottleInterceptor} against a registered pattern — that is every subclass here
+ * except the byte budget below, and it is a property of the unit rather than a list to keep — and
  * {@code ThrottleCoverageTest} seals that set. {@code UploadByteBudget} cannot be: its cost is
  * {@code MultipartFile.getSize()}, and an interceptor has neither the parsed part nor a reason to
  * look at one — exactly as the invitation ceilings cannot be, because theirs is keyed on the
@@ -62,13 +64,14 @@ public abstract class PerPrincipalMinuteBudget {
     /**
      * How many UNITS of this surface one principal may spend per minute.
      *
-     * <p><strong>{@code long}, and a "unit" is not always a request</strong> (HD-191). Three
-     * budgets denominate in requests and one — {@code UploadByteBudget} — denominates in BYTES,
-     * where a per-minute allowance runs to hundreds of millions and an {@code int} is a ceiling
-     * of about 2 GB that nothing in the configuration would warn anybody about. One mechanism,
-     * two denominations: the window arithmetic, the eviction sweep, the {@code Retry-After}
-     * computation and the metric-not-a-log-line refusal are the same in both, which is this
-     * class's own argument for not copying the loop.
+     * <p><strong>{@code long}, and a "unit" is not always a request</strong> (HD-191). A budget
+     * here denominates in requests unless it denominates in BYTES — {@code UploadByteBudget} does,
+     * and a per-minute allowance in bytes runs to hundreds of millions, where an {@code int} is a
+     * ceiling of about 2 GB that nothing in the configuration would warn anybody about. (No count
+     * of either kind is given on purpose: a number goes stale one entry before the list does, and
+     * the one that stood here did.) One mechanism, two denominations: the window arithmetic, the
+     * eviction sweep, the {@code Retry-After} computation and the metric-not-a-log-line refusal
+     * are the same in both, which is this class's own argument for not copying the loop.
      */
     protected abstract long limit();
 

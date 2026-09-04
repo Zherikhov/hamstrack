@@ -10,14 +10,24 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * The occupancy bound over the <strong>expensive-read surface</strong> — the reports base path,
- * the HQL search paths, saved filters and the workspace storage breakdown (HD-182).
+ * The occupancy bound over the <strong>expensive-read surface</strong> — every surface that holds
+ * a pool connection while it works (HD-182, extended by HD-174).
+ *
+ * <p>Deliberately described as a CATEGORY rather than by its members: it used to name "the reports
+ * base path, the HQL search paths, saved filters and the workspace storage breakdown", and that
+ * enumeration was false one slice later, when the planning surface joined it — an enumeration goes
+ * stale one entry before the property does. The property is the one {@link ExpensiveReadProperties}
+ * states, and it is what a reader should reason from; the current membership is derived at runtime
+ * by {@code ThrottleCoverageTest.expensiveReadSurface()} and sealed, per configurer, by
+ * {@code theThrottledPathSetIsSealed}.
  *
  * <p>The one concrete {@link PerPrincipalInFlightLimit} today. It is spent by the same
- * {@link PrincipalThrottleInterceptor} instances, on the same registrations, in
- * {@code ReportRateLimitConfig} and {@code SearchRateLimitConfig} — no new configurer and no
- * second pattern list, so {@code ThrottleCoverageTest.theThrottledPathSetIsSealed} is unchanged
- * and a new expensive read inherits <em>both</em> controls in one edit.
+ * {@link PrincipalThrottleInterceptor} instances, on the same registrations, in whichever
+ * {@code *RateLimitConfig} carries a surface — so there is <strong>one</strong> pattern list per
+ * configurer and never a second one for occupancy, and a new expensive read inherits <em>both</em>
+ * controls in one edit. ADR-0031 is why a new surface joins THIS share rather than getting one of
+ * its own: a second ceiling would turn {@link ExpensiveReadShare}'s derive-from-the-pool default
+ * into a partition that is degenerate on small pools.
  *
  * <p>Because the write budget's interceptor is the same type and deliberately does NOT carry an
  * occupancy bound, "there is a {@code PrincipalThrottleInterceptor} in front of this handler" no

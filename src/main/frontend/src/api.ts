@@ -1828,6 +1828,28 @@ export interface BacklogViewOptions extends IssueListFilters {
   includeDone?: boolean
 }
 
+// 429 on EVERY call below: the whole `…/projects/*/backlog/**` path is on the
+// planning surface (HD-174), which carries a per-minute budget of its own AND a
+// share of the expensive-read occupancy bound. So a planning read declares the
+// same three refusals the search and filter surfaces do — the per-minute budget
+// (no `errorType`), `TOO_MANY_IN_FLIGHT` and `EXPENSIVE_SURFACE_BUSY` — told
+// apart by `errorType` and never by the status, plus whatever a later release
+// adds. `mayRetryOnce` retries `TOO_MANY_IN_FLIGHT` once here, because these are
+// GETs; the other two are never retried automatically, the budget because
+// retrying it re-spends what just refused and the busy one because a retry is
+// more load on the scarce resource rather than a remedy.
+//
+// **The caller's obligation, and it is specific to this surface** (§5.4): a 429
+// on a SECTION refresh must not be answered by refetching the aggregate. The
+// aggregate is a `12 + N`-statement read on one connection where the section is
+// 11–12, so escalating would make a refusal of the cheap request provoke the
+// expensive one. `useBacklogView` branches on it; `isThrottleRefusal` is the
+// predicate.
+//
+// Both controls are spent in an interceptor, BEFORE the workspace or project is
+// resolved, so a 429 here says nothing about whether either exists or whether
+// the caller is a member — and a capability being off never changes it either.
+
 /**
  * The whole planning view in one aggregate: ACTIVE-first sprint sections plus
  * the ranked backlog, each with whole-section stats and HD-79 truncation

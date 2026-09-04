@@ -120,10 +120,18 @@ believed to cover more than they did:**
    because a report's JSON is serialised after the connection is returned; a permit spans the whole
    request including serialisation, so the ceiling drops to `max-in-flight × maxRows × ~1.9 KB`
    ≈ 228 MB at the proposed defaults, and to ~114 MB for any one principal. Lower, not safe.
-4. **It does not cover expensive reads that are not on the throttled path set.** The planning view
-   (up to 6300 issues), unpaged `GET …/versions` and anything else outside
-   `ThrottleCoverageTest`'s sealed patterns are outside this bound exactly as they are outside the
-   rate budgets. §2.3 says what happens when one arrives.
+4. **It does not cover expensive reads that are not on the throttled path set.** Unpaged
+   `GET …/versions` and anything else outside `ThrottleCoverageTest`'s sealed patterns are outside
+   this bound exactly as they are outside the rate budgets. §2.3 says what happens when one arrives.
+
+   > **HISTORICAL NOTE (HD-174).** This point named *the planning view (up to 6300 issues)* as its
+   > headline example, and that claim is **no longer true**: HD-174 registered
+   > `/api/workspaces/*/projects/*/backlog/**` with both controls, so the planning reads take
+   > permits from *this* share — not a second one (ADR-0031). The sentence is corrected rather than
+   > deleted because it is the shape of claim this repository keeps re-learning: a claim about
+   > *membership* goes stale without containing any word a grep for the new path would find. What
+   > survives is the property, not the example — *a surface not registered in a `*RateLimitConfig`
+   > is outside this bound*.
 5. **It is per replica.** §7.
 
 **And the property that makes an occupancy bound the right instrument rather than merely an
@@ -181,12 +189,15 @@ and the artefact that enforces it is `ThrottleCoverageTest`, whose failure messa
 propagation checklist.
 
 **Decision: the concurrency bound is spent by the same `PrincipalThrottleInterceptor` instances, on
-the same registrations, in `ReportRateLimitConfig` and `SearchRateLimitConfig`.** No new
-configurer, no new pattern list. Consequences, each deliberate:
+the same registrations, in whichever `*RateLimitConfig` owns a surface** — at the time of writing
+`ReportRateLimitConfig` and `SearchRateLimitConfig`, joined by `PlanningRateLimitConfig` in HD-174.
+No occupancy-only configurer, and no second pattern list *per configurer*. Consequences, each deliberate:
 
-- `theThrottledPathSetIsSealed()` is **unchanged and still exactly right** — the same three patterns
-  for reports, the same two for search. There is no second list to go stale, which is the whole point
-  of not creating one.
+- `theThrottledPathSetIsSealed()` is **unchanged by THIS change and still exactly right** — the same
+  three patterns for reports, the same two for search. There is no second list to go stale, which is
+  the whole point of not creating one. (It gained a fourth assertion in HD-174, for the planning
+  configurer's one pattern — which is the mechanism working: adding a *surface* edits that seal,
+  adding an *occupancy bound* does not.)
 - A new expensive read added to either configurer inherits **both** controls in one edit. That is
   strictly better than the status quo, where a new surface needs one edit per control.
 - **But "there is a `PrincipalThrottleInterceptor` in front of this handler" stops implying "this

@@ -18,7 +18,20 @@ import { phase } from './config.js';
 // browsing p95 and a report p95 averaged together describe nobody's experience.
 // ---------------------------------------------------------------------------
 export const CLASS = {
-  BROWSE: 'browse',   // board, backlog, issue detail, comments, history, config, catalogs
+  // DELIBERATELY COMPOSED ONLY OF READS THE PRODUCT DOES NOT BUDGET, which is a property of
+  // the class and not a claim about the product. That distinction is the whole reason PLANNING
+  // below exists: `browse` used to include the two .../backlog/sections/... reads, and its
+  // threshold rationale said "nothing in the product budgets ordinary browsing" - true when
+  // written, false the moment HD-174 gave the planning surface a budget and a place in the
+  // expensive-read bulkhead. A harness whose failure rationale is false is worse than one with
+  // no rationale, and probe P1 is where it bites: P1's success criterion is "the VICTIM's browse
+  // class stays inside its target", so a victim class containing a bounded endpoint makes a P1
+  // pass stop meaning what it says.
+  //
+  // SO THE RULE FOR WHOEVER ADDS AN ENDPOINT HERE: if the product budgets it per principal, or
+  // it takes a permit from the expensive-read share, it does not belong in `browse`.
+  BROWSE: 'browse',   // board, issue detail, comments, history, config, catalogs, shell poll
+  PLANNING: 'planning', // GET .../backlog and its section reads - budgeted AND occupancy-bounded
   SEARCH: 'search',   // POST /search, /search/schema, /search/suggest, saved-filter CRUD
   REPORT: 'report',   // the project reports, their .csv siblings, insights
   WRITE: 'write',     // issue PATCH, transition, comment, rank, sprint scope change
@@ -120,6 +133,15 @@ export const respBytes = new Trend('hs_response_bytes');
 // ---------------------------------------------------------------------------
 const LATENCY = {
   [CLASS.BROWSE]: { p95: 600, p99: 1500 },
+  // Looser than browse and tighter than search: one planning aggregate assembles
+  // (open sprints + 1) capped sections in a single read-only transaction spanning 12+N
+  // statements, so it is the most expensive read on any page a person opens by clicking a
+  // nav link. NOT anchored to a measurement - THERE IS NONE YET, which is stated rather than
+  // hidden: every occupancy estimate in HD-174 rests on "a planning response is short in the
+  // healthy case" and nobody has taken the number. Replacing this target with a measured one
+  // is the deliverable in RESULTS-TEMPLATE.md, and the browse ladder already exercises the
+  // endpoints.
+  [CLASS.PLANNING]: { p95: 1200, p99: 3000 },
   [CLASS.SEARCH]: { p95: 1500, p99: 4000 },
   [CLASS.REPORT]: { p95: 3000, p99: 8000 },
   [CLASS.WRITE]: { p95: 800, p99: 2500 },
@@ -198,11 +220,25 @@ export function thresholdsFor(classes) {
       // EVERY CLASS WITH A LATENCY TARGET ALSO DECLARES ITS REFUSAL RATE, AND THAT KEY DOES
       // TWO JOBS.
       //
-      // (1) THE TARGET. Nothing in the product budgets ordinary browsing or ordinary
-      //     writing per principal — the per-principal budgets are on search and reports —
-      //     so a browse or write 429 above 1% at target concurrency is a finding about the
-      //     configuration in front of the app (a limiter, a proxy, the edge) and belongs in
-      //     the results rather than in nobody's number.
+      // (1) THE TARGET, AND WHAT IT MEANS DEPENDS ON THE CLASS.
+      //
+      //     For `browse` and `write` it is a finding about the CONFIGURATION IN FRONT OF THE
+      //     APP (a limiter, a proxy, the edge): those two classes are composed only of
+      //     requests the product does not budget per principal, so a 429 there is not the
+      //     product working. Read that as a property of how the classes are COMPOSED, not as
+      //     a claim about the product - the claim version ("nothing in the product budgets
+      //     ordinary browsing") was true when written and false one release later, when
+      //     HD-174 budgeted the planning reads that used to live in `browse`.
+      //
+      //     For `planning`, `search` and `report` a 429 CAN be the product working as
+      //     designed - a per-principal minute budget or the expensive-read occupancy share.
+      //     1% is still the target, because at these arrival rates the harness is two orders
+      //     of magnitude below every entitlement (a browse VU thinks 4-8 s and rolls into the
+      //     backlog page 25% of the time: ~5 planning requests a minute against 240). If the
+      //     rate rises above 1%, read hs_occupancy_429 and hs_minute_budget_429 before
+      //     concluding anything: the first says the SHARE was full (the bulkhead doing its
+      //     job, or an under-provisioned box), the second says the harness and the box
+      //     disagree about the entitlement.
       //
       // (2) THE SEAL'S WITNESS, AND THIS IS WHY IT IS DECLARED PER CLASS RATHER THAN ONLY
       //     WHERE A BUDGET EXISTS. run-ladder.sh proves no declared threshold is vacuous by
@@ -234,6 +270,13 @@ export function thresholdsFor(classes) {
     }
     if (c === CLASS.SEARCH || c === CLASS.REPORT) {
       t[`hs_budget_422{class:${c}}`] = ['count==0'];
+    }
+    if (c === CLASS.PLANNING) {
+      // The witness that says WHICH refusal a planning 429 was. hs_refused_429 above folds
+      // both, deliberately - a refused user is refused - so this is attribution and not a
+      // second budget. It is a Rate that record() samples on every response, so it takes its
+      // false samples from the same mix and cannot read 1 by construction.
+      t[`hs_occupancy_429{class:${c},phase:hold}`] = ['rate<0.01'];
     }
     if (c === CLASS.WRITE) {
       t['hs_conflict_409{phase:hold}'] = ['rate<0.01'];

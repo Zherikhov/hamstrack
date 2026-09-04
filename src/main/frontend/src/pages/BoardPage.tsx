@@ -3,6 +3,9 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Filter, Plus } from 'lucide-react'
 import { apiGetProjectConfig, apiListIssues, apiUpdateIssue } from '../api'
+// From the leaf module: the capacity predicates are about a status class, not
+// about the planning surface that first needed them.
+import { ApiResponseError, isCapacityFailure, isThrottleRefusal } from '../apiError'
 import { useAuthStore } from '../auth'
 import { useProjectDelivery } from '../hooks/useProjectDelivery'
 import { useReducedMotion } from '../hooks/useReducedMotion'
@@ -19,7 +22,7 @@ import { ComponentFilter, ComponentName } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
 import {
   CompleteSprintDialog, SprintFormDialog, SprintHeader, StartSprintDialog, StoryPointsChip,
-  formatPoints, useActiveSprint, useOpenSprints,
+  apiErrorText, capacityRefusalText, formatPoints, useActiveSprint, useOpenSprints,
 } from '../components/sprints'
 import { useProjectPermissions } from '../hooks/usePermissions'
 import IssueSidePanel from './IssueSidePanel'
@@ -222,7 +225,7 @@ export default function BoardPage() {
     sprintId: sprintScoped ? activeSprint?.id : undefined,
   }
   const issuesKey = boardIssuesKey(wsId, projectId, serverFilters)
-  const { data: board, isLoading, isError } = useQuery({
+  const { data: board, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: issuesKey,
     queryFn: () => apiListIssues(wsId!, projectId!, serverFilters),
     // A sprint-scoped board with no active sprint has nothing to scope to — it
@@ -286,11 +289,32 @@ export default function BoardPage() {
   const anyFilterActive = quickActive || !!filterPriority || filterLabelIds.length > 0
     || !!filterComponentId || !!filterFixVersionId
 
+  /**
+   * **`isError` is not "this project is gone"** — it is "one request failed", and
+   * the board reached HD-174 still treating the two as the same fact (the
+   * planning surface was fixed next door; this is the same one-line application
+   * of the same predicates).
+   *
+   * The board is not on the throttled expensive surface, so it cannot be handed
+   * a planning 429 — but a 500, or the 502/503/504 a saturated instance answers
+   * with for a reason that never reached any throttle, made it tell a member in
+   * good standing that their access had been removed **and** silently delete the
+   * project from their recency journal, so the "/" redirect stopped pointing at
+   * it. Two statements, both false, from a server that had said nothing of the
+   * kind.
+   *
+   * Only these two statuses are evidence about the project itself.
+   */
+  const accessGone = isError && error instanceof ApiResponseError
+    && (error.status === 404 || error.status === 403)
+  /** The server has no room — it refused (429) or it is overloaded (502/503/504). */
+  const capacityError = isError && isCapacityFailure(error) ? error : null
+
   // Project gone or access revoked — drop it from the recency journal so the
   // "/" redirect stops pointing here
   useEffect(() => {
-    if (isError && user && projectId) forgetProject(user.id, projectId)
-  }, [isError, user, projectId])
+    if (accessGone && user && projectId) forgetProject(user.id, projectId)
+  }, [accessGone, user, projectId])
 
   const moveMutation = useMutation({
     mutationFn: ({ issue, statusId }: { issue: Issue; statusId: string }) =>
@@ -337,7 +361,7 @@ export default function BoardPage() {
   // config.statuses arrive in workflow (board-column) order — don't re-sort
   const ordered = statuses
 
-  if (isError) {
+  if (accessGone) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center gap-3">
         <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
@@ -345,6 +369,33 @@ export default function BoardPage() {
         </p>
         <Button variant="secondary" size="sm" onClick={() => navigate(`/w/${wsId}`, { state: { showAll: true } })}>
           Go to projects
+        </Button>
+      </div>
+    )
+  }
+
+  // Every other failure: say what happened, blame nothing that was not blamed by
+  // the server, and offer the one thing that can help — the SAME request again,
+  // asked for by a human. Never a redirect: the project is not the problem, and
+  // sending the reader away from a board that is merely unreachable this second
+  // is how the old branch turned a blip into a lost project.
+  if (isError) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center gap-3" style={{ padding: 24 }}>
+        <p className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
+          {capacityError
+            ? (isThrottleRefusal(capacityError)
+              ? 'The server declined this request — the board was not loaded.'
+              : 'The server is overloaded — the board was not loaded.')
+            : 'The board could not be loaded.'}
+        </p>
+        <p className="text-xs" style={{ color: 'var(--color-text-muted)', maxWidth: 520 }}>
+          {capacityError
+            ? capacityRefusalText(capacityError)
+            : apiErrorText(error, 'Something went wrong on the way to the server.')}
+        </p>
+        <Button variant="secondary" size="sm" disabled={isFetching} onClick={() => void refetch()}>
+          Try again
         </Button>
       </div>
     )

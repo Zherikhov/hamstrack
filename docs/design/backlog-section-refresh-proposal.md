@@ -420,6 +420,14 @@ Do **not** hand-edit `src/main/resources/static/openapi.yaml`; the Vite build ov
 
 ## 8. Throttle — stated deliberately, not inherited
 
+> **SUPERSEDED BY HD-174 — `docs/design/planning-surface-budget-proposal.md` and ADR-0031.** The
+> follow-up this section recommended has landed: `PlanningRateLimitConfig` binds
+> `/api/workspaces/*/projects/*/backlog/**` to one interceptor carrying **both** a pot of its own
+> (`app.planning.requests-per-minute`, 240) **and** the existing expensive-read occupancy share.
+> The reasoning below is unchanged and still the reason the budget belongs to the whole surface
+> rather than to one endpoint — only the tense and the answer are. The section left as written,
+> with this pointer, rather than rewritten: what it argues is *why parity*, and that is still true.
+
 The rule here is that **a throttle is earned by the work a handler does, not by where it is
 mounted**, and this repo has already paid a review round for the opposite assumption.
 

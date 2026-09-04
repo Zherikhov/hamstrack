@@ -116,6 +116,15 @@ export function boardIssuesKeyPrefix(
 }
 
 /**
+ * The marker segment of every planning-aggregate key. Declared once because
+ * three things read it — the key builder, its prefix and the predicate that
+ * tells a planning entry apart from every other issue list — and a fourth
+ * spelling of the same literal is how an invalidation policy silently stops
+ * applying to the thing it was written for.
+ */
+export const BACKLOG_VIEW_MARKER = 'backlogView' as const
+
+/**
  * The HD-23 planning aggregate (`GET …/backlog`; value shape: `BacklogView`).
  *
  * Its own marker segment, distinct from the legacy paginated `'backlog'` one —
@@ -123,6 +132,14 @@ export function boardIssuesKeyPrefix(
  * `projectIssuesKeyPrefix`, so creating an issue (which lands at the bottom of
  * the ranked backlog) still refreshes the planning view; fine-grained rank
  * moves instead patch the affected sections in place (see `useBacklogView`).
+ *
+ * **That inheritance is not free, and a broad invalidation must know it.** This
+ * entry is the ONLY one under the shared prefix whose refetch is a `12 + N`
+ * statement aggregate on the throttled planning surface, so anything that
+ * invalidates the prefix on an *event* — the SSE fan-out, which reaches every
+ * connected member at once — separates this namespace out and spends it under a
+ * policy of its own (`lib/issueEvents.ts`). Hence the prefix and the predicate
+ * below.
  */
 export function backlogViewKey(
   wsId: string | undefined,
@@ -135,7 +152,29 @@ export function backlogViewKey(
   // the response, so both have to change the key.
   if (filters.statusId) parts.push(`status:${filters.statusId}`)
   if (filters.includeDone) parts.push('includeDone')
-  return [ISSUES_KEY_ROOT, wsId, projectId, 'backlogView', parts.join('|')] as const
+  return [ISSUES_KEY_ROOT, wsId, projectId, BACKLOG_VIEW_MARKER, parts.join('|')] as const
+}
+
+/**
+ * Every planning-aggregate entry of one project, whatever it is filtered by —
+ * the invalidation prefix for "the planning view of this project is out of
+ * date", without touching the board or any picker.
+ */
+export function backlogViewKeyPrefix(
+  wsId: string | undefined,
+  projectId: string | undefined,
+) {
+  return [ISSUES_KEY_ROOT, wsId, projectId, BACKLOG_VIEW_MARKER] as const
+}
+
+/**
+ * Is this key a planning-aggregate entry? Used as the *negative* half of a
+ * broad issue invalidation — "everything under the project prefix EXCEPT the
+ * expensive one" — so it is written about the key's own shape rather than about
+ * any one caller's filters.
+ */
+export function isBacklogViewKey(key: readonly unknown[]): boolean {
+  return key[0] === ISSUES_KEY_ROOT && key[3] === BACKLOG_VIEW_MARKER
 }
 
 /** The board filters plus the planning view's own two dimensions. */

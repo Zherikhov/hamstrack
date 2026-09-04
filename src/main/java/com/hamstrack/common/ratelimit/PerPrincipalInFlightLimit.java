@@ -257,6 +257,19 @@ public abstract class PerPrincipalInFlightLimit {
      * two are coupled: {@code ThrottleCoverageTest.noExpensiveReadHandlerIsAsynchronous} is what
      * keeps this paragraph true, and whoever makes that test fail owes this trade a new answer.
      *
+     * <p><strong>"Some heap" is the half of that sentence that has since grown a number, and this
+     * sweep does not bound it.</strong> What is force-released is the PERMIT, never the assembled
+     * response: a slow-reading client keeps its whole response graph alive on its Tomcat thread
+     * while its next request takes a fresh permit, so the ceiling bounds concurrent PERMITS and not
+     * concurrent RESPONSES. That was cheap when the largest object on this surface was a report;
+     * since HD-174 it is a planning view, and roughly <strong>42</strong> retained 12 MB responses
+     * fill the 512 MB reference heap. It needs many sockets and patience, it is INHERITED rather
+     * than introduced — the same was true of reports before any of this — and it is written here
+     * rather than left to be discovered, because this is where the sentence it qualifies lives.
+     * The lever if it ever bites is a response cap or a write timeout, not a smaller ceiling: a
+     * lower {@link #maxTotal()} reduces how many such holds can START and nothing about how long
+     * one lasts.
+     *
      * <p><strong>A forced release is counted only when this sweep actually performed one.</strong>
      * The request's own {@code afterCompletion} can win the {@code compareAndSet} in between, and
      * counting that would put a WARN naming a user id against a client that did nothing wrong — in

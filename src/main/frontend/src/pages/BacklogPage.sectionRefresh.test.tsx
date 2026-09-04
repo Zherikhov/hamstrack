@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import BacklogPage from './BacklogPage'
 import { apiListIssuesPaged } from '../api'
+import { ApiResponseError, EXPENSIVE_SURFACE_BUSY } from '../apiError'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import type {
@@ -315,4 +316,54 @@ describe('BacklogPage — refreshing one section (HD-96)', () => {
     // that asked a different question would answer a different section.
     expect(apiGetBacklogSectionMock.mock.calls[0][3]).toMatchObject({ statusId: TODO.id })
   })
+})
+
+/**
+ * HD-174 §5.4 — what the planner SEES when the server refuses the refresh.
+ *
+ * The matrix (all three refusal shapes, the loop that stops, the negative that
+ * matters) is sealed one layer down in `components/sprints.refusal.test.tsx`,
+ * where a hook renders in milliseconds. This is the other half of the same rule
+ * and the half only a page can answer: that the section does not quietly keep
+ * rendering rows it could not confirm. A stale section with no signal is its own
+ * defect — it is showing data the user just changed.
+ *
+ * ONE test, and a generous timeout, on purpose: every case here costs a full
+ * `BacklogPage` render, and this file already sits near vitest's 5 s default on
+ * a loaded machine.
+ */
+describe('BacklogPage — a refused section refresh (HD-174)', () => {
+  const BUSY = new ApiResponseError(
+    429, 'This instance is running as many expensive requests as it can at once. Try again in a moment.',
+    undefined, undefined, { retryAfter: 1, errorType: EXPENSIVE_SURFACE_BUSY })
+
+  it('keeps the rows, marks them stale, refetches no aggregate, and offers a manual retry', async () => {
+    renderBacklog()
+    await screen.findByText('row 1')
+    expect(apiGetBacklogViewMock).toHaveBeenCalledTimes(1)
+
+    apiGetBacklogSectionMock.mockRejectedValueOnce(BUSY)
+    await refreshFirstSection()
+
+    // The refusal's own sentence, unparaphrased. `EXPENSIVE_SURFACE_BUSY` means
+    // the INSTANCE is full and this caller may hold no permit at all, so the UI
+    // adds no call to action of its own — a refusal may only prescribe something
+    // its reader can actually do, and "Try again" is the whole of it.
+    await screen.findByText(/Not refreshed/)
+    expect(screen.getByText(new RegExp(BUSY.detail.slice(0, 40)))).toBeTruthy()
+    // The rank write that preceded the refresh committed, so the rows are stale
+    // rather than wrong: nothing is rolled back and nothing is hidden.
+    expect(rows()).toHaveLength(120)
+    // THE assertion. A 429 refuses a 12-statement read; the aggregate this used
+    // to fall back to is 12 + N (32 at AGILE_MAX_OPEN_SPRINTS=20). One more
+    // aggregate call here is the whole defect, and it is invisible on screen.
+    expect(apiGetBacklogViewMock).toHaveBeenCalledTimes(1)
+
+    // The manual affordance re-asks for the SECTION, and the marker goes when it
+    // answers — still without an aggregate anywhere in the recovery path.
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(screen.queryByText(/Not refreshed/)).toBeNull())
+    expect(apiGetBacklogSectionMock).toHaveBeenCalledTimes(2)
+    expect(apiGetBacklogViewMock).toHaveBeenCalledTimes(1)
+  }, 20_000)
 })

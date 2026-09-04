@@ -75,14 +75,54 @@ import org.springframework.validation.annotation.Validated;
  *       {@code TomcatUploadTimeoutCustomizer} (in the application, so every deployment has it),
  *       the watchdog above (likewise), and {@code read_body} in the bundled {@code Caddyfile} (our
  *       edge only). Any change to acquisition or release owes those three a re-read.</li>
- *   <li><strong>Heap per request.</strong> {@code app.reports.max-rows} remains the only dial that
- *       does. What changes is the multiplier: concurrent materialisation used to be bounded by
- *       Tomcat threads (200) because a report's JSON is serialised after the connection is
- *       returned, and a permit spans the whole request including serialisation.</li>
+ *   <li><strong>Heap per request — and it is not ONE dial that bounds it.</strong> A permit
+ *       bounds how many assemblies may be alive at once; how large one of them is belongs to
+ *       whichever property caps the ROWS of the surface being read, and <em>every surface on
+ *       this share brings its own such cap</em>. So the figure is
+ *       {@code max-in-flight × (the largest row cap on the share) × ~1.9 KB per shipped row},
+ *       against a 512 MB reference heap — a form a third surface cannot falsify.
+ *       <p>Phrased over the category because the member form was false one slice after it was
+ *       written: this bullet used to name {@code app.reports.max-rows} as "the only dial that
+ *       does", and HD-174 put a second one on these same six permits while containing no word a
+ *       grep for it would have found. Today there are two, and they ceiling at the SAME 20 000
+ *       assembled rows: {@code app.reports.max-rows} (20 000 by default, ~38 MB) and
+ *       {@link AgileProperties#sectionMaxIssues()} × ({@code app.agile.max-open-sprints-per-project}
+ *       + 1), whose product {@link AgileProperties#isPlanningViewBounded()} holds to
+ *       {@code MAX_PLANNING_VIEW_ROWS} (6300 at stock, ~12 MB; ~38 MB at the maximum an operator
+ *       may configure).
+ *       <p><strong>What this bound DID change is the MULTIPLIER on that per-request figure, and
+ *       that is the memory half of the case for putting a surface here at all</strong> (ADR-0031,
+ *       which argues it explicitly): concurrent materialisation used to be bounded by Tomcat
+ *       threads (200), because a permit spans the whole request including the serialisation that
+ *       happens after the connection is returned. It is now bounded by {@link #maxInFlight()}.
+ *       6 × ~38 MB ≈ 228 MB is a share several surfaces divide; 200 × anything was not a ceiling
+ *       at all. Adding a surface to this share therefore LOWERS the worst case it joins.</li>
  *   <li><strong>Anything off the throttled path set.</strong> A surface that is expensive and is
- *       not registered in {@code ReportRateLimitConfig} / {@code SearchRateLimitConfig} is outside
- *       this bound exactly as it is outside the rate budgets — the gap
- *       {@code ThrottleCoverageTest}'s propagation checklist names.</li>
+ *       not registered in <em>a</em> {@code *RateLimitConfig} is outside this bound exactly as it
+ *       is outside the rate budgets — the gap {@code ThrottleCoverageTest}'s propagation checklist
+ *       names. Phrased over the category and not over today's configurers on purpose: this bullet
+ *       used to name two of them by hand, and it was stale the moment
+ *       {@code PlanningRateLimitConfig} became the third to carry a bound (HD-174). The claim that
+ *       survives a fourth is <em>registered or unbounded</em>.
+ *       <p><strong>The planning surface used to be the headline example here, and no longer
+ *       is.</strong> {@code GET …/backlog} assembles up to {@code MAX_PLANNING_VIEW_ROWS} issues —
+ *       6300 at stock defaults — inside ONE read-only transaction spanning {@code 12 + N}
+ *       statements, i.e. 32 at {@code AGILE_MAX_OPEN_SPRINTS=20}, so its worst-case connection hold
+ *       is ~320 s where {@code statement_timeout} bounds only each statement. It is <em>inside</em>
+ *       this bound since HD-174, spending these same permits from this same share (ADR-0031) with
+ *       no second ceiling and no second number an operator has to size. What remains outside is
+ *       whatever nobody has registered — unpaged {@code GET …/versions} among them.</li>
+ *   <li><strong>Bytes on the wire — recorded here as a known gap, not closed by this class.</strong>
+ *       Every budget on the READ side of this product is denominated in requests or in rows; its
+ *       byte-denominated budgets are all on the WRITE side ({@code app.write.upload-bytes-per-minute}
+ *       is one). And read egress is uncompressed: there is no {@code encode} directive in the
+ *       bundled {@code Caddyfile} and no {@code server.compression.enabled} in
+ *       {@code application.properties}, so a 12 MB planning response is 12 MB on the wire. At three
+ *       permits one principal sustains roughly 36 MB/s of it, which on Cloud is a bill rather than
+ *       an outage. Deliberately left as an asymmetry somebody wrote down rather than one somebody
+ *       discovers: enabling compression touches the {@code Caddyfile} — one of the two artefacts a
+ *       deploy does not sync — and deserves its own measurement rather than a line in an occupancy
+ *       change.</li>
  *   <li><strong>Abuse.</strong> A distributed set of principals still sums to
  *       {@link #maxInFlight()} of legitimate work, which is what it is for. Abuse stays the rate
  *       budgets' job.</li>
@@ -130,6 +170,15 @@ public record ExpensiveReadProperties(
          * arithmetic is. Two would be tighter and would refuse a legitimate page load whenever
          * the acquire wait expired; four buys nothing. Three of a default pool of 10 is 30% for
          * any one caller, against an entitlement that was previously the whole pool.
+         *
+         * ADDING A SURFACE TO THIS SHARE OWES THIS NUMBER ONE CHECK: does the new surface raise
+         * the largest concurrent burst a correct client makes? HD-174's did not, and it was
+         * checked rather than assumed — the Backlog page's mount puts ONE request on the bound
+         * (its /sprints, /config and /project queries are not on it) and refreshSections iterates
+         * with `for (const id of unique) await refreshSection(id)`, so even a cross-section drag,
+         * which is two requests, is never two IN FLIGHT. If a change ever parallelises those
+         * fetches, the planning surface goes from a burst of 1 to a burst of 2 and this number
+         * has to be re-argued in the same commit.
          *
          * -1 (the shipped value) means DERIVE IT: DEFAULT_MAX_IN_FLIGHT_PER_PRINCIPAL, clamped
          * to the derived surface ceiling so a small pool cannot produce a pair that refuses the

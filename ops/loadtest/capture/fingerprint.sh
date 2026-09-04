@@ -161,16 +161,30 @@ shell "docker exec $APP_CONTAINER sh -c 'java -XX:MaxRAMPercentage=50.0 -XX:+Pri
 shell "docker exec $APP_CONTAINER sh -c 'wget -qO- http://localhost:9090/actuator/prometheus 2>/dev/null | grep -E \"^jvm_memory_max_bytes.*heap|^jvm_gc_max_data_size_bytes\"'"
 
 # --- the values actually in effect ------------------------------------------
-# The pool, the statement and lock bounds, the report/search caps and the board/agile caps.
+# The pool, the statement and lock bounds, every per-principal budget the run can hit, the
+# occupancy share, and the board/agile caps.
 # Read from the ENVIRONMENT OF THE RUNNING CONTAINER, which is what the process obeys —
 # not from application.properties, which shows the default, and not from .env, which shows
 # an intention.
+#
+# WHAT BELONGS IN THIS LIST IS A CATEGORY, NOT A ROSTER: every number a THRESHOLD in
+# k6/lib/classes.js or a row in RESULTS-TEMPLATE.md is stated against. The README's rule —
+# "the numbers are void the moment its configuration moves" — is only true while the
+# fingerprint records the configuration the thresholds name; a class with a 429 target whose
+# budget is not captured here produces a result nobody can re-derive later. That is how
+# PLANNING_REQUESTS_PER_MINUTE (HD-174, the `planning` class and its hs_occupancy_429 target)
+# and the EXPENSIVE_READ_* share (HD-182, §P1b's occupancy numbers) were both missing.
+#
+# THE EXPENSIVE_READ_* CEILINGS PRINT NOTHING ON MOST INSTALLS AND THAT IS NOT A FAILED READ:
+# both ship UNSET and are then derived from DB_POOL_MAX_SIZE (60 % of it, capped at 6, the
+# per-principal one clamped to fit), so an absent line here means "derived from the pool
+# above" and the numbers actually in force are named in the app's startup log.
 #
 # The grep is an allow-list of NAMES so no secret can be printed even if one is added to
 # the container's environment later. That is why it is a positive filter and not a
 # `grep -v PASSWORD`: a deny-list is one new variable away from leaking.
 sec "configuration actually in effect (names allow-listed; no secrets can pass this filter)"
-shell "docker exec $APP_CONTAINER env | grep -E '^(DB_POOL_MAX_SIZE|DB_STATEMENT_TIMEOUT_MS|DB_LOCK_TIMEOUT_MS|REPORTS_MAX_ROWS|REPORTS_MAX_WINDOW_DAYS|REPORTS_REQUESTS_PER_MINUTE|SEARCH_REQUESTS_PER_MINUTE|BOARD_MAX_ISSUES|AGILE_SECTION_MAX_ISSUES|AGILE_MAX_OPEN_SPRINTS|MAX_LABELS_PER_WORKSPACE|RATE_LIMIT_ENABLED|RATE_LIMIT_AUTH_IP_PER_MINUTE|RATE_LIMIT_TRUST_FORWARDED_FOR|SPRING_PROFILES_ACTIVE|APP_STORAGE_TYPE)=' | sort"
+shell "docker exec $APP_CONTAINER env | grep -E '^(DB_POOL_MAX_SIZE|DB_STATEMENT_TIMEOUT_MS|DB_LOCK_TIMEOUT_MS|REPORTS_MAX_ROWS|REPORTS_MAX_WINDOW_DAYS|REPORTS_REQUESTS_PER_MINUTE|SEARCH_REQUESTS_PER_MINUTE|PLANNING_REQUESTS_PER_MINUTE|EXPENSIVE_READ_LIMIT_ENABLED|EXPENSIVE_READ_MAX_IN_FLIGHT|EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL|EXPENSIVE_READ_ACQUIRE_WAIT_MS|BOARD_MAX_ISSUES|AGILE_SECTION_MAX_ISSUES|AGILE_MAX_OPEN_SPRINTS|MAX_LABELS_PER_WORKSPACE|RATE_LIMIT_ENABLED|RATE_LIMIT_AUTH_IP_PER_MINUTE|RATE_LIMIT_TRUST_FORWARDED_FOR|SPRING_PROFILES_ACTIVE|APP_STORAGE_TYPE)=' | sort"
 
 # --- the entitlements the probes will assume ----------------------------------
 # PRINTED EVEN WHEN UNSET, AND THAT IS THE ENTIRE POINT OF THE SECTION.

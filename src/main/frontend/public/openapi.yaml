@@ -235,11 +235,18 @@ info:
     surface — `…/search/**` **plus `…/filters/**`**, since validating a saved
     filter is search-surface work wherever it is mounted — shares a **second,
     separate** per-principal budget
-    (`app.search.requests-per-minute`, 120/min by default). Both per-principal
-    budgets are checked **before** the workspace/project is resolved, so an
-    over-budget caller sees `429` even for a project they could not otherwise
-    see. `POST …/search/insights` is a report living on the search path and
-    spends **both** budgets — see the `Reports` tag. Finally,
+    (`app.search.requests-per-minute`, 120/min by default); and every planning
+    read — the whole view `GET …/projects/{projectId}/backlog` and every
+    section of it under `…/backlog/sections/…` — shares a **third** pot of its
+    own (`app.planning.requests-per-minute`, 240/min by default), sized for an
+    interactive drag-and-drop gesture rather than for a chart. **Every budget an
+    interceptor spends is spent before the workspace/project is resolved**, so
+    an over-budget caller sees `429` even for a project they could not
+    otherwise see; the invitation ceilings below are the one family decided
+    after the workspace resolves, and say so where they are described.
+    `POST …/search/insights` is a report living on the search path and
+    spends **both** the reports and the search budgets — see the `Reports` tag.
+    Finally,
     `POST …/workspaces/{workspaceId}/invites` carries ceilings of its own — a
     per-(sender, inbox) cooldown, a per-inbox daily cap (both count the
     destination inbox rather than the spelling of the address) and a per-sender
@@ -250,8 +257,10 @@ info:
     `inviteMember`.
 
     **Asking too often is not the only way to be refused on the expensive-read
-    surface.** The reports paths, `…/search/**`, `…/filters/**` and
-    `GET /workspaces/{workspaceId}/storage/projects` are additionally bounded by
+    surface.** The endpoints that hold one database connection across many
+    statements — the reports paths, the whole HQL surface, the workspace storage
+    breakdown and the planning reads, enumerated once and only in
+    `ConcurrencyLimitedProblemDetail` — are additionally bounded by
     **how many of their requests may be running at once** — a bound per caller
     and a bound across the whole instance — so that the rest of the API always
     keeps a share of the database connection pool however busy that surface
@@ -382,6 +391,18 @@ tags:
       a workspace OWNER/ADMIN across their whole workspace), while putting
       issues into a sprint is `sprint.assign` and ranking them is `issue.rank`
       — everyday contributor permissions.
+
+
+      **The planning reads are bounded on two axes**, from one registration over
+      the whole `…/backlog/**` path: a per-principal budget of their own
+      (`app.planning.requests-per-minute`, 240/min by default) and the shared
+      bound on how many expensive reads may run at once. All three of them can
+      therefore answer `429` — see `PlanningThrottled`. **One rule here is a
+      client's obligation rather than a status code: a refused section refresh
+      must not be retried as the whole view.** The aggregate assembles every open
+      section in a single transaction, so escalating to it after a refusal costs
+      the server far more than the request that was refused. Keep the section you
+      already have, mark it stale, and offer a person a retry.
   - name: Reports
     description: >-
       Read-only, project-scoped analytics under
@@ -418,11 +439,14 @@ tags:
       than assumed.
 
 
-      Refusals on this surface — the per-principal budgets over `…/reports/**`,
-      `…/search/**` and `…/filters/**`, and the bound on how many of their
-      requests may run at once — are **where `429` precedes `404` in this API**:
-      they run in interceptors, before the workspace and project are resolved, so
-      a refused caller is refused even for a project they cannot see. Nothing
+      Refusals on this surface — the per-principal budgets and the bound on how
+      many of their requests may run at once — run **in interceptors**, before
+      the workspace and project are resolved, which is how a `429` comes to
+      precede a `404`: a refused caller is refused even for a project they
+      cannot see. That follows from where a budget is spent rather than from
+      which surface spends it, so it holds of every interceptor budget on this
+      API; the invitation ceilings are the counter-case, spent after the
+      workspace resolves. Nothing
       there is keyed on the project, which is what keeps those refusals free of
       tenancy information — the `429` is identical for a real project, a
       nonexistent one and somebody else's.
@@ -1778,10 +1802,11 @@ paths:
         invitation ceilings (a per-(sender, address) cooldown, a per-address
         daily cap, and a per-sender hourly/daily volume budget) the answer is
         `429` with `Retry-After`, and nothing is sent or written when it
-        refuses. Unlike the report and search budgets, the ceilings are spent
-        **after** the workspace has been resolved, so a workspace the caller is
-        not a member of answers `404` even when the caller is over every
-        ceiling. See the `429` response below.
+        refuses. Unlike every budget an interceptor spends — a category, not a
+        list of today's surfaces — the ceilings are spent **after** the
+        workspace has been resolved, so a workspace the caller is not a member
+        of answers `404` even when the caller is over every ceiling. See the
+        `429` response below.
       operationId: inviteMember
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -5880,6 +5905,16 @@ paths:
 
         Rows inside every section are in the shared rank order (`position`, then
         newest first), which is the same order the board uses.
+
+
+        **Throttled on two axes** (`PlanningThrottled`): a per-principal budget
+        over the whole `…/backlog/**` path
+        (`app.planning.requests-per-minute`, 240/min by default) and the shared
+        bound on how many expensive reads may run at once — this operation is the
+        largest single response the API produces and holds one database
+        connection across one statement per open section plus a constant block.
+        Both are spent before the project is resolved, so this `429` can precede
+        the `404`.
       operationId: getBacklogView
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -5906,6 +5941,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/PlanningThrottled' }
 
   /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/backlog:
     get:
@@ -5954,12 +5990,18 @@ paths:
         question than the render did.
 
 
-        **Throttle: none, as parity with the aggregate rather than as an
-        omission.** No planning read carries a per-principal budget — a budget
-        is earned by the work a handler does, not by where it is mounted, and
-        refusing a section fetch would only push the client onto the whole-view
-        refetch, which runs the same aggregation and ships every section's rows
-        with it.
+        **Throttled exactly as the aggregate is, and that parity is the point**
+        (`PlanningThrottled`): one registration binds the whole
+        `…/backlog/**` path to the planning budget
+        (`app.planning.requests-per-minute`, 240/min by default) and to the
+        shared bound on how many expensive reads may run at once, so no planning
+        read is cheaper to ask for than another. A half-budgeted surface would be
+        worse than either whole answer, because a client refused on the cheap
+        request retries with the expensive one — which is also the rule this
+        response puts on a client: **a refused section refresh must not be
+        answered by fetching `GET …/backlog`.** A section fetch repeats the
+        section's whole-section aggregation, so it is not free either; what it
+        divides is the rows and the response, not that term.
       operationId: getBacklogSection
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -5989,6 +6031,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/PlanningThrottled' }
 
   /workspaces/{workspaceId}/projects/{projectId}/backlog/sections/{sprintId}:
     get:
@@ -6022,6 +6065,15 @@ paths:
         No `includeDone`: it applies to the backlog section only, here as in the
         aggregate, because a sprint's DONE issues are its record of what it
         delivered. Every other filter the aggregate accepts is accepted here.
+
+
+        **Throttled exactly as the other two planning reads are**
+        (`PlanningThrottled`), from the same registration over the whole
+        `…/backlog/**` path: the planning budget and the shared expensive-read
+        occupancy bound. A refused refresh leaves the section you already have
+        stale — it is never grounds for fetching the whole view instead. A
+        `COMPLETED` sprint spends the budget like any other: state does not
+        change a status code here, and neither does a throttle.
       operationId: getBacklogSprintSection
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -6058,6 +6110,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429': { $ref: '#/components/responses/PlanningThrottled' }
 
   /workspaces/{workspaceId}/projects/{projectId}/reports/flow:
     get:
@@ -8945,9 +8998,10 @@ components:
         the panel. **A panel refresh therefore competes with report fetches *and*
         with searches.** Every refusal spent in these interceptors — both
         per-principal budgets and the occupancy bound alike — is therefore
-        **spent before the resource is resolved**, which is what makes this the
-        part of the API where a `429` can precede a `404`: a refused caller is
-        refused even for a project they cannot see. The invitation ceilings on
+        **spent before the resource is resolved**, which is how a `429` comes to
+        precede a `404`: a refused caller is refused even for a project they
+        cannot see. That is true of every budget an interceptor spends, here and
+        on any other surface that grows one. The invitation ceilings on
         `POST …/workspaces/{workspaceId}/invites` are the deliberate
         counter-case — spent **after** the workspace is resolved, so that
         refusal can never precede a `404` (see `InviteThrottled`). Keying
@@ -8966,17 +9020,7 @@ components:
         entirely; `ConcurrencyLimitedProblemDetail` says what each one means and
         which of them is safe to retry.
       headers:
-        Retry-After:
-          description: >-
-            Seconds to wait — but **read `errorType` before you read this
-            header**, because its meaning follows the refusal. On the per-minute
-            budget (no `errorType`) it counts down the current window, can say up
-            to 60, and waiting it out is the whole remedy. On an occupancy
-            refusal it is always `1` and means *the obstacle is a request that
-            ends shortly*, not *the window has one second left* — so never carry
-            a backoff derived from one over to the other. See
-            `ConcurrencyLimitedProblemDetail`.
-          schema: { type: integer, example: 1 }
+        Retry-After: { $ref: '#/components/headers/ThrottleRetryAfter' }
       content:
         application/problem+json:
           schema:
@@ -9074,22 +9118,83 @@ components:
         `app.rate-limit.enabled=false`, and reads its `Retry-After` differently —
         see `ConcurrencyLimitedProblemDetail`.
       headers:
-        Retry-After:
-          description: >-
-            Seconds to wait — but **read `errorType` before you read this
-            header**, because its meaning follows the refusal. On the per-minute
-            budget (no `errorType`) it counts down the current window, can say up
-            to 60, and waiting it out is the whole remedy. On an occupancy
-            refusal it is always `1` and means *the obstacle is a request that
-            ends shortly*, not *the window has one second left*. See
-            `ConcurrencyLimitedProblemDetail`.
-          schema: { type: integer, example: 1 }
+        Retry-After: { $ref: '#/components/headers/ThrottleRetryAfter' }
       content:
         application/problem+json:
           schema:
             anyOf:
               - $ref: '#/components/schemas/ProblemDetail'
               - $ref: '#/components/schemas/ConcurrencyLimitedProblemDetail'
+
+    PlanningThrottled:
+      description: >-
+        **More than one refusal shares this status on the planning paths, and
+        `errorType` is what tells them apart — read it rather than assuming which
+        one you got.** Absent, it is the per-minute budget described below.
+        Present, it is the bound on how many expensive reads may be running **at
+        once**; `ConcurrencyLimitedProblemDetail` carries both causes, their
+        remedies and the reason `Retry-After` does not mean here what it means on
+        a budget.
+
+
+        Past this caller's **planning** budget
+        (`app.planning.requests-per-minute`, 240/min by default, in-memory per
+        app node, disabled wholesale by `app.rate-limit.enabled=false`). A
+        retryable throttle, not a fault: nothing was assembled, and the identical
+        request succeeds after the number of seconds in `Retry-After`.
+
+
+        The budget covers the whole `…/projects/*/backlog/**` path per
+        principal — the aggregate view and every section read alike — so a
+        planning read added later is budgeted the moment it exists rather than
+        when somebody remembers. **Its own pot rather than the reports one**: a
+        card dragged across sections costs two section refreshes, so an ordinary
+        grooming session would reach 60/min inside three minutes, and a `429` in
+        the middle of a drag reads as a product defect where a `429` on a chart
+        reads as a delay. 240 is roughly 3.4x the busiest single tab the
+        reference client can produce, so it is sized to catch a client in a loop
+        rather than to shape ordinary use.
+
+
+        Keyed on the caller and spent **before** the workspace and project are
+        resolved, so an over-budget caller is refused even for a project they
+        cannot see, and the `429` is identical for a real project, a nonexistent
+        one and somebody else's.
+
+
+        **A refusal is never a narrowed answer.** Past either bound the response
+        is this `429` — never a smaller `sectionCap`, a section quietly cut
+        short or a `truncated` that was not earned. Those fields describe the
+        data, and a throttle must not become the thing that changes them.
+
+
+        **The obligation this response puts on a client is not a status code: a
+        refused section refresh must not be retried as the whole view.**
+        `GET …/backlog` assembles every open section in one transaction — a
+        request several times the size of the section that was just refused — so
+        escalating on a refusal spends far more of the bound the caller has just
+        met, per refusal and per user, and a client whose error path invalidates
+        its cached view does exactly that without meaning to. Keep the section you
+        already have, mark it stale, and offer a person a manual retry. This holds
+        for all three refusals, the budget included.
+
+
+        **These paths carry the occupancy bound as well**, spent by the same
+        interceptor and for the reason a rate cannot cover: one planning read
+        holds a single database connection across every statement it issues — one
+        per open section on top of a constant block — so how many of them run at
+        once is bounded as well as how often they may be asked. That refusal names
+        itself in `errorType`, survives `app.rate-limit.enabled=false`, and reads
+        its `Retry-After` differently — see `ConcurrencyLimitedProblemDetail`.
+      headers:
+        Retry-After: { $ref: '#/components/headers/ThrottleRetryAfter' }
+      content:
+        application/problem+json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/ConcurrencyLimitedProblemDetail'
+
     ReportCsvNotAcceptable:
       description: >-
         The request `Accept` header excludes `text/csv`. These operations declare
@@ -9114,16 +9219,16 @@ components:
 
 
         **This `429` is spent AFTER tenancy and authorization, the deliberate
-        opposite of the report and search budgets.** The order is: workspace
+        opposite of every budget an interceptor spends.** The order is: workspace
         resolved (`404` for an unknown workspace and for a non-member alike) →
         `workspace.member.manage` (`403`) → the role reference and the grant
         ceiling (`422` / `403`) → already a member (`409`) → a standing
         unaccepted invitation to the same address (`409 DUPLICATE_INVITE`) →
         these ceilings (`429`). **A workspace the caller cannot see answers `404` even when the
         caller is over every ceiling**, and a `429` here is only ever seen by a
-        proven member who may invite. Do not carry the reports/search sentence
-        ("the budget is spent before the workspace is resolved") across to this
-        endpoint: a recipient-keyed refusal spent that early would answer a
+        proven member who may invite. Do not carry the interceptor-budget
+        sentence ("the budget is spent before the workspace is resolved") across
+        to this endpoint: a recipient-keyed refusal spent that early would answer a
         cross-tenant question to a non-member. One corollary worth relying on:
         no refusal above spends any allowance.
 
@@ -9271,6 +9376,19 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/InviteAlreadyAcceptedProblemDetail' }
   headers:
+    ThrottleRetryAfter:
+      description: >-
+        Seconds to wait — but **read `errorType` before you read this header**,
+        because its meaning follows the refusal rather than the status. On a
+        per-minute budget (no `errorType`) it counts down the current window, can
+        say up to 60, and waiting it out is the whole remedy. On an occupancy
+        refusal it is always `1` and means *the obstacle is a request that ends
+        shortly*, not *the window has one second left* — so never carry a backoff
+        derived from one over to the other, which is the way to hammer an
+        instance that is already saturated. See
+        `ConcurrencyLimitedProblemDetail`, where that difference is written
+        down once for every surface that has both.
+      schema: { type: integer, example: 1 }
     ReportCsvDisposition:
       description: >-
         Always `attachment`, with a **server-built** filename — never one the
@@ -9400,9 +9518,13 @@ components:
     ConcurrencyLimitedProblemDetail:
       description: >-
         The `429` body of a request refused for running **at the same time** as
-        too many others on the expensive-read surface — the reports paths,
-        `…/search/**`, `…/filters/**` and
-        `GET /workspaces/{workspaceId}/storage/projects`. It is not the
+        too many others on the expensive-read surface. **This is the one place
+        that surface is enumerated** — everything else that mentions it points
+        here rather than restating it, because the set grows whenever an endpoint
+        that holds one connection across many statements joins it. Today it is
+        the reports paths, `…/search/**`, `…/filters/**`,
+        `GET /workspaces/{workspaceId}/storage/projects` and the planning reads
+        under `…/projects/{projectId}/backlog/**`. It is not the
         per-minute budget: nothing was spent, the caller may be well inside every
         budget they hold, and what stood in the way was work already running.
 

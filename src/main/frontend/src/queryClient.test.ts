@@ -21,6 +21,15 @@ import { ApiResponseError } from './apiError'
  * 429 is here for the sibling reason: the limiter hands back a wait, and an
  * immediate automatic retry ignores it and burns another slot.
  *
+ * 502/503/504 are here for a reason written down somewhere else and therefore
+ * easy to contradict from here: `isOverloadFailure`, the predicate every surface
+ * that RENDERS one of these failures branches on, says that when the instance is
+ * saturated, asking for something bigger is exactly as wrong as it is after a
+ * refusal. An automatic retry is asking for one more of the request that just
+ * failed, from every open tab, at the moment there is least room for it. The
+ * doctrine and the retry layer held opposite opinions about the same three
+ * statuses for one review round; these tests are what stops that recurring.
+ *
  * The expensive surfaces (reports, insights, search) also set `retry: false` by
  * hand. Those are *narrower* than this rule — they decline a retry for any
  * failure, including a 500 — and must never be what keeps a 422 from being
@@ -50,6 +59,20 @@ describe('the global query-retry rule', () => {
         + 'the reader (RateLimitNotice) instead.',
       ).toBe(false)
     })
+
+    for (const status of [502, 503, 504]) {
+      it(`never retries a ${status} — the doctrine and the retry layer agree`, () => {
+        expect(
+          retryQuery(0, new ApiResponseError(status, 'Service Unavailable')),
+          `A ${status} is what a saturated instance hands back for a reason that never `
+          + 'reached a throttle. `isOverloadFailure` is the doctrine every surface that '
+          + 'renders these failures branches on, and it says asking for more is exactly '
+          + 'as wrong as it is after a 429 — so an automatic retry here, from every open '
+          + 'tab at once, is the one thing that doctrine forbids. Two layers must not '
+          + 'hold opposite opinions about one status class.',
+        ).toBe(false)
+      })
+    }
 
     it('still retries everything else exactly once, as before', () => {
       const serverError = new ApiResponseError(500, 'Internal error')
@@ -101,11 +124,22 @@ describe('the global query-retry rule', () => {
       ).toBe(1)
     })
 
+    it('asks once for a 503 and does not ask again', async () => {
+      expect(
+        await callsUntilItGivesUp(new ApiResponseError(503, 'Service Unavailable')),
+        'The default query options retried an overloaded instance — one more of the '
+        + 'request that just failed, from every open tab, at the moment there is least '
+        + 'room for it.',
+      ).toBe(1)
+    })
+
     it('keeps the historical single retry for a 500', async () => {
       expect(
         await callsUntilItGivesUp(new ApiResponseError(500, 'Internal error')),
-        'The one retry for transient failures was lost — this fix was meant to '
-        + 'narrow the rule to 422/429, not to disable retries everywhere.',
+        'The one retry for transient failures was lost. 500 is deliberately outside '
+        + '`isOverloadFailure`: it is a bug on ONE request, where a second attempt may '
+        + 'well succeed — the case this retry exists for. Narrowing the rule must never '
+        + 'widen into "never retry anything".',
       ).toBe(2)
     })
   })

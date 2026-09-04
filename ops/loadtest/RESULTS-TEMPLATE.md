@@ -203,6 +203,7 @@ with a *different* principal browsing at 5 VUs as the victim.
 |---|---|
 | **Verdict** | `<TODO the fix holds / the fix did not engage / regression / could not be determined>` |
 | Victim `browse` p95 / p99 (vs target) | `<TODO>` |
+| Victim class contains no budgeted endpoint (HD-174 — `victimBrowse` issues only `.../issues`, `.../issues/{n}` and `.../comments`) | `<TODO confirmed / NOT confirmed>` |
 | Hikari `pending` during the probe | `<TODO>` |
 | `hs_occupancy_429` received by the entitled principal | `<TODO>` |
 | `hs_minute_budget_429` received by the entitled principal (must be **0**) | `<TODO>` |
@@ -238,9 +239,43 @@ either way, and it is what makes HD-182 actionable rather than alarming**:
 | class | mean hold (ms) |
 |---|---|
 | browse | `<TODO>` |
+| planning | `<TODO>` |
 | search | `<TODO>` |
 | report | `<TODO>` |
 | write | `<TODO>` |
+
+### P1b — the planning occupancy measurement (HD-174, acceptance criterion 18)
+
+**This replaces an estimate that nothing supports.** Every occupancy number in HD-174's design
+rests on one assumption — *that a planning response is short in the healthy case* — and there
+is **no measurement**: the "~200 ms, so a busy planner occupies ~0.23 permits" figure comes
+from the shape of the queries and not from a run. If a default-configured 6300-row aggregate
+actually takes 2–3 s, a handful of planners occupy the whole six-permit share on their own and
+`EXPENSIVE_SURFACE_BUSY` becomes a routine outcome rather than a saturation signal — reports and
+searches refused during standup, which would look like a bug.
+
+**Nothing extra needs to be run: the browse ladder already exercises the exact endpoints**, and
+since HD-174 they are their own class.
+
+| | |
+|---|---|
+| `planning` p50 / p95 / p99 at the top clean stage | `<TODO>` / `<TODO>` / `<TODO>` |
+| Mean connection-hold per planning request (from the table above) | `<TODO>` ms |
+| `hamstrack_expensive_read_in_flight` — **max** over the browse ladder (max over replicas, never sum) | `<TODO>` |
+| `hs_occupancy_429{class:planning}` rate at the top clean stage | `<TODO>` |
+| Permits a busy planner actually occupies = (planning req/min ÷ 60) × mean response seconds | `<TODO>` |
+| Open sprints in the fixture project measured (occupancy is 12+N statements — say which N) | `<TODO>` |
+
+- **The estimate stands** if the measured occupancy per busy planner is at or below ~0.25
+  permits, i.e. a planning p50 at or under a few hundred ms. Record the number and delete the
+  estimate from the design doc rather than leaving both.
+- **The estimate is wrong** if planning p50 is seconds. Then the remedy is one `.env` line plus
+  a pool — raise `DB_POOL_MAX_SIZE` first and `EXPENSIVE_READ_MAX_IN_FLIGHT` with it (hard rule
+  2 in `PoolShareConsistency`), which widens the interactive API's reservation at the same time.
+  **Do not raise the share without the pool.**
+- **Could not be determined** if the fixture project has few open sprints: the aggregate's cost
+  is `12 + N`, so a project with two sprints measures a different endpoint than a project with
+  twenty. Say which was measured; a number without its N is not a measurement of the worst case.
 
 ### P2 — the report heap costing (~1.9 KB/row)
 

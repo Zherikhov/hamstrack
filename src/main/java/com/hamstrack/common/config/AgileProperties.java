@@ -34,6 +34,34 @@ public record AgileProperties(
          * typical is a few hundred). A truncated section still reports honest
          * whole-section stats plus `truncated` + `totalAvailable` — the HD-79
          * pattern — so the SPA can link to Search instead of paging.
+         *
+         * THIS IS A HEAP NUMBER, AND IT CARRIES A CONCURRENCY MULTIPLIER — the same
+         * arithmetic app.reports.max-rows spells out at length, which is the other
+         * property on this share whose unit is rows and whose cost is megabytes.
+         * One assembled IssueResponse costs roughly 1.9 KB of transient heap at worst
+         * (the JDBC row, the DTO built beside it and the buffered JSON are all alive
+         * together), so the product validated below is really "megabytes ÷ ~1.9":
+         *
+         *   defaults    300 x (20 + 1) =   6300 rows  ~= 12 MB per request
+         *   the ceiling MAX_PLANNING_VIEW_ROWS = 20000 rows ~= 38 MB per request
+         *
+         * against a reference heap of 512 MB — what a default install actually gets,
+         * since the image runs -XX:MaxRAMPercentage=50 and the bundled compose limits
+         * the app container to 1g (APP_MEMORY_LIMIT). Read the pair as one setting.
+         *
+         * And per request is not the ceiling. Since HD-174 the planning surface spends
+         * permits from the shared expensive-read occupancy bound (ADR-0031), so up to
+         * app.expensive-read.max-in-flight of these assemblies are alive at once — 6 on
+         * the shipped pool, i.e. ~228 MB at the configurable maximum, shared with
+         * reports and search rather than added to them. So RAISING THIS NUMBER RAISES A
+         * PER-REQUEST HEAP FIGURE WITH A ~6x MULTIPLIER ON IT, and it is the multiplier,
+         * not the row count, that decides whether the instance survives. The bound also
+         * cuts the OTHER way and is the reason the surface joined that share: before it,
+         * concurrent planning assemblies were bounded only by Tomcat's 200 threads.
+         *
+         * Whoever moves this number owes the same re-read app.reports.max-rows asks for,
+         * in EITHER direction: the 512 MB is not an invariant but the figure the
+         * arithmetic is stated against, and it follows APP_MEMORY_LIMIT.
          */
         @DefaultValue("300") @Min(1) @Max(2000) int sectionMaxIssues,
         /*
@@ -71,6 +99,15 @@ public record AgileProperties(
      * "1–20000" range is quoted to operators in three documents that are NOT generated
      * from here: {@code .env.prod.example}, {@code docs/self-hosting.md} and
      * {@code docs/api-dc.md}. Update all three in the same change.
+     *
+     * <p><strong>It is a HEAP ceiling wearing a row count, and it is not the only one on its
+     * share.</strong> 20 000 assembled {@code IssueResponse}s is ~38 MB of transient heap for ONE
+     * request — deliberately the same number as {@code app.reports.max-rows}, which costs the same
+     * ~1.9 KB per row on the same 512 MB reference heap — and since HD-174 both are drawn from the
+     * one occupancy share (ADR-0031), so the instance-wide figure is
+     * {@code app.expensive-read.max-in-flight} × the larger of them. The full arithmetic, and the
+     * warning an operator raising {@code AGILE_SECTION_MAX_ISSUES} needs, is on
+     * {@link #sectionMaxIssues()} above.
      */
     static final int MAX_PLANNING_VIEW_ROWS = 20_000;
 
