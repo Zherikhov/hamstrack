@@ -94,7 +94,50 @@ jobs:
       # once. `verify` covers both: compile → test → package, with
       # the frontend built once. A compile error still fails before any test
       # runs, so the old "compile check first" fast-fail is preserved.
-      - name: Build and test
+      #
+      # SINCE HD-242 THIS COMMAND ALSO RUNS THE FRONTEND SUITE. There is no
+      # separate `npm test` step here on purpose. `vitest run` had run on no
+      # automated path at all — CI's only command was this one, and the three
+      # frontend executions build the SPA (`tsc -b && vite build`) without
+      # executing a single test, so a type error broke the build and a
+      # behavioural regression did not. `src/licensing.test.ts`, the HD-194 seal
+      # against the "open source" claim returning, could only ever fail a person
+      # who remembered to type the command. The fix is a fourth execution in
+      # pom.xml (`npm-test`, bound to the `test` phase) rather than a step here,
+      # because a step here would leave `./mvnw verify` an incomplete gate that
+      # everyone treats as a complete one — which is precisely how this hid.
+      # Anything that runs the lifecycle now runs the suite; read the long
+      # comment on that execution before changing this.
+      #
+      # WHAT TO LOOK FOR IN THIS STEP'S LOG. Two lines, both from the frontend
+      # execution (`--- frontend:1.15.1:npm (npm-test) ---`):
+      #
+      #   * `Test Files … / Tests …` — the COUNT. A test step that silently
+      #     matched nothing is the failure mode being guarded here, and it looks
+      #     identical to a green one everywhere except this line. Today an empty
+      #     match is red (`vitest run` exits 1, verified by pointing the include
+      #     glob at an empty directory), and `--passWithNoTests` is deliberately
+      #     absent from the whole repo — but the count is what tells a reader
+      #     which of those two worlds this run happened in.
+      #
+      #   * `margin survey — testTimeout …ms, slowest …ms (…%)` — HD-240's
+      #     standing report of the five slowest tests as a percentage of the
+      #     timeout bound. It never fails a run; it is the number to READ. Every
+      #     figure behind that bound was taken on a 12-core dev box (there,
+      #     slowest ≈ 15-27%) using oversubscription as a stand-in for a runner
+      #     nobody had ever measured — THIS log is the first real measurement of
+      #     a GitHub-hosted runner. If the slowest test sits above ~50% here, the
+      #     bound is sized for the wrong machine and wants revisiting; the one
+      #     response that is not available is muting the suite, because a suite
+      #     nobody runs is the state HD-242 exists to end and it would cost ~50s
+      #     a build to stay in it.
+      #
+      # COST: measured +45-70s per non-skipped build on a dev box (see pom.xml).
+      # Local fast loops keep `-Dfrontend.skip=true`, which switches all four
+      # frontend executions off together; the image build in `build-and-push`
+      # pays nothing either, because its `package -DskipTests` skips a
+      # `test`-phase frontend execution the same way it skips surefire.
+      - name: Build and test (backend + frontend suites)
         run: ./mvnw -B verify
         env:
           DB_URL: jdbc:postgresql://localhost:5432/hamstrack_test

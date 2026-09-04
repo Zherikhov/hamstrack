@@ -36,10 +36,14 @@
         <java.version>21</java.version>
         <jjwt.version>0.12.6</jjwt.version>
         <awssdk.version>2.47.3</awssdk.version>
-        <!-- HD-94: -Dfrontend.skip=true skips node install + npm install + npm run build,
-             for a fast backend-only loop (`mvnw test`). Keep the default false: a plain
-             `mvnw package` / CI's `./mvnw -B verify` MUST still build the SPA into
-             src/main/resources/static, which is what ships inside the JAR. -->
+        <!-- HD-94: -Dfrontend.skip=true skips node install + npm install + npm run build
+             — and, since HD-242, `npm test` too — for a fast backend-only loop
+             (`mvnw test`). Keep the default false: a plain `mvnw package` / CI's
+             `./mvnw -B verify` MUST still build the SPA into src/main/resources/static,
+             which is what ships inside the JAR, and MUST still run the frontend suite,
+             which nothing else does. Note the two off-switches are not the same switch:
+             this one drops the SPA from the artifact, `-DskipTests` leaves the build
+             intact and drops only the test executions (surefire's and npm-test's). -->
         <frontend.skip>false</frontend.skip>
     </properties>
     <dependencyManagement>
@@ -181,7 +185,7 @@
                     <installDirectory>target</installDirectory>
                     <!-- Every goal of this plugin (install-node-and-npm, npm) declares its
                          own editable `skip` parameter, so one plugin-level binding covers
-                         all three executions below. -->
+                         all four executions below, including npm-test (HD-242). -->
                     <skip>${frontend.skip}</skip>
                 </configuration>
                 <executions>
@@ -215,6 +219,95 @@
                         <goals><goal>npm</goal></goals>
                         <phase>generate-resources</phase>
                         <configuration><arguments>run build</arguments></configuration>
+                    </execution>
+                    <!-- HD-242: the frontend suite runs inside `mvn verify`, not beside it.
+
+                         Before this execution existed, `npm test` ran on no automated path
+                         at all. CI's only command is `./mvnw -B verify`, and the three
+                         executions above install Node, install the lockfile and run
+                         `tsc -b && vite build` — a type error broke the build, a behavioural
+                         regression did not. So `src/licensing.test.ts` — the HD-194 seal that
+                         exists to go red when a retired licence claim comes back — could only
+                         ever fail a person who remembered to type the command. A guard CI
+                         never runs is documentation.
+
+                         WHY A FOURTH EXECUTION AND NOT A SECOND CI STEP. A step in build.yml
+                         would keep local builds ~40s faster, and would have been wrong for
+                         the same reason this hid for a year: it leaves `verify` an incomplete
+                         gate that everyone treats as a complete one. Someone verifying a
+                         release locally, the Dockerfile, a future workflow — each would have
+                         to remember the second mechanism. Here there is one: whatever runs
+                         the lifecycle runs the suite, and `-Dfrontend.skip=true` (HD-94)
+                         switches all four executions off together, by construction rather
+                         than by a second flag that has to be kept in sync.
+
+                         WHY THE `test` PHASE SPECIFICALLY. AbstractFrontendMojo honours
+                         `-DskipTests` ONLY for an execution bound to `test` or
+                         `integration-test` (`skipTestPhase()`; verified against 1.15.1) — so
+                         this binding gives the frontend suite the same off-switch as
+                         surefire, for free. That matters immediately: the Dockerfile builds
+                         with `clean package -DskipTests` because build-and-test already
+                         gated the tree, and the image build therefore does NOT pay this cost
+                         a third time per pipeline. Bind this to `process-test-classes` to
+                         make it run before surefire and you silently lose that.
+
+                         The price of that choice, so it is not a surprise: within the `test`
+                         phase the default-lifecycle binding goes first, so surefire runs the
+                         whole backend suite BEFORE this executes (verified in the build log).
+                         Frontend feedback therefore arrives last on a full run — use `npm
+                         test` in src/main/frontend while iterating, and keep the shared
+                         off-switch here.
+
+                         COST, measured on the 12-core dev box on 2026-09-04 (1166 tests,
+                         68 files). Three ways, because one number would have been a lie:
+
+                           41s / 55s   `npm test` on its own, two runs, same tree
+                           69s         the execution alone through Maven
+                                       (`mvnw frontend:npm@npm-test`, ~6s of it Maven start)
+                           +48s        the lifecycle delta: `mvnw test -DskipTests` (1:32)
+                                       against `mvnw test -Dmaven.test.skip.exec=true`
+                                       (2:20) — same tree, same npm ci, same vite build,
+                                       the ONLY difference being this execution
+
+                         So budget ~45-70s on a non-skipped build. Note the spread between
+                         two runs of the IDENTICAL command (41s vs 55s) is wider than any
+                         difference the wiring makes: this cost is a property of the machine,
+                         not of the config, which is exactly what HD-240 found one layer down
+                         and exactly why the survey below reports percentages.
+
+                         THE FAILURE MODE THIS STEP HAS. Not "the tests break" — that is the
+                         step working. It is a step that runs, prints, exits 0 and asserted
+                         NOTHING, because the include glob stopped matching (a directory
+                         rename, a `dir` flag added to the script, a `passWithNoTests`
+                         borrowed from someone's CI snippet). `vitest run` exits 1 on an empty
+                         match, so today the build goes red — verified, not assumed: pointing
+                         `include` at a non-existent directory produced `No test files found,
+                         exiting with code 1` and a Maven BUILD FAILURE (HD-242, 2026-09-04).
+                         Keep that property: `passWithNoTests`, in flag or config form,
+                         appears nowhere in this repo and must not appear in vitest.config.ts,
+                         in `package.json`'s `test` script, or here. Note this one guard
+                         cannot live in the suite — a test asserting "the suite is non-empty"
+                         is not collected when the suite is empty. What a reader checks
+                         instead is the count vitest prints above its result (`Test Files … /
+                         Tests …`): a run that suddenly asserts an order of magnitude less is
+                         visible there and nowhere else, which is why the whole npm output is
+                         left on INFO rather than quieted.
+
+                         WHAT MAKES IT AFFORDABLE: HD-240. An unmargined suite wired into
+                         `verify` is worse than no wiring, because the cheapest response to a
+                         suite that goes red for reasons that are not about the product is to
+                         mute it — which returns us to exactly here, plus a step everyone
+                         believes is protecting them. HD-240 sized `testTimeout` against the
+                         load factor rather than the standalone cost and left a standing
+                         margin survey (`src/test/marginReporter.ts`) that prints the five
+                         slowest tests as a PERCENTAGE of the bound after every full run. It
+                         reaches the Maven log because the plugin streams npm's stdout at
+                         INFO — read it, don't mute it. -->
+                    <execution>
+                        <id>npm-test</id>
+                        <goals><goal>npm</goal></goals>
+                        <phase>test</phase>
+                        <configuration><arguments>run test</arguments></configuration>
                     </execution>
                 </executions>
             </plugin>
