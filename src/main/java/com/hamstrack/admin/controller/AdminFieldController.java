@@ -18,6 +18,14 @@ import java.util.UUID;
  * confirmation. Creating a field also refuses (409) a key already claimed by
  * {@link com.hamstrack.search.FieldRegistry}, checked after slugification and on
  * create only. Guarded by hasRole(ADMIN) in SecurityConfig.
+ *
+ * <p><strong>Two refusal families, and which one a rule lands in is a property of the
+ * rule: 409 is a collision with something that already exists, 422 is everything the
+ * product declines on its own terms.</strong> The 422 family has grown since HD-171 —
+ * an immutable field's type being changed, a {@code config} document or an option leaf
+ * past its bound, an option {@code color} that is not one — and it will grow again,
+ * which is why it is given here by its shape rather than enumerated: a list of refusals
+ * reads as complete one entry before it stops being so.
  */
 @RestController
 @RequestMapping("/api/admin")

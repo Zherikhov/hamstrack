@@ -29,8 +29,14 @@ public class Priority extends CreatedOnlyEntity implements Scoped {
     @Column(nullable = false, length = 100)
     private String name;
 
+    /**
+     * {@code #RRGGBB} — an IDENTITY hue, not ink (HD-176 / ADR-0027); see
+     * {@code Status.color} for why this initialiser and not the column default is the
+     * default the application actually uses, and why both are kept equal by hand. V27 moved
+     * it off {@code #8B8680}, a warm grey from the retired visual language.
+     */
     @Column(nullable = false, length = 7)
-    private String color = "#8B8680";
+    private String color = "#667085";
 
     // lucide icon name (chevrons-up, chevron-up, equal, chevron-down, minus…)
     @Column(length = 50)

@@ -29,10 +29,14 @@ const DUE = [
   { badge: 'T', tint: TYPE.task, title: 'Draft release notes', meta: 'OPS-84 · Platform', due: '2d', now: false },
 ]
 
+// `tint`, like STATS/DUE/TYPE above and unlike every other priority swatch in
+// the product: this page is a static marketing mock behind no login, so these are
+// design TOKENS and not one workspace's stored hues. The distinction is the whole
+// subject of HD-176's fill scan, so it is drawn in the field name.
 const PRIORITY = [
-  { name: 'Urgent', color: 'var(--color-error)', n: 3, w: 32 },
-  { name: 'High', color: 'var(--color-pending)', n: 4, w: 40 },
-  { name: 'Medium', color: 'var(--color-sandbox)', n: 2, w: 28 },
+  { name: 'Urgent', tint: 'var(--color-error)', n: 3, w: 32 },
+  { name: 'High', tint: 'var(--color-pending)', n: 4, w: 40 },
+  { name: 'Medium', tint: 'var(--color-sandbox)', n: 2, w: 28 },
 ]
 
 // Only shipped functionality — no roadmap promises.
@@ -160,12 +164,12 @@ export default function LandingPage() {
                         <h4>Priority breakdown</h4>
                         <div className="lp-pbar">
                           {PRIORITY.map((p) => (
-                            <span key={p.name} style={{ width: `${p.w}%`, background: p.color }} />
+                            <span key={p.name} style={{ width: `${p.w}%`, background: p.tint }} />
                           ))}
                         </div>
                         {PRIORITY.map((p) => (
                           <div className="lp-prow" key={p.name}>
-                            <span className="sw" style={{ background: p.color }} />{p.name}
+                            <span className="sw" style={{ background: p.tint }} />{p.name}
                             <span className="pn">{p.n}</span>
                           </div>
                         ))}

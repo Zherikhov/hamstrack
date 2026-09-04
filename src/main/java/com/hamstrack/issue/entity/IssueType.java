@@ -28,8 +28,13 @@ public class IssueType extends CreatedOnlyEntity implements Scoped {
     @Column(nullable = false, length = 100)
     private String name;
 
+    /**
+     * {@code #RRGGBB} — an IDENTITY hue, not ink (HD-176 / ADR-0027); see
+     * {@code Status.color} for why this initialiser and not the column default is the
+     * default the application actually uses, and why both are kept equal by hand.
+     */
     @Column(nullable = false, length = 7)
-    private String color = "#6B7280";
+    private String color = "#667085";
 
     @Column(length = 50)
     private String icon;

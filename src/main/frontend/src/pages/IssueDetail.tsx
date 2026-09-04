@@ -13,6 +13,7 @@ import type { StorageQuotaRefusal } from '../api'
 import { useAuthStore } from '../auth'
 import { useUiStore } from '../uiStore'
 import { Button, Input, Select, Textarea, StatusBadge, PriorityBadge, Avatar, ChildrenProgress } from '../components/ui'
+import { SURFACE, fillOf, inkOn, ringOn } from '../colour'
 import { FieldInput, FieldValueDisplay } from '../components/fields'
 import { LabelChip, LabelPicker } from '../components/labels'
 import { ComponentSelect, useProjectComponents } from '../components/projectComponents'
@@ -1088,8 +1089,19 @@ export default function IssueDetail({
 
         {/* Parent breadcrumb — navigates to the parent issue */}
         {issue?.parentId && issue.parentKey && (() => {
-          const parentColor = issueTypes.find(t => t.id === issue.parentTypeId)?.color
-            ?? 'var(--color-text-muted)'
+          // The parent's issue-type hue is an IDENTITY, not ink (HD-176). It is
+          // derived here against the darkest state this row can take — the
+          // breadcrumb tints on hover — and the stored hue is deliberately never
+          // bound to a local on the way: the scan in `colour.test.ts` reads member
+          // chains, so a local holding a hue is outside what a text scan can see,
+          // and that is exactly how this site survived the sweep. A parent whose
+          // type carries no colour keeps the muted token it always had, passed as
+          // the neutral rather than defaulted before the derivation.
+          const parentInk = inkOn(
+            issueTypes.find(t => t.id === issue.parentTypeId)?.color,
+            SURFACE.row,
+            'var(--color-text-muted)',
+          )
           const parentNumber = numberFromKey(issue.parentKey)
           return (
             <button
@@ -1099,9 +1111,9 @@ export default function IssueDetail({
               className="flex items-center gap-1.5 text-xs text-left rounded px-2 py-1 -mx-1 transition-colors disabled:cursor-default enabled:cursor-pointer enabled:hover:bg-[var(--color-surface-2)]"
               style={{ color: 'var(--color-text-secondary)', width: 'fit-content', maxWidth: '100%' }}
             >
-              <CornerDownRight size={12} style={{ color: parentColor, flexShrink: 0 }} />
+              <CornerDownRight size={12} style={{ color: parentInk, flexShrink: 0 }} />
               <span style={{ color: 'var(--color-text-muted)' }}>under</span>
-              <span className="mono" style={{ color: parentColor }}>{issue.parentKey}</span>
+              <span className="mono" style={{ color: parentInk }}>{issue.parentKey}</span>
               {issue.parentTitle && (
                 <span className="truncate" style={{ color: 'var(--color-text-muted)' }}>
                   · {issue.parentTitle}
@@ -1191,7 +1203,7 @@ export default function IssueDetail({
                 <Select value={issue.type.id} disabled={!canEditIssue} onChange={e => changeType(e.target.value)}>
                   {issueTypes.map(t => (
                     <option key={t.id} value={t.id}>
-                      <span style={{ color: t.color }}>{t.name}</span>
+                      <span style={{ color: inkOn(t.color, SURFACE.card) }}>{t.name}</span>
                     </option>
                   ))}
                 </Select>
@@ -1648,7 +1660,7 @@ export default function IssueDetail({
                 >
                   <span
                     className="rounded-full flex-shrink-0"
-                    style={{ width: 7, height: 7, background: c.type.color }}
+                    style={{ width: 7, height: 7, background: fillOf(c.type.color), boxShadow: `inset 0 0 0 1px ${ringOn(c.type.color, SURFACE.card)}` }}
                     title={c.type.name}
                   />
                   <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{c.key}</span>

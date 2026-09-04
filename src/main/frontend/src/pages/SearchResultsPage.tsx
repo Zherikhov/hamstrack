@@ -10,6 +10,7 @@ import {
 } from '../api'
 import { parseOrderBy, setOrderBy, nextSortDir } from '../hql'
 import { Avatar, Button, PriorityBadge, StatusBadge } from '../components/ui'
+import { SURFACE, inkOn } from '../colour'
 import { Pager } from '../components/Pager'
 import HqlInput from '../components/HqlInput'
 import SavedFiltersPanel from '../components/SavedFiltersPanel'
@@ -471,7 +472,7 @@ function Cell({ col, row }: { col: string; row: SearchResultRow }) {
     case 'key':
       return <span className="mono text-xs" style={muted}>{i.key}</span>
     case 'type':
-      return <span className="text-xs" style={{ color: i.type.color }}>{i.type.name}</span>
+      return <span className="text-xs" style={{ color: inkOn(i.type.color, SURFACE.row) }}>{i.type.name}</span>
     case 'status':
       return <StatusBadge name={i.status.name} category={i.status.category} color={i.status.color} />
     case 'priority':

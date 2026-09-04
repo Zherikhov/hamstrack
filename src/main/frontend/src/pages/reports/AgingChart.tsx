@@ -1,6 +1,7 @@
 import { AlertTriangle } from 'lucide-react'
 import type { AgingColumn, AgingItem } from '../../types'
 import { CHART_AXIS, CHART_CONTEXT, CHART_GRID, CHART_SERIES } from './common'
+import { SURFACE, fillOf, ringOn } from '../../colour'
 import { formatDays } from './cycle'
 import { niceAxis } from './scale'
 
@@ -164,7 +165,11 @@ export default function AgingChart({
                 <span
                   style={{
                     width: 8, height: 8, borderRadius: 999, flexShrink: 0,
-                    background: columnColor(column) ?? CHART_CONTEXT,
+                    background: fillOf(columnColor(column), CHART_CONTEXT),
+                    // A chart sliced BY a taxonomy entity reads that entity's own
+                    // colour (DESIGN.md) and keeps it at full strength; the ring is
+                    // what stops a pale status from having no edge on the card.
+                    boxShadow: `inset 0 0 0 1px ${ringOn(columnColor(column) ?? CHART_CONTEXT, SURFACE.card)}`,
                   }}
                 />
                 <span className="truncate" style={{ fontSize: 12, fontWeight: 600 }}>{column.name}</span>

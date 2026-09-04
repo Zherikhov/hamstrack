@@ -3,6 +3,9 @@ import { forwardRef, useState, useRef, useEffect, useMemo, Children, isValidElem
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
 import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, Check, type LucideIcon } from 'lucide-react'
 import type { Priority } from '../types'
+import {
+  EDGE_WEIGHT, NEUTRAL_EDGE, NEUTRAL_FILL, NEUTRAL_INK, SURFACE, inkOn, tintOf, token,
+} from '../colour'
 
 // ── Button ────────────────────────────────────────────────────────────────────
 
@@ -352,16 +355,37 @@ interface BadgeProps {
   label: string
   color?: string
   className?: string
+  /**
+   * The opaque surface the badge itself sits on — what its tint is composited
+   * against. The card by default; pass the rail's colour on a dark surface.
+   */
+  surface?: string
 }
 
-export function Badge({ label, color, className }: BadgeProps) {
+/**
+ * The tinted badge `DESIGN.md` mandates, with two things now computed rather
+ * than layered (HD-176):
+ *
+ * - **the tint is opaque.** An 8-digit overlay composites over whatever happens
+ *   to be behind the element, so the badge's background over a hovered row was
+ *   never the colour anybody measured. Compositing it here against a named
+ *   surface makes the background a known value in every row state.
+ * - **the label is `inkOn` that tint**, not the raw stored hue. Above 4.5:1 the
+ *   derivation is the identity and the label is the stored hex byte for byte;
+ *   below it the same hue is dimmed until it can be read. Nothing about the
+ *   badge's size, padding or radius changes — the box is the one that was
+ *   already there.
+ */
+export function Badge({ label, color, className, surface = SURFACE.card }: BadgeProps) {
+  const tint = color ? tintOf(color, surface) : NEUTRAL_FILL
+  const edge = color ? tintOf(color, surface, EDGE_WEIGHT) : NEUTRAL_EDGE
   return (
     <span
       className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', className)}
       style={{
-        background: color ? `${color}20` : 'var(--color-surface-2)',
-        color: color ?? 'var(--color-text-secondary)',
-        border: `1px solid ${color ? `${color}40` : 'var(--color-border)'}`,
+        background: tint,
+        color: color ? inkOn(color, tint) : NEUTRAL_INK,
+        border: `1px solid ${edge}`,
       }}
     >
       {label}
@@ -398,15 +422,24 @@ const priorityIcons: Record<string, LucideIcon> = {
   'minus':        Minus,
 }
 
-export function PriorityIcon({ priority, size = 14 }: { priority: Priority; size?: number }) {
+/**
+ * The stroked glyph is ink, not a fill — a 2.5px stroke is text-weight, so it
+ * takes the text threshold. `SURFACE.row` by default because these sit in board
+ * cards, backlog rows and table rows that tint on hover: deriving against the
+ * darkest state a row can take keeps the ratio true in both, where deriving
+ * against the resting card would hold only in the state that was screenshotted.
+ */
+export function PriorityIcon({ priority, size = 14, surface = SURFACE.row }: {
+  priority: Priority; size?: number; surface?: string
+}) {
   const Icon = (priority.icon && priorityIcons[priority.icon]) || Minus
-  return <Icon size={size} strokeWidth={2.5} style={{ color: priority.color, flexShrink: 0 }} />
+  return <Icon size={size} strokeWidth={2.5} style={{ color: inkOn(priority.color, surface), flexShrink: 0 }} />
 }
 
-export function PriorityBadge({ priority }: { priority: Priority }) {
+export function PriorityBadge({ priority, surface = SURFACE.row }: { priority: Priority; surface?: string }) {
   return (
-    <span className="inline-flex items-center gap-1 text-xs" style={{ color: priority.color }}>
-      <PriorityIcon priority={priority} size={13} />
+    <span className="inline-flex items-center gap-1 text-xs" style={{ color: inkOn(priority.color, surface) }}>
+      <PriorityIcon priority={priority} size={13} surface={surface} />
       {priority.name}
     </span>
   )
@@ -414,35 +447,56 @@ export function PriorityBadge({ priority }: { priority: Priority }) {
 
 // ── StatusBadge ───────────────────────────────────────────────────────────────
 
-const categoryColors: Record<string, string> = {
-  TODO:        'var(--color-sandbox)',
-  IN_PROGRESS: 'var(--color-pending)',
-  DONE:        'var(--color-brand)',
+/**
+ * The fallback when a status arrives with no colour of its own: the safety-state
+ * triple (sandbox slate → pending amber → production teal) `DESIGN.md` declares.
+ *
+ * Resolved to channels rather than left as `var(...)` strings — as a raw token
+ * the badge's tint and hairline were being written as `var(--color-sandbox)20`,
+ * which is not a colour any browser parses, so a status without a stored colour
+ * had silently lost both. Reading the token through `colour.ts` keeps the value
+ * in `index.css` (one file re-skins the app) and gives the badge something it can
+ * measure.
+ */
+const categoryTokens: Record<string, string> = {
+  TODO:        '--color-sandbox',
+  IN_PROGRESS: '--color-pending',
+  DONE:        '--color-brand',
 }
 
-export function StatusBadge({ name, category, color }: { name: string; category: string; color?: string }) {
-  const c = color ?? categoryColors[category] ?? 'var(--color-text-muted)'
-  return <Badge label={name} color={c} />
+export function StatusBadge({ name, category, color, surface }: {
+  name: string; category: string; color?: string; surface?: string
+}) {
+  const fallback = categoryTokens[category]
+  return <Badge label={name} color={color ?? (fallback ? token(fallback) : undefined)} surface={surface} />
 }
 
 // ── ParentChip ────────────────────────────────────────────────────────────────
 // Compact "↳ PARENT-KEY" pill tinted by the parent's issue-type color. The color
 // is config-driven (passed in from the resolved issue type) — never hardcoded.
 
+/** The pill's own tint is what its key is painted on, so that is what the key is derived against. */
+const PARENT_TINT_WEIGHT = 0x18 / 255
+
 export function ParentChip({
-  parentKey, color, title, onClick,
-}: { parentKey: string; color?: string; title?: string; onClick?: (e: React.MouseEvent) => void }) {
-  const c = color ?? 'var(--color-text-muted)'
+  parentKey, color, title, onClick, surface = SURFACE.row,
+}: {
+  parentKey: string; color?: string; title?: string
+  onClick?: (e: React.MouseEvent) => void; surface?: string
+}) {
+  const tint = color ? tintOf(color, surface, PARENT_TINT_WEIGHT) : NEUTRAL_FILL
+  const edge = color ? tintOf(color, surface, EDGE_WEIGHT) : NEUTRAL_EDGE
+  const ink = color ? inkOn(color, tint) : NEUTRAL_INK
   return (
     <button
       type="button"
       onClick={onClick}
       title={title ? `${parentKey} · ${title}` : parentKey}
       className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full max-w-full cursor-pointer transition-opacity hover:opacity-80"
-      style={{ background: `${c}18`, border: `1px solid ${c}40` }}
+      style={{ background: tint, border: `1px solid ${edge}` }}
     >
-      <CornerDownRight size={11} style={{ color: c, flexShrink: 0 }} />
-      <span className="mono truncate" style={{ fontSize: 11, color: c }}>{parentKey}</span>
+      <CornerDownRight size={11} style={{ color: ink, flexShrink: 0 }} />
+      <span className="mono truncate" style={{ fontSize: 11, color: ink }}>{parentKey}</span>
     </button>
   )
 }
@@ -460,7 +514,8 @@ export function ChildrenProgress({
 
   if (compact) {
     // Teal tint when all children are done (production-trusted state), muted otherwise.
-    const brand = '#0EA5A4'
+    // Read from the token so the one file that re-skins the app still re-skins this.
+    const brand = token('--color-brand')
     return (
       <span
         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full mono"

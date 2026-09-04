@@ -2,6 +2,7 @@ package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
+import com.hamstrack.common.util.ColorFormat;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
@@ -62,6 +63,13 @@ public class AdminFieldService {
      * discovered later as a bug.
      */
     private static final int MAX_CONFIG_LENGTH = 20000;
+
+    /**
+     * Code points of a refused value quoted back inside a refusal — see {@link #safeEcho}.
+     * A ceiling on a message, not on content: the shape it wants is in {@link ColorFormat#MESSAGE}
+     * and does not depend on seeing all of what was sent.
+     */
+    private static final int MAX_ECHO = 40;
 
     // ---------- field defs ----------
 
@@ -295,8 +303,10 @@ public class AdminFieldService {
     }
 
     /**
-     * The two <em>option</em> ceilings — a bound on the leaves, with {@link #requireConfigSize}
-     * bounding the document they live in (HD-171 §4.3). 422 for the same reason.
+     * Everything an <em>option</em> must satisfy — bounds on the leaves, with
+     * {@link #requireConfigSize} bounding the document they live in (HD-171 §4.3), and
+     * {@link #requireOptionColor} on the one leaf that is a colour (HD-176 §7.2). 422 throughout,
+     * for the same reason.
      *
      * <p>The numbers are ceilings on a picker, not on prose: 100 options is far past any usable
      * dropdown, and an option {@code id} is read back by {@code FieldValueService.optionIds} on
@@ -325,8 +335,107 @@ public class AdminFieldService {
                             "An option id and label must each be at most " + MAX_OPTION_TEXT
                             + " characters");
                 }
+                requireOptionColor(opt);
             }
         }
+    }
+
+    /**
+     * <strong>An option's {@code color} is a colour</strong> (HD-176 §7.2) — the format refusal
+     * this path never had. Until now {@code config.options[].color} was validated as
+     * <em>nothing</em>: {@code "red"}, {@code ""} and {@code "javascript:…"} were all stored and
+     * re-served from the project-config endpoint the SPA fetches for <em>every</em> board and every
+     * issue form. The three sibling colour columns (statuses / priorities / issue types) have
+     * carried a {@code @Pattern} on their DTO since V1; this one could not, because {@code config}
+     * is a {@code JsonNode} and no bean-validation annotation reaches inside it — the same reason
+     * {@link #requireConfigSize} has to exist as a service check.
+     *
+     * <p><strong>422, not 400</strong>, matching every other refusal on this path: the request is
+     * well-formed and the product declines it. The <em>sentence</em> comes from
+     * {@link ColorFormat} so that a label and a select option answer the same wording to the same
+     * mistake, and it names the shape it wants rather than only reporting a refusal. The offending
+     * option's id is quoted because a select may carry up to {@link #MAX_OPTIONS} of them and
+     * "one of your options is wrong" is not an actionable message; both it and the value go through
+     * {@link #safeEcho}, which bounds and sanitises anything quoted back into a refusal.
+     *
+     * <p><strong>Absent is legal, blank is not.</strong> A missing or JSON-{@code null} colour
+     * means "no colour" and always has — {@code FieldValueDisplay} falls back to a neutral token —
+     * which is exactly what a {@code @Pattern} does with a {@code null} on the sibling paths. An
+     * empty string is a value, and it fails there too.
+     *
+     * <p><strong>This is a FORMAT check and never a contrast check.</strong> A stored colour is an
+     * identity hue and the readable foreground is derived from it at render time (ADR-0027), so
+     * {@code #FFFF00} is accepted here on purpose.
+     */
+    private void requireOptionColor(com.fasterxml.jackson.databind.JsonNode opt) {
+        if (!opt.hasNonNull("color")) return;
+        var node = opt.get("color");
+        var value = node.isTextual() ? node.asText() : node.toString();
+        if (!ColorFormat.isValid(value)) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "Option '" + safeEcho(opt.get("id").asText()) + "' has color '" + safeEcho(value)
+                    + "' — " + ColorFormat.MESSAGE);
+        }
+    }
+
+    /**
+     * <strong>A value echoed back inside a refusal is bounded and encodable</strong> (HD-176
+     * review, Low 1). Both of this path's echoes go through here — the offending colour and the
+     * option id that names which option is meant — and it does two things:
+     *
+     * <p><strong>It bounds.</strong> {@link #MAX_CONFIG_LENGTH} is the only thing bounding the
+     * colour, so a 20 000-character "colour" would otherwise be quoted back in full.
+     *
+     * <p><strong>And it cuts where it is allowed to cut, which is the part that was a defect.</strong>
+     * The previous spelling was {@code value.substring(0, 40)}, counting UTF-16 code units: a value
+     * whose 41st unit is the low half of a surrogate pair — an admin pasting an emoji into a colour
+     * box — was severed between the halves, leaving a lone high surrogate in the {@code detail} of
+     * the {@code ProblemDetail}.
+     *
+     * <p><strong>What that actually produced is worth writing down, because the obvious guess is
+     * wrong and was guessed wrong during review.</strong> Jackson's UTF-8 generator neither throws
+     * nor substitutes: a surrogate it cannot encode is emitted as an escape, so the endpoint
+     * answered an ordinary 422 whose body carried an <em>unpaired surrogate escape</em>. Not a 5xx,
+     * not a truncated write — a refusal that decodes, in every client, to a message with an
+     * unrenderable character where the offending value should be, and which any consumer that
+     * re-encodes it (a log shipper, an error tracker, anything writing UTF-8 bytes) mangles or
+     * rejects on its own terms. Being wrong about which of the three it was is precisely why
+     * {@code AdminFieldOptionColorFormatTest} asserts the <em>decoded</em> {@code detail} and not
+     * the status: the status was never the tell, and a status-only test would have passed against
+     * the defect.
+     *
+     * <p>So the loop advances by <em>code point</em> and never splits a pair; a surrogate with no
+     * partner cannot be encoded at all and becomes {@code '?'}, as does an ISO control, which would
+     * otherwise put a line break into a string this application both returns and logs. The count is
+     * code points, so the bound is on what a reader sees rather than on how the text is stored.
+     *
+     * <p><strong>Legible text is left alone, deliberately.</strong> An option id may be Cyrillic or
+     * CJK and is the only part of the message that says <em>which</em> of up to
+     * {@link #MAX_OPTIONS} options is meant, so flattening the echo to ASCII would trade a mangled
+     * character for a refusal naming an option nobody can find. This is not a confusable or bidi
+     * rule either — see {@code DisplayText} for that, which guards text being <em>stored</em>;
+     * here the string is the caller's own input reflected straight back to the caller.
+     */
+    private static String safeEcho(String value) {
+        var sb = new StringBuilder(Math.min(value.length(), MAX_ECHO) + 1);
+        int shown = 0;
+        int i = 0;
+        while (i < value.length() && shown < MAX_ECHO) {
+            char c = value.charAt(i);
+            if (Character.isHighSurrogate(c) && i + 1 < value.length()
+                    && Character.isLowSurrogate(value.charAt(i + 1))) {
+                sb.append(c).append(value.charAt(i + 1));   // a whole code point, never half of one
+                i += 2;
+            } else if (Character.isSurrogate(c) || Character.isISOControl(c)) {
+                sb.append('?');
+                i++;
+            } else {
+                sb.append(c);
+                i++;
+            }
+            shown++;
+        }
+        return i < value.length() ? sb + "…" : sb.toString();
     }
 
     private UsageInfo fieldUsage(ScopeContext scope, FieldDef f) {

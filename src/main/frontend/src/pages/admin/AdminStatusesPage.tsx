@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import type { AdminStatus } from '../../types'
-import { Button, Input, Select, StatusBadge } from '../../components/ui'
+import { Badge, Button, Input, Select, StatusBadge } from '../../components/ui'
+import { SURFACE, contrastRatio, fillOf, inkOn, parseColour, ringOn, tintOf, token } from '../../colour'
 import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
 
@@ -48,7 +49,7 @@ export default function AdminStatusesPage() {
           <tr key={s.id} className="border-b" style={{ borderColor: 'var(--color-border)' }}>
             <td className="px-3 py-2.5">
               <span className="inline-flex items-center gap-2 text-sm">
-                <span className="rounded-full" style={{ width: 10, height: 10, background: s.color }} />
+                <span className="rounded-full" style={{ width: 10, height: 10, background: fillOf(s.color), boxShadow: `inset 0 0 0 1px ${ringOn(s.color, SURFACE.card)}` }} />
                 {s.name}
                 {s.archived && <ArchivedBadge />}
               </span>
@@ -105,7 +106,7 @@ function StatusForm({ status, onClose, onSaved }: {
   const { api } = useAdminApi()
   const [name, setName] = useState(status?.name ?? '')
   const [category, setCategory] = useState<string>(status?.category ?? 'TODO')
-  const [color, setColor] = useState(status?.color ?? '#6B7280')
+  const [color, setColor] = useState(status?.color ?? token('--color-sandbox'))
   const [error, setError] = useState('')
 
   const save = useMutation({
@@ -137,15 +138,80 @@ function StatusForm({ status, onClose, onSaved }: {
   )
 }
 
-export function ColorField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+/**
+ * The one colour picker (statuses, priorities, issue types, labels, and the
+ * custom-field option editor), now showing what the product will actually paint.
+ *
+ * **It refuses nothing.** Under the identity-hue rule there is nothing left to
+ * refuse: every hue is stored as picked and painted at full strength as a fill,
+ * and only a glyph that could not be read is derived. Refusing on contrast would
+ * delete yellow, amber, mid-orange, bright green and light pink from every
+ * admin's palette — including most of the catalog defaults `DESIGN.md` itself
+ * declares — to buy a guarantee the renderer already holds.
+ *
+ * What it does instead is say so at the moment of choosing: the real chip, the
+ * real dot with its ring, the measured ratio as a number, and the hex that will
+ * be drawn when (and only when) it is not the one picked. A derivation nobody is
+ * told about is magic; one shown beside the swatch is a fact.
+ *
+ * `compact` is the per-row form the custom-field option editor needs — one line,
+ * same disclosure, no heading — so that editor stops inlining a bare
+ * `input type="color"` of its own and the product keeps one picker.
+ */
+export function ColorField({ value, onChange, compact }: {
+  value: string; onChange: (v: string) => void; compact?: boolean
+}) {
+  const parsed = parseColour(value) !== null
+  const ratio = contrastRatio(value, SURFACE.card)
+  const tint = tintOf(value, SURFACE.card)
+  const ink = inkOn(value, tint)
+  const derived = parsed && ink.toUpperCase() !== value.trim().toUpperCase()
+
+  const swatch = (
+    <input type="color" value={parsed ? value : token('--color-sandbox')} onChange={e => onChange(e.target.value)}
+           aria-label="Color"
+           className="cursor-pointer flex-shrink-0"
+           style={{ width: compact ? 30 : 34, height: compact ? 28 : 30, border: 'none', background: 'none' }} />
+  )
+  const dot = parsed ? (
+    <span
+      aria-hidden="true"
+      className="rounded-full flex-shrink-0"
+      style={{ width: 10, height: 10, background: fillOf(value), boxShadow: `inset 0 0 0 1px ${ringOn(value, SURFACE.card)}` }}
+    />
+  ) : null
+
+  if (compact) {
+    return (
+      <div className="flex items-center gap-1.5 flex-shrink-0">
+        {swatch}
+        {dot}
+        {parsed && (
+          <span className="mono text-xs whitespace-nowrap" style={{ color: 'var(--color-text-muted)' }}>
+            {ratio.toFixed(2)}:1{derived ? ` → ${ink}` : ''}
+          </span>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col gap-1">
       <label className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Color</label>
       <div className="flex items-center gap-2">
-        <input type="color" value={value} onChange={e => onChange(e.target.value)}
-               className="cursor-pointer" style={{ width: 34, height: 30, border: 'none', background: 'none' }} />
+        {swatch}
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{value}</span>
+        {parsed && <Badge label="Preview" color={value} />}
+        {dot}
       </div>
+      {parsed && (
+        <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          Contrast {ratio.toFixed(2)}:1 against a white card.{' '}
+          {derived
+            ? <>Too low to read, so text is drawn as <span className="mono" style={{ color: ink }}>{ink}</span> — the same hue, dimmed. Dots, bars and chart segments keep {value}.</>
+            : <>Text is drawn as picked.</>}
+        </p>
+      )}
     </div>
   )
 }

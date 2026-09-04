@@ -13,6 +13,7 @@ import { boardIssuesKeyPrefix } from '../lib/queryKeys'
 import {
   Avatar, Button, ChildrenProgress, ParentChip, PriorityBadge, Select, StatusBadge,
 } from '../components/ui'
+import { SURFACE, inkOn } from '../colour'
 import { LabelChips, LabelFilter } from '../components/labels'
 import { ComponentFilter } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
@@ -1243,7 +1244,9 @@ function IssueRow({
           <LabelChips labels={issue.labels} max={2} compact />
         </span>
       )}
-      <span className="text-xs flex-shrink-0 truncate" style={{ color: issue.type.color, maxWidth: 90 }}>
+      {/* Still bare inline text, still truncated at 90px — the ink is derived, the
+          box is not (HD-176). */}
+      <span className="text-xs flex-shrink-0 truncate" style={{ color: inkOn(issue.type.color, SURFACE.row), maxWidth: 90 }}>
         {issue.type.name}
       </span>
       {issue.childCount > 0 && (

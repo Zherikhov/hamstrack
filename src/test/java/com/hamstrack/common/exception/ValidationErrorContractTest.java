@@ -203,11 +203,17 @@ class ValidationErrorContractTest extends LabelTestBase {
                 .andExpect(jsonPath("$.detail", not(containsString(BOOT_GENERIC))));
 
         // ---- issue feature: a label colour that is not a hex swatch ----
+        // The wording comes from ColorFormat.MESSAGE, which the label DTOs now name instead of
+        // carrying an inline copy — the same sentence the service belt and the 422 on the
+        // admin-field path answer. It reads with a small stutter in the per-field map
+        // ("color: Color must be ..."); that is the price of one sentence for one shape, and it
+        // is asserted as a literal here so a silent rewording is a failing test rather than a
+        // product that answers two sentences to one mistake again.
         postLabel(ctx, ctx.token(), "{\"name\":\"backend\",\"color\":\"teal\"}")
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.errors.color").value("must be #RRGGBB or #RRGGBBAA"))
+                .andExpect(jsonPath("$.errors.color").value("Color must be #RRGGBB or #RRGGBBAA"))
                 .andExpect(jsonPath("$.detail",
-                        containsString("color: must be #RRGGBB or #RRGGBBAA")))
+                        containsString("color: Color must be #RRGGBB or #RRGGBBAA")))
                 .andExpect(jsonPath("$.detail", not(containsString(BOOT_GENERIC))));
     }
 

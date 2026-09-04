@@ -5,6 +5,7 @@ import type { AdminPriority, AdminPrioritySet } from '../../types'
 import { Button, Checkbox, Input, PriorityIcon, Select } from '../../components/ui'
 import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
+import { SURFACE, fillOf, ringOn, token } from '../../colour'
 import { ColorField } from './AdminStatusesPage'
 
 const ICONS = ['chevrons-up', 'chevron-up', 'equal', 'chevron-down', 'minus'] as const
@@ -65,7 +66,7 @@ export default function AdminPrioritiesPage() {
             </td>
             <td className="px-3 py-2.5">
               <span className="inline-flex items-center gap-2">
-                <span className="rounded-full" style={{ width: 10, height: 10, background: p.color }} />
+                <span className="rounded-full" style={{ width: 10, height: 10, background: fillOf(p.color), boxShadow: `inset 0 0 0 1px ${ringOn(p.color, SURFACE.card)}` }} />
                 <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{p.color}</span>
               </span>
             </td>
@@ -164,7 +165,7 @@ function PriorityForm({ priority, onClose, onSaved }: {
 }) {
   const { api } = useAdminApi()
   const [name, setName] = useState(priority?.name ?? '')
-  const [color, setColor] = useState(priority?.color ?? '#8B8680')
+  const [color, setColor] = useState(priority?.color ?? token('--color-sandbox'))
   const [icon, setIcon] = useState(priority?.icon ?? 'minus')
   const [error, setError] = useState('')
 

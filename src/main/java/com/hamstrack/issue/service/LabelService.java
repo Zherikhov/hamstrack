@@ -3,6 +3,7 @@ package com.hamstrack.issue.service;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.config.ClassificationProperties;
 import com.hamstrack.common.security.Permission;
+import com.hamstrack.common.util.ColorFormat;
 import com.hamstrack.issue.dto.CreateLabelRequest;
 import com.hamstrack.issue.dto.LabelRef;
 import com.hamstrack.issue.dto.LabelResponse;
@@ -83,9 +84,6 @@ public class LabelService {
     /** The one constraint a label write may legitimately lose to (V8__labels.sql). */
     private static final String NAME_UNIQUE_CONSTRAINT = "labels_workspace_name_uk";
 
-    /** {@code #RRGGBB} or {@code #RRGGBBAA}. */
-    private static final java.util.regex.Pattern COLOR_PATTERN =
-            java.util.regex.Pattern.compile("^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$");
 
     /**
      * The 8 auto-assign swatches (§4.1), built from DESIGN.md "Beacon" tokens. A label
@@ -674,11 +672,26 @@ public class LabelService {
         return ClassificationNames.normalize(raw);
     }
 
+    /**
+     * The belt behind {@code @Pattern(regexp = ColorFormat.REGEX)} on the label DTOs. Over the web
+     * the annotation fires first, so this is unreachable for a format violation there; it exists
+     * for the in-process callers bean validation never sees — {@code DemoDataService} builds a
+     * {@code CreateLabelRequest} directly — and it trims, which an annotation cannot.
+     *
+     * <p><strong>Both spell the shape AND the sentence from
+     * {@link com.hamstrack.common.util.ColorFormat}</strong>, so which of the two answered is
+     * invisible to the caller, which is the entire requirement: one shape, one sentence. Until
+     * HD-176's review the DTOs carried an inline copy of the expression with a wording of their
+     * own, which left {@code ColorFormat.MESSAGE} dead on the very path it was written for.
+     *
+     * <p>400 here, and the status deliberately is <em>not</em> shared: the same format is refused
+     * with 422 wherever the value is buried in a JSON document no annotation can reach. A status
+     * belongs to the endpoint's convention; a sentence belongs to the shape.
+     */
     private String requireValidColor(String raw) {
         String color = raw.trim();
-        if (!COLOR_PATTERN.matcher(color).matches()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Color must be #RRGGBB or #RRGGBBAA");
+        if (!ColorFormat.isValid(color)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ColorFormat.MESSAGE);
         }
         return color;
     }

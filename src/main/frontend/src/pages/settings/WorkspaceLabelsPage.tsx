@@ -8,6 +8,7 @@ import { LABEL_PALETTE, LabelChip, colorForName, labelsKey } from '../../compone
 import { ISSUES_KEY_ROOT } from '../../lib/queryKeys'
 import { AdminTable, ArchivedBadge, ArchivedToggle, Modal, PageHeader, UsageChip } from '../admin/common'
 import { ColorField } from '../admin/AdminStatusesPage'
+import { SURFACE, ringOn } from '../../colour'
 
 /**
  * Workspace settings → Labels (HD-30). The curation surface for the workspace's
@@ -228,6 +229,9 @@ function LabelForm({ wsId, label, onClose, onSaved }: {
                   border: effectiveColor.toLowerCase() === c.toLowerCase()
                     ? '2px solid var(--color-text)'
                     : '2px solid transparent',
+                  // A pale swatch on a white card is a fill with no edge; the ring
+                  // is the same hue at 3:1, so it stays visible without repainting it.
+                  boxShadow: `inset 0 0 0 1px ${ringOn(c, SURFACE.card)}`,
                 }}
               />
             ))}

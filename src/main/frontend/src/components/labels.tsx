@@ -4,6 +4,7 @@ import { Check, Plus, Tag, X } from 'lucide-react'
 import { ApiResponseError, labelsApi } from '../api'
 import type { LabelMatch } from '../api'
 import type { Label, LabelRef } from '../types'
+import { NEUTRAL_EDGE, NEUTRAL_FILL, SURFACE, fillOf, ringOn, tintOf } from '../colour'
 
 /**
  * Label rendering + picking (HD-30) — the labels counterpart of
@@ -86,7 +87,14 @@ export function LabelChip({ label, onRemove, title, compact }: {
   title?: string
   compact?: boolean
 }) {
-  const c = label.color || 'var(--color-text-muted)'
+  // The chip's text is a fixed neutral token and always was — this is the rule
+  // HD-176 generalised to every other stored colour, not a surface it changed.
+  // What it gains is an opaque tint (measured, rather than composited over
+  // whatever is behind the row) and a ring on the dot, so a pale label keeps a
+  // visible edge. No padding, radius or size moves.
+  const c = label.color || null
+  const tint = c ? tintOf(c, SURFACE.card, 0.12) : NEUTRAL_FILL
+  const edge = c ? tintOf(c, SURFACE.card, 0.4) : NEUTRAL_EDGE
   return (
     <span
       className="inline-flex items-center gap-1 border max-w-full"
@@ -96,13 +104,14 @@ export function LabelChip({ label, onRemove, title, compact }: {
         padding: compact ? '1px 7px' : '2px 8px',
         fontSize: compact ? 11 : 12,
         lineHeight: 1.4,
-        background: `color-mix(in srgb, ${c} 12%, white)`,
-        borderColor: `color-mix(in srgb, ${c} 40%, white)`,
+        background: tint,
+        borderColor: edge,
         color: 'var(--color-text-secondary)',
         opacity: label.archived ? 0.55 : 1,
       }}
     >
-      <span className="rounded-full flex-shrink-0" style={{ width: 6, height: 6, background: c }} />
+      <span className="rounded-full flex-shrink-0"
+            style={{ width: 6, height: 6, background: fillOf(c), boxShadow: `inset 0 0 0 1px ${ringOn(c, tint)}` }} />
       <span className="truncate">{label.name}</span>
       {onRemove && (
         <button
@@ -322,7 +331,8 @@ export function LabelPicker({
                 background: idx === highlight ? 'var(--color-surface)' : 'transparent',
               }}
             >
-              <span className="rounded-full flex-shrink-0" style={{ width: 8, height: 8, background: l.color }} />
+              <span className="rounded-full flex-shrink-0"
+                    style={{ width: 8, height: 8, background: fillOf(l.color), boxShadow: `inset 0 0 0 1px ${ringOn(l.color, SURFACE.card)}` }} />
               <span className="text-sm truncate flex-1">{l.name}</span>
               {l.description && (
                 <span className="text-xs truncate" style={{ color: 'var(--color-text-muted)', maxWidth: 120 }}>
@@ -477,7 +487,8 @@ export function LabelFilter({ wsId, value, onChange, match, onMatchChange }: {
                   className="w-full flex items-center gap-2 text-left cursor-pointer hover:bg-[var(--color-surface)]"
                   style={{ padding: '6px 8px', borderRadius: 'var(--radius-sm)' }}
                 >
-                  <span className="rounded-full flex-shrink-0" style={{ width: 8, height: 8, background: l.color }} />
+                  <span className="rounded-full flex-shrink-0"
+                        style={{ width: 8, height: 8, background: fillOf(l.color), boxShadow: `inset 0 0 0 1px ${ringOn(l.color, SURFACE.card)}` }} />
                   <span className="text-sm truncate flex-1">{l.name}</span>
                   {on && <Check size={13} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />}
                 </button>

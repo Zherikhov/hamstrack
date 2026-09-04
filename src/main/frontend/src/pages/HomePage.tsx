@@ -3,6 +3,7 @@ import { CheckCircle2, Clock, ListChecks, TrendingUp } from 'lucide-react'
 import { useAuthStore } from '../auth'
 import { useMyWork, dueLabel, daysUntil, type MyIssue } from '../hooks/useMyWork'
 import { Avatar, PriorityBadge } from '../components/ui'
+import { SURFACE, fillOf, onSolid, ringOn, token } from '../colour'
 
 const CARD: React.CSSProperties = {
   background: 'var(--color-card)', border: '1px solid var(--color-border)',
@@ -16,10 +17,18 @@ function greeting(): string {
   return 'Good evening'
 }
 
+/**
+ * The board snapshot's three buckets are **status categories, not statuses**, so
+ * their dots are the safety-state triple from `DESIGN.md` and never a colour any
+ * workspace stored. The token NAME is what is held here and {@link token} is what
+ * resolves it, for the same reason `StatusBadge` does: a `var(...)` string is a
+ * value nothing can measure, and the field was called `color` while carrying one,
+ * which reads at a glance exactly like the stored hues two widgets below it.
+ */
 const CATS = [
-  { key: 'TODO', name: 'To Do', color: 'var(--color-sandbox)' },
-  { key: 'IN_PROGRESS', name: 'In Progress', color: 'var(--color-pending)' },
-  { key: 'DONE', name: 'Done', color: 'var(--color-success)' },
+  { key: 'TODO', name: 'To Do', token: '--color-sandbox' },
+  { key: 'IN_PROGRESS', name: 'In Progress', token: '--color-pending' },
+  { key: 'DONE', name: 'Done', token: '--color-success' },
 ]
 
 export default function HomePage() {
@@ -90,7 +99,7 @@ export default function HomePage() {
                   return (
                     <div key={c.key} style={{ flex: '1 1 0', minWidth: 130 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, fontWeight: 700, color: 'var(--color-text-secondary)', marginBottom: 8 }}>
-                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: c.color }} />{c.name}
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: token(c.token) }} />{c.name}
                         <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}>{items.length}</span>
                       </div>
                       {items.slice(0, 4).map(i => (
@@ -126,12 +135,15 @@ export default function HomePage() {
               {priList.length === 0 ? <Empty text="No open work" /> : (
                 <>
                   <div style={{ height: 12, borderRadius: 8, overflow: 'hidden', display: 'flex', margin: '4px 0 14px' }}>
-                    {priList.map(p => <span key={p.name} style={{ width: `${(p.n / priTotal) * 100}%`, background: p.color }} />)}
+                    {/* The bar is a fill and keeps every hue at full strength; the
+                        segments abut, so each one's edge is the next one's hue and
+                        no ring is needed. The legend squares below carry theirs. */}
+                    {priList.map(p => <span key={p.name} style={{ width: `${(p.n / priTotal) * 100}%`, background: fillOf(p.color) }} />)}
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                     {priList.map(p => (
                       <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}>
-                        <span style={{ width: 10, height: 10, borderRadius: 3, background: p.color }} />{p.name}
+                        <span style={{ width: 10, height: 10, borderRadius: 3, background: fillOf(p.color), boxShadow: `inset 0 0 0 1px ${ringOn(p.color, SURFACE.card)}` }} />{p.name}
                         <span style={{ marginLeft: 'auto', fontWeight: 700, color: 'var(--color-text-secondary)' }}>{p.n}</span>
                       </div>
                     ))}
@@ -190,7 +202,11 @@ function TaskRow({ i, onClick, showDue }: { i: MyIssue; onClick: () => void; sho
       style={{ padding: '11px 0', borderTop: '1px solid var(--color-border)', background: 'none', border: 'none', borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: 'var(--color-border)' }}
       onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
       onMouseLeave={e => (e.currentTarget.style.background = 'none')}>
-      <span style={{ width: 20, height: 20, borderRadius: 6, display: 'grid', placeItems: 'center', fontSize: 10, color: '#fff', fontWeight: 800, flexShrink: 0, background: i.type.color }}>{i.type.name[0]}</span>
+      {/* The one deliberate SOLID form in the product, so it is the one place
+          `onSolid` belongs: black or white over the type's own hue, whichever
+          measures higher. It shipped white unconditionally, which measured 1.92
+          on the seeded Medium yellow — the tile stays a tile, only its ink moves. */}
+      <span style={{ width: 20, height: 20, borderRadius: 6, display: 'grid', placeItems: 'center', fontSize: 10, color: onSolid(i.type.color), fontWeight: 800, flexShrink: 0, background: fillOf(i.type.color) }}>{i.type.name[0]}</span>
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
         <span className="block truncate" style={{ fontSize: 13.5, fontWeight: 600 }}>{i.title}</span>
         <span className="mono" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{i.key} · {i._project.name}</span>

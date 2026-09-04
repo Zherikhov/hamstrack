@@ -7,6 +7,7 @@ import {
   apiListWorkspaces, apiSearch, savedFilters,
 } from '../api'
 import { useAuthStore } from '../auth'
+import { SURFACE, fillOf, ringOn } from '../colour'
 import { useUiStore } from '../uiStore'
 import { useCurrentProject } from '../hooks/useCurrentProject'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
@@ -620,7 +621,8 @@ function Row({ cmd, active, onHover, onRun }: {
           aria-hidden="true"
           style={{
             width: 9, height: 9, borderRadius: 999, flexShrink: 0,
-            background: cmd.dotColor,
+            background: fillOf(cmd.dotColor),
+            boxShadow: `inset 0 0 0 1px ${ringOn(cmd.dotColor, SURFACE.card)}`,
           }}
         />
       ) : Icon ? (

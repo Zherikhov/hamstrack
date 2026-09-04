@@ -1,5 +1,6 @@
 package com.hamstrack.issue.dto;
 
+import com.hamstrack.common.util.ColorFormat;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
@@ -14,7 +15,6 @@ import jakarta.validation.constraints.Size;
  */
 public record UpdateLabelRequest(
         @Size(max = 200) String name,
-        @Pattern(regexp = "^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$",
-                message = "must be #RRGGBB or #RRGGBBAA") String color,
+        @Pattern(regexp = ColorFormat.REGEX, message = ColorFormat.MESSAGE) String color,
         @Size(max = 200) String description
 ) {}

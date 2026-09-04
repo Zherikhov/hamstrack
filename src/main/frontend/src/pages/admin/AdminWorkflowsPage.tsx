@@ -6,6 +6,7 @@ import { Button, Input, Select } from '../../components/ui'
 import { PROSE_MAX_LENGTH } from '../../lib/limits'
 import { AdminTable, ImpactBanner, InheritedBadge, Modal, PageHeader } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
+import { SURFACE, fillOf, ringOn } from '../../colour'
 
 export default function AdminWorkflowsPage() {
   const { api, keyPrefix, scope } = useAdminApi()
@@ -149,7 +150,7 @@ function WorkflowForm({ workflow, onClose, onSaved }: {
           {inWorkflow.map((s, idx) => (
             <div key={s.id} className="flex items-center gap-2 rounded border px-2.5 py-1.5"
                  style={{ borderColor: 'var(--color-border)', background: 'var(--color-surface)' }}>
-              <span className="rounded-full" style={{ width: 8, height: 8, background: s.color }} />
+              <span className="rounded-full" style={{ width: 8, height: 8, background: fillOf(s.color), boxShadow: `inset 0 0 0 1px ${ringOn(s.color, SURFACE.card)}` }} />
               <span className="text-sm flex-1">{s.name}</span>
               <button type="button" className="cursor-pointer text-xs px-1" onClick={() => move(idx, -1)} disabled={idx === 0}>↑</button>
               <button type="button" className="cursor-pointer text-xs px-1" onClick={() => move(idx, 1)} disabled={idx === inWorkflow.length - 1}>↓</button>

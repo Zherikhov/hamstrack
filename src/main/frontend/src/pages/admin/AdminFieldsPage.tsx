@@ -7,6 +7,8 @@ import { FIELD_TYPE_LABELS } from '../../components/fields'
 import { Button, Checkbox, Input, Select } from '../../components/ui'
 import { AdminTable, ArchivedBadge, ArchivedToggle, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
+import { ColorField } from './AdminStatusesPage'
+import { SURFACE, inkOn, token } from '../../colour'
 
 export default function AdminFieldsPage() {
   const { api, keyPrefix, scope } = useAdminApi()
@@ -64,7 +66,7 @@ export default function AdminFieldsPage() {
               <span className="flex flex-wrap gap-1" style={{ maxWidth: 240 }}>
                 {f.config?.options?.map(o => (
                   <span key={o.id} className="text-xs rounded-full border px-2 py-0.5"
-                        style={{ borderColor: 'var(--color-border-2)', color: o.color ?? 'var(--color-text-secondary)' }}>
+                        style={{ borderColor: 'var(--color-border-2)', color: o.color ? inkOn(o.color, SURFACE.card) : 'var(--color-text-secondary)' }}>
                     {o.label}
                   </span>
                 ))}
@@ -294,13 +296,19 @@ function FieldForm({ field, onClose, onSaved }: {
                 Issues store option ids — removing an option leaves old values showing the raw id.
               </p>
             )}
+            {/* An option colour is a stored, user-chosen colour like any other, so it
+                renders by the same rule — excluding it would mean the same yellow is
+                legible as a status and unreadable as a Severity. */}
+            <p className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              An option's colour is its identity: the dot is painted exactly as picked, and its
+              label is dimmed to the same hue only when the picked one cannot be read.
+            </p>
             {options.map((o, idx) => (
               <div key={idx} className="flex items-center gap-2">
                 <Input value={o.label} placeholder="Label" className="flex-1"
                        onChange={e => updateOption(idx, { label: e.target.value })} />
-                <input type="color" value={o.color ?? '#64748B'} className="cursor-pointer flex-shrink-0"
-                       style={{ width: 30, height: 28, border: 'none', background: 'none' }}
-                       onChange={e => updateOption(idx, { color: e.target.value })} />
+                <ColorField compact value={o.color ?? token('--color-sandbox')}
+                            onChange={v => updateOption(idx, { color: v })} />
                 <button type="button" className="cursor-pointer hover:opacity-60 flex-shrink-0"
                         onClick={() => setOptions(prev => prev.filter((_, i) => i !== idx))}>
                   <Trash2 size={13} style={{ color: 'var(--color-text-muted)' }} />

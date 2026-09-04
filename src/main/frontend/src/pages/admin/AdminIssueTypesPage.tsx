@@ -4,6 +4,7 @@ import type { AdminIssueType, AdminIssueTypeSet } from '../../types'
 import { Button, Checkbox, Input } from '../../components/ui'
 import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
 import { ownScopeTag, useAdminApi, useAdminInvalidate } from './AdminApiContext'
+import { SURFACE, fillOf, ringOn, token } from '../../colour'
 import { ColorField } from './AdminStatusesPage'
 
 export default function AdminIssueTypesPage() {
@@ -55,7 +56,7 @@ export default function AdminIssueTypesPage() {
           <tr key={t.id} className="border-b" style={{ borderColor: 'var(--color-border)' }}>
             <td className="px-3 py-2.5">
               <span className="inline-flex items-center gap-2 text-sm">
-                <span className="rounded-full" style={{ width: 10, height: 10, background: t.color }} />
+                <span className="rounded-full" style={{ width: 10, height: 10, background: fillOf(t.color), boxShadow: `inset 0 0 0 1px ${ringOn(t.color, SURFACE.card)}` }} />
                 {t.name}
                 {t.archived && <ArchivedBadge />}
               </span>
@@ -100,7 +101,7 @@ export default function AdminIssueTypesPage() {
                 <span key={t.id}
                       className="inline-flex items-center gap-1.5 text-xs rounded-full border px-2.5 py-0.5"
                       style={{ borderColor: 'var(--color-border-2)', background: 'white' }}>
-                  <span className="rounded-full" style={{ width: 8, height: 8, background: t.color }} />
+                  <span className="rounded-full" style={{ width: 8, height: 8, background: fillOf(t.color), boxShadow: `inset 0 0 0 1px ${ringOn(t.color, SURFACE.card)}` }} />
                   {t.name}
                 </span>
               ))}
@@ -189,7 +190,7 @@ function TypeSetForm({ set, types, onClose, onSaved }: {
           {types.map(t => (
             <Checkbox key={t.id} checked={selected.includes(t.id)} onChange={() => toggle(t.id)}
                       label={<span className="inline-flex items-center gap-1.5">
-                        <span className="rounded-full" style={{ width: 8, height: 8, background: t.color }} />
+                        <span className="rounded-full" style={{ width: 8, height: 8, background: fillOf(t.color), boxShadow: `inset 0 0 0 1px ${ringOn(t.color, SURFACE.card)}` }} />
                         {t.name}
                       </span>} />
           ))}
@@ -215,7 +216,7 @@ function TypeForm({ type, onClose, onSaved }: {
 }) {
   const { api } = useAdminApi()
   const [name, setName] = useState(type?.name ?? '')
-  const [color, setColor] = useState(type?.color ?? '#6B7280')
+  const [color, setColor] = useState(type?.color ?? token('--color-sandbox'))
   const [icon, setIcon] = useState(type?.icon ?? '')
   const [error, setError] = useState('')
 

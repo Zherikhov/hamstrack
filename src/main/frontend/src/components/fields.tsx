@@ -1,6 +1,7 @@
 import { Check, ExternalLink } from 'lucide-react'
 import type { FieldType, FieldValue, ProjectField, WorkspaceMember } from '../types'
 import { Checkbox, Input, Select, Textarea } from './ui'
+import { SURFACE, fillOf, inkOn, ringOn } from '../colour'
 
 // Custom-field rendering shared by the create modal, the issue side panel and
 // the backlog table. Value shapes per field type are documented on FieldValue.
@@ -106,8 +107,11 @@ export function FieldInput({ field, value, onChange, members = [] }: {
                 <button key={o.id} type="button" onClick={() => toggle(o.id)}
                         className="inline-flex items-center gap-1 text-xs rounded-full border px-2.5 py-1 cursor-pointer transition-colors"
                         style={{
-                          borderColor: on ? (o.color ?? 'var(--color-brand)') : 'var(--color-border-2)',
-                          color: on ? (o.color ?? 'var(--color-brand)') : 'var(--color-text-secondary)',
+                          // The stored option hue reaches the declaration only
+                          // through the module — the hairline at 3:1, the label
+                          // at 4.5:1, and the brand token when there is no hue.
+                          borderColor: on ? ringOn(o.color, SURFACE.card, 'var(--color-brand)') : 'var(--color-border-2)',
+                          color: on ? inkOn(o.color, SURFACE.card, 'var(--color-brand)') : 'var(--color-text-secondary)',
                           background: 'white',
                         }}>
                   {on && <Check size={11} />}
@@ -146,8 +150,12 @@ export function FieldValueDisplay({ field, value, members = [] }: {
     case 'SELECT': {
       const opt = optionOf(field, value as string)
       return (
-        <span className="inline-flex items-center gap-1.5 text-sm" style={{ color: opt?.color }}>
-          {opt?.color && <span className="rounded-full" style={{ width: 8, height: 8, background: opt.color }} />}
+        <span className="inline-flex items-center gap-1.5 text-sm"
+              style={{ color: opt?.color ? inkOn(opt.color, SURFACE.row) : undefined }}>
+          {opt?.color && (
+            <span className="rounded-full"
+                  style={{ width: 8, height: 8, background: fillOf(opt.color), boxShadow: `inset 0 0 0 1px ${ringOn(opt.color, SURFACE.row)}` }} />
+          )}
           {opt?.label ?? String(value)}
         </span>
       )
@@ -159,7 +167,7 @@ export function FieldValueDisplay({ field, value, members = [] }: {
             const opt = optionOf(field, id)
             return (
               <span key={id} className="text-xs rounded-full border px-2 py-0.5"
-                    style={{ borderColor: 'var(--color-border-2)', color: opt?.color ?? 'var(--color-text-secondary)' }}>
+                    style={{ borderColor: 'var(--color-border-2)', color: opt?.color ? inkOn(opt.color, SURFACE.row) : 'var(--color-text-secondary)' }}>
                 {opt?.label ?? id}
               </span>
             )

@@ -39,6 +39,47 @@
 - **Explicitly avoided:** indigo/violet as the *primary* brand accent (category default; Plane uses it). Violet is fine as a *type* color only.
 - **Dark mode:** Not yet themed app-wide (the rail is the only permanently-dark surface). When added: dedicated surface/border/text overrides, not inverted lightness; state tints darken while preserving hue so safety-state meaning stays legible.
 
+### Colour that comes from data (added 2026-09-03, HD-176)
+
+**Any colour stored in the database and chosen by a user — a status, priority,
+issue type, label or custom-field select option — is an identity hue, not ink.**
+It is painted at full strength wherever it is a **fill** (dot, tile, tint, bar,
+chart segment) and is **dimmed until it clears 4.5:1 against the surface it is
+actually painted on** wherever it is a **glyph**. The dimming scales all three
+linear RGB channels by one factor, so it preserves chromaticity exactly — the
+same hue with less light — and it is the **identity function** for every colour
+that already clears the threshold, which is why a workspace that has already
+tuned its colours sees a byte-identical render.
+
+- **Two thresholds, both from WCAG, neither configurable:** **4.5:1** for a glyph
+  (1.4.3) and **3:1** for a fill (1.4.11). A fill carries a 1px ring derived from
+  the same hue at 3:1, so a pale dot keeps a visible edge. An accessibility floor
+  an operator can lower is a promise the product cannot keep.
+- **The surface is an argument, never an assumption.** The same hue needs a
+  different factor on a white card, on a hoverable row and on the dark rail — an
+  element that can sit on either measures against the darker. This is also what
+  makes dark mode a new argument rather than a re-litigation.
+- **Nothing gains a box.** The badge-tint rule above is unchanged; the tint is
+  now *computed* to an opaque colour instead of layered as `color + 18–20` alpha,
+  because an overlay composites over whatever is behind the element and so was
+  never the background anybody measured. Bare inline text — the issue type on a
+  board card and a backlog row — stays bare inline text: no padding, no radius,
+  no fill. A board where every card carries two saturated blocks is a different
+  visual language, not a refinement of this one.
+- **Text over a solid fill of the hue** is black or white, whichever measures
+  higher (floor 4.58:1 for any colour that exists). Home's issue-type tile is the
+  one deliberate solid form and the only place this applies.
+- **No colour is refused.** The picker discloses — the real chip, the real dot,
+  the measured ratio, and the derived hex when one is used — and stores exactly
+  what was picked. Refusing below 4.5:1 would delete yellow, amber, mid-orange,
+  bright green and light pink from every admin's palette, including most of the
+  catalog defaults declared above.
+- **Derived at render time, never stored.** One primitive
+  (`src/main/frontend/src/colour.ts`); a component that needs a colour from data
+  asks it rather than writing `style={{ color: x.color }}`. A stored foreground
+  would be a second source of truth going stale on every theme, surface and
+  threshold change.
+
 ## Data Visualisation (charts — added 2026-08-19, reports epic HD-5)
 
 Charts are read, not decorated. The palette below is the **only** source of series colour
@@ -69,7 +110,9 @@ completed). It is deliberately disjoint from the colours that already mean somet
 - **When the series IS a taxonomy entity, use the entity's own colour.** A chart sliced by
   status / priority / issue type reads `color` from the project `config` endpoint, exactly
   as badges do — never the ramp, never a hardcoded hex. Config-driven rendering does not
-  stop at the chart boundary.
+  stop at the chart boundary. Series colour itself does not change under *Colour that comes
+  from data* — a segment is a fill and keeps the hue at full strength — but it takes that
+  section's ring rule, and any label drawn in the hue takes its ink rule.
 - **Exception — a chart above the project uses the ramp** (added 2026-08-20, search
   insights, HD-140). The rule above assumes one project's `config`. A workspace-scoped
   chart has none: the same status name can carry different configured colours in two
@@ -141,3 +184,4 @@ completed). It is deliberately disjoint from the colours that already mean somet
 | 2026-08-19 | **Recharts (MIT), lazy-loaded inside the `/reports` chunk only** | Owner decision (reports-proposal §9 OQ 1). Hand-rolled SVG is fine for lines and bars but not for the scatter-with-reference-lines that carries the most value in R3. Lazy import keeps the main bundle unchanged — same pattern as the Swagger UI chunk |
 | 2026-08-19 | **Every chart ships a table equivalent underneath it** | It is the accessibility answer (the chart is decoration over a real table) and it is the series CSV export R7 needs — one artefact, two requirements |
 | 2026-08-20 | **Exported images are opaque, titled and footed** — white background, report name, and a footer carrying project / window / `computedAt` / the axis claim | R7 (HD-141). A PNG leaves the app's theme and lands anywhere, so a transparent background plus dark text is unreadable on half the surfaces it reaches; and a chart pasted into a chat is separated from its URL the instant it is pasted, so everything needed to say what it is a picture of has to be inside it |
+| 2026-09-03 | **A stored colour is an identity hue, not ink** — painted at full strength as a fill, dimmed to the same hue until it clears 4.5:1 as a glyph, derived at render time against the surface it lands on | HD-176. Legibility was an outcome of a colour-picker click nobody checked: most of the seeded catalog, and most of the palette this document declares, measures below 4.5:1 on the white card the product draws on. The two alternatives both cost more — guarding the picker would forbid the design system's own colours and could not repair a row a customer already chose, and a solid chip with black/white ink would override this document's restraint and badge-tint rules and add a second bounding box to the board and the backlog, the two densest surfaces. Deriving costs a text colour that is not byte-identical to the stored hex in exactly the cases where the faithful rendering is unreadable, and is the identity function everywhere else |

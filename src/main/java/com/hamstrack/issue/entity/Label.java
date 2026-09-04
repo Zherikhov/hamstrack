@@ -37,7 +37,12 @@ public class Label extends BaseEntity {
     @Column(nullable = false, length = 60)
     private String name;
 
-    /** {@code #RRGGBB} or {@code #RRGGBBAA}; validated at the service boundary. */
+    /**
+     * {@code #RRGGBB} or {@code #RRGGBBAA} — the shape is {@link com.hamstrack.common.util.ColorFormat},
+     * named by the label DTOs and by the service belt behind them rather than spelled twice.
+     * {@code length = 9} must stay equal to the column's {@code VARCHAR(9)}: it is the alpha form
+     * that needs the ninth character, and {@code ddl-auto=validate} does not compare widths.
+     */
     @Column(nullable = false, length = 9)
     private String color;
 

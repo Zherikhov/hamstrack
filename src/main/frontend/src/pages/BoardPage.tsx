@@ -13,6 +13,7 @@ import { useUiStore } from '../uiStore'
 import { isMoveAllowed } from '../lib/transitions'
 import { boardIssuesKey } from '../lib/queryKeys'
 import { Button, PriorityBadge, Avatar, ParentChip, ChildrenProgress, Select } from '../components/ui'
+import { SURFACE, fillOf, inkOn, ringOn } from '../colour'
 import { LabelChips, LabelFilter } from '../components/labels'
 import { ComponentFilter, ComponentName } from '../components/projectComponents'
 import { FixVersionFilter } from '../components/versions'
@@ -660,7 +661,11 @@ export default function BoardPage() {
                   <div className="flex items-center gap-2 px-3 py-2.5 flex-shrink-0">
                     <span
                       className="rounded-full flex-shrink-0"
-                      style={{ width: 8, height: 8, background: status.color || 'var(--color-text-muted)' }}
+                      style={{
+                        width: 8, height: 8,
+                        background: fillOf(status.color, 'var(--color-text-muted)'),
+                        boxShadow: `inset 0 0 0 1px ${ringOn(status.color, SURFACE.card)}`,
+                      }}
                     />
                     <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--color-text-secondary)' }}>
                       {status.name}
@@ -1010,7 +1015,10 @@ function IssueCard({
       )}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-xs truncate" style={{ color: issue.type.color }}>{issue.type.name}</span>
+          {/* Bare inline text, and it stays bare inline text: the type name gains
+              no padding, no radius and no bounding box — only its ink is derived
+              (HD-176). Board density is the thing that change had to not cost. */}
+          <span className="text-xs truncate" style={{ color: inkOn(issue.type.color, SURFACE.row) }}>{issue.type.name}</span>
           {/* Story points (HD-22) — a native attribute now, so it reads the same
               on every surface; unestimated renders nothing. */}
           <StoryPointsChip points={issue.storyPoints} compact />

@@ -185,6 +185,30 @@ info:
     as it does for lock contention. Being a `403`, it does not interact with the
     "check `Retry-After` first" rule, which sorts `409`s only.
 
+    **A color is a hex literal, everywhere one is accepted.** Wherever this API
+    takes a color — a label, a status/priority/issue-type swatch, a custom-field
+    select option — the value is `#RRGGBB`, plus `#RRGGBBAA` on the two
+    surfaces that store transparency (a label's `color` and a select option's;
+    the three taxonomy catalogs take the six-digit form only). A color name, a
+    three-digit shorthand, an empty string or anything else is refused; omitting
+    an optional `color` still means "no color" and is always allowed. **The
+    status differs by door, deliberately**: a `color` declared on a request
+    body answers the ordinary field-anchored `400`, while one buried inside a
+    custom field's `config` answers `422`, because `config` is free-form
+    JSON that no field constraint reaches into and every refusal on that path is
+    a `422`. Branch on where the value was sent, not on one status. A color
+    is taken exactly as sent — nothing is trimmed, so a padded
+    `" #0EA5A4 "` is refused like any other non-color, at every door: where
+    a value is checked both by a constraint declared on a request field and
+    by the service behind it, the constraint is met first. And one shape
+    gets one sentence wherever that shape is checked: the eight-digit-capable
+    doors answer `Color must be #RRGGBB or #RRGGBBAA` and the three taxonomy
+    catalogs answer `Color must be #RRGGBB`, whether it arrives as an
+    `errors` entry or quoted inside the option refusal. What is
+    checked is only that the value **is a color** — a stored color is an
+    identity hue and the text drawn on it is derived at render time, so no
+    contrast or readability rule is applied here and none will be.
+
     **Pagination** — paginated endpoints take `page` (zero-based, default 0)
     and `size` (default 50, clamped server-side to a maximum of 100) and return
     a uniform `PageResponse` envelope (`content` plus `page`/`size`/
@@ -3143,11 +3167,15 @@ paths:
             `config` cannot be stored as sent. A select field with no options,
             or an option missing its `id` or `label`; a `config` whose compact
             serialization exceeds 20 000 characters (checked for **every** field
-            type, not only selects); more than 100 options; or an option whose
-            `id` or `label` exceeds 100 characters. `detail` says which, and
-            names the measured size against its limit where there is one. The
-            same refusals apply on `PATCH /admin/fields/{id}` and on the
-            delegated workspace- and project-scoped mirrors.
+            type, not only selects); more than 100 options; an option whose
+            `id` or `label` exceeds 100 characters; or an option whose
+            `color` is not `#RRGGBB`/`#RRGGBBAA` — `red`, a three-digit
+            shorthand and an empty string are all refused, while an absent or
+            null `color` stays legal and means "no color". `detail` says
+            which: it names the measured size against its limit, or the
+            offending option's `id` and the shape wanted. The same refusals
+            apply on `PATCH /admin/fields/{id}` and on the delegated
+            workspace- and project-scoped mirrors.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -4469,7 +4497,9 @@ paths:
         '400':
           description: >-
             Failed validation — blank name, a name longer than 60 characters
-            after normalization, or a `color` that is not `#RRGGBB`/`#RRGGBBAA`.
+            after normalization, or a `color` that is not `#RRGGBB`/`#RRGGBBAA`
+            (`Color must be #RRGGBB or #RRGGBBAA`; the color is not
+            normalized the way the name is, so a padded value is refused).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
@@ -4514,7 +4544,11 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LabelResponse' }
         '400':
-          description: Blank/too-long name, or a `color` that is not `#RRGGBB`/`#RRGGBBAA`
+          description: >-
+            Blank/too-long name, or a `color` that is not
+            `#RRGGBB`/`#RRGGBBAA` (`Color must be #RRGGBB or #RRGGBBAA`;
+            the color is not normalized the way the name is, so a padded
+            value is refused).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
@@ -10357,7 +10391,16 @@ components:
       properties:
         name: { type: string, maxLength: 100 }
         category: { $ref: '#/components/schemas/StatusCategory' }
-        color: { type: string, pattern: '^#[0-9A-Fa-f]{6}$', example: '#3B82F6' }
+        color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          example: '#3B82F6'
+          description: >-
+            Six digits only — the status, priority and issue-type color
+            columns are `VARCHAR(7)` and cannot hold the alpha form. A bad
+            value is the ordinary field-anchored `400`, and the message
+            names the shape it wants: `Color must be #RRGGBB`. The
+            priority and issue-type upserts take `color` on the same terms.
         position: { type: integer, nullable: true, description: Omitted = appended last }
 
     AdminScope:
@@ -10535,13 +10578,16 @@ components:
         `options` for selects; `min`/`max` for numbers.
 
 
-        **The document is bounded, and so are the options inside it** — both as
-        `422`s from the upsert, whatever the field's type. Serialized compactly
-        the whole `config` may be at most **20 000 characters**; a select may
+        **The document is bounded, and so are the options inside it, and an
+        option's `color` has to be a color** — all of them `422`s from the
+        upsert, whatever the field's type. Serialized compactly the whole
+        `config` may be at most **20 000 characters**; a select may
         carry at most **100 options**; and an option's `id` and `label` may each
         be at most **100 characters**. The document ceiling is the binding one
         at the extreme: 100 options each carrying a 100-character `id` *and*
         `label` is about 23 KB and is refused before the option checks run.
+        An option's `color`, when it is present at all, must be `#RRGGBB` or
+        `#RRGGBBAA` — see the property below.
         This config is re-served to every project member on every board load,
         which is what the ceilings protect.
       properties:
@@ -10554,7 +10600,20 @@ components:
             properties:
               id: { type: string, maxLength: 100, example: critical, description: Referenced by stored values — stable once used }
               label: { type: string, maxLength: 100, example: Critical }
-              color: { type: string, nullable: true, example: '#B91C1C' }
+              color:
+                type: string
+                nullable: true
+                pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$'
+                example: '#B91C1C'
+                description: >-
+                  `#RRGGBB` or `#RRGGBBAA`; anything else is a 422 from the
+                  upsert naming the option and quoting the sentence a label
+                  answers with, `Color must be #RRGGBB or #RRGGBBAA`. The
+                  value is not trimmed, so a padded one is refused here too.
+                  Absent or null means "no color" and
+                  is always allowed. A format check only — the color is an
+                  identity hue and the text drawn on it is derived at render
+                  time, so no contrast rule applies.
         min: { type: number, nullable: true }
         max: { type: number, nullable: true }
 
@@ -12858,7 +12917,12 @@ components:
           type: string
           nullable: true
           pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$'
-          description: '`#RRGGBB` or `#RRGGBBAA`. Omitted → a deterministic swatch derived from the name.'
+          description: >-
+            `#RRGGBB` or `#RRGGBBAA`. Omitted → a deterministic swatch
+            derived from the name. Taken exactly as sent: unlike `name` it
+            is not normalized first, so a padded `" #0EA5A4 "` is a `400`
+            rather than a trim. The message is
+            `Color must be #RRGGBB or #RRGGBBAA`.
           example: '#0EA5A4'
         description: { type: string, nullable: true, maxLength: 200, description: 'Optional note; blank is stored as null.' }
 
@@ -12870,7 +12934,7 @@ components:
         label's creator.
       properties:
         name: { type: string, maxLength: 200, description: 'New name if present — same normalization, 60-char limit and case-insensitive uniqueness as create (`409` + `existingId`; a pure casing change is allowed).' }
-        color: { type: string, pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$', description: 'New color if present (`#RRGGBB`/`#RRGGBBAA`).' }
+        color: { type: string, pattern: '^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$', description: 'New color if present (`#RRGGBB`/`#RRGGBBAA`) — refused with `Color must be #RRGGBB or #RRGGBBAA`, and never trimmed first.' }
         description: { type: string, maxLength: 200, description: 'New description if present; a blank string clears it.' }
 
     MergeLabelsRequest:

@@ -11,6 +11,12 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
-    css: false,
+    // The CSS pipeline stays off — with ONE file excused. `css: false` makes a
+    // stylesheet import resolve to an empty string even through `?raw`, and
+    // `colour.test.ts` reads `index.css` as TEXT to prove that the design tokens
+    // `colour.ts` falls back on when no stylesheet is attached still agree with
+    // the ones the app ships. No test imports `index.css` as a stylesheet, so
+    // nothing here starts asserting on computed styles.
+    css: { include: [/index\.css/] },
   },
 })

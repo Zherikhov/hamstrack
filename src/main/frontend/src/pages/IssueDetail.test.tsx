@@ -7,6 +7,7 @@ import type { ReactNode } from 'react'
 import IssueDetail from './IssueDetail'
 import { apiUpdateIssue, sprintsApi, versionsApi } from '../api'
 import { useAuthStore } from '../auth'
+import { INK_MIN, SURFACE, contrastRatio } from '../colour'
 import type {
   Attachment, Comment, Issue, IssueType, PriorityOption, ProjectDelivery, ProjectField,
   Sprint, Status, VersionRef,
@@ -175,13 +176,13 @@ function wrapper({ children }: { children: ReactNode }) {
 
 /** `enableExpand` is omitted on purpose: the key would then render a <Link>,
  *  which needs a router the rest of this component doesn't. */
-function renderDetail(fields: ProjectField[] = []) {
+function renderDetail(fields: ProjectField[] = [], types: IssueType[] = [TYPE_TASK]) {
   render(
     <IssueDetail
       wsId="w1"
       projectId="p1"
       issueNumber={7}
-      issueTypes={[TYPE_TASK]}
+      issueTypes={types}
       statuses={[STATUS_TODO, STATUS_DOING]}
       transitions={[]}
       priorities={[PRIORITY]}
@@ -777,5 +778,88 @@ describe('IssueDetail permission gates (HD-123 S5)', () => {
     await screen.findByText('mine.txt')
     expect(fileRowButtons('mine.txt')).toHaveLength(1)
     expect(screen.queryByRole('button', { name: 'Delete comment' })).not.toBeInTheDocument()
+  })
+})
+
+// ── The parent breadcrumb's ink (HD-176 follow-up) ────────────────────────────
+// The breadcrumb paints the PARENT ISSUE TYPE's stored hue as text. That hue is
+// an identity a human picked, not ink, so it is derived against the surface the
+// row lands on before it reaches a `color`.
+//
+// This is asserted from the DOM and phrased about the *entity* — a parent whose
+// type carries an unreadable hue — rather than about the variable that holds the
+// value on the way. The escape it pins existed precisely because that variable
+// was local: `colour.test.ts` scans source text for member chains, so a hue
+// copied into a bare local is outside what it can see, and renaming or
+// re-inlining the local must not decide whether this guarantee is checked.
+describe('IssueDetail parent breadcrumb (HD-176)', () => {
+  /** jsdom serialises an inline colour as `rgb(r, g, b)`; bring it back to hex. */
+  function toHexFromCss(value: string): string {
+    const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(value)
+    return m
+      ? `#${[1, 2, 3].map(i => Number(m[i]).toString(16).padStart(2, '0')).join('').toUpperCase()}`
+      : value.trim().toUpperCase()
+  }
+
+  const PARENT_KEY = 'PR-1'
+  /** The seeded Medium yellow — 1.92:1 as text, which is what shipped here. */
+  const TYPE_EPIC_UNREADABLE: IssueType = {
+    id: 't9', name: 'Epic', color: '#EAB308', position: 1, hierarchyLevel: 2,
+  }
+  /** A hue that already reads: the tuned-workspace half of the guarantee. */
+  const TYPE_EPIC_READABLE: IssueType = { ...TYPE_EPIC_UNREADABLE, color: '#16202E' }
+
+  const childOf = (parentType: IssueType): Issue => ({
+    ...ISSUE,
+    parentId: 'i0', parentKey: PARENT_KEY, parentTitle: 'The epic', parentTypeId: parentType.id,
+  })
+
+  /** The parent key, and the surface it is painted on — the row's darkest state. */
+  async function parentKeyInk(parentType: IssueType) {
+    issueResponse = childOf(parentType)
+    renderDetail([], [TYPE_TASK, parentType])
+    const key = await screen.findByText(PARENT_KEY)
+    return { key, ink: toHexFromCss(key.style.color) }
+  }
+
+  it('renders derived ink when the parent TYPE hue fails 4.5:1 on this row', async () => {
+    // Sanity: the fixture really is a hue that cannot be read here, so a green
+    // run below is the derivation working and not a threshold that never bites.
+    expect(contrastRatio(TYPE_EPIC_UNREADABLE.color, SURFACE.row)).toBeLessThan(INK_MIN)
+
+    const { ink } = await parentKeyInk(TYPE_EPIC_UNREADABLE)
+
+    expect(ink).not.toBe(TYPE_EPIC_UNREADABLE.color)
+    expect(contrastRatio(ink, SURFACE.row)).toBeGreaterThanOrEqual(INK_MIN)
+  })
+
+  it('paints the arrow and the key the same derived ink', async () => {
+    const { key, ink } = await parentKeyInk(TYPE_EPIC_UNREADABLE)
+    const glyph = key.closest('button')!.querySelector('svg')!
+    expect(toHexFromCss(glyph.style.color)).toBe(ink)
+  })
+
+  it('leaves a hue that already reads exactly as stored', async () => {
+    const { ink } = await parentKeyInk(TYPE_EPIC_READABLE)
+    expect(ink).toBe(TYPE_EPIC_READABLE.color)
+  })
+
+  it('keeps a parent whose type the config does not carry on its muted token', async () => {
+    // The config is the only source of a type's hue, so a parent typed by
+    // something this project's config does not list has no hue at all.
+    issueResponse = { ...childOf(TYPE_EPIC_UNREADABLE), parentTypeId: 'not-in-the-config' }
+    renderDetail([], [TYPE_TASK])
+    const key = await screen.findByText(PARENT_KEY)
+    // A token, not a derived hex and not a raw junk value: the neutral is passed
+    // into the derivation rather than defaulted in front of it.
+    expect(key.style.color).toContain('--color-text-muted')
+  })
+
+  it('adds no box to the breadcrumb: it is still the bare button it was', async () => {
+    const { key } = await parentKeyInk(TYPE_EPIC_UNREADABLE)
+    const chip = key.closest('button') as HTMLElement
+    expect(chip.style.background).toBe('')
+    expect(chip.style.backgroundColor).toBe('')
+    expect(chip.style.border).toBe('')
   })
 })
