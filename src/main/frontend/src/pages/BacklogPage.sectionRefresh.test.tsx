@@ -328,9 +328,13 @@ describe('BacklogPage — refreshing one section (HD-96)', () => {
  * rendering rows it could not confirm. A stale section with no signal is its own
  * defect — it is showing data the user just changed.
  *
- * ONE test, and a generous timeout, on purpose: every case here costs a full
- * `BacklogPage` render, and this file already sits near vitest's 5 s default on
- * a loaded machine.
+ * ONE test on purpose: every case here costs a full `BacklogPage` render, and
+ * this file owns the four slowest tests in the suite.
+ *
+ * The generous per-test timeout that used to sit on this one case is gone — it
+ * is the SUITE's bound now (HD-240, `vitest.config.ts`). A margin patched onto
+ * the single test that has already failed protects nothing: the same load hit
+ * its three neighbours in this file the moment the suite grew.
  */
 describe('BacklogPage — a refused section refresh (HD-174)', () => {
   const BUSY = new ApiResponseError(
@@ -365,5 +369,5 @@ describe('BacklogPage — a refused section refresh (HD-174)', () => {
     await waitFor(() => expect(screen.queryByText(/Not refreshed/)).toBeNull())
     expect(apiGetBacklogSectionMock).toHaveBeenCalledTimes(2)
     expect(apiGetBacklogViewMock).toHaveBeenCalledTimes(1)
-  }, 20_000)
+  })
 })
