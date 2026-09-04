@@ -132,6 +132,18 @@ jobs:
       #     nobody runs is the state HD-242 exists to end and it would cost ~50s
       #     a build to stay in it.
       #
+      # The BACKEND half of that same question stopped being a matter of reading
+      # in HD-265: an unfiltered run now compares the test classes it actually
+      # executed against src/test/java and fails, naming whatever it never
+      # reached (the `test-tree-coverage-guard` execution in pom.xml). It exists
+      # because a green `mvnw test` once reported four zeros over a plan missing
+      # whole packages, and the only thing that noticed was a human remembering
+      # a different total. The line to glance at is `[test-tree] all N test
+      # classes ... executed in this run` — but it is now enforced rather than
+      # trusted, and it disarms itself for `-Dtest=`/`-DskipTests`, which is why
+      # the image build in build-and-push neither pays for it nor is refused by
+      # it.
+      #
       # COST: measured +45-70s per non-skipped build on a dev box (see pom.xml).
       # Local fast loops keep `-Dfrontend.skip=true`, which switches all four
       # frontend executions off together; the image build in `build-and-push`

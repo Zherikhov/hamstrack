@@ -1,0 +1,5 @@
+# HD-265. Registered by ServiceLoader so that it runs whatever the test plan turns out to contain —
+# a guard that is itself selected as a test can be dropped by the truncation it exists to catch.
+# Deleting this line does not break a single test; it blinds SuiteCoverageGuard, which then fails the
+# build saying the run recorded nothing. Keep the two facts together: the file below is not optional.
+com.hamstrack.common.testsupport.ExecutedTestClassRecorder

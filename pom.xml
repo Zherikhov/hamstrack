@@ -172,6 +172,17 @@
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- HD-265. Surefire already puts the JUnit Platform launcher on the test JVM's classpath
+             at runtime, so nothing needed it DECLARED until a TestExecutionListener had to compile
+             against it (ExecutedTestClassRecorder — the half of the suite-coverage guard that can
+             see what actually ran). Declaring it is the setup JUnit documents for exactly this, and
+             it is the same artifact Surefire would have injected, not a second one: version managed
+             by the JUnit BOM the Spring Boot BOM imports, so do NOT pin it here. -->
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -416,12 +427,116 @@
                       @SpringBootTest(properties = …), which sits above this.
                     -->
                     <systemPropertyVariables>
+                        <!--
+                          HD-265: the identity of THIS Maven session, and where to write it down.
+
+                          ExecutedTestClassRecorder (a ServiceLoader-registered JUnit Platform
+                          listener) records the test classes this fork actually executed into
+                          target/test-run-record/, and the antrun step below compares that record
+                          against src/test/java. The record has to be per-run: target/surefire-reports
+                          is cumulative and is never cleaned, so on the day HD-265 was filed it held
+                          more reports than the tree held classes, two of them naming classes deleted
+                          weeks earlier — anything derived from it counts history rather than this
+                          run, which is the failure being guarded against, dressed as the guard.
+                          Freshness is therefore an IDENTITY, not a timestamp comparison:
+                          ${maven.build.timestamp} is fixed for the whole session and both halves are
+                          handed the same value, so the reader accepts only files this run wrote and
+                          ignores every leftover (an earlier run, an IDE run, a crashed run) on sight.
+
+                          Losing either line is silent in the only way that matters: the suite still
+                          runs and still passes, and the step below can no longer tell how much of it
+                          ran — which is why it treats a missing record as a failure rather than as
+                          nothing to do.
+                        -->
+                        <hamstrack.test-run.id>${maven.build.timestamp}</hamstrack.test-run.id>
+                        <hamstrack.test-run.build-dir>${project.build.directory}</hamstrack.test-run.build-dir>
+
                         <spring.datasource.hikari.maximum-pool-size>4</spring.datasource.hikari.maximum-pool-size>
                         <spring.datasource.hikari.minimum-idle>0</spring.datasource.hikari.minimum-idle>
                         <app.expensive-read.max-in-flight>2</app.expensive-read.max-in-flight>
                         <app.expensive-read.max-in-flight-per-principal>2</app.expensive-read.max-in-flight-per-principal>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <!--
+              HD-265: THE STEP THAT REFUSES A RUN THAT SILENTLY SKIPPED PART OF THE TREE.
+
+              An unfiltered `mvnw test` reported `Tests run: 1463, Failures: 0, Errors: 0` and BUILD
+              SUCCESS while executing 224 of 252 test classes. The absent 28 were a contiguous
+              alphabetical prefix — whole packages — and the run said nothing whatsoever about them;
+              the author had just written a class inside the gap, so the green run was evidence about
+              everything except the thing being verified. It was caught by a remembered total looking
+              low, which is not a mechanism. "A filtered run is not evidence" was already project
+              lore; the honest version is that AN UNFILTERED RUN IS NOT EVIDENCE EITHER UNLESS THE
+              CLASS COUNT IS CHECKED. This is the check.
+
+              WHY IT IS A BUILD STEP AND NOT A TEST. A guard shaped as a test class is selected by
+              the same mechanism that failed: the dropped prefix can drop the guard, which is then
+              silent exactly when it is needed. A JUnit listener is immune to test selection but
+              cannot fail anything (the Launcher swallows what its callbacks throw, and System.exit
+              inside a fork surfaces as "the forked VM terminated without properly saying goodbye",
+              sending the reader to an unrelated question). So the two halves are split by what each
+              one can do: the listener sees, this refuses. Note that the guard's own class file comes
+              off the classpath below — if the truncation ever takes THAT, this step fails too.
+
+              IT COSTS ONE SHORT-LIVED JVM. No JUnit, no Spring context, no database: the classpath
+              is target/test-classes and the program reads two directories and one record file.
+
+              ARMING. Every switch that legitimately narrows the plan is passed straight through and
+              disarms the check inside SuiteCoverageGuard rather than out here, so all of it is
+              readable in one place — a profile activation can only test ONE property, and this needs
+              the whole category. An undefined Maven property interpolates to its own placeholder,
+              which is how "not passed" reaches the program; it reads blank as unset too, so it
+              behaves the same if that ever changes. An IDE builds its own command line and never
+              runs a Maven phase, so IDE runs are untouched.
+
+              ORDERING: within the `test` phase the default lifecycle binding (surefire:test) runs
+              before POM-declared executions, so the record is complete by the time this reads it —
+              the same ordering the frontend `npm-test` execution above depends on, verified in the
+              build log for both.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <!-- version managed by the Spring Boot BOM (the <parent>); do NOT pin -->
+                <executions>
+                    <execution>
+                        <id>test-tree-coverage-guard</id>
+                        <phase>test</phase>
+                        <goals><goal>run</goal></goals>
+                        <configuration>
+                            <target>
+                                <!-- failonerror would end the build with "Java returned: 1", which
+                                     names neither the check nor where its report went; the exit
+                                     code is captured and turned into a <fail> whose message is the
+                                     one line Maven prints last. The report itself is the program's
+                                     stderr, a few lines above. -->
+                                <java classname="com.hamstrack.common.testsupport.SuiteCoverageGuard"
+                                      fork="true" failonerror="false" logError="true"
+                                      resultproperty="hamstrack.test-tree.exit">
+                                    <classpath>
+                                        <pathelement location="${project.build.testOutputDirectory}"/>
+                                    </classpath>
+                                    <arg value="testSources=${project.build.testSourceDirectory}"/>
+                                    <arg value="testClasses=${project.build.testOutputDirectory}"/>
+                                    <arg value="buildDirectory=${project.build.directory}"/>
+                                    <arg value="runId=${maven.build.timestamp}"/>
+                                    <arg value="test=${test}"/>
+                                    <arg value="groups=${groups}"/>
+                                    <arg value="excludedGroups=${excludedGroups}"/>
+                                    <arg value="skipTests=${skipTests}"/>
+                                    <arg value="maven.test.skip=${maven.test.skip}"/>
+                                    <arg value="maven.test.skip.exec=${maven.test.skip.exec}"/>
+                                </java>
+                                <fail message="This test run cannot be shown to have executed the whole tree, so its result is not evidence about whatever it left out. The [test-tree] report above says what is missing; HD-265.">
+                                    <condition>
+                                        <not><equals arg1="${hamstrack.test-tree.exit}" arg2="0"/></not>
+                                    </condition>
+                                </fail>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
