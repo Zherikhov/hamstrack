@@ -419,10 +419,43 @@ class JwtSecretValidationTest {
                         powershell("JWT_SECRET", "Zq4mR7vL2xN9pK6wT3sY8bF5hJ0dC1gA4eU7iO2n"), true,
                         "a signing key set for a command an operator pastes into a terminal"),
 
+                // The other half of the same wrong assumption, found while checking whether
+                // the truncation hid anything in the opposite direction: the flag dialect
+                // ended its value at a QUOTE as well as at a space, so `export
+                // DB_PASSWORD='...'` was read as the empty string and allowed as "not a
+                // value at all". A working credential, published, invisible - and one line
+                // in docs/launch-day-runbook.md already uses that form (a blank, so nothing
+                // leaked, and nothing would have said so if it had not been).
+                new Case("ops/deploy/apply-config.sh", quotedFlag("API_TOKEN", "literal-token"), true,
+                        "a quoted value in the flag dialect is a value, not an empty one"),
+
+                // A blank that is never closed. One token, yes - but only within its line: if
+                // the blank could run past the line end it would swallow the `export` below,
+                // and the literal credential on that line would be reported by nothing.
+                new Case("ops/deploy/apply-config.sh",
+                        "docker run -e " + assign("API_TOKEN", "<unclosed") + "\n"
+                        + "export " + assign("API_TOKEN", "literal-token") + "\n", true,
+                        "an unfilled blank is one token, but never across a line break"),
+
                 new Case("docker-compose.yml", yaml("POSTGRES_PASSWORD", "hamstrack"), false,
                         "the local dev stack, in the file that creates it"),
+                // The multi-word blank, in EVERY dialect that ends a value at a delimiter.
+                // The reasoning ("a blank contains spaces, so truncating it turns a
+                // placeholder into a word") was written out on the line dialect - the one
+                // that cannot truncate - and carried to neither sibling that can, so a
+                // runbook writing `-e DB_PASSWORD=<from .env>` was reported for publishing
+                // `<from`: the seal refusing the very form remedy 2 tells its reader to use.
+                // Both remedy-2 examples in that message, <a strong password> and <any unique
+                // string>, have spaces in them, so a dialect proved only with a one-word
+                // blank is proved with the one input that cannot fail.
                 new Case("docs/self-hosting.md", assign("DB_PASSWORD", "<a strong password>"), false,
-                        "an unfilled blank"),
+                        "an unfilled blank, in the line dialect"),
+                new Case("docs/design/flyway-squash-procedure.md",
+                        dockerFlag("DB_PASSWORD", "<from .env>"), false,
+                        "the same blank in the flag dialect, where the value ends at whitespace"),
+                new Case("docs/ops-prod-hardening.md",
+                        powershellUnquoted("DB_PASSWORD", "<from .env>"), false,
+                        "and unquoted in PowerShell, where it ends at whitespace or a `;`"),
                 new Case("docs/self-hosting.md", dockerFlag("POSTGRES_PASSWORD", "drill-only-password"), false,
                         "self-labelled as a throwaway, and the label travels with the value"),
                 new Case(".env.prod.example", assign("JWT_SECRET", ""), false,
@@ -588,12 +621,30 @@ class JwtSecretValidationTest {
     }
 
     /**
+     * The same dialect with the value quoted — how a shell script writes one whose value has
+     * a space, and how {@code docs/launch-day-runbook.md} writes its {@code export}.
+     */
+    private static String quotedFlag(String variable, String value) {
+        return "export " + variable + "='" + value + "'";
+    }
+
+    /**
      * PowerShell's form, written the way the runbooks actually write it: two assignments on
      * one line, separated by {@code ;}, values double-quoted. Both of those are why the
      * other two patterns could not see it.
      */
     private static String powershell(String variable, String value) {
         return "$env:DB_USERNAME=\"hamstrack\"; $env:" + variable + "=\"" + value + "\"";
+    }
+
+    /**
+     * The same dialect without the quotes, which PowerShell accepts and which our own
+     * runbooks mix with the quoted form. The quotes are what made a multi-word blank survive
+     * there; unquoted, the value ends at whitespace and the blank is only one token if the
+     * pattern says so.
+     */
+    private static String powershellUnquoted(String variable, String value) {
+        return "$env:DB_USERNAME=hamstrack; $env:" + variable + "=" + value;
     }
 
     /** Assembled, quote by quote, so no literal {@code PASSWORD '…'} appears in a scanned file. */

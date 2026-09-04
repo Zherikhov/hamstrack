@@ -80,10 +80,49 @@ public final class PublishedCredentials {
     public static final Pattern CREDENTIAL_SHAPED_NAME = Pattern.compile(CREDENTIAL_SHAPED);
 
     /**
+     * <strong>An unfilled blank is ONE token, whatever it contains.</strong>
+     * {@code <a strong password>}, {@code <from .env>}, {@code <any unique string>} — remedy
+     * 2 of this rule's own failure message, and every example that message offers has a space
+     * in it. A dialect that ends a value at a delimiter therefore has to recognise the blank
+     * <em>before</em> it applies its delimiters, or {@code <from .env>} arrives as
+     * {@code <from}, stops matching {@link #UNFILLED}, and is reported as a working
+     * credential — a refusal refusing the very form it prescribes.
+     *
+     * <p>Never across a line break: an unclosed {@code <} would otherwise swallow the
+     * assignment below it, and a literal credential on the next line would be seen by
+     * nothing.
+     */
+    public static final String UNFILLED_BLANK = "<[^>\\r\\n]*>";
+
+    /**
+     * The value of a dialect that ends its value at a delimiter — {@code delimiters} is the
+     * body of a negated character class, e.g. {@code " \\t;"}. A quoted string and an
+     * unfilled blank are each ONE token before those delimiters apply; only what is left is
+     * a bare run of non-delimiters.
+     *
+     * <p>It exists so both of those are written once and a fifth dialect inherits them by
+     * construction, and the reason it has to is this class's own history. The "a blank
+     * contains spaces, so truncating it turns a placeholder into a word" reasoning was
+     * written out in full on {@link #LINE_ASSIGNMENT} — the one dialect that cannot truncate
+     * — and carried to neither sibling that can. That is <em>"a claim phrased about a
+     * category outlives a claim phrased about a member"</em> (CLAUDE.md) committed against
+     * itself, and it made {@code main} red on a runbook line that was doing exactly what the
+     * failure message told it to do.
+     *
+     * <p>The quoted alternative is the same mistake read the other way round, and was found
+     * by looking for it: the flag dialect ended its value <em>at</em> a quote, so
+     * {@code export DB_PASSWORD='…'} produced the empty string and was allowed as "not a
+     * value at all" — a published, working credential that the scan could not see.
+     */
+    private static String valueEndingAt(String delimiters) {
+        return "\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|" + UNFILLED_BLANK + "|[^" + delimiters + "]*";
+    }
+
+    /**
      * {@code VAR=value} / {@code VAR: value} at the start of a line, optionally as a YAML
-     * list item ({@code - VAR=value}). The value runs to the end of the line, because
-     * {@code <a strong password>} contains spaces and truncating it would turn a placeholder
-     * into a word.
+     * list item ({@code - VAR=value}). The value runs to the end of the line, so this is the
+     * one dialect with no delimiter to stop early at and nothing to truncate — the rule its
+     * siblings need is {@link #UNFILLED_BLANK}.
      */
     public static final Pattern LINE_ASSIGNMENT = Pattern.compile(
             "(?m)^[ \\t]*(?:-[ \\t]+)?(" + CREDENTIAL_SHAPED + ")[ \\t]*(?:=|:[ \\t]+)[ \\t]*(.*)$");
@@ -91,7 +130,11 @@ public final class PublishedCredentials {
     /**
      * {@code -e VAR=value}, {@code --env VAR=value}, {@code export VAR=value} — anywhere in a
      * line, because a {@code docker run} in a runbook carries several on one. Here the value
-     * ends at whitespace: the next flag is not part of it.
+     * ends at whitespace or at the end of the line: the next flag is not part of it, and
+     * neither is the next line. A quoted string and an unfilled blank survive that whole
+     * ({@link #valueEndingAt}) — {@code -e DB_PASSWORD=<from .env>} in a runbook is a blank
+     * and is read as one, where ending it at the space made it {@code <from} and turned this
+     * repository's own squash procedure into a published credential.
      *
      * <p><strong>{@code (?m)} is load-bearing.</strong> Without it the {@code ^} alternative
      * anchors to the start of the whole FILE, so the only way to be seen was to be preceded
@@ -101,7 +144,8 @@ public final class PublishedCredentials {
      * scan stay quiet.
      */
     public static final Pattern FLAG_ASSIGNMENT = Pattern.compile(
-            "(?m)(?:^|[ \\t])(?:-e|--env|export)[ \\t]+(" + CREDENTIAL_SHAPED + ")=([^ \\t\"'`]*)");
+            "(?m)(?:^|[ \\t])(?:-e|--env|export)[ \\t]+(" + CREDENTIAL_SHAPED + ")="
+            + "(" + valueEndingAt(" \\t\"'`\\r\\n") + ")");
 
     /**
      * PowerShell's dialect — {@code $env:VAR="value"} — which is <strong>the one this
@@ -121,11 +165,15 @@ public final class PublishedCredentials {
      * way; the variable NAME is deliberately left case-sensitive, so widening this does not
      * quietly widen {@link #CREDENTIAL_SHAPED} into matching lowercase identifiers
      * everywhere else. The value ends at whitespace or a statement separator, because these
-     * lines carry two assignments joined by {@code ;}.
+     * lines carry two assignments joined by {@code ;} — so an UNQUOTED blank needs
+     * {@link #valueEndingAt} exactly as the flag dialect does. Only the quoted form was ever
+     * safe here, and which of the two a runbook uses is its author's habit, not a guarantee;
+     * the quoting this dialect used to spell out for itself now comes from the same shared
+     * rule, so the two cannot disagree about what a quoted value is either.
      */
     public static final Pattern POWERSHELL_ASSIGNMENT = Pattern.compile(
             "\\$[Ee][Nn][Vv]:(" + CREDENTIAL_SHAPED + ")[ \\t]*=[ \\t]*"
-            + "(\"[^\"]*\"|'[^']*'|[^ \\t;\\r\\n]*)");
+            + "(" + valueEndingAt(" \\t;\\r\\n") + ")");
 
     /**
      * SQL's own dialect — the {@code PASSWORD} keyword followed by a quoted literal — and the
