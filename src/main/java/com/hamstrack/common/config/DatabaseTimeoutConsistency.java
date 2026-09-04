@@ -117,9 +117,11 @@ public class DatabaseTimeoutConsistency {
                      + "waiting request gives up: under load, requests will fail to ACQUIRE a "
                      + "connection rather than merely waiting for one. This is a sizing warning, "
                      + "not an error — a deliberately long bound is legitimate. If it is "
-                     + "deliberate, raise DB_POOL_MAX_SIZE (currently the only other dial) with "
-                     + "it; if it is not, {} ms or less keeps the property the default was "
-                     + "chosen for.", statementMs, connectionTimeoutMs, comfortable);
+                     + "deliberate, raise DB_POOL_MAX_SIZE with it (and see "
+                     + "EXPENSIVE_READ_MAX_IN_FLIGHT, which is what bounds how much of that pool "
+                     + "the expensive-read surface may hold at once); if it is not, {} ms or less "
+                     + "keeps the property the default was chosen for.",
+                     statementMs, connectionTimeoutMs, comfortable);
         }
     }
 }

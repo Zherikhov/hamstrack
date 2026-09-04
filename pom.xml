@@ -282,10 +282,29 @@
                       @SpringBootTest(properties = …) / @TestPropertySource in Spring's
                       precedence order, so this overrides the production defaults without
                       taking anything away from a test that deliberately tunes the pool.
+
+                      THE TWO EXPENSIVE-READ NUMBERS ARE HERE BECAUSE THE POOL CAP IS
+                      (HD-182), and they are not a policy of their own. They are PINNED
+                      rather than required: the shipped default of both is -1, "derive from
+                      the pool", so a pool of 4 with neither set derives 2 and boots — the
+                      suite would not fail without these lines. What they buy is that every
+                      context runs the SAME two numbers whatever a class does to its pool,
+                      and that the numbers are small enough to be a LEAK DETECTOR. (This
+                      comment used to justify them by "the production default share is 6",
+                      which stopped being true when the literal default became a derivation.)
+                      2 and 2 keep the WARN quiet (the soft rule is 60% of the pool) and
+                      make the bound a LEAK DETECTOR: it stays on even where
+                      app.rate-limit.enabled=false, which is most contexts, so a permit that
+                      is acquired and never released makes the THIRD sequential expensive
+                      request in that context fail loudly instead of draining capacity in
+                      silence. A class that needs different numbers overrides them in its own
+                      @SpringBootTest(properties = …), which sits above this.
                     -->
                     <systemPropertyVariables>
                         <spring.datasource.hikari.maximum-pool-size>4</spring.datasource.hikari.maximum-pool-size>
                         <spring.datasource.hikari.minimum-idle>0</spring.datasource.hikari.minimum-idle>
+                        <app.expensive-read.max-in-flight>2</app.expensive-read.max-in-flight>
+                        <app.expensive-read.max-in-flight-per-principal>2</app.expensive-read.max-in-flight-per-principal>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>

@@ -120,7 +120,22 @@ public class ProductMetrics {
         // will be served again next minute; hamstrack.storage.quota_refused says a TENANT is
         // stuck until somebody frees space or raises a number.
         WRITE_REQUESTS("write_requests"),
-        UPLOAD_BYTES("upload_bytes");
+        UPLOAD_BYTES("upload_bytes"),
+        // ---- The expensive-read OCCUPANCY bound (HD-182). Two constants rather than one,
+        // following the same rule: a rate on the first is ONE CLIENT fanning out — a lost debounce,
+        // a script, a page mounting more parallel queries than it used to — and the remedy is with
+        // that client. A rate on the second is an UNDER-PROVISIONED INSTANCE: every principal
+        // together is asking for more expensive work at once than this replica's share of the pool
+        // allows, and the remedy is DB_POOL_MAX_SIZE plus EXPENSIVE_READ_MAX_IN_FLIGHT, or another
+        // replica. Sharing a tag would make the two indistinguishable at exactly the moment the
+        // difference decides what to do — and, worse here than elsewhere, would make a
+        // single-tenant fan-out look like a capacity problem and get the ceiling raised.
+        //
+        // Neither of these is a rate budget: they say a caller had too many requests running AT
+        // ONCE, not that they asked too often, and they answer errorType TOO_MANY_IN_FLIGHT /
+        // EXPENSIVE_SURFACE_BUSY with Retry-After: 1 rather than a window.
+        EXPENSIVE_READ_IN_FLIGHT("expensive_read_in_flight"),
+        EXPENSIVE_READ_SURFACE_FULL("expensive_read_surface_full");
         final String tag;
         RateLimitKind(String tag) { this.tag = tag; }
     }
@@ -442,6 +457,64 @@ public class ProductMetrics {
     /** {@code hamstrack.ratelimit.hit{kind}} — at each RateLimitedException throw. */
     public void rateLimitHit(RateLimitKind kind) {
         registry.counter("hamstrack.ratelimit.hit", "kind", kind.tag).increment();
+    }
+
+    /**
+     * {@code hamstrack.expensive_read.in_flight} — current occupancy of the expensive-read
+     * bulkhead (HD-182), registered once by {@code ExpensiveReadConcurrencyLimit} at startup.
+     *
+     * <p><strong>The number that makes the guard legible.</strong> The two refusal counters say
+     * only that a ceiling <em>fired</em>; without this gauge, "is the bulkhead ever full?" and "is
+     * it draining?" are both unanswerable — and the second is the one that matters, because a
+     * LEAKED PERMIT is a permanent, silent capacity loss on that replica. A permit counter that
+     * only ever goes down looks exactly like a busy instance until the surface refuses everything.
+     * Alert on {@code max()} over replicas, never {@code sum()}: each process has its own bulkhead
+     * and its own pool, and summing would report an occupancy no single replica ever had.
+     *
+     * <p>A registration method rather than a field, because the value lives in the limiter and the
+     * NAME lives here — the cardinality/privacy rule at the top of this class is enforceable only
+     * while every meter name in the product is in one file. No labels: occupancy is an instance
+     * property, and a per-principal breakdown would be the unbounded label this class forbids.
+     */
+    public void registerExpensiveReadInFlight(java.util.function.IntSupplier occupancy) {
+        Gauge.builder("hamstrack.expensive_read.in_flight", occupancy,
+                        supplier -> (double) supplier.getAsInt())
+                .description("Requests currently in flight on the expensive-read surface (reports, "
+                             + "HQL search, saved filters, storage breakdown), out of "
+                             + "app.expensive-read.max-in-flight; per replica, so alert with "
+                             + "max() and never sum()")
+                .register(registry);
+    }
+
+    /**
+     * {@code hamstrack.expensive_read.permit_force_released} — permits the watchdog took back
+     * because a request had held one longer than {@code DB_STATEMENT_TIMEOUT_MS} plus slack
+     * (HD-182 review).
+     *
+     * <p><strong>The counter that keeps a new failure mode from being invisible.</strong> A permit
+     * is taken before the request body is read and given back after the response is written, so
+     * its life includes two stretches the CLIENT controls; a slow-trickling upload or a slow reader
+     * can therefore hold a share of the bulkhead for as long as it likes, for the price of one
+     * socket. {@code PerPrincipalInFlightLimit.sweepStalePermits} takes those back — and a
+     * force-release that nobody counted would be a silent correction of a silent attack.
+     *
+     * <p>It is also the discriminator the {@code ExpensiveReadSurfaceSaturated} runbook needs: an
+     * occupancy gauge pinned at the ceiling with no traffic to explain it means a LEAKED permit if
+     * this counter is flat, and a HELD one — slow or hostile clients — if it is climbing.
+     * <strong>Which is why the sweep increments this only when it actually performed the
+     * release</strong>: the request's own {@code afterCompletion} can win the {@code compareAndSet}
+     * between the staleness check and the release, and an increment for a release that did not
+     * happen sends an operator hunting a slow client that does not exist — with a WARN naming a
+     * user id. A rule of its own, {@code ExpensiveReadPermitForceReleased}, watches a sustained
+     * rate here; before it existed this counter was covered only by its consequence, i.e. once the
+     * surface was already refusing real users.
+     *
+     * <p>No labels, for this class's standing reason: a per-principal breakdown of who held a
+     * permit too long is the unbounded cardinality (and the personal data) the header forbids. The
+     * WARN line names the user id for the operator who needs it.
+     */
+    public void expensiveReadPermitForceReleased() {
+        registry.counter("hamstrack.expensive_read.permit_force_released").increment();
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.hamstrack.search.ratelimit;
 
+import com.hamstrack.common.ratelimit.ExpensiveReadConcurrencyLimit;
 import com.hamstrack.common.ratelimit.PrincipalThrottleInterceptor;
 import com.hamstrack.report.ratelimit.ReportRateLimitConfig;
 import lombok.RequiredArgsConstructor;
@@ -67,9 +68,22 @@ public class SearchRateLimitConfig implements WebMvcConfigurer {
 
     private final SearchRateLimiter searchRateLimiter;
 
+    /**
+     * The same occupancy bound the reports registration carries (HD-182) — one bulkhead over the
+     * whole expensive-read surface, not one per configurer.
+     *
+     * <p>A request behind BOTH registrations takes <strong>one</strong> permit, not two: it
+     * occupies one connection, and the first interceptor to acquire parks the permit on the request
+     * while the second skips. Ordering across the two is already fixed and load-bearing
+     * ({@link ReportRateLimitConfig#ORDER}), so on {@code …/search/insights} the reports interceptor
+     * is the one that takes it and the one that releases it.
+     */
+    private final ExpensiveReadConcurrencyLimit expensiveReadConcurrency;
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(new PrincipalThrottleInterceptor(searchRateLimiter))
+        registry.addInterceptor(
+                        new PrincipalThrottleInterceptor(searchRateLimiter, expensiveReadConcurrency))
                 .addPathPatterns(SEARCH_PATH, FILTERS_PATH);
     }
 }

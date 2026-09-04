@@ -10,13 +10,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.server.PathContainer;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import org.springframework.web.servlet.handler.MappedInterceptor;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 import org.springframework.web.util.ServletRequestPathUtils;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -110,6 +114,41 @@ class ThrottleCoverageTest {
     private static final Set<Class<?>> EXEMPT = Set.of();
 
     /**
+     * Handlers on the occupancy-bounded surface that may be rate-bounded without being
+     * OCCUPANCY-bounded (HD-182).
+     *
+     * <p><strong>Empty, and it is a different question from {@link #EXEMPT}</strong>, which is why
+     * it is a different set: a handler can legitimately be cheap enough per call to want no rate
+     * budget and still hold a connection for seconds, or the reverse. Anything added here needs a
+     * reason that survives one question — <em>does this handler hold a connection while it works,
+     * and if so why may it hold one outside the share?</em>
+     */
+    private static final Set<Class<?>> CONCURRENCY_EXEMPT = Set.of();
+
+    /**
+     * Return types that make a handler asynchronous, i.e. that split one request across two
+     * dispatches. Matched by ASSIGNABILITY against the raw return type and every one of its type
+     * arguments, so {@code SseEmitter} is caught through {@code ResponseBodyEmitter} and
+     * {@code ResponseEntity<StreamingResponseBody>} is caught through its argument — a name match
+     * would miss both.
+     *
+     * <p><strong>A return type is not the only way to go asynchronous</strong>: a handler that
+     * calls {@code request.startAsync()} itself, or injects a {@code jakarta.servlet.AsyncContext},
+     * splits the same dispatch while declaring an ordinary return type, and is invisible to
+     * everything below. There is no such handler in this product and no cheap structural way to
+     * find one — so if you are writing it, this list is not what will stop you, and
+     * {@code PrincipalThrottleInterceptor}'s account of what a permit means across the gap is the
+     * paragraph you owe an answer.
+     */
+    private static final List<Class<?>> ASYNC_RETURN_TYPES = List.of(
+            org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody.class,
+            org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter.class,
+            org.springframework.web.context.request.async.DeferredResult.class,
+            org.springframework.web.context.request.async.WebAsyncTask.class,
+            java.util.concurrent.Callable.class,
+            java.util.concurrent.CompletionStage.class);
+
+    /**
      * <strong>The checklist, in the one place a maintainer cannot fail to read it: a failing
      * assertion at the moment of the change.</strong>
      *
@@ -142,7 +181,8 @@ class ThrottleCoverageTest {
               3. .env.prod.example                                       — the REPORTS_REQUESTS_PER_MINUTE
                  and SEARCH_REQUESTS_PER_MINUTE blocks (the one missed last time)
               4. docs/self-hosting.md                                    — the operator table rows and
-                 the numbered "Nth mechanism is node-local" prose below it
+                 the "this one is node-local too" prose below them (deliberately de-ordinalised:
+                 the ordinals went stale one entry before the list did, so do not renumber it back)
               5. docs/api-dc.md AND docs/api-cloud.md                    — the env-var table, the
                  "surfaces with throttles of their own" section, and each endpoint's 429 note
               6. src/main/frontend/public/openapi.yaml                   — the info description and the
@@ -150,8 +190,14 @@ class ThrottleCoverageTest {
                  overwrites from public/)
               7. docs/project-state.md                                   — the "Config:" line of the
                  search section
-              8. docs/hql-search-maintainers-guide.md                    — the ratelimit/** row of the
-                 package table
+              8. docs/hql-search-maintainers-guide.md                    — EVERY claim in that file
+                 about what an endpoint on the search surface inherits, which is NOT one row: the
+                 package table states it three times (the controller row, the filter/** row, the
+                 ratelimit/** row), the cookbook section tells a maintainer what a new endpoint
+                 gets for free, and the saved-filter section repeats it per operation. The last
+                 binding change had to edit five of them while this line named one — which is the
+                 exact shape of the gap it produced: the named row got fixed and the other four
+                 did not
               9. src/main/frontend/src/api.ts                            — the 429 comments on the
                  search, insights, saved-filter, storage-breakdown and attachment-upload callers
              10. src/main/java/.../common/config/WriteProperties.java    — the two write budgets
@@ -160,11 +206,46 @@ class ThrottleCoverageTest {
              11. src/main/resources/application.properties               — the app.write.* and
                  app.storage.quota.* blocks, AND both lists in the app.rate-limit.enabled block:
                  the numbered enumeration of what it turns off, and the "deliberately outside it"
-                 list, which now has two entries
+                 list (a list, not a count — a number goes stale one entry before the list does,
+                 and this very line used to carry one)
              12. src/main/resources/application-cloud.properties         — the 10GB quota override
              13. .env.prod.example                                       — the Write-budget and
                  Storage-quota sections
              14. observability/grafana/provisioning/alerting/rules.yml   — the four Storage* rules
+             15. src/main/java/.../common/config/ExpensiveReadProperties.java — the four occupancy
+                 numbers, the property they deliver, and the connection-seconds derivation kept
+                 once as HISTORY (it is why a rate could not deliver that property, not a live
+                 sizing relation)
+             16. src/main/java/.../common/config/PoolShareConsistency.java   — the two hard rules
+                 and the 60%-of-the-pool WARN; and DatabaseTimeoutConsistency, whose sizing WARN
+                 names the pool and must not claim to name the only other dial
+             17. src/main/resources/application.properties + .env.prod.example — the
+                 app.expensive-read.* block and the EXPENSIVE_READ_* section, and the
+                 DB_POOL_MAX_SIZE block, which must say that a share of the pool is reserved
+             18. docs/observability.md + observability/.../rules.yml    — every metric row and
+                 every alert rule this surface has (the in-flight GAUGE, the force-release
+                 counter, the ratelimit kinds, and the rules built on them), plus the rule
+                 TABLE in the doc, which is a second copy of the same list. A metric row that
+                 prescribes an action needs a rule that prompts it, or the row must say that
+                 nothing watches it — the force-release counter was covered by consequence
+                 alone for a slice
+             19. ops/loadtest/k6/probes.js + ops/loadtest/RESULTS-TEMPLATE.md — probe P1's stated
+                 prediction, which this product DELIBERATELY falsified: a harness that keeps
+                 documenting a prediction the product set out to break reads as the product being
+                 wrong
+             20. THE THREE BOUNDS ON HOW LONG A PERMIT MAY BE HELD, if you touch acquisition or
+                 release: TomcatUploadTimeoutCustomizer (in the app, so every deployment has it),
+                 PerPrincipalInFlightLimit.sweepStalePermits + its metric, and read_body in the
+                 Caddyfile (our edge only, and one of the two files a deploy never syncs). A permit
+                 is taken BEFORE the request body is read and given back AFTER the response is
+                 written, so the client paces part of its life. WHICH OF THE THREE MAKES THAT PART
+                 FINITE IS THE WATCHDOG, AND ONLY THE WATCHDOG — measured, twice: Tomcat's default
+                 does not remove the read timeout for the body, it leaves it at connectionTimeout
+                 (60 s, and whatever an operator sets server.tomcat.connection-timeout to), so the
+                 customizer tightens that gap to 20 s and pins it independently of that dial. That
+                 is a packet rate an attacker must sustain, not an end to the hold. Do not write
+                 the "unbounded by default" story back into any of them: it is wrong in the
+                 direction that stops the next reader looking at the layer that actually bounds it
 
             Two claims to re-check rather than copy, because both have been false in this tree \
             already: "the whole X surface" (insights is a report OUTSIDE .../reports/**) and "the \
@@ -215,6 +296,18 @@ class ThrottleCoverageTest {
             bytes to FileStorage? And if it is a WRITE, ask the fourth: is it under a \
             method-conditioned binding, or does it belong in WriteThrottleCoverageTest's EXEMPT \
             set with a reason?
+
+            AND THE FIFTH (HD-182), WHICH IS ABOUT A DIFFERENT AXIS AGAIN — not how OFTEN it may \
+            be asked for, but how many may be RUNNING: does it hold a connection while it works, \
+            and if so is it inside the occupancy share? A rate budget spends the same unit whether \
+            a request takes 8 ms or 8 s, so its protection evaporates exactly as the instance \
+            slows down; app.expensive-read.max-in-flight is what keeps the interactive API's \
+            connections out of one surface's reach. Registering the path in ReportRateLimitConfig \
+            or SearchRateLimitConfig buys BOTH controls in one edit — that is why there is no \
+            second pattern list — and everyExpensiveReadHandlerIsAlsoConcurrencyBounded is what \
+            fires when a new handler lands under those packages with only half of them. If it is \
+            asynchronous, noExpensiveReadHandlerIsAsynchronous fires instead, and says what the \
+            permit is owed.
             """;
 
     @Autowired
@@ -229,6 +322,14 @@ class ThrottleCoverageTest {
     /** HD-191 — the third configurer, and the first one whose binding is method-conditioned. */
     @Autowired
     WriteRateLimitConfig writeRateLimitConfig;
+
+    /**
+     * EVERY configurer in the context, not the three above. {@link #expensiveReadSurface()} derives
+     * what the occupancy bound covers from these, so a fourth configurer — or a bound moved between
+     * two existing ones — is in scope by existing rather than by being added to a list here.
+     */
+    @Autowired
+    List<WebMvcConfigurer> webMvcConfigurers;
 
     @Test
     void everyReportAndSearchHandlerSitsBehindAPerPrincipalThrottle() throws Exception {
@@ -272,6 +373,179 @@ class ThrottleCoverageTest {
                     + "SearchRateLimitConfig; do not add a check inside the service, which is the "
                     + "line the next endpoint forgets.")
                 .isEmpty();
+    }
+
+    /**
+     * <strong>Every expensive read is also bounded by OCCUPANCY, not only by rate</strong>
+     * (HD-182, AC-8).
+     *
+     * <p>The sibling above asks whether a {@link PrincipalThrottleInterceptor} is in front of each
+     * handler, and until HD-182 that was the whole coverage question. It stopped being sufficient
+     * the moment a second registration of the SAME TYPE deliberately did not take an occupancy
+     * bound: the write budget uses this interceptor and is out of scope for the bulkhead by a
+     * reasoned decision (writes are short, already bounded by {@code lock_timeout} +
+     * {@code statement_timeout}, and an occupancy bound there would refuse an SPA saving several
+     * inline edits at once). So "there is a PrincipalThrottleInterceptor here" no longer implies
+     * "this handler is concurrency-bounded", and a type question has to become a
+     * <em>which-controls</em> question.
+     *
+     * <p>Same inverted polarity as the sibling: everything on the surface is covered unless it is
+     * in {@link #CONCURRENCY_EXEMPT} with a written reason. Without this refinement the coverage
+     * assertion would keep passing while covering half of what its name claims, which is the
+     * failure this file exists to have deleted.
+     *
+     * <p><strong>And the surface is {@link #expensiveReadSurface()}, not a package list</strong>
+     * (HD-182 review). The scope of a tripwire has to be the scope of the bound, or the two agree
+     * only until somebody mounts a bounded endpoint somewhere new — which had already happened:
+     * the storage breakdown is on the bound and lives in {@code workspace.controller}, so it was
+     * invisible to both this test and the async one while every document counted it as covered.
+     */
+    @Test
+    void everyExpensiveReadHandlerIsAlsoConcurrencyBounded() throws Exception {
+        var unbounded = new LinkedHashSet<String>();
+        var probed = new ArrayList<String>();
+
+        for (var handler : expensiveReadSurface()) {
+            probed.add(handler.method() + " " + handler.uri());
+            // appliesTo(method) as well as "is in the chain" (HD-182 review): an occupancy bound
+            // may be registered with a method condition exactly as the write budget is, and a
+            // membership question would then report a bound that never fires on this handler.
+            // Nothing on this surface is method-conditioned today — which is precisely the state
+            // the RATE axis was in before WriteThrottleCoverageTest had to be written.
+            boolean bounded = throttlesFor(handler.method(), handler.uri()).stream()
+                    .filter(throttle -> throttle.appliesTo(handler.method()))
+                    .anyMatch(throttle -> throttle.concurrencyBound() != null);
+            if (!bounded) {
+                unbounded.add(handler.describe());
+            }
+        }
+
+        assertThat(probed)
+                .as("the expensive-read surface came back almost empty, so this test is guarding "
+                    + "an empty set — a controller package moved, or no registration carries an "
+                    + "occupancy bound any more")
+                .hasSizeGreaterThan(5);
+
+        assertThat(unbounded)
+                .as("these handlers are rate-bounded and NOT occupancy-bounded. A rate budget "
+                    + "spends the same unit whether a request takes 8 ms or 8 s, so its protection "
+                    + "evaporates precisely as the instance slows down — which is how one "
+                    + "principal, inside their documented allowance, saturated a whole replica "
+                    + "(HD-182, probe P1). Register the path in ReportRateLimitConfig or "
+                    + "SearchRateLimitConfig, which carry BOTH controls on one interceptor; if it "
+                    + "genuinely must not hold a share of the pool, put it in CONCURRENCY_EXEMPT "
+                    + "with the reason, not here. Note the scanned set is the union of the "
+                    + "throttled PACKAGES and whatever the bound is actually registered in front "
+                    + "of, so a handler can be in scope here while living in neither package — "
+                    + "the storage breakdown is, today."
+                    + PROPAGATION_CHECKLIST)
+                .isEmpty();
+    }
+
+    /**
+     * <strong>No handler on a concurrency-bounded surface is asynchronous</strong> (HD-182, AC-10)
+     * — the async-leak tripwire, and a CATEGORY test rather than a list because the risk is a path
+     * nobody enumerated.
+     *
+     * <p>A permit is acquired in {@code preHandle} and released in {@code afterCompletion}, and
+     * Spring does <strong>not</strong> call {@code afterCompletion} when a handler starts async
+     * processing — it calls {@code afterConcurrentHandlingStarted}, then runs the whole interceptor
+     * chain again on the ASYNC dispatch. This repository already carries that scar on the security
+     * side ({@code DispatcherType.ASYNC} in {@code SecurityConfig}). {@link
+     * PrincipalThrottleInterceptor} handles the seam deliberately — only a {@code REQUEST} dispatch
+     * acquires, and both terminal callbacks release — so an async handler here would not LEAK; it
+     * would silently make the bound weaker than every document says it is, because the
+     * asynchronous part of the request would occupy nothing.
+     *
+     * <p><strong>And the permit WATCHDOG's own trade depends on this test being green</strong>
+     * (HD-182 review). {@code PerPrincipalInFlightLimit.sweepStalePermits} force-releases a permit
+     * whose request is still running, and calls that a bounded over-issue costing a worker and some
+     * heap but never a CONNECTION. That holds only while every handler here is synchronous: such a
+     * handler has committed and returned its connection to the pool long before a request is old
+     * enough to be swept, so what the over-issue races against is a client-paced response write. A
+     * streaming handler holds its connection across exactly the stretch the watchdog gives the
+     * permit away in, and the bulkhead would then over-issue the one resource it exists to reserve.
+     * The two are coupled; the watchdog's javadoc says so, and this is the test that keeps it true.
+     *
+     * <p>So the tripwire keeps this surface synchronous, and makes a future streaming report a
+     * deliberate edit that must decide what a permit means across the async gap — and what a forced
+     * release means while a connection is genuinely held — instead of inheriting either answer by
+     * silence.
+     */
+    @Test
+    void noExpensiveReadHandlerIsAsynchronous() throws Exception {
+        var asynchronous = new LinkedHashSet<String>();
+        var probed = new ArrayList<String>();
+
+        for (var handler : expensiveReadSurface()) {
+            var handlerMethod = handler.handler();
+            probed.add(handler.method() + " " + handler.uri());
+            for (var candidate : returnTypes(handlerMethod.getMethod().getGenericReturnType())) {
+                for (var async : ASYNC_RETURN_TYPES) {
+                    if (async.isAssignableFrom(candidate)) {
+                        asynchronous.add(handlerMethod.getBeanType().getSimpleName() + "."
+                                         + handlerMethod.getMethod().getName() + " -> "
+                                         + candidate.getSimpleName());
+                    }
+                }
+            }
+        }
+
+        assertThat(probed)
+                .as("the expensive-read surface came back almost empty, so this tripwire is "
+                    + "guarding nothing — a controller package moved, or no registration carries "
+                    + "an occupancy bound any more")
+                .hasSizeGreaterThan(5);
+
+        assertThat(asynchronous)
+                .as("""
+
+                    AN ASYNCHRONOUS HANDLER APPEARED ON THE EXPENSIVE-READ SURFACE, AND IT OWES \
+                    THE PERMIT AN ANSWER.
+
+                    Requests here hold one permit out of app.expensive-read.max-in-flight for as \
+                    long as they run. Spring does not call afterCompletion when a handler starts \
+                    async processing (afterConcurrentHandlingStarted runs instead, and the whole \
+                    interceptor chain runs again on the ASYNC dispatch), so \
+                    PrincipalThrottleInterceptor releases the permit AT THE ASYNC GAP: nothing \
+                    leaks, and the asynchronous part of your request occupies NOTHING. For a \
+                    streaming report that is precisely backwards — the streaming is the expensive \
+                    part.
+
+                    Decide, and write the decision down: either keep the handler synchronous (a \
+                    report that buffers is what every other one here does), or extend the permit \
+                    across the gap and prove the release on the async dispatch, the timeout \
+                    dispatch AND the error dispatch. Do not simply add the handler and leave this \
+                    test edited.""")
+                .isEmpty();
+    }
+
+    /**
+     * <strong>Every pattern the occupancy bound is registered on has a handler the tripwires above
+     * actually scan</strong> (HD-182 review) — the seal on the derivation itself.
+     *
+     * <p>{@link #expensiveReadSurface()} is a union, and a union is only as good as its second
+     * half. If a bound pattern matched no scanned handler, both tripwires would be back to the
+     * package list while reading as though they covered the whole surface — which is the state
+     * this review found: the storage breakdown was on the bound, in a package neither list named,
+     * and therefore invisible to both.
+     *
+     * <p>Phrased over patterns rather than over the handler that exposed it, so it stays true as
+     * endpoints move: it also fails on a registration whose pattern matches nothing at all, which
+     * is dead configuration wearing a bulkhead's clothes.
+     */
+    @Test
+    void everyOccupancyBoundedPatternHasAHandlerOnTheScannedSurface() {
+        var scanned = expensiveReadSurface();
+
+        for (var pattern : concurrencyBoundedPatterns()) {
+            assertThat(scanned)
+                    .as("no scanned handler matches the occupancy-bounded pattern %s — either the "
+                        + "pattern matches nothing (dead configuration) or the scan cannot see the "
+                        + "handlers it covers, which puts both tripwires back to the package list "
+                        + "while every document says otherwise", pattern.getPatternString())
+                    .anyMatch(handler -> pattern.matches(PathContainer.parsePath(handler.uri())));
+        }
     }
 
     /**
@@ -447,6 +721,128 @@ class ThrottleCoverageTest {
                 .filter(PrincipalThrottleInterceptor.class::isInstance)
                 .map(PrincipalThrottleInterceptor.class::cast)
                 .toList();
+    }
+
+    /**
+     * <strong>The handlers the two tripwires above scan — derived from the RUNTIME, so their scope
+     * is the bound's scope</strong> (HD-182 review).
+     *
+     * <p>It is the union of two questions, and both halves are load-bearing:
+     *
+     * <ul>
+     *   <li><strong>Every handler under {@link #THROTTLED_PACKAGES}</strong>, which is what makes
+     *       {@code everyExpensiveReadHandlerIsAlsoConcurrencyBounded} able to FAIL: a new report
+     *       controller that lands with a rate budget and no occupancy bound is caught because it is
+     *       in scope by package, not by being bounded.</li>
+     *   <li><strong>Every handler an occupancy-bounded interceptor is actually in front of</strong>,
+     *       whatever package it lives in. This half is why the async tripwire now sees
+     *       {@code WorkspaceStorageController}: the storage breakdown is on the bound
+     *       ({@code /api/workspaces/*}{@code /storage/projects} is registered in
+     *       {@code ReportRateLimitConfig}) while living in {@code workspace.controller}, so a
+     *       package list could not see it — and a {@code StreamingResponseBody} on a grouped
+     *       aggregate over every attachment row is the most plausible way this surface goes
+     *       asynchronous. It passed green before this, while making the bound weaker than every
+     *       document claims.</li>
+     * </ul>
+     *
+     * <p>The second half is read from the interceptor registrations of <em>every</em>
+     * {@link WebMvcConfigurer} in the context rather than from the three this class autowires, so a
+     * fourth configurer is in scope by existing. That is the rule this file keeps re-learning: a
+     * throttle is earned by the work a handler does, not by where it is mounted, and two lists that
+     * happen to agree are one commit away from not agreeing.
+     */
+    private List<ProbedHandler> expensiveReadSurface() {
+        var boundedPatterns = concurrencyBoundedPatterns();
+        var surface = new ArrayList<ProbedHandler>();
+
+        for (var entry : handlerMapping.getHandlerMethods().entrySet()) {
+            var beanType = entry.getValue().getBeanType();
+            if (CONCURRENCY_EXEMPT.contains(beanType)) {
+                continue;
+            }
+            var patterns = Objects.requireNonNull(entry.getKey().getPathPatternsCondition(),
+                                                  "a handler with no path patterns to probe");
+            for (var pattern : patterns.getPatterns()) {
+                var method = httpMethod(entry.getKey().getMethodsCondition().getMethods());
+                var uri = concrete(pattern.getPatternString());
+                boolean bound = boundedPatterns.stream()
+                        .anyMatch(bounded -> bounded.matches(PathContainer.parsePath(uri)));
+                if (mustBeThrottled(beanType) || bound) {
+                    surface.add(new ProbedHandler(entry.getValue(), method, uri,
+                                                  pattern.getPatternString()));
+                }
+            }
+        }
+        return surface;
+    }
+
+    /**
+     * Every path pattern an occupancy-bounded {@link PrincipalThrottleInterceptor} is registered
+     * on, across every configurer in the context.
+     *
+     * <p>Read from the registrations rather than by probing every mapped handler through
+     * {@code getHandler}: a probe has to satisfy a mapping's {@code consumes}, {@code produces},
+     * {@code params} and {@code headers} conditions before a chain comes back at all, so a
+     * multipart or content-negotiated handler would silently answer "no chain" and drop out of the
+     * scanned set — the exact hole this method exists to close, reintroduced by the mechanism that
+     * closed it.
+     */
+    private Set<PathPattern> concurrencyBoundedPatterns() {
+        var parser = new PathPatternParser();
+        var patterns = new LinkedHashSet<PathPattern>();
+
+        for (var configurer : webMvcConfigurers) {
+            var registry = new ExposedRegistry();
+            configurer.addInterceptors(registry);
+            for (var registered : registry.registered()) {
+                var interceptor = registered instanceof MappedInterceptor mapped
+                        ? mapped.getInterceptor()
+                        : registered;
+                if (!(interceptor instanceof PrincipalThrottleInterceptor throttle)
+                        || throttle.concurrencyBound() == null) {
+                    continue;
+                }
+                assertThat(registered)
+                        .as("an occupancy bound was registered with NO path patterns, so a share of "
+                            + "the connection pool is spent on EVERY request in the application")
+                        .isInstanceOf(MappedInterceptor.class);
+                var includes = Objects.requireNonNull(
+                        ((MappedInterceptor) registered).getIncludePathPatterns(),
+                        "an occupancy bound was registered with excludes or method conditions but "
+                        + "no INCLUDE patterns — state the paths positively");
+                for (var include : includes) {
+                    patterns.add(parser.parse(include));
+                }
+            }
+        }
+
+        assertThat(patterns)
+                .as("no interceptor registration in this context carries an occupancy bound, so "
+                    + "both tripwires below would be guarding the package list alone and the "
+                    + "expensive-read surface would be unbounded")
+                .isNotEmpty();
+        return patterns;
+    }
+
+    /** One mapped handler, with the concrete URI the probes use for it. */
+    private record ProbedHandler(HandlerMethod handler, String method, String uri, String pattern) {
+        String describe() {
+            return method + " " + pattern + "  (" + handler.getBeanType().getSimpleName() + ")";
+        }
+    }
+
+    /** A return type and every type argument it carries, as raw classes. */
+    private static List<Class<?>> returnTypes(java.lang.reflect.Type type) {
+        var found = new ArrayList<Class<?>>();
+        if (type instanceof Class<?> raw) {
+            found.add(raw);
+        } else if (type instanceof java.lang.reflect.ParameterizedType parameterized) {
+            found.addAll(returnTypes(parameterized.getRawType()));
+            for (var argument : parameterized.getActualTypeArguments()) {
+                found.addAll(returnTypes(argument));
+            }
+        }
+        return found;
     }
 
     private static boolean mustBeThrottled(Class<?> beanType) {

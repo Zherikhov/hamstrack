@@ -18,10 +18,17 @@ import { ApiResponseError } from './apiError'
  *    (422 is also the HQL validation status: a malformed query is not going to
  *    parse on the second attempt either, so not retrying is right there too.)
  *
- *  • **429** — the rate limiter answers with `Retry-After`. An immediate
- *    automatic retry ignores the wait it was just handed and burns another slot.
- *    The wait is surfaced to the reader instead (`RateLimitNotice`), who retries
- *    when the countdown says they may.
+ *  • **429** — the refusal answers with `Retry-After`. An immediate automatic
+ *    retry ignores the wait it was just handed and burns another slot. The wait
+ *    is surfaced to the reader instead (`RateLimitNotice`), who retries when the
+ *    countdown says they may. This is a rule about the *status*, and it stays one
+ *    even though a 429 no longer names a single control: since HD-182 the same
+ *    code carries a per-minute budget's refusal and two occupancy refusals, and
+ *    the one of them whose obstacle really does clear in about a second
+ *    (`TOO_MANY_IN_FLIGHT`) is retried **once, inside `request()`**, where the
+ *    body's `errorType` is in hand. By the time an error reaches this predicate
+ *    that retry has already happened and failed, so retrying here would be the
+ *    second — which is the one nobody wants.
  *
  * Everything else keeps the historical behaviour: exactly one retry, which is
  * what a transient 5xx or a dropped connection deserves.

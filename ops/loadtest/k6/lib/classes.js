@@ -52,6 +52,18 @@ export const budget422 = new Counter('hs_budget_422');
 export const refused429 = new Rate('hs_refused_429');
 export const rebalance429 = new Rate('hs_rebalance_429');
 
+// The two 429s HD-182 added, split from the per-minute budgets they share a status with.
+// A refusal here says "too many of these were RUNNING", not "you asked too often", and the
+// two answer different questions about an instance: a minute-budget refusal at an entitled
+// rate means the harness and the box disagree about the entitlement, while an occupancy
+// refusal at that same rate is the bulkhead doing its job. Both are still counted in
+// hs_refused_429 above — a refused user is refused — so the ladder's breach point is
+// unaffected; these two are ATTRIBUTION, and they are separate Rates rather than a `kind`
+// tag on one because a Rate needs its false samples in the same sub-metric, and a tag that
+// only exists on the true ones makes every rate read 1.
+export const occupancy429 = new Rate('hs_occupancy_429');
+export const minuteBudget429 = new Rate('hs_minute_budget_429');
+
 // 409 + Retry-After on writes: row-lock contention. A retryable refusal is a correct
 // answer at low rates; above about one in a hundred the product is asking users to retry
 // more often than they will tolerate.
@@ -285,7 +297,13 @@ export function record(res, cls, tags) {
   }
 
   const isRebalance = res.status === 429 && /rank|rebalance/i.test(res.body || '');
+  const isOccupancy = res.status === 429 &&
+    /TOO_MANY_IN_FLIGHT|EXPENSIVE_SURFACE_BUSY/.test(res.body || '');
   refused429.add(res.status === 429 && !isRebalance, t);
+  // Sampled on EVERY response, like refused429 and for the same reason: a Rate whose false
+  // samples live somewhere else is a Rate that always reads 1.
+  occupancy429.add(isOccupancy, t);
+  minuteBudget429.add(res.status === 429 && !isRebalance && !isOccupancy, t);
   if (cls === CLASS.WRITE) {
     rebalance429.add(isRebalance, t);
     conflict409.add(res.status === 409, t);

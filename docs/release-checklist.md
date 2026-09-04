@@ -410,6 +410,36 @@ produces an error.
 > Details:
 > [PostgreSQL is bounded and tuned from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#postgresql-is-bounded-and-tuned-from-0180).
 
+And the expensive-read bulkhead, which is in this class for a reason worth naming rather than
+inheriting: it does not merely resize something, it introduces a **refusal that did not exist**
+on endpoints that always answered. Its break-even is not a host size — it is concurrency, and a
+box too small to have been slow yesterday is exactly the one that meets it today:
+
+> **Reports and searches are now bounded by how many run AT ONCE, not only by how often they
+> are asked for (`EXPENSIVE_READ_MAX_IN_FLIGHT`, default 6 of a pool of 10; 3 per user).**
+> Before 0.18.0 nothing bounded concurrency on that surface, and one user inside their
+> documented per-minute allowance could hold the whole connection pool — measured, not
+> theorised: every other endpoint on the instance then failed after waiting 30 s for a
+> connection. From now on a request over the share waits up to a second and is then refused
+> **`429`** with `Retry-After: 1` and `errorType` `TOO_MANY_IN_FLIGHT` (your own requests) or
+> `EXPENSIVE_SURFACE_BUSY` (the instance's). **On a small busy instance this is a `429` where
+> yesterday there was a slow `200`** — nothing was computed and the identical retry succeeds.
+> The trade is deliberate: the expensive surface refuses in milliseconds so the rest of the API
+> keeps its connections. To give reports more room, raise `DB_POOL_MAX_SIZE` **first** and then
+> `EXPENSIVE_READ_MAX_IN_FLIGHT` (an explicit value must stay strictly below the pool, or the app
+> refuses to start). **One line to check before pulling, and only if you pin the share:** while
+> `EXPENSIVE_READ_MAX_IN_FLIGHT` is unset it is derived from your pool (60 % of it, capped at 6),
+> so an install that has never named it upgrades cleanly on any pool size — but an install with
+> the line uncommented needs that number below its `DB_POOL_MAX_SIZE`, or the container will
+> crash-loop with a startup message naming both. `grep '^EXPENSIVE_READ_MAX_IN_FLIGHT=' .env` —
+> anchored, because an unanchored grep also matches
+> `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL`, which is a different variable measured against a
+> different number: it is compared with the **share**, not with the pool, and pinning it while the
+> share is derived narrows it with a WARN instead of refusing to boot. To
+> remove the bound: `EXPENSIVE_READ_LIMIT_ENABLED=false` — and note that
+> `RATE_LIMIT_ENABLED=false` deliberately does **not** turn it off. Details:
+> [Expensive reads are bounded by concurrency from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#expensive-reads-are-bounded-by-concurrency-from-0180).
+
 And one line that changes no default but answers a question every one of the lines above
 makes an operator ask:
 

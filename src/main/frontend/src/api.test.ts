@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest'
 import {
-  apiGetBacklogSection, apiMe, apiRankIssue, apiUpdateIssue, ApiResponseError,
+  apiGetBacklogSection, apiGetWorkspaceStorageByProject, apiMe, apiRankIssue, apiSearch,
+  apiSearchSchema, apiUpdateIssue, ApiResponseError, savedFilters,
   filenameFromDisposition, reportCsvPath,
+  TOO_MANY_IN_FLIGHT, EXPENSIVE_SURFACE_BUSY,
 } from './api'
 import type { RankIssuePayload, UpdateIssuePayload } from './api'
 import { useAuthStore } from './auth'
@@ -332,5 +334,184 @@ describe('backlog section fetch', () => {
     // what it delivered, so the knob does not apply and is not sent.
     await apiGetBacklogSection('w1', 'p1', 'sp-7', { includeDone: true })
     expect(urlOf(fetchMock).searchParams.get('includeDone')).toBeNull()
+  })
+})
+
+// ── HD-182: three refusals share status 429, and only one may be re-sent ──────
+//
+// The expensive-read surface (search, insights, saved filters, the storage
+// breakdown, reports) now answers 429 for three different reasons, told apart by
+// `errorType` and by nothing else. `request()` retries exactly one of them, once.
+//
+// The negative cases are the ones that matter here: an over-eager retry is
+// indistinguishable from correct behaviour until the surface is actually
+// saturated, at which point the client is amplifying the shortage it was told
+// about. Nothing in CI runs these tests (HD-242), so they exist for a reviewer.
+
+/** A 429 as the server writes it: `errorType` in the body, `Retry-After` in the header. */
+function throttledResponse(errorType: string | null, retryAfter: string): Response {
+  const body: Record<string, string> = { detail: 'Refused.' }
+  if (errorType) body.errorType = errorType
+  return new Response(JSON.stringify(body), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Retry-After': retryAfter },
+  })
+}
+
+/**
+ * Advances past the one-second wait `request()` honours before its retry, so the
+ * suite does not spend a real second per case. Chunked, because the timer is
+ * scheduled by a promise chain that has to settle first.
+ */
+async function runThroughTheRetryWait(): Promise<void> {
+  for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(200)
+}
+
+describe('the one 429 that is retried is chosen by errorType, not by the status', () => {
+  const SCHEMA = { fields: [] }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('retries a TOO_MANY_IN_FLIGHT GET exactly once, then returns the second answer', async () => {
+    vi.useFakeTimers()
+    let calls = 0
+    globalThis.fetch = vi.fn<FetchFn>(async () => {
+      calls++
+      return calls === 1
+        ? throttledResponse(TOO_MANY_IN_FLIGHT, '1')
+        : jsonResponse(200, SCHEMA)
+    })
+
+    const promise = apiSearchSchema('w1')
+    await runThroughTheRetryWait()
+
+    await expect(promise).resolves.toEqual(SCHEMA)
+    expect(calls).toBe(2)
+  })
+
+  it('surfaces the refusal when the single retry is refused too — and does not go again', async () => {
+    // The whole risk of a silent retry is that it hides a real refusal. It must
+    // stop at two attempts and hand the second failure to the caller unchanged,
+    // errorType and all, so the banner is the one the server wrote.
+    vi.useFakeTimers()
+    let calls = 0
+    globalThis.fetch = vi.fn<FetchFn>(async () => {
+      calls++
+      return throttledResponse(TOO_MANY_IN_FLIGHT, '1')
+    })
+
+    // The handler is attached before the clock moves: the rejection happens
+    // while we are advancing timers, and `expect(...).rejects` afterwards would
+    // catch it a tick too late for Node to call it handled.
+    const settled = apiSearchSchema('w1').then(() => null, (e: unknown) => e as ApiResponseError)
+    await runThroughTheRetryWait()
+
+    expect(await settled).toMatchObject({
+      status: 429,
+      errorType: TOO_MANY_IN_FLIGHT,
+      detail: 'Refused.',
+    })
+    expect(calls).toBe(2)
+  })
+
+  it('NEVER retries EXPENSIVE_SURFACE_BUSY — the caller may hold no permit at all', async () => {
+    // The negative case this block exists for. Retrying a full shared surface is
+    // what makes it fuller, and the reader is not the one occupying it.
+    const fetchMock = vi.fn<FetchFn>(async () =>
+      throttledResponse(EXPENSIVE_SURFACE_BUSY, '1'))
+    globalThis.fetch = fetchMock
+
+    await expect(apiSearchSchema('w1')).rejects.toMatchObject({
+      status: 429,
+      errorType: EXPENSIVE_SURFACE_BUSY,
+      // `Retry-After: 1` here means "the obstacle is a request that ends
+      // shortly", not "the window has one second left" — it is carried to the
+      // reader, never acted on by this client.
+      retryAfter: 1,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('NEVER retries the per-minute budget 429, which carries no errorType at all', async () => {
+    const fetchMock = vi.fn<FetchFn>(async () => throttledResponse(null, '37'))
+    globalThis.fetch = fetchMock
+
+    const err = await apiSearchSchema('w1').then(() => null, (e: unknown) => e as ApiResponseError)
+    // The wait is a window rolling, not a request ending — and the ABSENT
+    // errorType is exactly what marks it as the refusal with no fast remedy.
+    expect(err).toMatchObject({ status: 429, retryAfter: 37 })
+    expect(err?.errorType).toBeUndefined()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('NEVER retries a 429 whose errorType this build has not heard of', async () => {
+    // A fourth refusal must be a deliberate edit of the branch. Until someone
+    // makes it, an unknown code inherits the safe answer.
+    const fetchMock = vi.fn<FetchFn>(async () =>
+      throttledResponse('SOME_LATER_REFUSAL', '1'))
+    globalThis.fetch = fetchMock
+
+    await expect(apiSearchSchema('w1')).rejects.toMatchObject({
+      status: 429,
+      errorType: 'SOME_LATER_REFUSAL',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the retry follows what a call DOES, not what budget it is on', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('retries POST …/search: a POST because the query is a body, not because it writes', async () => {
+    vi.useFakeTimers()
+    const page = { content: [], page: 0, size: 50, totalElements: 0, totalPages: 0, hasNext: false }
+    let calls = 0
+    globalThis.fetch = vi.fn<FetchFn>(async () => {
+      calls++
+      return calls === 1 ? throttledResponse(TOO_MANY_IN_FLIGHT, '1') : jsonResponse(200, page)
+    })
+
+    const promise = apiSearch('w1', { query: 'status = Open' })
+    await runThroughTheRetryWait()
+
+    await expect(promise).resolves.toEqual(page)
+    expect(calls).toBe(2)
+  })
+
+  it('does NOT retry a saved-filter create, which is on the same budget and is a write', async () => {
+    // Saved-filter CRUD is throttled with the search reads because validating a
+    // filter's HQL costs what /search/schema costs. That is a statement about
+    // price, not about safety: a second create is a second create.
+    const fetchMock = vi.fn<FetchFn>(async () => throttledResponse(TOO_MANY_IN_FLIGHT, '1'))
+    globalThis.fetch = fetchMock
+
+    await expect(savedFilters.create('w1', { name: 'Mine', hql: 'status = Open' }))
+      .rejects.toMatchObject({ status: 429, errorType: TOO_MANY_IN_FLIGHT })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // …and neither is the delete, for the same reason.
+    fetchMock.mockClear()
+    await expect(savedFilters.remove('w1', 'f1')).rejects.toMatchObject({ status: 429 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries the storage breakdown, a GET on the same surface as the reports', async () => {
+    vi.useFakeTimers()
+    const breakdown = { projects: [] }
+    let calls = 0
+    globalThis.fetch = vi.fn<FetchFn>(async () => {
+      calls++
+      return calls === 1 ? throttledResponse(TOO_MANY_IN_FLIGHT, '1') : jsonResponse(200, breakdown)
+    })
+
+    const promise = apiGetWorkspaceStorageByProject('w1')
+    await runThroughTheRetryWait()
+
+    await expect(promise).resolves.toEqual(breakdown)
+    expect(calls).toBe(2)
   })
 })

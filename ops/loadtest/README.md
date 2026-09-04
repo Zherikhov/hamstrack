@@ -14,8 +14,10 @@ target, and **which resource breached**, named with the metric that shows it. Th
 the smaller half; "the server is too small" and "the application serialises on something"
 call for opposite responses, and today we cannot tell them apart.
 
-**What this is not:** a fix for anything it finds. Findings become tickets. HD-182 is
-already open and waiting for exactly this.
+**What this is not:** a fix for anything it finds. Findings become tickets — the harness
+measures and reports, and every remedy it implies belongs to whichever ticket the finding
+becomes. (Probe P1's first run produced HD-182, the expensive-read occupancy bound, which is
+why the P1 notes in `probes.js` say what the product now does instead of what it did then.)
 
 ---
 

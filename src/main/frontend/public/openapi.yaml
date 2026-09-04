@@ -185,6 +185,12 @@ info:
     as it does for lock contention. Being a `403`, it does not interact with the
     "check `Retry-After` first" rule, which sorts `409`s only.
 
+    A `429` can carry it too, on the expensive-read surface, and there the
+    absence rule is what tells the refusals apart: an occupancy refusal names
+    itself in `errorType`, while the per-minute budget carries none — so a `429`
+    without one is the budget, not an unknown cause. See
+    `ConcurrencyLimitedProblemDetail`.
+
     **A color is a hex literal, everywhere one is accepted.** Wherever this API
     takes a color — a label, a status/priority/issue-type swatch, a custom-field
     select option — the value is `#RRGGBB`, plus `#RRGGBBAA` on the two
@@ -242,6 +248,20 @@ info:
     opposite of every per-principal budget on this API: a workspace the caller
     cannot see answers `404` even when the caller is over a ceiling. See
     `inviteMember`.
+
+    **Asking too often is not the only way to be refused on the expensive-read
+    surface.** The reports paths, `…/search/**`, `…/filters/**` and
+    `GET /workspaces/{workspaceId}/storage/projects` are additionally bounded by
+    **how many of their requests may be running at once** — a bound per caller
+    and a bound across the whole instance — so that the rest of the API always
+    keeps a share of the database connection pool however busy that surface
+    gets. These refusals are `429`, like the budgets above, but they carry an
+    `errorType` and the budgets do not: **a `429` on this surface names its own
+    cause, so read `errorType` rather than assuming which one you got**, and
+    branch on it rather than on the status alone. `Retry-After` here also does
+    not mean what it means on a per-minute budget — see
+    `ConcurrencyLimitedProblemDetail`, where the causes, their remedies and that
+    difference are written down once.
 
     **Writing costs a budget too.** Every **mutating** request under
     `…/projects/*/issues/**` — issue, comment, attachment and backlog-rank
@@ -398,14 +418,22 @@ tags:
       than assumed.
 
 
-      The per-principal budgets — this one and the search budget over
-      `…/search/**` and `…/filters/**` — are **the one place in this API where
-      `429` precedes `404`**: they run in interceptors, before the workspace and
-      project are resolved, so a caller over budget is refused even for a project
-      they cannot see. The
-      budget is keyed on the caller and never on the project, which is what keeps
-      that refusal free of tenancy information — the `429` is identical for a
-      real project, a nonexistent one and somebody else's.
+      Refusals on this surface — the per-principal budgets over `…/reports/**`,
+      `…/search/**` and `…/filters/**`, and the bound on how many of their
+      requests may run at once — are **where `429` precedes `404` in this API**:
+      they run in interceptors, before the workspace and project are resolved, so
+      a refused caller is refused even for a project they cannot see. Nothing
+      there is keyed on the project, which is what keeps those refusals free of
+      tenancy information — the `429` is identical for a real project, a
+      nonexistent one and somebody else's.
+
+
+      **Being inside a budget is not the same as being admitted.** A report may
+      also be refused because too many expensive reads are already running, on
+      this caller's own account or across the instance; that refusal carries an
+      `errorType` where the budget carries none, and
+      `ConcurrencyLimitedProblemDetail` says which is which and what each one
+      asks of a client.
 
 
       Two things vary between reports rather than across them. **Not every
@@ -2312,11 +2340,14 @@ paths:
         and an unknown workspace are both `404`, as everywhere in this API.
 
 
-        **On the reports budget** (`app.reports.requests-per-minute`, 60/min by
-        default), spent from the same pot as `…/reports/**` and
-        `POST …/search/insights` — the response is small but the work is a
-        grouped aggregate over every attachment row in the workspace, which is
-        that budget's denomination. Past it: `429` + `Retry-After`.
+        **On the expensive-read surface** — the response is small but the work is
+        a grouped aggregate over every attachment row in the workspace, which is
+        what earns it a bound. It spends the reports budget
+        (`app.reports.requests-per-minute`, 60/min by default) from the same pot
+        as `…/reports/**` and `POST …/search/insights`, and it is inside the same
+        bound on how many expensive reads may run at once. Past either: `429` +
+        `Retry-After`, with `errorType` naming which — see the `429` response
+        below.
 
 
         `unattributedBytes` is published rather than folded away: it is the
@@ -2335,7 +2366,7 @@ paths:
               schema: { $ref: '#/components/schemas/WorkspaceStorageByProjectResponse' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
-        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '429': { $ref: '#/components/responses/ReportThrottled' }
 
   /workspaces/accept-invite:
     post:
@@ -8868,6 +8899,16 @@ components:
           schema: { $ref: '#/components/schemas/ProblemDetail' }
     ReportThrottled:
       description: >-
+        **More than one refusal shares this status on this path, and `errorType`
+        is what tells them apart — read it rather than assuming which one you
+        got.** Absent, it is the per-minute budget described below. Present, it
+        is the bound on how many expensive reads may be running **at once**,
+        whose causes, remedies and deliberately different `Retry-After` meaning
+        are written down in `ConcurrencyLimitedProblemDetail`. The two are not
+        interchangeable: one is cleared by asking less often, the other by
+        something finishing.
+
+
         Past this caller's report budget (`app.reports.requests-per-minute`,
         60/min by default, in-memory per app node and disabled wholesale by
         `app.rate-limit.enabled=false`). A **retryable throttle, not a fault**:
@@ -8902,10 +8943,11 @@ components:
         budget as a side effect. Do not assume which one governs: it follows from
         whatever an operator has configured, so lowering *either* property lowers
         the panel. **A panel refresh therefore competes with report fetches *and*
-        with searches.** The per-principal budgets — this one and the search
-        budget — are therefore **the only `429`s in this API spent before the
-        resource is resolved**: an over-budget caller is refused even for a
-        project they cannot see. The invitation ceilings on
+        with searches.** Every refusal spent in these interceptors — both
+        per-principal budgets and the occupancy bound alike — is therefore
+        **spent before the resource is resolved**, which is what makes this the
+        part of the API where a `429` can precede a `404`: a refused caller is
+        refused even for a project they cannot see. The invitation ceilings on
         `POST …/workspaces/{workspaceId}/invites` are the deliberate
         counter-case — spent **after** the workspace is resolved, so that
         refusal can never precede a `404` (see `InviteThrottled`). Keying
@@ -8913,13 +8955,34 @@ components:
         tenancy information — and it means the budget bounds one **user**, not
         one workspace: aggregate report load still scales with the number of
         members asking.
+
+
+        **The occupancy bound is the other half of this response.** The same
+        paths are additionally bounded by how many of their requests may run at
+        once — per caller, and across the whole instance — so that the rest of
+        the API always keeps a share of the connection pool. Those refusals carry
+        an `errorType` and this one does not, they are unaffected by
+        `app.rate-limit.enabled`, and their `Retry-After` means something else
+        entirely; `ConcurrencyLimitedProblemDetail` says what each one means and
+        which of them is safe to retry.
       headers:
         Retry-After:
-          description: Seconds to wait before retrying
-          schema: { type: integer }
+          description: >-
+            Seconds to wait — but **read `errorType` before you read this
+            header**, because its meaning follows the refusal. On the per-minute
+            budget (no `errorType`) it counts down the current window, can say up
+            to 60, and waiting it out is the whole remedy. On an occupancy
+            refusal it is always `1` and means *the obstacle is a request that
+            ends shortly*, not *the window has one second left* — so never carry
+            a backoff derived from one over to the other. See
+            `ConcurrencyLimitedProblemDetail`.
+          schema: { type: integer, example: 1 }
       content:
         application/problem+json:
-          schema: { $ref: '#/components/schemas/ProblemDetail' }
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/ConcurrencyLimitedProblemDetail'
     ReportSprintNotFound:
       description: >-
         The family's `404` — an unknown workspace, an unknown project, a project
@@ -8953,6 +9016,15 @@ components:
 
     SearchThrottled:
       description: >-
+        **More than one refusal shares this status on these paths, and
+        `errorType` is what tells them apart — read it rather than assuming which
+        one you got.** Absent, it is the per-minute budget described below.
+        Present, it is the bound on how many expensive reads may be running **at
+        once**; `ConcurrencyLimitedProblemDetail` carries the causes, the
+        remedies and the reason `Retry-After` does not mean here what it means on
+        a budget.
+
+
         Past this caller's **search** budget (`app.search.requests-per-minute`,
         120/min by default, in-memory per app node, disabled wholesale by
         `app.rate-limit.enabled=false`). A retryable throttle, not a fault: nothing
@@ -8992,13 +9064,32 @@ components:
         removing that binding would raise the panel’s allowance to the search
         budget as a side effect. Lowering *either* property lowers the panel, so
         do not assume which one governs. See `ReportThrottled`.
+
+
+        **These paths carry the occupancy bound as well**, spent by the same
+        interceptor: `POST …/search` runs its whole predicate twice and a
+        saved-filter write builds the same resolution context `…/search/schema`
+        pays for, so how many of them run at once is bounded as well as how often
+        they may be asked. That refusal names itself in `errorType`, survives
+        `app.rate-limit.enabled=false`, and reads its `Retry-After` differently —
+        see `ConcurrencyLimitedProblemDetail`.
       headers:
         Retry-After:
-          description: Seconds to wait before retrying
-          schema: { type: integer }
+          description: >-
+            Seconds to wait — but **read `errorType` before you read this
+            header**, because its meaning follows the refusal. On the per-minute
+            budget (no `errorType`) it counts down the current window, can say up
+            to 60, and waiting it out is the whole remedy. On an occupancy
+            refusal it is always `1` and means *the obstacle is a request that
+            ends shortly*, not *the window has one second left*. See
+            `ConcurrencyLimitedProblemDetail`.
+          schema: { type: integer, example: 1 }
       content:
         application/problem+json:
-          schema: { $ref: '#/components/schemas/ProblemDetail' }
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/ProblemDetail'
+              - $ref: '#/components/schemas/ConcurrencyLimitedProblemDetail'
     ReportCsvNotAcceptable:
       description: >-
         The request `Accept` header excludes `text/csv`. These operations declare
@@ -9305,6 +9396,77 @@ components:
             errorType:
               type: string
               enum: [STATEMENT_BUDGET_EXCEEDED]
+
+    ConcurrencyLimitedProblemDetail:
+      description: >-
+        The `429` body of a request refused for running **at the same time** as
+        too many others on the expensive-read surface — the reports paths,
+        `…/search/**`, `…/filters/**` and
+        `GET /workspaces/{workspaceId}/storage/projects`. It is not the
+        per-minute budget: nothing was spent, the caller may be well inside every
+        budget they hold, and what stood in the way was work already running.
+
+
+        The bound exists so that the rest of the API always keeps a share of the
+        instance's database connections however busy this surface gets. It is
+        counted per app node, because the connections it protects are too, and it
+        has an off switch of its own rather than sharing the master rate-limit
+        one — an instance with rate limiting disabled still answers it.
+
+
+        **A `429` on this surface names its own cause in `errorType`; check it
+        rather than assuming which one you got.** The causes today:
+
+
+        * `TOO_MANY_IN_FLIGHT` — **your own** requests are occupying your share
+        of the surface. Let one finish: close the extra tab, stop the loop, stop
+        firing the same read in parallel. Nothing was computed, so the identical
+        request is safe to repeat, and a UI may retry **once** after the hinted
+        delay.
+
+
+        * `EXPENSIVE_SURFACE_BUSY` — the **instance** is running as many
+        expensive requests at once as it can. You may hold none of them, so there
+        is nothing about your own conduct to change and reducing your concurrency
+        need not help. Retry shortly, but **not immediately and not
+        automatically**: retrying a saturated shared resource is what keeps it
+        saturated. Offer a person a manual retry instead.
+
+
+        The body carries no count, no principal and no tenant, deliberately:
+        `EXPENSIVE_SURFACE_BUSY` says the instance is busy and nothing about who
+        made it busy. Like the per-minute budgets, both are decided before the
+        workspace or project is resolved, so the refusal is identical for a real
+        workspace, a nonexistent one and somebody else's, and can answer no
+        question about a resource the caller cannot see — which is also why one
+        of these can precede a `404`.
+
+
+        **`Retry-After: 1` here means "the obstacle is a request that ends
+        shortly", not "the window has one second left".** The two readings are
+        not interchangeable, and a client that carries one over to the other will
+        hammer an instance that is already saturated. On a per-minute budget the
+        header counts down a clock, can say up to 60, and waiting it out *is* the
+        remedy; here it hints that another in-flight request will finish, usually
+        in tens of milliseconds. Obey the header in both cases, and do not read a
+        small value as permission to retry in a loop.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 429 }
+            detail:
+              type: string
+              description: >-
+                States the condition and, for `TOO_MANY_IN_FLIGHT` only, the
+                action its reader can actually take. It never names a
+                configuration property or an administrator: the numbers behind
+                the bound are the operator's, and on Cloud there is no operator
+                the caller can reach.
+              example: Too many of your requests are running at once — wait for one to finish.
+            errorType:
+              type: string
+              enum: [TOO_MANY_IN_FLIGHT, EXPENSIVE_SURFACE_BUSY]
 
     ReferenceConstraintProblemDetail:
       description: >-

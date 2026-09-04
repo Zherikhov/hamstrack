@@ -20,25 +20,45 @@ import { canary } from './lib/canary.js';
 const PROBE = (__ENV.PROBE || 'p1').toLowerCase();
 
 // ===========================================================================
-// PROBE P1 — the entitlement probe. Tests HD-182 directly.
+// PROBE P1 — the entitlement probe. It measured HD-182, and now it verifies the fix.
 //
 // One principal spends EXACTLY their documented allowance and no more: 120 search + 60
 // report requests per minute, no think time, capped CLIENT-SIDE at the entitlement so the
 // run cannot be dismissed as abuse. Simultaneously a VICTIM probe — a DIFFERENT principal
 // running the browsing mix at 5 VUs — measures what an ordinary user experiences.
 //
-//   THE PREDICTION HOLDS if the victim's `browse` class breaches its target, or Hikari
-//   `pending` stays above 0, WHILE the entitled principal receives no 429 at all. That is
-//   "one user, entirely within the rules, degrades everyone" — HD-182's premise.
+//   THE PREDICTION THIS PROBE ORIGINALLY CARRIED HAS BEEN DELIBERATELY FALSIFIED BY THE
+//   PRODUCT, AND THE WORDING BELOW IS THE INVERSION (HD-182). It used to read: the
+//   prediction HOLDS if the victim degrades WHILE the entitled principal receives no 429 at
+//   all. It did hold — worse than predicted, the 2026-08-31 run aborted after 32 s on
+//   dropped iterations — and the answer shipped was an OCCUPANCY bound: no principal, and
+//   no set of principals, may hold more than a stated share of a replica's connection pool
+//   through the expensive-read surface. So "the entitled principal receives no 429" is now
+//   the REGRESSION, not the confirmation. A harness that kept documenting the old
+//   prediction would be read as the product being wrong.
 //
-//   THE PREDICTION FAILS if the instance absorbs one fully-entitled principal with every
-//   target intact. Then the arithmetic (600 connection-seconds/minute supplied against 180
-//   requests/minute entitled, each able to hold a connection for the full statement bound)
-//   has over-estimated the ACTUAL hold time per request — and the number worth measuring
-//   instead is the REAL MEAN CONNECTION-HOLD TIME PER REQUEST CLASS, from Hikari's
-//   `hikaricp_connections_usage_seconds`. REPORT IT EITHER WAY: it is the number that makes
-//   HD-182 actionable rather than alarming, and it is new regardless of how the prediction
-//   comes out.
+//   THE FIX HOLDS if the victim's `browse` class stays INSIDE its target while the entitled
+//   principal receives 429s of the new kind — `hs_occupancy_429`, i.e. `errorType`
+//   TOO_MANY_IN_FLIGHT (their own share) or EXPENSIVE_SURFACE_BUSY (the instance's). Their
+//   own latency is still not a target: an entitled principal may be slow, and may now also
+//   be refused. Neither is the claim under test.
+//
+//   THE FIX DID NOT ENGAGE if there are no occupancy 429s at all. That is not a failure —
+//   it means this box absorbed one fully entitled principal without the surface ever
+//   filling, so the probe says nothing about the bulkhead either way. Record it as such
+//   rather than as a pass, and report the number below, which is what makes the difference
+//   legible.
+//
+//   REPORT REGARDLESS: the REAL MEAN CONNECTION-HOLD TIME PER REQUEST CLASS, from Hikari's
+//   `hikaricp_connections_usage_seconds`, and `hamstrack_expensive_read_in_flight` (max over
+//   replicas, never sum). The first is what the original arithmetic could only estimate; the
+//   second says whether the share was ever full. A value pinned at the ceiling AFTER the run
+//   ends has TWO readings, and `hamstrack_expensive_read_permit_force_released_total` separates
+//   them: FLAT means a LEAKED PERMIT — a permanent capacity loss on that replica until
+//   restart — while CLIMBING means slots were being HELD (a request whose body read or
+//   response write outlived the ceiling) and the watchdog took them back. k6 does not
+//   produce the second on purpose, so seeing it during a run means something else on that
+//   box was holding a connection open.
 //
 // The rates below are the ENTITLEMENT, not a load level. Do not raise them to "get a
 // better result": a probe that exceeds the allowance is measuring abuse and answers a
@@ -133,20 +153,27 @@ function buildOptions() {
       // is recorded and is NOT a target — it is allowed to be slow; that is not the claim
       // under test.
       //
-      // ITS REFUSALS ARE A TARGET, AND THAT IS THE HALF OF THE ENTITLEMENT CROSS-CHECK THAT
-      // CAN BE EXECUTED. P1 drives the entitled principal at exactly SEARCH_ENTITLEMENT /
-      // REPORT_ENTITLEMENT, which are asserted to be the box's own per-principal budgets, so
-      // the prediction is not "few 429s" but NONE AT ALL: a principal inside its entitlement
-      // that is refused has not been granted the entitlement this probe claims to be
-      // testing. Until now that cross-check lived only in a console.log asking the operator
-      // to compare two numbers by eye, and an advisory note is not a check.
+      // ITS MINUTE-BUDGET REFUSALS ARE A TARGET, AND THAT IS THE HALF OF THE ENTITLEMENT
+      // CROSS-CHECK THAT CAN BE EXECUTED. P1 drives the entitled principal at exactly
+      // SEARCH_ENTITLEMENT / REPORT_ENTITLEMENT, which are asserted to be the box's own
+      // per-principal budgets, so the expectation is not "few of them" but NONE AT ALL: a
+      // principal inside its entitlement that is refused BY THAT ENTITLEMENT has not been
+      // granted the entitlement this probe claims to be testing. Until this was a threshold
+      // the cross-check lived only in a console.log asking the operator to compare two
+      // numbers by eye, and an advisory note is not a check.
+      //
+      // IT IS THE MINUTE-BUDGET METRIC AND NOT hs_refused_429, WHICH IS THE HD-182 EDIT.
+      // Occupancy refusals (hs_occupancy_429) are counted in hs_refused_429 as well — a
+      // refused user is refused — so keying this threshold on that metric would now fail the
+      // probe for the product working as designed. The two are separate metrics precisely so
+      // one of them can stay a threshold while the other becomes an observation.
       //
       // IT IS ONE-SIDED, AND THE NOTE IN setup() COVERS THE OTHER SIDE. Configuring these
       // BELOW what the box grants also produces no 429 and passes — assuming too little is
       // invisible here and only the fingerprint comparison catches it. Assuming too MUCH now
       // fails the probe instead of quietly answering a question about a different instance.
       thresholds: Object.assign(thresholdsFor([CLASS.BROWSE]), {
-        'hs_refused_429{role:entitled}': ['rate==0'],
+        'hs_minute_budget_429{role:entitled}': ['rate==0'],
       }),
     };
   }

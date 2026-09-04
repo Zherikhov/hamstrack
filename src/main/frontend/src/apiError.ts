@@ -84,6 +84,35 @@ export interface ConflictInfo {
 export const STORAGE_QUOTA_EXCEEDED = 'STORAGE_QUOTA_EXCEEDED'
 
 /**
+ * The two `errorType`s the expensive-read occupancy bound refuses with (HD-182,
+ * ADR-0030). They share status **429** with each other and with the per-minute
+ * budget, so nothing but this field tells them apart.
+ *
+ * - **`TOO_MANY_IN_FLIGHT`** — too many of *this caller's own* requests are
+ *   running at once. The obstacle is the caller's own conduct and it clears as
+ *   soon as one of their requests finishes, which is why this is the only one of
+ *   the three that `api.ts` retries by itself, once.
+ * - **`EXPENSIVE_SURFACE_BUSY`** — the instance's expensive-read share is full.
+ *   The caller may hold **no** permit at all, so there is nothing for them to
+ *   stop doing and a retry is not a remedy, it is more load: never retry it
+ *   automatically. Render `detail` and let the reader decide.
+ *
+ * Both carry `Retry-After: 1`, and that number means *the obstacle is a request
+ * that ends shortly* — **not** *the window has one second left*. The
+ * lock-contention 409 uses the same value for the same reason. The per-minute
+ * budget's `Retry-After` is the other kind (a clock), which is why computing one
+ * of these the way that one is computed would be wrong by up to 60×.
+ *
+ * Named constants rather than literals at each branch, for
+ * {@link STORAGE_QUOTA_EXCEEDED}'s reason: a typo fails silently, by falling
+ * through to the branch that offers nothing.
+ */
+export const TOO_MANY_IN_FLIGHT = 'TOO_MANY_IN_FLIGHT'
+
+/** @see TOO_MANY_IN_FLIGHT — the refusal that must NEVER be retried automatically. */
+export const EXPENSIVE_SURFACE_BUSY = 'EXPENSIVE_SURFACE_BUSY'
+
+/**
  * The ProblemDetail extensions on that 409 — bytes, raw, all four together or
  * not at all.
  *

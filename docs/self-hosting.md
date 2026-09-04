@@ -45,6 +45,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Duplicate accounts after an upgrade](#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
   - [Free text is bounded from 0.18.0](#free-text-is-bounded-from-0180)
   - [Attachment storage is capped per workspace from 0.18.0](#attachment-storage-is-capped-per-workspace-from-0180)
+  - [Expensive reads are bounded by concurrency from 0.18.0](#expensive-reads-are-bounded-by-concurrency-from-0180)
 - [Backups](#backups)
   - [By hand](#by-hand)
   - [On a schedule](#on-a-schedule)
@@ -456,7 +457,7 @@ Full reference:
 | `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud` |
 | `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud` |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
-| `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections`. **The max is also a memory dial on the database, and `max_connections` is not the bound that bites first**: `POSTGRES_WORK_MEM` is charged per sort or hash node per *backend*, so this number is the `backends` in `work_mem × nodes × backends` — `4MB × ~4 × ~12` (this pool, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB** at the defaults, and `4MB × 4 × 52` ≈ **830 MB** at a pool of 50, against a `POSTGRES_MEMORY_LIMIT` of `512m`. Fifty connections sits comfortably under a stock `max_connections` of 100 and comfortably over that cgroup ceiling, where the failure is an OOM-killed backend — or postmaster, which takes every session with it — rather than a refused connection. **Raise `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit.** `DB_STATEMENT_TIMEOUT_MS` below is the other half of pool sizing: a longer statement bound holds each of these connections for longer |
+| `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections`. **The max is also a memory dial on the database, and `max_connections` is not the bound that bites first**: `POSTGRES_WORK_MEM` is charged per sort or hash node per *backend*, so this number is the `backends` in `work_mem × nodes × backends` — `4MB × ~4 × ~12` (this pool, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB** at the defaults, and `4MB × 4 × 52` ≈ **830 MB** at a pool of 50, against a `POSTGRES_MEMORY_LIMIT` of `512m`. Fifty connections sits comfortably under a stock `max_connections` of 100 and comfortably over that cgroup ceiling, where the failure is an OOM-killed backend — or postmaster, which takes every session with it — rather than a refused connection. **Raise `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit.** `DB_STATEMENT_TIMEOUT_MS` below is the other half of pool sizing: a longer statement bound holds each of these connections for longer. **Part of this pool is reserved, and the reservation is checked at startup**: `EXPENSIVE_READ_MAX_IN_FLIGHT` is the most of these connections the reports/search/filters/storage-breakdown surface may hold at once, so the rest of the API always retains the difference. **While you leave that variable unset it is derived from this one** (60 % of it, capped at 6, with the per-user ceiling clamped to fit), so lowering the pool on its own is safe and an install that has never touched `EXPENSIVE_READ_*` cannot be stopped from booting by this row. **If you have set it explicitly it must stay strictly below this number or the app refuses to start**, and an explicit share above 60 % of this number logs a sizing WARN at every boot — so lowering the pool while pinning the share is an edit to make in one go |
 | `POSTGRES_EFFECTIVE_CACHE_SIZE` | `512MB` | What the PostgreSQL **planner believes is cached** — `shared_buffers` plus the OS page cache it can expect to reach. Passed to the server as `postgres -c effective_cache_size=…` by the bundled compose file, so it takes PostgreSQL's units (`512MB`, `2GB`). **It allocates nothing**; it changes which plans look cheap, and a value far above the truth makes the planner prefer index access it will actually have to read off disk. The PostgreSQL image's own default is **4GB**, which is why this row exists: on Hamstrack's 1909 MiB production host that claimed more than twice the machine's entire RAM, on a box measured swapping. The `512MB` default is `shared_buffers` (128 MB) plus the low end of the page cache measured there under load (387 MB). **Set it from your host, in both directions**: roughly `shared_buffers` + the page cache this database can really expect. The usual starting point of ~75% of RAM assumes a *dedicated* database host — a box that also runs the JVM, Caddy and the observability stack is not one. **And under ~1 GB of RAM, lower it — to about `192MB`**: `512MB` on a 512 MB VPS claims the whole machine as cache, which is the image's `4GB` mistake one order of magnitude down. `192MB` is the `64MB` of `shared_buffers` that row recommends plus a small real page cache; confirm the second half with `free -m` rather than copying the figure. That ~1 GB is the same threshold `POSTGRES_SHARED_BUFFERS` and `POSTGRES_WORK_MEM` use — one number for all three dials. A value the server cannot parse makes PostgreSQL refuse to start while `docker compose up -d` still exits `0`, so change one dial at a time and check `docker compose ps`. **Upgrading from before 0.18.0 on a host of 4 GB or more? This default is a planner regression for you** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`: this is host sizing, not a deployment mode |
 | `POSTGRES_SHARED_BUFFERS` | `128MB` | PostgreSQL's own cache, and unlike the row above this one **is** an allocation — it comes out of `POSTGRES_MEMORY_LIMIT`, and on a single-box install it comes out of the JVM's share of the machine. Left at the image default deliberately: the stock advice of 25% of RAM assumes the database owns the host, and this memory is double-buffered against the very page cache `effective_cache_size` just told the planner to count on. Raise it with the host, and raise `effective_cache_size` and `POSTGRES_MEMORY_LIMIT` with it. **Under ~1 GB of RAM, lower it — to `64MB`**: there this allocation comes straight out of the JVM's share, and the page cache is doing the work anyway. Same ~1 GB threshold as `POSTGRES_EFFECTIVE_CACHE_SIZE` and `POSTGRES_WORK_MEM`. Identical in `dc` and `cloud` |
 | `POSTGRES_WORK_MEM` | `4MB` | Memory for one sort or hash — **per node, not per connection**, which is the whole reason this row spells it out. A single query with three sorts and a hash join can take four times this value, and the app opens up to `DB_POOL_MAX_SIZE` (default 10) connections, so the honest worst case is `work_mem × nodes × backends`: even `4MB` is `4MB × ~4 × ~12` ≈ **190 MB** of exposure. **That makes this one of the three dials `POSTGRES_MEMORY_LIMIT` has to be raised with** — doubling it doubles the product that ceiling must contain, without the pool changing at all. Lower spills sorts into temp files (slow); higher swaps a small host, which is slower still and drags the JVM's garbage collector down with it. Raise it on a roomy host, or per session (`SET work_mem`) for one heavy job, rather than globally on a box that is already tight — and under ~1 GB of RAM go **down**, to `2MB`, since the same multiplication happens against less memory (same threshold as the two rows above). **Raising it also wants `POSTGRES_SHM_SIZE` raised**: PostgreSQL's parallel workers allocate their share of a sort in `/dev/shm`, which Docker fixes at 64 MB per container, and running out of it fails with `could not resize shared memory segment … No space left on device` — a message that names neither this variable nor the memory limit. Identical in `dc` and `cloud` |
@@ -510,12 +511,13 @@ Full reference:
 | `STORAGE_QUOTA_RECONCILE_CRON` | `0 20 3 * * *` | When to re-check that the stored counter still equals the attachment rows it claims to count. The counter is maintained by a **database trigger** — that is the mechanism; this is only the **witness**, and drift is expected to be exactly zero. Spring cron syntax (six fields, seconds first). **An empty value disables the schedule**, which is a supported choice and is **not silent**: `hamstrack_storage_drift_refreshed_at_age_seconds` then rises from process start and `StorageDriftGaugeStale` fires, which is the documented consequence of the setting rather than an accident. An **invalid** cron still fails the boot — a typo is not a decision. Disabling it does not disable the counter or the quota |
 | `WRITE_REQUESTS_PER_MINUTE` | `180` | How many **mutating** requests **one user** may make per minute across `…/workspaces/*/projects/*/issues/**` — issue create/update/delete, comment create/update/delete, attachment upload/delete and backlog rank. `GET` on the same path is **not** counted: the binding is method-conditioned, so board and issue reads are untouched. It covers **all** mutating verbs and not only `POST`, because a client refused on the create simply retries with the patch, and an update is not the cheap half — it writes history rows, bumps a version and fans out SSE and notifications to every watcher. Until this existed the entire write surface had no budget of any kind while reads and authentication had three. `180` is 3/s sustained, sized against the SPA's inline-edit saves and board drags. Past it: `429` + `Retry-After`. Counted **in memory, per node**, so N replicas allow up to N × this. Valid range 1–10000; **no "unlimited"** — `0` fails startup, and the off switch is `RATE_LIMIT_ENABLED`. **Leave the line out to get the default — `WRITE_REQUESTS_PER_MINUTE=` is an empty value, not an absent one, and it stops the boot rather than restoring 180** |
 | `WRITE_UPLOAD_BYTES_PER_MINUTE` | `250MB` | How many uploaded **bytes** one user may push per minute, summed over the **parsed** sizes of their uploads — never a client-declared `Content-Length`, which is a number the client sets. A separate denomination because **neither other control bounds bytes**: the request budget above counts requests, and one 20 MB upload is not one comment; the workspace quota counts *cumulative* bytes and never sees churn, since upload → delete → upload leaves the workspace total exactly where it started while billing every PUT and every stored byte in between. Past it: `429` + `Retry-After` (unlike the quota's `409`, the wait here is real — the window does empty). Must be **≥ `ATTACHMENT_MAX_FILE_SIZE`**, or a file this instance permits could never be uploaded and every attempt would answer `429` telling the caller to wait for room a fixed one-minute window can never make; the boot **refuses that pair**. In memory, per node. Off switch: `RATE_LIMIT_ENABLED`. **Empty stops the boot rather than restoring 250MB** |
+| `EXPENSIVE_READ_LIMIT_ENABLED` / `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL` / `EXPENSIVE_READ_MAX_IN_FLIGHT` / `EXPENSIVE_READ_ACQUIRE_WAIT_MS` | `true` (3 / 6 / 1000) | **How many expensive reads may be RUNNING at once — the bound the per-minute budgets above are not.** A rate budget spends the same unit whether a request takes 8 ms or 8 s, so its protection evaporates exactly as an instance slows down; this one tightens instead. Through the expensive-read surface (every `…/reports/**`, `…/search/**`, `…/filters/**` and `…/storage/projects`), no user may occupy more than `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL` of a replica's connections and no set of users more than `EXPENSIVE_READ_MAX_IN_FLIGHT`, **so the rest of the API always retains `DB_POOL_MAX_SIZE − EXPENSIVE_READ_MAX_IN_FLIGHT` of them**. It is a counted share of the one pool, not a second pool. Past the share: `429` with `errorType` `TOO_MANY_IN_FLIGHT` (your own requests — let one finish) or `EXPENSIVE_SURFACE_BUSY` (the instance's share — retry shortly), both with `Retry-After: 1`, because what you are waiting for is a request that ends rather than a window that rolls. `EXPENSIVE_READ_MAX_IN_FLIGHT` must be **strictly less than `DB_POOL_MAX_SIZE`** and at least the per-principal number, or the app **refuses to start** naming both; above **60 % of the pool** it logs one sizing WARN at every boot, which is legitimate on a large pool and is not silenceable. **Both ceilings ship unset and are then derived from your pool** — 60 % of `DB_POOL_MAX_SIZE` capped at 6, with the per-user ceiling clamped to fit, which is exactly 3 and 6 on the default pool of 10 — so an install that has never named these variables cannot be stopped from booting by them, whatever its pool size. Set one and it is obeyed exactly and checked hard. The wait is the only one of the three that accepts `0` (refuse immediately); `0` on either ceiling fails startup, and a blank value stops the boot rather than restoring the default. Either ceiling also accepts **`-1`, which asks for the derived value explicitly** — the same thing leaving the line out does, and the only way to ask for it when your environment comes from a systemd `EnvironmentFile`, an ECS task definition or a Kubernetes ConfigMap, where there is no line to comment out. Valid ranges are therefore **1–100 (or `-1`)** per user and **1–1000 (or `-1`)** per instance. The wait's own ceiling is **2000 ms**, and it is the one number here denominated in Tomcat worker threads rather than in connections: a waiting request holds a worker, so a longer wait multiplies the thread cost of every refusal. **Its off switch is its own and is NOT `RATE_LIMIT_ENABLED`** — removing a bound on your connection pool must not require disabling brute-force protection on your login page. Per **process**, which against the pool is exactly right (the pool is per process too); against a shared `max_connections`, the number to check when scaling out is `EXPENSIVE_READ_MAX_IN_FLIGHT × replicas`. **New in this release, and on a small busy box the symptom is a `429` where yesterday there was a slow `200`** |
 | `PUBLIC_SIGNUP_ENABLED` | `false` | Self-registration is **closed by default** on self-hosted installs — create accounts in the Admin console (Users → New user → share the setup link, no email needed). Set `true` to let anyone register |
 | `PUBLIC_LANDING_ENABLED` | `true` | `false` hides the public landing page (`/` redirects to login, crawlers disallowed) |
 | `TERMS_ACCEPTANCE_REQUIRED` | `true` | `false` removes the required terms checkbox at registration |
 | `PRIVACY_CONTACT_EMAIL` | *(empty)* | Address the in-app **Account** page tells a user to write to when they want their account deleted. It is served on the **public, unauthenticated** `GET /api/meta`, so whatever you set here is **published** to anyone who can reach the instance — use an address you are willing to have on the open internet, and expect it to be scraped like any address on a web page. Empty is the default and a supported answer: it does **not** hide the deletion section, which still explains what deletion does and tells the user this installation's administrator handles the request — an affordance that appeared only where somebody remembered to set a variable would be missing for exactly the operators who did not know it existed. Nothing here creates or monitors a mailbox, and the product promises no reply time: the deletion itself is carried out by the operator, out of band. A malformed value **aborts startup** rather than being published: it must be a single address of at most 255 characters, and the characters `mailto:` treats as separators (`? & # % , ; < >`), whitespace, quotes and backslashes are refused. |
 | `DEMO_SEED_ON_FIRST_LOGIN` | `true` | `false` disables the demo workspace seeded on a user's first login |
-| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search, report and **write** budgets (`WRITE_REQUESTS_PER_MINUTE`, `WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`); see the rate-limiting section. It does **not** reach the workspace storage quota (`STORAGE_QUOTA_ENABLED`, its own switch) or the backlog-rebalance cooldown (no switch at all) |
+| `RATE_LIMIT_ENABLED` (+ `RATE_LIMIT_AUTH_IP_PER_MINUTE`, `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD`, `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS`, `RATE_LIMIT_LOGIN_BACKOFF_MAX_SECONDS`) | `true` (15 / 5 / 30 / 900) | Brute-force protection on auth endpoints: per-IP budget + per-account login backoff, `429` + `Retry-After`. `RATE_LIMIT_ENABLED` is **not** auth-only — it is the master switch for every limiter that has an off switch, including the search, report and **write** budgets (`WRITE_REQUESTS_PER_MINUTE`, `WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`); see the rate-limiting section. It does **not** reach the workspace storage quota (`STORAGE_QUOTA_ENABLED`, its own switch), the expensive-read occupancy bound (`EXPENSIVE_READ_LIMIT_ENABLED`, likewise) or the backlog-rebalance cooldown (no switch at all) |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_DISPLAY_NAME` / `SEED_ADMIN_PASSWORD` | — | Optionally create/promote a system administrator on startup (access to the `/admin` console) — **both** email and password required. `SEED_ADMIN_PASSWORD` is capped at **72 UTF-8 bytes** — BCrypt's own ceiling, so it is the cap on every password the application stores, and bytes are not characters (Cyrillic costs 2 each, CJK 3, emoji 4). A longer value **aborts startup** rather than being truncated, but only where it would actually create the account: email set, over the limit, and nobody at that address yet |
 
 ### Turning the storage quota on where there is already content
@@ -903,13 +905,13 @@ DC operators can disable Cloud-oriented behavior:
 | `TERMS_ACCEPTANCE_REQUIRED=false` | removes the required terms checkbox at registration |
 | `PRIVACY_CONTACT_EMAIL=privacy@example.com` | publishes that address on the in-app Account page as the one to write to for account deletion. Empty by default, and the section is never hidden — unset, the page tells the user their installation's administrator handles it. Also served on the public `GET /api/meta`, so setting it publishes it. A malformed value **aborts startup** rather than being published: it must be a single address of at most 255 characters, and the characters `mailto:` treats as separators (`? & # % , ; < >`), whitespace, quotes and backslashes are refused. |
 | `DEMO_SEED_ON_FIRST_LOGIN=false` | disables the demo workspace seeded on first login |
-| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for every limiter that **has** an off switch: brute-force protection on auth endpoints, the per-principal reports budget, the per-principal search budget and every recipient-keyed mail ceiling (`INVITE_*` and `AUTH_MAIL_*`). Not the backlog-rebalance cooldown, which is a fixed internal safety valve with no variable and no switch. Note it no longer says *in-memory* — the recipient-keyed mail ceilings keep their state in PostgreSQL |
+| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for **every limiter that has an off switch and does not carry one of its own** — the auth brute-force protection, and each of the per-principal request budgets. **A control with a switch of its own, or with none at all, is outside it**, and that is the category to check rather than a list to extend: today it excludes the workspace storage quota (`STORAGE_QUOTA_ENABLED`), the expensive-read occupancy bound (`EXPENSIVE_READ_LIMIT_ENABLED`) and the backlog-rebalance cooldown (no variable at all). Note it no longer says *in-memory* — the recipient-keyed mail ceilings keep their state in PostgreSQL |
 
 Rate-limit tuning (all optional; defaults shown):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off every limiter that has an off switch, in one go: the auth budgets in this table, `REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE`, `WRITE_REQUESTS_PER_MINUTE`, `WRITE_UPLOAD_BYTES_PER_MINUTE`, the invitation ceilings (`INVITE_MAX_PER_SENDER_PER_HOUR` / `_PER_DAY`, `INVITE_RECIPIENT_COOLDOWN_MINUTES`, `INVITE_MAX_PER_RECIPIENT_PER_DAY`) and the auth-mail ceilings (`AUTH_MAIL_RECIPIENT_COOLDOWN_MINUTES`, `AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. **A control that carries a switch of its own, or carries none at all, is outside this one**, and this is the list to read before assuming otherwise: the backlog-rebalance cooldown, a fixed internal safety valve that protects the database from a whole-table rewrite storm and has no environment variable of its own; and the **workspace storage quota** (`STORAGE_QUOTA_ENABLED`), which carries its own switch because removing a bound on your disk must not require disabling brute-force protection on your login page. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
+| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off, in one go, **every limiter that has an off switch and does not carry one of its own**: the auth budgets in this table, every per-principal request budget (`REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE`, `WRITE_REQUESTS_PER_MINUTE`), the uploaded-byte budget (`WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. **What is outside it is a category, not a list to extend: a control that carries a switch of its own, or carries none at all.** Read it that way rather than by the membership below, which is what today's controls happen to be — a control added tomorrow belongs to whichever category it belongs to, and an enumeration here goes stale one entry before the list does. Today that category holds the **workspace storage quota** (`STORAGE_QUOTA_ENABLED`) and the **expensive-read occupancy bound** (`EXPENSIVE_READ_LIMIT_ENABLED`), each with its own switch because removing a bound on your disk — or on your connection pool — must not require disabling brute-force protection on your login page; and the backlog-rebalance cooldown, a fixed internal safety valve protecting the database from a whole-table rewrite storm, which has no variable at all. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` | `15` | per-IP request budget/min across login, register, verify, resend, forgot & reset |
 | `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` | `5` | failed logins for one account before backoff starts |
 | `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` | `30` | first backoff delay (doubles on each further failure) |
@@ -925,12 +927,11 @@ allow up to N whole-project rebalances per cooldown window instead of one. It
 degrades safely — the operation is idempotent and the throttle only damps an
 abuse vector — and a restart re-arms the window rather than locking planners out.
 
-A third is the **per-principal reports budget** (`REPORTS_REQUESTS_PER_MINUTE`,
+The **per-principal reports budget** is node-local too (`REPORTS_REQUESTS_PER_MINUTE`,
 the 429 with `Retry-After` on `/api/workspaces/*/projects/*/reports/**` — and on
 `/api/workspaces/*/search/insights`, the Insights panel, which is a report that
 lives on the search path and is bound to this limiter explicitly rather than by
-prefix). It is
-node-local too, so N replicas allow up to N × the budget per user. It degrades
+prefix), so N replicas allow up to N × the budget per user. It degrades
 safely for the same reason the cooldown does — it damps an abuse vector rather
 than enforcing an invariant, so a split budget yields a weaker guard and never a
 wrong answer — and what it protects is the *per-instance* connection pool, which
@@ -938,7 +939,7 @@ N replicas also have N of. A restart re-arms the window. Note the key is the
 **principal**, so the budget bounds one user, not one tenant: aggregate load
 still scales with member count, which is the number to size against.
 
-A fourth is the **per-principal search budget** (`SEARCH_REQUESTS_PER_MINUTE`,
+So is the **per-principal search budget** (`SEARCH_REQUESTS_PER_MINUTE`,
 the 429 with `Retry-After` on `/api/workspaces/*/search/**` — `POST …/search`,
 `/search/schema`, `/search/suggest` and the Insights panel — plus saved filters
 under `/api/workspaces/*/filters/**`, because validating a filter's HQL does the
@@ -963,6 +964,19 @@ uploaded-byte total spent at the attachment door — and they are two properties
 one because a request count does not bound bytes and most mutations carry none. `GET` on
 the same path is deliberately outside both; the binding is method-conditioned, so board and
 issue reads are never charged.
+
+**The expensive-read occupancy bound is per process too, and here that is exactly right
+rather than a weakening — this is the one sentence to get the right way round.** For a
+per-minute budget, counting per node is a loss: N replicas allow N × the budget for one
+user. `EXPENSIVE_READ_MAX_IN_FLIGHT` bounds how much of *a replica's connection pool* the
+reports/search/filters/storage-breakdown surface may hold at once, and the pool is per
+replica as well — so the ratio between the two is invariant as you add replicas and the
+guarantee ("the rest of the API always retains `DB_POOL_MAX_SIZE − EXPENSIVE_READ_MAX_IN_FLIGHT`
+connections") holds on every one of them with no coordination at all. What does *not* scale
+neutrally is the database behind them: the instance's aggregate ceiling against a shared
+`max_connections` is `EXPENSIVE_READ_MAX_IN_FLIGHT × replicas`, which is the number to check
+when scaling out, beside the `work_mem × nodes × backends` arithmetic. It is also outside
+`RATE_LIMIT_ENABLED`, with a switch of its own, for the same reason the storage quota is.
 
 **The workspace storage quota is the exception in the other direction, and it must stay
 one.** `STORAGE_QUOTA_WORKSPACE_BYTES` is **cluster-wide and exact** — its state is a row
@@ -1331,6 +1345,22 @@ completes — and because a `409` is a clean refusal it appears in no error rate
 is a query there that answers "am I affected" before you pull, and the ceiling you get
 (100 GB or 10 GB) follows `SPRING_PROFILES_ACTIVE`, not the fact that you are self-hosting.
 
+**And the same release reserves part of your connection pool, so check one line of `.env`
+before you pull if you pin `EXPENSIVE_READ_MAX_IN_FLIGHT`.**
+[Expensive reads are bounded by concurrency from 0.18.0](#expensive-reads-are-bounded-by-concurrency-from-0180).
+The share must stay strictly below `DB_POOL_MAX_SIZE` or **the app refuses to start** — and while
+you leave the variable unset the share is derived from your pool, so an install that has never
+touched `EXPENSIVE_READ_*` upgrades cleanly whatever its pool size. The one configuration to look
+at is a pinned share against a small pool. **The two variables have different comparands, and a
+grep that matches both will mislead you** — `grep '^EXPENSIVE_READ_MAX_IN_FLIGHT=' .env` matches
+only the surface share, which is the one that must be **below `DB_POOL_MAX_SIZE`** (default `10`).
+`grep '^EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL=' .env` is the other one, and it is compared
+**against the surface share, never against the pool**: pinning it to `3` on a pool of `4` passes
+"below `DB_POOL_MAX_SIZE`" and is still above the share of `2` derived from that pool. That case
+now **narrows to `2` with a WARN** rather than refusing to boot; you are refused only if you pinned
+*both* numbers in an impossible order. Comment either line out — or set it to `-1` — to get the
+derived value back.
+
 **And the same release bounds and tunes the database container, which is the one change here
 that lands differently depending on how big your host is:**
 [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180).
@@ -1592,32 +1622,42 @@ become a `422` that no retry can fix.
 
 > **Above 15000 the app logs a sizing WARN at every boot, and no setting turns it off.** It
 > compares the statement bound against half of the pool's 30 s acquisition timeout and nothing
-> else — raising `DB_POOL_MAX_SIZE` is the right response to it but does not suppress it, and
-> the WARN says so itself while firing. Any value in the table above trips it; that is the
-> intended state for a deliberately long bound, and the log line is the record of the decision.
+> else — raising `DB_POOL_MAX_SIZE` is the right response to it (and the WARN also points at
+> `EXPENSIVE_READ_MAX_IN_FLIGHT`, which decides how much of that pool the expensive surface may
+> hold) but does not suppress it, and the WARN says so itself while firing. Any value in the
+> table above trips it; that is the intended state for a deliberately long bound, and the log
+> line is the record of the decision.
 >
-> **Raising it is not free, and these three numbers are really one setting.** Every second you
-> add is a second one request can hold one of your `DB_POOL_MAX_SIZE` connections, so the
-> relation to keep in view is
+> **Raising it is not free, and these numbers are really one setting.** Every second you add is
+> a second one request can hold one of your `DB_POOL_MAX_SIZE` connections. What keeps that from
+> being an arithmetic exercise is that **occupancy is now bounded directly** rather than inferred
+> from a rate:
 >
-> ```
-> requests-per-minute x statement-timeout-seconds  <=  pool-size x 60 x (that surface's share)
-> ```
+> > Through the expensive-read surface, no user may occupy more than
+> > `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL` of a replica's connections and no set of users
+> > more than `EXPENSIVE_READ_MAX_IN_FLIGHT`, so the rest of the API always retains
+> > `DB_POOL_MAX_SIZE − EXPENSIVE_READ_MAX_IN_FLIGHT` of them. The per-minute budgets bound
+> > throughput; they do not bound occupancy and never did.
 >
-> **The left side is a floor, not the demand.** The bound is per *statement*, so a request made
-> of several statements holds a connection for longer than the number on the left — and one that
-> assembles its response in Java while the transaction is open (a report CSV) holds it for time
-> the bound does not govern at all. Solve it for `DB_POOL_MAX_SIZE` and you will under-provision
-> by roughly the statements-per-request factor.
+> That replaces the `requests-per-minute × statement-timeout-seconds ≤ pool-size × 60 × share`
+> relation this section used to ask you to solve. The relation was not wrong, it was
+> unsatisfiable at the defaults — one user was entitled to 180 expensive requests a minute (120
+> search + 60 reports) while one replica has 600 connection-seconds a minute to spend — and a
+> rate can never deliver a bound on occupancy anyway, because it spends the same unit whether a
+> request takes 8 ms or 8 s. A load probe confirmed the consequence: a single user, breaking no
+> rule, saturated an instance and everything else on it failed on connection acquisition.
 >
-> At the defaults one user is entitled to 180 expensive requests a minute (120 search + 60
-> reports) while one replica has 600 connection-seconds a minute to spend — so the entitlement
-> already exceeds the supply even at the floor. Bounding the hold is what makes that arithmetic
-> possible to do at all, and it does not by itself close the gap (tracked as HD-182).
-> Practically: if you raise
-> `DB_STATEMENT_TIMEOUT_MS` near or above 30 s, raise `DB_POOL_MAX_SIZE` with it, or lower
-> `REPORTS_REQUESTS_PER_MINUTE` / `SEARCH_REQUESTS_PER_MINUTE` — otherwise a handful of slow
-> requests can still take the pool, more slowly than before, which is all this setting promises.
+> So, practically: if you raise `DB_STATEMENT_TIMEOUT_MS` near or above 30 s, raise
+> `DB_POOL_MAX_SIZE` with it — and if you raise the pool in order to give the expensive surface
+> more room, check `EXPENSIVE_READ_MAX_IN_FLIGHT` with it, since that is the number deciding how
+> much of the pool that surface can actually reach. Lowering `REPORTS_REQUESTS_PER_MINUTE` /
+> `SEARCH_REQUESTS_PER_MINUTE` is no longer the lever for pool safety; they bound throughput.
+> **Whether the pool alone widens that surface depends on whether you pinned the share**: unset, it
+> is derived from the pool at every boot (60 % of it, capped at 6), so raising the pool from 6 to 10
+> widens the share from 3 to 6 by itself; pinned, the number is yours and nothing moves it.
+> **What the statement bound still does not govern** is a request that assembles its response in
+> Java while the transaction is open (a report CSV): it is per *statement*, so occupancy ×
+> duration remains unbounded above even though occupancy is not.
 
 ### The heap is bounded from 0.17.0
 
@@ -2316,6 +2356,105 @@ SELECT workspace_id, bytes_used, attachment_count, updated_at
  ORDER BY bytes_used DESC
  LIMIT 20;
 ```
+
+### Expensive reads are bounded by CONCURRENCY from 0.18.0
+
+Before 0.18.0 two per-minute budgets bounded how *often* one user could ask for a report or a
+search, and **nothing bounded how many they could have running**. That is not a small gap: a
+rate spends the same unit whether a request takes 8 ms or 8 s, so its protection evaporates
+exactly as an instance slows down. At the shipped defaults one user was entitled to 180
+expensive requests a minute while one replica has 600 connection-seconds a minute to spend —
+and a load probe confirmed the consequence, which is worse than a slow report: **one user,
+breaking no rule, saturated the instance, and everything else on it failed on connection
+acquisition after 30 s**, including endpoints with nothing to do with reports.
+
+From 0.18.0 there is an occupancy bound, and **it arrives switched on**
+(`EXPENSIVE_READ_LIMIT_ENABLED` defaults to `true`), so it applies at the container restart
+your upgrade performs, to an install whose `.env` names none of these variables:
+
+> Through the expensive-read surface — every `…/reports/**`, `…/search/**`, `…/filters/**` and
+> `…/storage/projects` — no user may occupy more than
+> `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL` (3) of a replica's connections and no set of
+> users more than `EXPENSIVE_READ_MAX_IN_FLIGHT` (6), so the rest of the API always retains
+> `DB_POOL_MAX_SIZE − EXPENSIVE_READ_MAX_IN_FLIGHT` of them.
+
+**Those two numbers are derived from your pool while you leave them unset, and that is what makes
+this upgrade safe on a small box.** 3 and 6 are what the derivation produces against the default
+`DB_POOL_MAX_SIZE` of 10; on a pool of 6 it produces 3 and 3, on a pool of 4, 2 and 2 — 60 % of the
+pool, capped at the shipped 6, with the per-user ceiling clamped to fit. **The share is never
+derived larger than 6**, so a big pool keeps the documented numbers and the only installs whose
+behaviour the derivation changes are the ones that would otherwise have refused to start. Set
+either variable and the number is yours exactly, checked against the pool as described below. The
+boot log names the numbers in force and says whether they were derived.
+
+**What you may see that you did not see before: a `429` where yesterday there was a slow
+`200`.** A request over the share waits up to `EXPENSIVE_READ_ACQUIRE_WAIT_MS` (1 s) for a slot
+and is then refused with `Retry-After: 1` and one of two `errorType`s — `TOO_MANY_IN_FLIGHT`
+(the caller's own requests are occupying their share) or `EXPENSIVE_SURFACE_BUSY` (the
+instance's share is full). Nothing is computed and nothing is wrong with the request; the
+identical retry a moment later succeeds. That is the trade, stated plainly: under sustained
+overload some legitimate reports and searches are refused **in milliseconds** instead of
+everything on the instance failing **after 30 s**.
+
+**Who is likely to notice.** A small box under real load, and anyone driving the reports or
+search API with more requests in flight at once than their per-user ceiling. The web UI's widest
+parallel burst on this surface is the search results page's three mount queries — so **while the
+per-user ceiling is 3, i.e. on a pool of 5 or more**, the acquire wait absorbs those rather than
+refusing them. On a smaller pool the derived ceiling is 2 (pool 4) or 1 (pools 1–3) and that page
+can meet it: the mount queries then serialise inside the one-second wait, and only past that does
+one of them answer `429` and retry.
+
+**If the numbers are wrong for your instance**, they are three `.env` lines — but they are not
+independent of your pool, and the app checks the relation rather than trusting it:
+
+- An explicit `EXPENSIVE_READ_MAX_IN_FLIGHT` must be **strictly less than `DB_POOL_MAX_SIZE`**, or
+  the app **refuses to start**. At or above it the surface could hold every connection and the
+  reservation this feature exists to make would not exist. **A derived share satisfies this by
+  construction** — refusing to boot is the right answer to a number you typed and the wrong one to
+  a number nobody chose.
+- An explicit `EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL` must be
+  **≤ `EXPENSIVE_READ_MAX_IN_FLIGHT`** — above it the per-user ceiling can never fire and callers
+  would get the wrong refusal for their situation. **What happens then depends on who chose the
+  other number.** If you pinned *both*, the app refuses to start naming both: you stated a relation
+  and the relation cannot work. If you pinned only this one and let the share be derived from your
+  pool — a pool of 4 derives 2, so the `3` this file shows you is already above it — the app
+  **narrows your number to the derived share and logs one WARN** naming both numbers and the pool.
+  A bound that exists so one surface cannot take an instance down must not take the instance down
+  over a pair only half of which anybody chose.
+- **An explicit share above 60 % of the pool** logs one sizing WARN naming the connections left. It
+  is legitimate on a large pool and nothing silences it. A derived share is taken at exactly that
+  fraction and never warns about itself.
+- **Neither number bounds how long one request may hold its slot**, and there is no variable for
+  that. A slot is taken before the request body is read and given back after the response is
+  written, so a client that trickles bytes would otherwise hold one for the price of a socket.
+  **The layer that makes that hold finite is the watchdog**: it force-releases a slot held past
+  `DB_STATEMENT_TIMEOUT_MS` + 60 s and counts it in
+  `hamstrack_expensive_read_permit_force_released_total`. Two further layers raise the price of the
+  attempt rather than ending it, and it is worth knowing which does which. Inside the application
+  the gap between two reads of a request body is pinned at 20 seconds — Tomcat's default is *not*
+  "no timeout"; it lets the body inherit the connector's connection timeout (60 s, and whatever you
+  set `server.tomcat.connection-timeout` to), so this tightens that gap and makes it independent of
+  a dial meant for idle keep-alive connections. It ships in the app, so it applies behind any proxy,
+  including your own. At the edge, a `read_body` timeout in the bundled `Caddyfile` is an absolute
+  deadline on reading a whole request. **That last one does not arrive with an upgrade** — like `.env`, the
+  `Caddyfile` is never replaced by [config apply](#applying-repository-configuration), so if you
+  run the bundled edge and your copy predates 0.18.0, copy the `timeouts` block from the repository
+  by hand and reload Caddy.
+
+So the order for giving reports more room is **raise `DB_POOL_MAX_SIZE` first, then the share**
+— and if you raise the pool, re-read `POSTGRES_MEMORY_LIMIT` and `POSTGRES_WORK_MEM` with it,
+since the pool is the `backends` term in that arithmetic.
+
+**Turning it off is one variable and it is not `RATE_LIMIT_ENABLED`.**
+`EXPENSIVE_READ_LIMIT_ENABLED=false` removes the bound; `RATE_LIMIT_ENABLED=false` does **not**,
+deliberately — removing a bound on your connection pool should not require disabling
+brute-force protection on your login page. Turning it off restores exactly the behaviour above,
+so if you do it, watch `hamstrack_expensive_read_in_flight` and Hikari's `pending`.
+
+**Is the share ever full?** `hamstrack_expensive_read_in_flight` is the gauge, per replica —
+alert with `max()`, never `sum()`. The rule `ExpensiveReadSurfaceSaturated` fires on a sustained
+rate of `EXPENSIVE_SURFACE_BUSY` refusals, which means the instance is under-provisioned for its
+traffic rather than that anything is broken.
 
 ## Backups
 

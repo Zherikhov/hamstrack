@@ -1,5 +1,6 @@
 package com.hamstrack.report.ratelimit;
 
+import com.hamstrack.common.ratelimit.ExpensiveReadConcurrencyLimit;
 import com.hamstrack.common.ratelimit.PrincipalThrottleInterceptor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
@@ -130,9 +131,20 @@ public class ReportRateLimitConfig implements WebMvcConfigurer {
 
     private final ReportRateLimiter reportRateLimiter;
 
+    /**
+     * The occupancy bound (HD-182), spent by the SAME interceptor on the SAME registration.
+     *
+     * <p><strong>No new configurer and no second pattern list</strong>, which is the whole point:
+     * {@code ThrottleCoverageTest.theThrottledPathSetIsSealed} is unchanged and still exactly
+     * right, there is no second list to go stale, and a new expensive read added here inherits
+     * BOTH controls in one edit instead of one edit per control.
+     */
+    private final ExpensiveReadConcurrencyLimit expensiveReadConcurrency;
+
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
-        registry.addInterceptor(new PrincipalThrottleInterceptor(reportRateLimiter))
+        registry.addInterceptor(
+                        new PrincipalThrottleInterceptor(reportRateLimiter, expensiveReadConcurrency))
                 .addPathPatterns(REPORTS_PATH, INSIGHTS_PATH, STORAGE_BREAKDOWN_PATH);
     }
 }

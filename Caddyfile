@@ -1,3 +1,44 @@
+# HOW LONG A CLIENT MAY TAKE TO SEND ITS REQUEST (HD-182 review). Caddy defaults every
+# timeout in this block to 0, i.e. no bound, so without these lines a client that trickles
+# a body one byte at a time holds a connection here — and, behind it, one of the permits
+# of app.expensive-read.max-in-flight, which is taken before the body is read. As many
+# such requests as that share allows (six on the default pool of 10, fewer on a smaller
+# one) are the whole expensive-read surface, for the price of one socket each.
+#
+# THIS FILE IS NOT THE PROTECTION, IT IS THE OUTERMOST LAYER OF IT. Underneath it are two
+# bounds that every deployment gets, and only one of them ends a trickled request: the
+# permit watchdog (PerPrincipalInFlightLimit.sweepStalePermits), which takes the permit
+# back at a fixed age however slowly the client is sending. The other in-app layer,
+# TomcatUploadTimeoutCustomizer, pins the gap between two reads of a body at 20 s — a
+# TIGHTENING of Tomcat's default, which does not remove the read timeout for the body but
+# leaves it at the connector's connectionTimeout (60 s by default, and operator-settable).
+# It raises the packet rate an attacker has to sustain; it does not end the hold.
+# AND THIS IS ONE OF THE TWO FILES A DEPLOY NEVER SYNCS: like .env, the Caddyfile is
+# skipped by ops/deploy/apply-config.sh (HD-199), so an existing box does NOT get these
+# lines from a git pull — copy them by hand and reload Caddy.
+#
+# read_body is an ABSOLUTE deadline for reading the whole request, unlike Tomcat's
+# per-read one — a deadline ends a trickle where a gap ceiling only prices it, and that is
+# also why this number has to be loose where the other is tight. It has to leave room for
+# the largest legal upload over a slow link:
+# 5m is 25 MB at ~0.7 Mbit/s. Lower it if your users are all on good links; raising it
+# weakens only this layer.
+#
+# THERE IS DELIBERATELY NO `write` TIMEOUT, and that omission is load-bearing rather than
+# forgotten. A slow READER holds a permit the same way a slow sender does, and a write
+# deadline is the instrument for it — but Caddy applies one per response, and this
+# application serves SSE streams that legitimately live for up to 30 minutes
+# (SseRegistry.EMITTER_TIMEOUT_MS). Any value short enough to bound a slow reader would
+# cut every notification stream in the product. The permit watchdog is what bounds that
+# half, in the one place that can tell a stream from a stall.
+{
+    servers {
+        timeouts {
+            read_body 5m
+        }
+    }
+}
+
 # SITE_ADDRESS is injected from .env (see .env.prod.example). Its host(s) must
 # match the host in APP_BASE_URL. Example: "example.com, www.example.com".
 {$SITE_ADDRESS} {

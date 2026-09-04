@@ -26,9 +26,11 @@ const BASE = '/api'
 // call site is unchanged. The split exists because `queryClient.ts` has to test
 // for the error type, and importing `api.ts` from there closed the cycle
 // queryClient → api → auth → queryClient. apiError.ts says what that cost.
-import { ApiResponseError, STORAGE_QUOTA_EXCEEDED } from './apiError'
+import {
+  ApiResponseError, STORAGE_QUOTA_EXCEEDED, TOO_MANY_IN_FLIGHT, EXPENSIVE_SURFACE_BUSY,
+} from './apiError'
 import type { HqlError, ConflictInfo, StorageQuotaRefusal } from './apiError'
-export { ApiResponseError, STORAGE_QUOTA_EXCEEDED }
+export { ApiResponseError, STORAGE_QUOTA_EXCEEDED, TOO_MANY_IN_FLIGHT, EXPENSIVE_SURFACE_BUSY }
 export type { HqlError, ConflictInfo, StorageQuotaRefusal }
 
 /**
@@ -203,7 +205,103 @@ async function authFetch(path: string, init: RequestInit = {}): Promise<Response
   return res
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+/**
+ * Facts about a call that only its caller knows. There is exactly one today, and
+ * it exists so the single in-flight retry below can be given to the two POSTs
+ * that are **reads**.
+ */
+interface RequestOptions {
+  /**
+   * This call changes nothing on the server, whatever its HTTP method says.
+   *
+   * Set by `POST …/search` and `POST …/search/insights` alone: those are POSTs
+   * because a query travels in a body, not because they write. Everything else
+   * earns a retry by being a GET or does not earn one — notably **saved-filter
+   * create/update/delete**, which sit on the same budget as the search reads
+   * (validating a filter's HQL costs what `/search/schema` costs) and are the
+   * reason this flag is opt-in rather than "anything on the expensive surface".
+   */
+  readShaped?: boolean
+}
+
+/**
+ * The longest this client will sit on the hinted wait before its one automatic
+ * retry.
+ *
+ * The refusal it applies to carries `Retry-After: 1`, and that 1 means *the
+ * obstacle is a request that ends shortly* — **not** *the window has one second
+ * left*; the lock-contention 409 uses the same value for the same reason. So the
+ * hint is honoured as written, and capped, because this wait parks a query the
+ * user is watching and `conflictOf` will faithfully carry a proxy's `86400`
+ * (it is clamped for RENDERING, and rendering a day is harmless where sleeping
+ * one is not).
+ */
+const IN_FLIGHT_RETRY_MAX_WAIT_MS = 2_000
+
+/**
+ * Whether a failed call may be sent **once** more.
+ *
+ * **This branches on `errorType`, never on the status, and that is the whole
+ * design.** Three different refusals now share `429` on the expensive-read
+ * surface (HD-182 / ADR-0030) and only one of them is the caller's own conduct:
+ *
+ *  • `TOO_MANY_IN_FLIGHT` — this caller's own requests occupy their share. It
+ *    clears when one of them finishes, i.e. in about a second, and a page that
+ *    mounts several parallel queries can provoke it while behaving perfectly.
+ *    Retried once, here.
+ *  • `EXPENSIVE_SURFACE_BUSY` — the instance's expensive-read share is full. The
+ *    caller may hold none of it, so retrying is not a remedy; it is more load on
+ *    the resource that is already scarce. **Never** retried.
+ *  • the per-minute budget 429 — no `errorType` at all. Its window is up to a
+ *    minute away, so a retry cannot help and re-spends the budget that just
+ *    refused. **Never** retried. (`queryClient.retryQuery` refuses every 429 for
+ *    this reason too, which is what keeps the retry below the ONLY one.)
+ *
+ * A fourth 429 must therefore be a deliberate edit of the comparison below: an
+ * unknown or absent `errorType` falls through to "do not retry", so a refusal
+ * this build has never heard of inherits the safe answer instead of whatever a
+ * status-based branch happened to do for it.
+ */
+function mayRetryOnce(error: unknown, init: RequestInit, opts: RequestOptions): boolean {
+  if (!(error instanceof ApiResponseError)) return false
+  if (error.errorType !== TOO_MANY_IN_FLIGHT) return false
+  // Idempotence is the second half: the refusal is raised in an interceptor, so
+  // nothing ran and nothing was written — but a re-send is still a second write
+  // ATTEMPT, and the only calls given one here are the ones that could not write
+  // even if they arrived twice.
+  const method = (init.method ?? 'GET').toUpperCase()
+  return opts.readShaped === true || method === 'GET' || method === 'HEAD'
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * The one door every JSON call in this module goes through (the two that fetch
+ * BYTES — an attachment, a report CSV — use `authFetch` directly and get none of
+ * what follows).
+ *
+ * The retry is deliberately the narrowest thing that works — one `await`, one
+ * re-send, no backoff, no queue, no framework — and it is **not** invisible: the
+ * second attempt is the last one, and whatever it throws (the same refusal, a
+ * different one, a 500) propagates unchanged, so a refusal that survives the
+ * retry reaches the UI exactly as it would have without one.
+ */
+async function request<T>(
+  path: string, init: RequestInit = {}, opts: RequestOptions = {},
+): Promise<T> {
+  try {
+    return await attempt<T>(path, init)
+  } catch (error) {
+    if (!mayRetryOnce(error, init, opts)) throw error
+    const hinted = (error as ApiResponseError).retryAfter ?? 1
+    await sleep(Math.min(hinted * 1000, IN_FLIGHT_RETRY_MAX_WAIT_MS))
+    return attempt<T>(path, init)
+  }
+}
+
+async function attempt<T>(path: string, init: RequestInit): Promise<T> {
   const res = await authFetch(path, init)
 
   if (!res.ok) {
@@ -467,12 +565,18 @@ export async function apiGetWorkspaceStorage(wsId: string): Promise<WorkspaceSto
  * gated on `workspace.edit` (**403** for a proven member without it, **404** for
  * a non-member).
  *
- * **429 + `Retry-After`** — this one IS budgeted, on the reports pot: it is a
- * grouped aggregate over every attachment row in the workspace, i.e. O(tenant
- * content), which is that budget's denomination. Its sibling summary is not, and
- * the asymmetry is safe in the direction that matters: a caller refused here who
- * falls back to the cheap read gets *less* information, never a way around the
- * bound.
+ * **429 + `Retry-After`** — this one IS on the expensive-read surface, on the
+ * reports registration: it is a grouped aggregate over every attachment row in
+ * the workspace, i.e. O(tenant content), which is that budget's denomination. So
+ * it can meet any refusal that surface declares — the per-minute report budget,
+ * `TOO_MANY_IN_FLIGHT`, `EXPENSIVE_SURFACE_BUSY`, or a later addition — and which
+ * one arrived is read off `ApiResponseError.errorType`, never off the status.
+ * Being a GET, it is retried once by `request()` for the one of those that clears
+ * in about a second, and never for the others.
+ *
+ * Its sibling summary is on none of them, and the asymmetry is safe in the
+ * direction that matters: a caller refused here who falls back to the cheap read
+ * gets *less* information, never a way around the bound.
  */
 export async function apiGetWorkspaceStorageByProject(wsId: string): Promise<WorkspaceStorageByProject> {
   return request(`/workspaces/${wsId}/storage/projects`)
@@ -1805,20 +1909,29 @@ export async function apiRankIssue(
 // Workspace-scoped; a non-member gets 404. A bad query POST throws an
 // ApiResponseError with .status === 422 and a populated .hql (position/length/
 // token/field/errorType) so the input can underline the offending span.
-// 429 — `POST …/search`, `…/search/schema` and `…/search/suggest` are all on
-// this caller's search budget. A retryable throttle, not a fault: nothing was
-// computed and the identical request succeeds after `Retry-After`
-// (`ApiResponseError.retryAfter` carries it). Spent BEFORE the workspace is
-// resolved, so a 429 says nothing about whether the caller can see it.
+// 429 — `POST …/search`, `…/search/schema` and `…/search/suggest` are all on the
+// expensive-read surface, and a refusal there can be ANY of the ones that surface
+// declares (three today): this caller's per-minute search budget, `TOO_MANY_IN_FLIGHT`,
+// `EXPENSIVE_SURFACE_BUSY` — and whatever a later release adds, which is why this
+// says "any of them" rather than naming a set that goes stale. Tell them apart by
+// `ApiResponseError.errorType`, never by the status; every one is a throttle rather
+// than a fault, so nothing was computed and the identical request is legal to send
+// again — but only ONE of them is worth sending again soon, and `request()` already
+// does that one automatically (see `mayRetryOnce`). `retryAfter` carries the wait,
+// which is a rolling window for the budget and "a request that ends shortly" for the
+// other two. All of them are spent BEFORE the workspace is resolved, so a 429 here
+// still says nothing about whether the caller can see it.
 
 export async function apiSearch(
   wsId: string,
   payload: { query: string; page?: number; size?: number }
 ): Promise<Page<SearchResultRow>> {
+  // A POST that reads: the query travels in a body because it is too big for a URL,
+  // and re-sending it writes nothing — so it is eligible for the one in-flight retry.
   return request(`/workspaces/${wsId}/search`, {
     method: 'POST',
     body: JSON.stringify(payload),
-  })
+  }, { readShaped: true })
 }
 
 export async function apiSearchSchema(wsId: string): Promise<SearchSchema> {
@@ -1854,14 +1967,21 @@ export async function apiSearchSuggest(
  *     also `slice === segment`, which the panel never offers (a diagonal is not
  *     a breakdown) but which a hand-edited URL can ask for.
  *   • 404 — workspace not visible (non-member and non-existent alike).
- *   • 429 — past a throttle budget, and this endpoint sits inside TWO of them:
- *     it is bound to the reports limiter explicitly (`ReportRateLimitConfig`,
- *     because it does NOT live under `/reports`) and it also falls under the
- *     search path pattern. It spends both budgets, the lower configured value
- *     binds, and lowering either property lowers the panel. The explicit
- *     binding only looks redundant — deleting it would silently raise the
- *     panel's allowance to the search budget as a side effect. A retryable
- *     throttle, never a fault (`ApiResponseError.retryAfter` carries the wait).
+ *   • 429 — refused by one of the controls on the expensive-read surface, told
+ *     apart by `ApiResponseError.errorType` and never by the status. Two of them
+ *     are per-minute budgets, because this endpoint sits inside TWO
+ *     registrations: it is bound to the reports limiter explicitly
+ *     (`ReportRateLimitConfig`, because it does NOT live under `/reports`) and it
+ *     also falls under the search path pattern. It spends both budgets, the lower
+ *     configured value binds, and lowering either property lowers the panel. The
+ *     explicit binding only looks redundant — deleting it would silently raise
+ *     the panel's allowance to the search budget as a side effect. On top of
+ *     those sits the occupancy bound (HD-182), whose two refusals —
+ *     `TOO_MANY_IN_FLIGHT` and `EXPENSIVE_SURFACE_BUSY` — cost this request ONE
+ *     permit even though it is behind both registrations. Whatever the count
+ *     becomes, they are all throttles and never faults
+ *     (`ApiResponseError.retryAfter` carries the wait), and exactly one of them
+ *     is retried for the caller by `request()`.
  *
  * **A capability never changes the answer** (delivery-paths Rule A). The panel
  * omits the `sprint` slice when no visible project runs sprints, and the story
@@ -1880,22 +2000,33 @@ export async function apiSearchInsights(
     segment?: InsightsDimension
   },
 ): Promise<InsightsResponse> {
+  // Read-shaped, exactly like `apiSearch`: the query is the dataset, the POST is
+  // only how it travels, and a second send aggregates the same rows again.
   return request(`/workspaces/${wsId}/search/insights`, {
     method: 'POST',
     body: JSON.stringify(payload),
-  })
+  }, { readShaped: true })
 }
 
 // ── Saved filters — HD-26 ─────────────────────────────────────────────────────
 // Own + shared, workspace-scoped. Create/update/delete are owner-only server-side
 // (a non-owner PATCH/DELETE 404s). Create: 422 invalid HQL (.hql set), 409 dup name.
-// 429 on EVERY call here: the whole `…/filters/**` path is on the search budget,
-// because validating a filter's HQL builds the same resolution context
+// 429 on EVERY call here: the whole `…/filters/**` path is on the expensive-read
+// surface, because validating a filter's HQL builds the same resolution context
 // `…/search/schema` pays for — so an invalid-body loop here was the same cost
 // wearing different clothes. The binding is by PATH, not by method, so `list`,
 // `get` and `remove` are throttled too, surprising as that is for a read and a
-// delete. A retryable throttle, not a validation failure: retry after
-// `Retry-After` (`ApiResponseError.retryAfter`).
+// delete. Which refusal arrived is a question for `ApiResponseError.errorType`
+// and never for the status: the per-minute budget, `TOO_MANY_IN_FLIGHT`,
+// `EXPENSIVE_SURFACE_BUSY`, or a later one — all throttles rather than validation
+// failures, none of them meaning anything was written.
+//
+// **Only the reads here get the automatic retry** (HD-182). Being on this budget
+// is not the same as being safe to re-send: `create`, `update` and `remove` are
+// writes that happen to be priced like a search, so `request()` hands them the
+// refusal instead of quietly sending a second create. `list`, `get` and `usage`
+// are GETs and are retried once when the refusal is `TOO_MANY_IN_FLIGHT` — which
+// is exactly what a filter sidebar mounting beside a search provokes.
 
 export const savedFilters = {
   list: (wsId: string) =>
@@ -1932,10 +2063,16 @@ export const savedFilters = {
 //     `detail` verbatim (see `FlowReportPage`). All three share one shape, so
 //     they share one rendering path.
 //   • 404 — workspace/project not visible (non-member and non-existent alike).
-//   • 429 — past this caller's report budget (`app.reports.requests-per-minute`).
-//     A retryable throttle, not a fault: nothing was computed and a retry after
-//     `Retry-After` succeeds (`ApiResponseError.retryAfter` carries it). It is
-//     spent per principal BEFORE the project is resolved — a budget of that shape
+//   • 429 — refused by one of the controls on the expensive-read surface, which
+//     reports share with search: the per-minute report budget
+//     (`app.reports.requests-per-minute`), or the occupancy bound's
+//     `TOO_MANY_IN_FLIGHT` / `EXPENSIVE_SURFACE_BUSY` (HD-182), or whatever a
+//     later release adds. Branch on `ApiResponseError.errorType`, never on the
+//     status. Each is a throttle rather than a fault — nothing was computed, and
+//     the identical request is legal to send again once its obstacle is gone
+//     (`ApiResponseError.retryAfter` carries the wait: a rolling window for the
+//     budget, a request that ends shortly for the other two). Every one of them is
+//     spent per principal BEFORE the project is resolved — a control of that shape
 //     answers 429 ahead of 404, so a 429 says nothing about whether the caller
 //     can see the project, and no UI may imply otherwise. Budgets spent AFTER
 //     resolution exist too and read the other way (see `apiInviteWorkspaceMember`).
@@ -2119,8 +2256,15 @@ export function reportCsvPath(
  *
  * Failures arrive as `ApiResponseError` with the server's own `detail` — a
  * report CSV inherits every refusal of the report itself (400 on a too-wide
- * window naming the cap, 404, 429 with `Retry-After`), and those sentences are
- * the ones the page already knows how to render.
+ * window naming the cap, 404, and any 429 the expensive-read surface can raise,
+ * each with `Retry-After`), and those sentences are the ones the page already
+ * knows how to render.
+ *
+ * It goes through `authFetch` rather than `request()`, so it gets **no**
+ * automatic retry — not even for `TOO_MANY_IN_FLIGHT`. That is a consequence of
+ * the body being bytes rather than JSON, not a judgement about the refusal; a
+ * download the reader started is also the one place a visible failure they can
+ * click again costs least.
  */
 export async function apiDownloadReportCsv(
   wsId: string,

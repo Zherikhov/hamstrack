@@ -70,7 +70,12 @@ import java.util.UUID;
  *       specific to reports, but it belongs in a list the next reader will trust;</li>
  *   <li>{@code 401} — anonymous;</li>
  *   <li>{@code 404} — workspace or project not visible to the caller;</li>
- *   <li>{@code 429} — past this caller's report budget, with {@code Retry-After};</li>
+ *   <li>{@code 429} — refused by one of the bounds this surface carries, with
+ *       {@code Retry-After}: this caller's per-minute report budget, or the bound on how many
+ *       expensive reads may be running at once. The refusal names its own cause in
+ *       {@code errorType} — absent, it is the budget — because the remedies differ and the
+ *       {@code Retry-After} of the occupancy refusals means "a request ends shortly" rather
+ *       than "the window has this long left";</li>
  *   <li>{@code 500} — a broken install: a project whose effective workflow cannot be
  *       resolved (no system default workflow) fails the same way on every project endpoint
  *       in the product, not just here. Stated so the list is what can actually happen

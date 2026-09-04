@@ -147,7 +147,9 @@ Response-code mix over time, **every non-2xx class attributed** (429 by `kind`, 
 > completion k6 does not score as a success. Do not copy this number into the results as an
 > error rate, and do not compare it with `HighErrorRate`'s 5%. The error signals are the
 > named ones: `hs_errors_5xx`, `hs_unexpected_404`, `hs_budget_422`, `hs_refused_429`,
-> `hs_conflict_409`, `hs_rebalance_429`.
+> `hs_conflict_409`, `hs_rebalance_429` — and, splitting the 429s by what they mean,
+> `hs_occupancy_429` (too many RUNNING at once) beside `hs_minute_budget_429` (asked too
+> often). Both are inside `hs_refused_429`; they are attribution, not extra refusals.
 
 ### 3.2 Reporting & searching
 
@@ -185,23 +187,49 @@ product's (criterion 5).*
 
 Each answered explicitly as **held / did not hold / could not be determined**, with numbers.
 
-### P1 — the entitlement probe (HD-182's premise)
+### P1 — the entitlement probe (HD-182: first the premise, now the fix)
 
 One principal spending exactly their documented allowance (`SEARCH_ENTITLEMENT` / `REPORT_ENTITLEMENT`, which MUST equal the `SEARCH_REQUESTS_PER_MINUTE` / `REPORTS_REQUESTS_PER_MINUTE` capture/fingerprint.sh read off the box — record both),
 with a *different* principal browsing at 5 VUs as the victim.
 
+> **The prediction this probe used to carry was deliberately falsified by the product.** It
+> read: *held if the victim degrades while the entitled principal receives no 429 at all.* It
+> held — worse than predicted, the 2026-08-31 run aborted after 32 s on dropped iterations —
+> and the answer shipped was an **occupancy bound** (`EXPENSIVE_READ_MAX_IN_FLIGHT`). So the
+> entitled principal receiving no 429 is now the **regression**, and the wording below is the
+> inversion. Do not restore the old sentence from an older results file.
+
 | | |
 |---|---|
-| **Verdict** | `<TODO held / did not hold / could not be determined>` |
-| Victim `browse` p95 / p99 | `<TODO>` |
+| **Verdict** | `<TODO the fix holds / the fix did not engage / regression / could not be determined>` |
+| Victim `browse` p95 / p99 (vs target) | `<TODO>` |
 | Hikari `pending` during the probe | `<TODO>` |
-| 429s received by the entitled principal | `<TODO>` |
+| `hs_occupancy_429` received by the entitled principal | `<TODO>` |
+| `hs_minute_budget_429` received by the entitled principal (must be **0**) | `<TODO>` |
+| `hamstrack_expensive_read_in_flight` — max during, and value AFTER the run | `<TODO>` / `<TODO>` |
+| `hamstrack_expensive_read_permit_force_released_total` — total during the run (expected **0**) | `<TODO>` |
 
-- **Held** if the victim breached, or `pending` stayed above 0, *while the entitled principal
-  received no 429 at all* — "one user, entirely within the rules, degrades everyone".
-- **Did not hold** if the instance absorbed a fully-entitled principal with every target
-  intact. Then the arithmetic over-estimated the real hold time per request, and the number
-  worth having instead is the one below.
+- **The fix holds** if the victim's `browse` class stays **inside** its target while the
+  entitled principal receives occupancy 429s (`TOO_MANY_IN_FLIGHT` / `EXPENSIVE_SURFACE_BUSY`).
+  Their own latency is not a target and never was.
+- **The fix did not engage** if there were no occupancy 429s at all: this box absorbed one
+  fully entitled principal without the share ever filling, so the run says nothing about the
+  bulkhead in either direction. Record it that way rather than as a pass.
+- **Regression** if the victim breaches while the entitled principal is unrefused — the
+  original finding, reproduced after the fix.
+- **A minute-budget 429 for the entitled principal is a harness/box disagreement, not a
+  result**: the entitlements above do not match what the instance grants. It is a threshold,
+  so the run fails on it.
+- **The value of `hamstrack_expensive_read_in_flight` after the run has ended is a permit
+  leak check**, and it is the one number here that reports a defect rather than a capacity: it
+  must fall back to 0. A gauge stuck at the ceiling means that replica has lost the capacity
+  permanently until it restarts — **unless `hamstrack_expensive_read_permit_force_released_total`
+  moved**, in which case slots were being *held* rather than leaked and the watchdog took them
+  back. Report both, because they look identical on the gauge and have opposite remedies.
+- **`hamstrack_expensive_read_permit_force_released_total` above 0 during a k6 run is a finding about
+  the box, not about the product**: k6 sends and reads promptly, so nothing in this harness
+  should hold a slot past `DB_STATEMENT_TIMEOUT_MS` + 60 s. A nonzero value means something
+  else was talking to that instance, or that a single request really did run for over a minute.
 
 **Measured mean connection-hold time per request class** (from
 `hikaricp_connections_usage_seconds`) — **report this regardless of the verdict; it is new

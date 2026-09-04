@@ -80,7 +80,10 @@ import java.util.UUID;
  *       surface, so alternating between a chart and the panel does not double an allowance) and
  *       the search budget it shares with {@code POST …/search} by living on that path. The
  *       lower configured value binds — which of the two that is depends on how the deployment
- *       set them, so neither is named here.</li>
+ *       set them, so neither is named here. It is inside the occupancy bound as well, where
+ *       sitting on two limiters costs it ONE place in flight rather than two: one request, one
+ *       connection, one permit. That refusal carries an {@code errorType} and the budgets do
+ *       not, which is what a client branches on.</li>
  * </ul>
  * <strong>No status code here depends on a delivery capability</strong> (Rule A). The
  * {@code SPRINT} slice and the {@code POINTS} measure are omitted from what

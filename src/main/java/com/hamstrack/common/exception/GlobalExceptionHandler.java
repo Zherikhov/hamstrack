@@ -2,6 +2,7 @@ package com.hamstrack.common.exception;
 
 import com.hamstrack.common.config.StatementTimeoutProperties;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.ratelimit.ConcurrencyLimitedException;
 import com.hamstrack.common.ratelimit.RateLimitedException;
 import com.hamstrack.issue.exception.LabelNameConflictException;
 import com.hamstrack.project.exception.StrandedProjectsException;
@@ -110,6 +111,32 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(RateLimitedException.class)
     public ResponseEntity<ProblemDetail> handleRateLimited(RateLimitedException ex) {
         var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        return ResponseEntity.status(ex.getStatus())
+                .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
+                .body(problem);
+    }
+
+    /**
+     * More specific again — the same 429 + {@code Retry-After} envelope, plus the
+     * {@code errorType} that tells the THREE refusals of one path apart (HD-182).
+     *
+     * <p>A caller on the expensive-read surface can now be refused because they asked too OFTEN
+     * (the minute budget: no {@code errorType}, {@code Retry-After} up to 60), because too many of
+     * their own requests are running AT ONCE ({@code TOO_MANY_IN_FLIGHT}), or because the whole
+     * surface is full ({@code EXPENSIVE_SURFACE_BUSY}). The remedies are different and not
+     * interchangeable — one is "stop for a minute", one is "let one of yours finish", one is
+     * "retry shortly, there is nothing else to do" — so a client must be able to branch without
+     * parsing prose. The two new ones carry {@code Retry-After: 1} because the obstacle is a
+     * request that ends, not a window that rolls.
+     *
+     * <p>The metric is emitted at the throw site rather than here, unlike the storage quota:
+     * {@link com.hamstrack.common.ratelimit.PerPrincipalInFlightLimit} is the one place both
+     * refusals are decided, and it already has the kind in hand.
+     */
+    @ExceptionHandler(ConcurrencyLimitedException.class)
+    public ResponseEntity<ProblemDetail> handleConcurrencyLimited(ConcurrencyLimitedException ex) {
+        var problem = ProblemDetail.forStatusAndDetail(ex.getStatus(), ex.getMessage());
+        problem.setProperty("errorType", ex.getErrorType());
         return ResponseEntity.status(ex.getStatus())
                 .header(HttpHeaders.RETRY_AFTER, String.valueOf(ex.getRetryAfterSeconds()))
                 .body(problem);

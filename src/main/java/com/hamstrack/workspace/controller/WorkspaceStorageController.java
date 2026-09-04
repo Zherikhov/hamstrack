@@ -30,7 +30,8 @@ import java.util.UUID;
  *       disclosure: it names projects and their volumes, including projects the caller may not be
  *       a member of. <strong>200</strong> · <strong>403</strong> a proven member without the
  *       permission · <strong>404</strong> non-member · <strong>429</strong> + {@code Retry-After}
- *       past the reports budget.</li>
+ *       past the reports budget, or past the bound on how many expensive reads may run at once
+ *       ({@code errorType} names which; the budget carries none).</li>
  * </ul>
  *
  * <p><strong>The breakdown is on the REPORTS budget and the summary is on none</strong>
