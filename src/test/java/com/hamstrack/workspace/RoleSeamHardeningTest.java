@@ -30,6 +30,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
 
 import java.util.UUID;
 
@@ -94,12 +95,15 @@ class RoleSeamHardeningTest {
 
         var impostor = customRole(ws, RoleScope.WORKSPACE, "ADMIN", "Totally normal role");
         var view = roleCatalog.view(impostor.getId());
-        assert view.permissions().isEmpty() : "fixture: the impostor is meant to grant nothing";
-        assert !view.builtIn();
-        assert !view.isBuiltIn(BuiltInRoles.WORKSPACE_ADMIN)
-                : "a CUSTOM role keyed 'ADMIN' answered isBuiltIn(WORKSPACE_ADMIN). That check is "
+        assertThat(view.permissions().isEmpty()).withFailMessage("fixture: the impostor is meant to grant nothing").isTrue();
+        assertThat(view.builtIn())
+                .withFailMessage("a custom role keyed like a built-in is still a custom role — the key is not the identity")
+                .isFalse();
+        assertThat(view.isBuiltIn(BuiltInRoles.WORKSPACE_ADMIN))
+                .withFailMessage("a CUSTOM role keyed 'ADMIN' answered isBuiltIn(WORKSPACE_ADMIN). That check is "
                   + "what the invite/role-change Owner guardrail keys on, and it must compare "
-                  + "identity, never the key string.";
+                  + "identity, never the key string.")
+                .isFalse();
 
         var actor = user();
         var membership = new WorkspaceMember();
@@ -110,11 +114,12 @@ class RoleSeamHardeningTest {
         workspaceMemberRepository.flush();
 
         var ctx = workspaceAccess.requireMember(actor, ws.getId());
-        assert ctx.permissions().isEmpty()
-                : "a workspace member holding a zero-permission role keyed 'ADMIN' resolved to "
+        assertThat(ctx.permissions().isEmpty())
+                .withFailMessage(() -> "a workspace member holding a zero-permission role keyed 'ADMIN' resolved to "
                   + ctx.permissions().asWireStrings() + ". A role's KEY must never confer "
                   + "anything — that is the escalation HD-123 deleted the ordinal ladder to "
-                  + "prevent, and it would open every workspace-scoped gate for its holder.";
+                  + "prevent, and it would open every workspace-scoped gate for its holder.")
+                .isTrue();
 
         var projectImpostor = customRole(ws, RoleScope.PROJECT, "MANAGER", "Also normal");
         var pm = new com.hamstrack.project.entity.ProjectMember();
@@ -125,10 +130,11 @@ class RoleSeamHardeningTest {
         projectMemberRepository.flush();
 
         var projectCtx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert projectCtx.permissions().isEmpty()
-                : "a project member holding a zero-permission role keyed 'MANAGER' resolved to "
+        assertThat(projectCtx.permissions().isEmpty())
+                .withFailMessage(() -> "a project member holding a zero-permission role keyed 'MANAGER' resolved to "
                   + projectCtx.permissions().asWireStrings() + " — project taxonomy, issue "
-                  + "deletion and attachment moderation, all opened by a name.";
+                  + "deletion and attachment moderation, all opened by a name.")
+                .isTrue();
     }
 
     // ====================================================== H3/T2: scope and ownership
@@ -155,11 +161,10 @@ class RoleSeamHardeningTest {
 
         try {
             var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-            assert false
-                    : "a WORKSPACE role was accepted as a project role, and the caller now holds "
+            fail("a WORKSPACE role was accepted as a project role, and the caller now holds "
                       + ctx.permissions().asWireStrings() + " IN A PROJECT. workspace.edit reaching "
                       + "ProjectContext is privilege escalation assembled from ids that are each "
-                      + "individually legitimate.";
+                      + "individually legitimate.");
         } catch (WorkspaceNotFoundException expected) {
             // 404, not 403: a tenancy/consistency failure tells the caller nothing.
         }
@@ -225,7 +230,7 @@ class RoleSeamHardeningTest {
         // …and the detail path still refuses the same row. The asymmetry is the design.
         try {
             workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-            assert false : "the detail path must keep failing closed on a corrupt role row";
+            fail("the detail path must keep failing closed on a corrupt role row");
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
@@ -266,9 +271,9 @@ class RoleSeamHardeningTest {
 
         try {
             workspaceService.get(actor, ws.getId());
-            assert false : "the detail read must keep failing closed — degrading it would leave "
+            fail("the detail read must keep failing closed — degrading it would leave "
                            + "the caller inheriting Contributor in every project of an OPEN "
-                           + "workspace, which is a widening, not an empty permission set";
+                           + "workspace, which is a widening, not an empty permission set");
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
@@ -311,17 +316,17 @@ class RoleSeamHardeningTest {
             projectService.updateMember(actor, ws.getId(), project.getId(), target.getId(),
                     new com.hamstrack.project.dto.UpdateProjectMemberRequest(
                             BuiltInRoles.PROJECT_MEMBER));
-            assert false : "a WORKSPACE-scoped role_id on another member's row was dereferenced "
+            fail("a WORKSPACE-scoped role_id on another member's row was dereferenced "
                            + "as their current PROJECT role. Its name reaches the ceiling 403 "
-                           + "and its workspace.* grants become the ACTING_ON comparand.";
+                           + "and its workspace.* grants become the ACTING_ON comparand.");
         } catch (WorkspaceNotFoundException expected) {
             // 404, and it says nothing about the role it refused.
         }
 
         try {
             projectService.removeMember(actor, ws.getId(), project.getId(), target.getId());
-            assert false : "removeMember reads the same row for the same reason and must refuse "
-                           + "identically — one of the two guarded is not a guard";
+            fail("removeMember reads the same row for the same reason and must refuse "
+                           + "identically — one of the two guarded is not a guard");
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
@@ -343,7 +348,7 @@ class RoleSeamHardeningTest {
 
         try {
             workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-            assert false : "a role owned by another workspace was honoured in this one (§12)";
+            fail("a role owned by another workspace was honoured in this one (§12)");
         } catch (WorkspaceNotFoundException expected) {
             // as required
         }
@@ -369,15 +374,21 @@ class RoleSeamHardeningTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert !ctx.permissions().has(Permission.WORKSPACE_MEMBER_MANAGE)
-                : "a workspace-scoped default role was honoured as the project default, handing "
+        assertThat(ctx.permissions().has(Permission.WORKSPACE_MEMBER_MANAGE))
+                .withFailMessage(() -> "a workspace-scoped default role was honoured as the project default, handing "
                   + "workspace.member.manage to every member with no project row: "
-                  + ctx.permissions().asWireStrings();
-        assert ctx.permissions().has(Permission.ISSUE_CREATE)
-                && ctx.permissions().has(Permission.SPRINT_ASSIGN)
-                : "the fallback must be the built-in Contributor — falling back to NOTHING would "
+                  + ctx.permissions().asWireStrings())
+                .isFalse();
+        assertThat(ctx.permissions().has(Permission.ISSUE_CREATE))
+                .withFailMessage(() -> "the fallback must be the built-in Contributor — falling back to NOTHING would "
                   + "lock every member out of every project over one bad config row. Got "
-                  + ctx.permissions().asWireStrings();
+                  + ctx.permissions().asWireStrings())
+                .isTrue();
+        assertThat(ctx.permissions().has(Permission.SPRINT_ASSIGN))
+                .withFailMessage(() -> "the fallback must be the built-in Contributor — falling back to NOTHING would "
+                  + "lock every member out of every project over one bad config row. Got "
+                  + ctx.permissions().asWireStrings())
+                .isTrue();
     }
 
     // ============================================== the invite seam (round-3 review)
@@ -409,14 +420,15 @@ class RoleSeamHardeningTest {
 
         try {
             workspaceService.acceptInvite(invitee, invite.getId());
-            assert false : "the invite path wrote an unjudged role_id onto workspace_members — "
+            fail("the invite path wrote an unjudged role_id onto workspace_members — "
                            + "and that membership row cannot then be removed through the API, "
-                           + "because every read of it refuses rather than degrades";
+                           + "because every read of it refuses rather than degrades");
         } catch (WorkspaceNotFoundException expected) {
             // as required — and the ERROR line names workspace_invites, not workspace_members
         }
-        assert workspaceMemberRepository.findByWorkspaceAndUser(ws, invitee).isEmpty()
-                : "a refused acceptance must leave no membership behind";
+        assertThat(workspaceMemberRepository.findByWorkspaceAndUser(ws, invitee))
+                .as("a refused acceptance must leave no membership behind")
+                .isEmpty();
     }
 
     /**
@@ -440,12 +452,16 @@ class RoleSeamHardeningTest {
 
         var pending = workspaceService.listPendingInvites(invitee);
 
-        assert pending.size() == 1 : "one bad invite must not empty the whole list";
-        assert pending.getFirst().role() == null
-                : "the refused role's key was rendered anyway: " + pending.getFirst().role();
-        assert !pending.toString().contains("invite-list-sneaky")
-               && !pending.toString().contains("Project-scoped")
-                : "the response leaked the role we just refused: " + pending;
+        assertThat(pending).as("one bad invite must not empty the whole list").hasSize(1);
+        assertThat(pending.getFirst().role())
+                .as("the refused role's key was rendered anyway: " + pending.getFirst().role())
+                .isNull();
+        assertThat(pending.toString())
+                .as("the response leaked the role we just refused: " + pending)
+                .doesNotContain("invite-list-sneaky");
+        assertThat(pending.toString())
+                .as("the response leaked the role we just refused: " + pending)
+                .doesNotContain("Project-scoped");
     }
 
     /** The scoped finder is the S4 front door for a role id from a request body. */
@@ -457,15 +473,20 @@ class RoleSeamHardeningTest {
         var role = customRole(ws, RoleScope.PROJECT, "lead", "A project role");
         em.flush();
 
-        assert roleRepository.findAssignable(role.getId(), ws.getId(), RoleScope.PROJECT).isPresent();
-        assert roleRepository.findAssignable(role.getId(), ws.getId(), RoleScope.WORKSPACE).isEmpty()
-                : "findAssignable ignored the scope — the caller would assign a project role as a "
-                  + "workspace role, or vice versa";
-        assert roleRepository.findAssignable(role.getId(), other.getId(), RoleScope.PROJECT).isEmpty()
-                : "findAssignable leaked a role across workspaces (§12)";
-        assert roleRepository.findAssignable(
-                BuiltInRoles.PROJECT_MEMBER, ws.getId(), RoleScope.PROJECT).isPresent()
-                : "built-in templates must stay assignable in every workspace";
+        assertThat(roleRepository.findAssignable(role.getId(), ws.getId(), RoleScope.PROJECT))
+                .as("a PROJECT role of this workspace is assignable at PROJECT scope, so the refusals below are the filter and not a finder that answers nothing")
+                .isPresent();
+        assertThat(roleRepository.findAssignable(role.getId(), ws.getId(), RoleScope.WORKSPACE))
+                .as("findAssignable ignored the scope — the caller would assign a project role as a "
+                  + "workspace role, or vice versa")
+                .isEmpty();
+        assertThat(roleRepository.findAssignable(role.getId(), other.getId(), RoleScope.PROJECT))
+                .as("findAssignable leaked a role across workspaces (§12)")
+                .isEmpty();
+        assertThat(roleRepository.findAssignable(
+                BuiltInRoles.PROJECT_MEMBER, ws.getId(), RoleScope.PROJECT))
+                .as("built-in templates must stay assignable in every workspace")
+                .isPresent();
     }
 
     // ================================================================= T1: the pair
@@ -489,10 +510,9 @@ class RoleSeamHardeningTest {
         var ctx = workspaceAccess.requireMember(actor, ws.getId());
         try {
             workspaceAccess.projectContext(actor, ctx, foreignProject);
-            assert false
-                    : "projectContext accepted a project from a different workspace than the "
+            fail("projectContext accepted a project from a different workspace than the "
                       + "WorkspaceContext it was handed. Nothing else in the chain re-checks the "
-                      + "pairing, so any future caller that resolves the two separately leaks.";
+                      + "pairing, so any future caller that resolves the two separately leaks.");
         } catch (ProjectNotFoundException expected) {
             // 404, never 403.
         }
@@ -521,10 +541,12 @@ class RoleSeamHardeningTest {
         em.clear();
 
         var view = roleCatalog.view(role.getId());
-        assert view.permissions().has(Permission.ISSUE_CREATE)
-                : "the known grants must survive alongside the unknown one";
-        assert view.permissions().asWireStrings().size() == 1
-                : "the unknown key leaked into the resolved set: " + view.permissions();
+        assertThat(view.permissions().has(Permission.ISSUE_CREATE))
+                .withFailMessage("the known grants must survive alongside the unknown one")
+                .isTrue();
+        assertThat(view.permissions().asWireStrings())
+                .as(() -> "the unknown key leaked into the resolved set: " + view.permissions())
+                .hasSize(1);
     }
 
     /**
@@ -536,11 +558,15 @@ class RoleSeamHardeningTest {
     @Test
     void everyPermissionKeyIsUnambiguousOnTheWire() {
         for (var p : Permission.values()) {
-            assert p.key().matches("[a-z]+(\\.[a-z]+)+")
-                    : p.name() + " has key '" + p.key() + "', which is not area.action lowercase";
-            assert !p.key().contains(":")
-                    : p.name() + " has a ':' in its key, which collides with the \":own\" suffix";
-            assert p.key().length() <= 64 : p.name() + " exceeds the VARCHAR(64) column";
+            assertThat(p.key())
+                    .as(() -> String.valueOf(p.name() + " has key '" + p.key() + "', which is not area.action lowercase"))
+                    .matches("[a-z]+(\\.[a-z]+)+");
+            assertThat(p.key())
+                    .as(() -> String.valueOf(p.name() + " has a ':' in its key, which collides with the \":own\" suffix"))
+                    .doesNotContain(":");
+            assertThat(p.key().length())
+                    .as(() -> String.valueOf(p.name() + " exceeds the VARCHAR(64) column"))
+                    .isLessThanOrEqualTo(64);
         }
     }
 

@@ -7,6 +7,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -94,7 +95,7 @@ class VersionApiTest extends VersionTestBase {
         postVersion(ctx, ctx.token(), "{\"name\":\"\\u200b\"}").andExpect(status().isBadRequest());
         postVersion(ctx, ctx.token(), "{\"name\":\"" + "x".repeat(61) + "\"}")
                 .andExpect(status().isBadRequest());
-        assert listVersions(ctx, ctx.token(), null).size() == 0 : "nothing was created";
+        assertThat(listVersions(ctx, ctx.token(), null)).as("nothing was created").isEmpty();
     }
 
     /**
@@ -120,8 +121,12 @@ class VersionApiTest extends VersionTestBase {
         releaseVersion(ctx, ctx.token(), id, "{\"releaseDate\":\"+999999999-12-31\"}")
                 .andExpect(status().isUnprocessableContent());
         // …and none of the rejects wrote anything.
-        assert versionNode(ctx, id).get("releaseDate").isNull();
-        assert !versionNode(ctx, id).get("released").asBoolean();
+        assertThat(versionNode(ctx, id).get("releaseDate").isNull())
+                .withFailMessage("a rejected release date must not have been written")
+                .isTrue();
+        assertThat(versionNode(ctx, id).get("released").asBoolean())
+                .withFailMessage("a rejected release must leave the version unreleased")
+                .isFalse();
 
         // The edges of the accepted window still bind normally.
         postVersion(ctx, ctx.token(), "{\"name\":\"epoch\",\"releaseDate\":\"1000-01-01\"}")
@@ -182,25 +187,29 @@ class VersionApiTest extends VersionTestBase {
         releaseVersion(ctx, ctx.token(), shipped).andExpect(status().isOk());
         releaseVersion(ctx, ctx.token(), shippedEarlier).andExpect(status().isOk());
 
-        assert versionNames(listVersions(ctx, ctx.token(), null)).equals(List.of(
+        assertThat(versionNames(listVersions(ctx, ctx.token(), null)))
+                .as("%s", versionNames(listVersions(ctx, ctx.token(), null)))
+                .isEqualTo(List.of(
                 // unreleased, dated, ascending…
                 "a-early", "b-late",
                 // …then unreleased and undated, by name…
                 "a-undated", "z-undated",
                 // …then the released ones, still by date.
-                "shipped-earlier", "shipped"))
-                : versionNames(listVersions(ctx, ctx.token(), null));
+                "shipped-earlier", "shipped"));
 
         // includeReleased=false drops the shipped ones without disturbing the rest.
-        assert versionNames(listVersions(ctx, ctx.token(), "?includeReleased=false"))
-                .equals(List.of("a-early", "b-late", "a-undated", "z-undated"));
+        assertThat(versionNames(listVersions(ctx, ctx.token(), "?includeReleased=false")))
+                .as("includeReleased=false drops the shipped versions without disturbing the order of the rest")
+                .isEqualTo(List.of("a-early", "b-late", "a-undated", "z-undated"));
 
         // Archived rows are out by default and in on request, keeping their place.
         archiveVersion(ctx, ctx.token(), zUndated).andExpect(status().isOk());
-        assert versionNames(listVersions(ctx, ctx.token(), null))
-                .equals(List.of("a-early", "b-late", "a-undated", "shipped-earlier", "shipped"));
-        assert versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true"))
-                .equals(List.of("a-early", "b-late", "a-undated", "z-undated",
+        assertThat(versionNames(listVersions(ctx, ctx.token(), null)))
+                .as("an archived version is out of the default list")
+                .isEqualTo(List.of("a-early", "b-late", "a-undated", "shipped-earlier", "shipped"));
+        assertThat(versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true")))
+                .as("includeArchived=true brings the archived version back in the place it had")
+                .isEqualTo(List.of("a-early", "b-late", "a-undated", "z-undated",
                         "shipped-earlier", "shipped"));
     }
 
@@ -225,9 +234,9 @@ class VersionApiTest extends VersionTestBase {
         markDone(ctx, done.get("number").asLong());
 
         var node = versionNode(ctx, target);
-        assert node.get("issueCount").asInt() == 3 : node;          // open + done + both
-        assert node.get("doneIssueCount").asInt() == 1 : node;
-        assert node.get("affectsIssueCount").asInt() == 2 : node;   // affects-only + both
+        assertThat(node.get("issueCount").asInt()).as("%s", node).isEqualTo(3);          // open + done + both
+        assertThat(node.get("doneIssueCount").asInt()).as("%s", node).isEqualTo(1);
+        assertThat(node.get("affectsIssueCount").asInt()).as("%s", node).isEqualTo(2);   // affects-only + both
 
         // usage/{id} is fed by the SAME grouped query and must agree, with
         // unresolvedFixIssueCount = fix - fixDone (what a release-time move would move).
@@ -239,9 +248,15 @@ class VersionApiTest extends VersionTestBase {
 
         // A version nothing links to reports honest zeroes, not nulls or a 404.
         var empty = createVersion(ctx, "0.0.1");
-        assert versionNode(ctx, empty).get("issueCount").asInt() == 0;
-        assert versionNode(ctx, empty).get("doneIssueCount").asInt() == 0;
-        assert versionNode(ctx, empty).get("affectsIssueCount").asInt() == 0;
+        assertThat(versionNode(ctx, empty).get("issueCount").asInt())
+                .as("a version nothing links to reports an honest zero, not a null and not a 404")
+                .isEqualTo(0);
+        assertThat(versionNode(ctx, empty).get("doneIssueCount").asInt())
+                .as("a version nothing links to reports an honest zero, not a null and not a 404")
+                .isEqualTo(0);
+        assertThat(versionNode(ctx, empty).get("affectsIssueCount").asInt())
+                .as("a version nothing links to reports an honest zero, not a null and not a 404")
+                .isEqualTo(0);
         versionUsage(ctx, ctx.token(), empty)
                 .andExpect(jsonPath("$.fixIssueCount").value(0))
                 .andExpect(jsonPath("$.affectsIssueCount").value(0))
@@ -251,13 +266,18 @@ class VersionApiTest extends VersionTestBase {
         // the whole page — a per-row query would be the thing that drifts).
         for (var v : listVersions(ctx, ctx.token(), null)) {
             if (v.get("id").asText().equals(target.toString())) {
-                assert v.get("issueCount").asInt() == 3 && v.get("doneIssueCount").asInt() == 1
-                        && v.get("affectsIssueCount").asInt() == 2 : v;
+                assertThat(v.get("issueCount").asInt()).as("%s", v).isEqualTo(3);
+                assertThat(v.get("doneIssueCount").asInt()).as("%s", v).isEqualTo(1);
+                assertThat(v.get("affectsIssueCount").asInt()).as("%s", v).isEqualTo(2);
             }
         }
         // …and the elsewhere-linked issue only moved the OTHER version's counter.
-        assert versionNode(ctx, other).get("issueCount").asInt() == 1;
-        assert versionNode(ctx, other).get("affectsIssueCount").asInt() == 0;
+        assertThat(versionNode(ctx, other).get("issueCount").asInt())
+                .as("an issue linked elsewhere counts only against the version it actually links to")
+                .isEqualTo(1);
+        assertThat(versionNode(ctx, other).get("affectsIssueCount").asInt())
+                .as("a fixVersion link must not leak into the affects counter")
+                .isEqualTo(0);
     }
 
     // ==================================================== archive
@@ -272,9 +292,13 @@ class VersionApiTest extends VersionTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.archived").value(true));
         // The link survives and still renders on the issue…
-        assert fixVersionNames(getIssue(ctx, issue.get("number").asLong())).equals(List.of("2.4.0"));
+        assertThat(fixVersionNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("archiving keeps the link — the issue still renders its fix version")
+                .isEqualTo(List.of("2.4.0"));
         // …and the progress counter still sees it.
-        assert versionNode(ctx, id).get("issueCount").asInt() == 1;
+        assertThat(versionNode(ctx, id).get("issueCount").asInt())
+                .as("archiving keeps the version's progress counter")
+                .isEqualTo(1);
 
         unarchiveVersion(ctx, ctx.token(), id)
                 .andExpect(status().isOk())
@@ -300,7 +324,9 @@ class VersionApiTest extends VersionTestBase {
         createIssue(ctx, "affected", affectsVersionIdsJson(affectsOnly));
         deleteVersion(ctx, ctx.token(), affectsOnly, null).andExpect(status().isConflict());
 
-        assert versionNames(listVersions(ctx, ctx.token(), null)).equals(List.of("2.3.0", "2.4.0"));
+        assertThat(versionNames(listVersions(ctx, ctx.token(), null)))
+                .as("a refused delete must leave every version in place")
+                .isEqualTo(List.of("2.3.0", "2.4.0"));
     }
 
     @Test
@@ -314,12 +340,19 @@ class VersionApiTest extends VersionTestBase {
 
         deleteVersion(ctx, ctx.token(), doomed, "?force=true").andExpect(status().isNoContent());
 
-        assert fixVersionNames(getIssue(ctx, a.get("number").asLong())).isEmpty();
-        assert affectsVersionNames(getIssue(ctx, b.get("number").asLong())).isEmpty();
+        assertThat(fixVersionNames(getIssue(ctx, a.get("number").asLong())))
+                .as("force delete drops the fix link it was warned about")
+                .isEmpty();
+        assertThat(affectsVersionNames(getIssue(ctx, b.get("number").asLong())))
+                .as("force delete drops the affects link too — both roles, one delete")
+                .isEmpty();
         // The OTHER version's link on the same issue is untouched — force is scoped.
-        assert fixVersionNames(getIssue(ctx, c.get("number").asLong())).equals(List.of("2.5.0"));
-        assert versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true"))
-                .equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, c.get("number").asLong())))
+                .as("force is scoped to the deleted version: the other version's link on the same issue survives")
+                .isEqualTo(List.of("2.5.0"));
+        assertThat(versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true")))
+                .as("force delete removes the version row itself, archived listing included")
+                .isEqualTo(List.of("2.5.0"));
     }
 
     /**
@@ -351,27 +384,34 @@ class VersionApiTest extends VersionTestBase {
                 .andExpect(status().isNoContent());
 
         // The collision collapsed into ONE row instead of blowing up…
-        assert fixVersionNames(getIssue(ctx, fixCollision.get("number").asLong()))
-                .equals(List.of("2.5.0"));
-        assert fixVersionNames(getIssue(ctx, fixClean.get("number").asLong()))
-                .equals(List.of("2.5.0"));
-        assert affectsVersionNames(getIssue(ctx, affectsCollision.get("number").asLong()))
-                .equals(List.of("2.5.0"));
-        assert affectsVersionNames(getIssue(ctx, affectsClean.get("number").asLong()))
-                .equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, fixCollision.get("number").asLong())))
+                .as("the remap collapsed the collision into ONE link instead of a unique violation")
+                .isEqualTo(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, fixClean.get("number").asLong())))
+                .as("a link with no collision is simply repointed at the remap target")
+                .isEqualTo(List.of("2.5.0"));
+        assertThat(affectsVersionNames(getIssue(ctx, affectsCollision.get("number").asLong())))
+                .as("the affects role collapses its collision the same way the fix role does")
+                .isEqualTo(List.of("2.5.0"));
+        assertThat(affectsVersionNames(getIssue(ctx, affectsClean.get("number").asLong())))
+                .as("an affects link with no collision is repointed at the remap target")
+                .isEqualTo(List.of("2.5.0"));
         // …and the cross-role issue now legitimately carries the target TWICE, once per
         // role, because link_type is part of the unique key.
         var cross = getIssue(ctx, crossRole.get("number").asLong());
-        assert fixVersionNames(cross).equals(List.of("2.5.0")) : cross;
-        assert affectsVersionNames(cross).equals(List.of("2.5.0")) : cross;
-        assert fixVersionNames(getIssue(ctx, untouched.get("number").asLong())).isEmpty();
+        assertThat(fixVersionNames(cross)).as("%s", cross).isEqualTo(List.of("2.5.0"));
+        assertThat(affectsVersionNames(cross)).as("%s", cross).isEqualTo(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, untouched.get("number").asLong())))
+                .as("an issue that linked to neither version is untouched by the remap")
+                .isEmpty();
 
         // The target's counters now reflect the merged sets: 3 fix, 3 affects.
         var node = versionNode(ctx, target);
-        assert node.get("issueCount").asInt() == 3 : node;
-        assert node.get("affectsIssueCount").asInt() == 3 : node;
-        assert versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true"))
-                .equals(List.of("2.5.0"));
+        assertThat(node.get("issueCount").asInt()).as("%s", node).isEqualTo(3);
+        assertThat(node.get("affectsIssueCount").asInt()).as("%s", node).isEqualTo(3);
+        assertThat(versionNames(listVersions(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the remapped-away version is gone, archived listing included")
+                .isEqualTo(List.of("2.5.0"));
     }
 
     /**
@@ -401,12 +441,16 @@ class VersionApiTest extends VersionTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("Unknown version")));
         // Every rejection left the version — and its link — completely alone.
-        assert versionNode(ctx, doomed).get("issueCount").asInt() == 1;
+        assertThat(versionNode(ctx, doomed).get("issueCount").asInt())
+                .as("every rejected remap left the version and its link completely alone")
+                .isEqualTo(1);
 
         // …and the released target IS accepted.
         deleteVersion(ctx, ctx.token(), doomed, "?remapToId=" + shipped)
                 .andExpect(status().isNoContent());
-        assert versionNode(ctx, shipped).get("issueCount").asInt() == 1;
+        assertThat(versionNode(ctx, shipped).get("issueCount").asInt())
+                .as("the accepted remap moved the link onto the released target")
+                .isEqualTo(1);
     }
 
     /** {@code remapToId} is the strictly more specific, non-destructive intent. */
@@ -420,8 +464,9 @@ class VersionApiTest extends VersionTestBase {
         deleteVersion(ctx, ctx.token(), doomed, "?force=true&remapToId=" + target)
                 .andExpect(status().isNoContent());
 
-        assert fixVersionNames(getIssue(ctx, issue.get("number").asLong())).equals(List.of("2.5.0"))
-                : "remapToId must win over force — force would have dropped the link";
+        assertThat(fixVersionNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("remapToId must win over force — force would have dropped the link")
+                .isEqualTo(List.of("2.5.0"));
     }
 
     /** Deleting a released version is allowed: force/remap already require intent. */
@@ -434,7 +479,9 @@ class VersionApiTest extends VersionTestBase {
 
         deleteVersion(ctx, ctx.token(), shipped, null).andExpect(status().isConflict());
         deleteVersion(ctx, ctx.token(), shipped, "?force=true").andExpect(status().isNoContent());
-        assert listVersions(ctx, ctx.token(), "?includeArchived=true").size() == 0;
+        assertThat(listVersions(ctx, ctx.token(), "?includeArchived=true"))
+                .as("a released version deleted with force leaves nothing behind")
+                .isEmpty();
     }
 
     // ==================================================== archived project
@@ -457,7 +504,9 @@ class VersionApiTest extends VersionTestBase {
         deleteVersion(ctx, ctx.token(), id, null).andExpect(status().isConflict());
 
         // Reads still work — the freeze is about writes.
-        assert versionNames(listVersions(ctx, ctx.token(), null)).equals(List.of("2.4.0"));
+        assertThat(versionNames(listVersions(ctx, ctx.token(), null)))
+                .as("an archived project freezes writes, not reads — the list still answers")
+                .isEqualTo(List.of("2.4.0"));
         getVersion(ctx, ctx.token(), id).andExpect(status().isOk());
         versionUsage(ctx, ctx.token(), id).andExpect(status().isOk());
 

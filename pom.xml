@@ -256,6 +256,28 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <configuration>
                     <!--
+                      Bare `assert` statements run ONLY when the JVM is started with -ea, and
+                      much of this suite is written with them: those checks have an opinion at
+                      all because Surefire enables assertions by default. That default is the
+                      problem — it is load-bearing and this build file never said so. A future
+                      Surefire default, or an enableAssertions=false added here for an
+                      unrelated reason, would turn every one of those checks into a silent
+                      no-op and NOT ONE TEST WOULD TURN RED. This line states the default, so
+                      that losing it has to be a deliberate edit to this block rather than a
+                      side effect of someone else's change.
+
+                      IT IS A FLOOR, NOT A FIX, and it reaches only the Maven run. An IDE
+                      builds its own command line: neither IntelliJ nor VS Code passes -ea, so
+                      a developer running one class from the editor — which is how anyone
+                      actually works on a failing test — watches it pass on assertions that
+                      never executed. Do not read this line as the problem being handled. The
+                      remedy is the ongoing conversion of bare `assert` to real assertion
+                      calls (HD-164), which hold whoever runs them and however they are run;
+                      until a class is converted, only CI is really checking it.
+                    -->
+                    <enableAssertions>true</enableAssertions>
+
+                    <!--
                       TEST-ONLY connection-pool cap.
 
                       The suite runs many @SpringBootTest classes and every distinct

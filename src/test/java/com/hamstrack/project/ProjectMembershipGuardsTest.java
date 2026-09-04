@@ -62,9 +62,10 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
 
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
         var membership = projectMemberRepository.findByProjectAndUser(project, newcomer.user()).orElseThrow();
-        assert membership.getRole().getId().equals(BuiltInRoles.PROJECT_MEMBER)
-                : "an added 'VIEWER' landed on role " + membership.getRole().getId()
-                  + "; it must be the Contributor V14 maps existing VIEWER rows to.";
+        assertThat(membership.getRole().getId())
+                .as(() -> "an added 'VIEWER' landed on role " + membership.getRole().getId()
+                  + "; it must be the Contributor V14 maps existing VIEWER rows to.")
+                .isEqualTo(BuiltInRoles.PROJECT_MEMBER);
 
         // And the newcomer can still do what any workspace member could do before HD-123.
         postIssue(ctx, newcomer.token(), "Still able to work").andExpect(status().isCreated());
@@ -135,10 +136,12 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(status().isForbidden());
 
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
-        assert projectMemberRepository.findByProjectAndUser(project, third.user()).isEmpty()
-                : "the refused grant created a membership anyway";
-        assert projectMemberRepository.findByProjectAndUser(project, ctx.owner()).isPresent()
-                : "the refused removal deleted the project admin anyway";
+        assertThat(projectMemberRepository.findByProjectAndUser(project, third.user()))
+                .as("the refused grant created a membership anyway")
+                .isEmpty();
+        assertThat(projectMemberRepository.findByProjectAndUser(project, ctx.owner()))
+                .as("the refused removal deleted the project admin anyway")
+                .isPresent();
     }
 
     /**
@@ -174,8 +177,9 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(status().isForbidden());   // Contributor > the lead's own set
 
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
-        assert projectMemberRepository.findByProjectAndUser(project, lead.user()).isPresent()
-                : "the refused self-removal deleted the row anyway";
+        assertThat(projectMemberRepository.findByProjectAndUser(project, lead.user()))
+                .as("the refused self-removal deleted the row anyway")
+                .isPresent();
     }
 
     /**
@@ -243,8 +247,9 @@ class ProjectMembershipGuardsTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("last administrator")));
 
         var project = projectRepository.findById(ctx.projectId()).orElseThrow();
-        assert projectMemberRepository.findByProjectAndUser(project, lead.user()).isPresent()
-                : "the project's last administrator was removed anyway";
+        assertThat(projectMemberRepository.findByProjectAndUser(project, lead.user()))
+                .as("the project's last administrator was removed anyway")
+                .isPresent();
     }
 
     /**

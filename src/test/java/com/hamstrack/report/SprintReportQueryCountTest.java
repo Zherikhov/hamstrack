@@ -13,6 +13,8 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The cost claim for R4 (§2.3 "the cheapest report in the set", §12 "Performance"): both sprint
  * reports are a <strong>fixed, small number of statements</strong>, independent of how large the
@@ -79,22 +81,30 @@ class SprintReportQueryCountTest extends SprintReportTestBase {
         long smallReview = count(() -> runReview(small, smallSprint));
         long largeReview = count(() -> runReview(large, largeSprint));
 
-        assert smallBurnup == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "the burn-up took " + smallBurnup + " statements, not "
+        assertThat(smallBurnup)
+                .as(() -> "the burn-up took " + smallBurnup + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + " (" + RESOLUTION_STATEMENTS
                   + " for the tenancy resolution + the sprint, the ledger and meta.firstIssueAt). "
                   + "If it is higher, something is reading issues one at a time — most likely a "
-                  + "per-event lookup of the issue behind a ledger row.";
+                  + "per-event lookup of the issue behind a ledger row.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert smallReview == smallBurnup
-                : "the sprint review took " + smallReview + " statements and the burn-up "
+        assertThat(smallReview)
+                .as("the sprint review took " + smallReview + " statements and the burn-up "
                   + smallBurnup + ". They share one ledger query by design; a difference means one "
-                  + "of them started fetching the issues separately.";
+                  + "of them started fetching the issues separately.")
+                .isEqualTo(smallBurnup);
 
-        assert smallBurnup == largeBurnup && smallReview == largeReview
-                : "the sprint reports are data-dependent: " + smallBurnup + "/" + smallReview
+        assertThat(smallBurnup)
+                .as("the sprint reports are data-dependent: " + smallBurnup + "/" + smallReview
                   + " statements for a 2-issue sprint vs " + largeBurnup + "/" + largeReview
-                  + " for a 25-issue one. The row count may grow; the statement count may not.";
+                  + " for a 25-issue one. The row count may grow; the statement count may not.")
+                .isEqualTo(largeBurnup);
+        assertThat(smallReview)
+                .as("the sprint reports are data-dependent: " + smallBurnup + "/" + smallReview
+                  + " statements for a 2-issue sprint vs " + largeBurnup + "/" + largeReview
+                  + " for a 25-issue one. The row count may grow; the statement count may not.")
+                .isEqualTo(largeReview);
     }
 
     @Test
@@ -106,10 +116,11 @@ class SprintReportQueryCountTest extends SprintReportTestBase {
         long named = count(() -> runBurnup(ctx, sprint));
         long defaulted = count(() -> runBurnup(ctx, null));
 
-        assert named == defaulted
-                : "naming the sprint cost " + named + " statements and defaulting to the ACTIVE one "
+        assertThat(named)
+                .as("naming the sprint cost " + named + " statements and defaulting to the ACTIVE one "
                   + defaulted + ". The picker is one statement either way; if the default is more, "
-                  + "it is listing sprints and filtering in Java.";
+                  + "it is listing sprints and filtering in Java.")
+                .isEqualTo(defaulted);
     }
 
     // ------------------------------------------------------------------ plumbing

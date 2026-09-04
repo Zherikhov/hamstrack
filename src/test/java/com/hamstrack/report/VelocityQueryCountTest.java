@@ -11,6 +11,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The cost claim for R5 (§2.5 "one grouped query over the ledger, bounded by N"; §12
  * "Performance"): velocity is a <strong>fixed</strong> number of statements, and in particular it is
@@ -65,16 +67,18 @@ class VelocityQueryCountTest extends SprintReportTestBase {
         long small = count(() -> run(one, null));
         long large = count(() -> run(twelve, VelocityService.MAX_SPRINTS));
 
-        assert small == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "velocity took " + small + " statements, not "
+        assertThat(small)
+                .as(() -> "velocity took " + small + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + " (" + RESOLUTION_STATEMENTS
-                  + " for the tenancy resolution + the sprint sample, the ledger sweep and meta).";
+                  + " for the tenancy resolution + the sprint sample, the ledger sweep and meta).")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert small == large
-                : "velocity is data-dependent: " + small + " statements for 1 sprint and " + large
+        assertThat(small)
+                .as("velocity is data-dependent: " + small + " statements for 1 sprint and " + large
                   + " for " + VelocityService.MAX_SPRINTS + ". The likeliest cause is that it now "
                   + "reads one sprint's ledger at a time — which is what SprintLedgerReader does, "
-                  + "and is 3N here. One sweep serves them all.";
+                  + "and is 3N here. One sweep serves them all.")
+                .isEqualTo(large);
     }
 
     /**
@@ -90,10 +94,11 @@ class VelocityQueryCountTest extends SprintReportTestBase {
         run(ctx, null);
         long empty = count(() -> run(ctx, null));
 
-        assert empty == RESOLUTION_STATEMENTS + REPORT_STATEMENTS - 1
-                : "an empty velocity report took " + empty + " statements, not "
+        assertThat(empty)
+                .as(() -> "an empty velocity report took " + empty + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS - 1)
-                  + " — there are no sprints to sweep, so there is no sweep to run.";
+                  + " — there are no sprints to sweep, so there is no sweep to run.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS - 1);
     }
 
     /**
@@ -121,11 +126,12 @@ class VelocityQueryCountTest extends SprintReportTestBase {
         long json = count(() -> run(ctx, null));
         long csv = count(() -> export(ctx));
 
-        assert csv == json + 1
-                : "the velocity export took " + csv + " statements against the report's " + json
+        assertThat(csv)
+                .as("the velocity export took " + csv + " statements against the report's " + json
                   + ". One more is the project header (key + name) the comment block needs; four "
                   + "more means the export resolved the project a second time instead of letting "
-                  + "the report service do it once.";
+                  + "the report service do it once.")
+                .isEqualTo(json + 1);
     }
 
     // ------------------------------------------------------------------ plumbing

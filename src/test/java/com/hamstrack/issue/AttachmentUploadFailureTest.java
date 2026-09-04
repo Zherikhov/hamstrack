@@ -32,6 +32,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.io.InputStream;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -103,9 +104,10 @@ class AttachmentUploadFailureTest {
         // The compensating tenant-scoped delete must have removed the reserved row —
         // zero attachments remain on the issue.
         var issue = issueRepository.findById(issueId).orElseThrow();
-        assert attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue).isEmpty()
-                : "compensating delete must remove the reserved attachment row on store failure; "
-                  + "found " + attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue).size();
+        assertThat(attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue))
+                .as(() -> "compensating delete must remove the reserved attachment row on store failure; "
+                  + "found " + attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue).size())
+                .isEmpty();
     }
 
     @Test
@@ -122,13 +124,14 @@ class AttachmentUploadFailureTest {
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         var node = json.readTree(body);
-        assert node.get("filename").asText().equals("note.txt") : "filename echoed back";
+        assertThat(node.get("filename").asText()).as("filename echoed back").isEqualTo("note.txt");
 
         // store(...) was actually invoked, and the row persists.
         Mockito.verify(fileStorage).store(anyString(), any(InputStream.class), anyLong(), anyString());
         var issue = issueRepository.findById(issueId).orElseThrow();
-        assert attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue).size() == 1
-                : "the attachment row must persist on a successful store";
+        assertThat(attachmentRepository.findAllByIssueOrderByCreatedAtAsc(issue))
+                .as("the attachment row must persist on a successful store")
+                .hasSize(1);
     }
 
     // ============================================================ helpers

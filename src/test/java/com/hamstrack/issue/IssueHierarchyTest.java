@@ -26,6 +26,7 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -83,9 +84,10 @@ class IssueHierarchyTest {
     private void assertLevel(JsonNode types, String name, int level) {
         for (var t : types) {
             if (t.get("name").asText().equals(name)) {
-                assert t.has("hierarchyLevel") : name + " missing hierarchyLevel";
-                assert t.get("hierarchyLevel").asInt() == level
-                        : name + " level " + t.get("hierarchyLevel").asInt() + " != " + level;
+                assertThat(t.has("hierarchyLevel")).withFailMessage("%s", name + " missing hierarchyLevel").isTrue();
+                assertThat(t.get("hierarchyLevel").asInt())
+                        .as(() -> String.valueOf(name + " level " + t.get("hierarchyLevel").asInt() + " != " + level))
+                        .isEqualTo(level);
                 return;
             }
         }
@@ -493,7 +495,7 @@ class IssueHierarchyTest {
                 .andExpect(jsonPath("$.parentTypeId").value(ctx.typeId("Story").toString()))
                 .andExpect(jsonPath("$.childCount").value(0))
                 .andExpect(jsonPath("$.doneChildCount").value(0));
-        assert issueRepository.count() == before + 1 : "exactly one issue created";
+        assertThat(issueRepository.count()).as("exactly one issue created").isEqualTo(before + 1);
     }
 
     @Test
@@ -520,9 +522,8 @@ class IssueHierarchyTest {
                 .andReturn().getResponse().getContentAsString();
         // The emitted body parses and carries the field value (JSONB round-trip).
         var node = json.readTree(resp);
-        assert node.get("fields").get(0).get("value").asText().equals("major")
-                : "field value round-tripped";
-        assert issueRepository.count() == before + 1 : "exactly one issue created";
+        assertThat(node.get("fields").get(0).get("value").asText()).as("field value round-tripped").isEqualTo("major");
+        assertThat(issueRepository.count()).as("exactly one issue created").isEqualTo(before + 1);
     }
 
     @Test
@@ -536,12 +537,12 @@ class IssueHierarchyTest {
         // Epic → Sub-task is now illegal (gap 2) → 422, nothing persisted.
         create(ctx, body(ctx, "Sub-task", "doomed", parentField(epic.id())))
                 .andExpect(status().isUnprocessableContent());
-        assert issueRepository.count() == before : "rejected create left no orphan row";
+        assertThat(issueRepository.count()).as("rejected create left no orphan row").isEqualTo(before);
 
         // Valid retry: a Story under the Epic → exactly one new issue.
         create(ctx, body(ctx, "Story", "valid retry", parentField(epic.id())))
                 .andExpect(status().isCreated());
-        assert issueRepository.count() == before + 1 : "retry created exactly one";
+        assertThat(issueRepository.count()).as("retry created exactly one").isEqualTo(before + 1);
     }
 
     @Test
@@ -554,7 +555,9 @@ class IssueHierarchyTest {
                 .andExpect(jsonPath("$.title").value("plain task"))
                 .andExpect(jsonPath("$.parentId").doesNotExist())
                 .andExpect(jsonPath("$.childCount").value(0));
-        assert issueRepository.count() == before + 1;
+        assertThat(issueRepository.count())
+                .as("exactly one issue was written: the parentless create is a real insert, not an echo")
+                .isEqualTo(before + 1);
     }
 
     private void bindEngineeringFields(Ctx ctx) {

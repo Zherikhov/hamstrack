@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -53,16 +54,30 @@ class LabelSearchTest extends LabelTestBase {
         createIssue(ctx, "both", labelIdsJson(bug, ui));
         createIssue(ctx, "bare");
 
-        assert found(ctx, "label = \"bug\"").equals(Set.of("only-bug", "both"));
+        assertThat(found(ctx, "label = \"bug\""))
+                .as("label = resolves a label name to every issue carrying it")
+                .isEqualTo(Set.of("only-bug", "both"));
         // != is "does not carry it" — NOT EXISTS, so the unlabelled issue matches too
-        assert found(ctx, "label != \"bug\"").equals(Set.of("only-ui", "bare"));
-        assert found(ctx, "label IN (\"bug\", \"ui\")").equals(Set.of("only-bug", "only-ui", "both"));
-        assert found(ctx, "label IS EMPTY").equals(Set.of("bare"));
-        assert found(ctx, "label IS NOT EMPTY").equals(Set.of("only-bug", "only-ui", "both"));
+        assertThat(found(ctx, "label != \"bug\""))
+                .as("label != is 'does not carry it' — a NOT EXISTS, so the unlabelled issue matches too")
+                .isEqualTo(Set.of("only-ui", "bare"));
+        assertThat(found(ctx, "label IN (\"bug\", \"ui\")"))
+                .as("IN unions the named labels without duplicating the issue that carries both")
+                .isEqualTo(Set.of("only-bug", "only-ui", "both"));
+        assertThat(found(ctx, "label IS EMPTY"))
+                .as("label IS EMPTY is the issues carrying no label at all")
+                .isEqualTo(Set.of("bare"));
+        assertThat(found(ctx, "label IS NOT EMPTY"))
+                .as("label IS NOT EMPTY is the complement of IS EMPTY over the same rows")
+                .isEqualTo(Set.of("only-bug", "only-ui", "both"));
         // name resolution is case-insensitive, and the plural alias is the same field
-        assert found(ctx, "labels = \"BUG\"").equals(Set.of("only-bug", "both"));
+        assertThat(found(ctx, "labels = \"BUG\""))
+                .as("name resolution is case-insensitive and the plural alias is the same field")
+                .isEqualTo(Set.of("only-bug", "both"));
         // composes with the rest of the language
-        assert found(ctx, "label = \"bug\" AND text ~ \"only\"").equals(Set.of("only-bug"));
+        assertThat(found(ctx, "label = \"bug\" AND text ~ \"only\""))
+                .as("label composes with the rest of the language instead of being a special case")
+                .isEqualTo(Set.of("only-bug"));
     }
 
     @Test
@@ -93,7 +108,9 @@ class LabelSearchTest extends LabelTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("No label named 'stale'")));
         // …but the issue still HAS a label, so IS NOT EMPTY still finds it
-        assert found(ctx, "label IS NOT EMPTY").equals(Set.of("carrier"));
+        assertThat(found(ctx, "label IS NOT EMPTY"))
+                .as("an archived label drops out of NAME resolution, but the issue still HAS it, so IS NOT EMPTY still finds it")
+                .isEqualTo(Set.of("carrier"));
     }
 
     @Test
@@ -104,8 +121,12 @@ class LabelSearchTest extends LabelTestBase {
         createIssue(b, "b-issue", labelIdsJson(createLabel(b, "shared-name")));
 
         // The same label name exists in both tenants; each side sees only its own.
-        assert found(a, "label = \"shared-name\"").equals(Set.of("a-issue"));
-        assert found(b, "label = \"shared-name\"").equals(Set.of("b-issue"));
+        assertThat(found(a, "label = \"shared-name\""))
+                .as("the same label name exists in both tenants and each side resolves its own")
+                .isEqualTo(Set.of("a-issue"));
+        assertThat(found(b, "label = \"shared-name\""))
+                .as("the other tenant resolves the shared name to its own label, never across")
+                .isEqualTo(Set.of("b-issue"));
     }
 
     @Test
@@ -127,7 +148,9 @@ class LabelSearchTest extends LabelTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.hql", containsString("label")));
 
-        assert found(ctx, created.get("hql").asText()).equals(Set.of("only-bug"));
+        assertThat(found(ctx, created.get("hql").asText()))
+                .as("a saved filter round-trips: the stored HQL runs and finds what it found when it was saved")
+                .isEqualTo(Set.of("only-bug"));
     }
 
     // ==================================================== /schema
@@ -159,16 +182,17 @@ class LabelSearchTest extends LabelTestBase {
                 .andReturn().getResponse().getContentAsString());
 
         var label = fieldNamed(schema, "label");
-        assert label.get("valueSuggest").asText().equals("LABEL") : label;
-        assert label.get("type").asText().equals("LABEL_REF") : label;
-        assert !label.get("sortable").asBoolean() : "label must not be sortable";
-        assert label.get("nullable").asBoolean() : "label supports IS [NOT] EMPTY";
+        assertThat(label.get("valueSuggest").asText()).as("%s", label).isEqualTo("LABEL");
+        assertThat(label.get("type").asText()).as("%s", label).isEqualTo("LABEL_REF");
+        assertThat(label.get("sortable").asBoolean()).withFailMessage("label must not be sortable").isFalse();
+        assertThat(label.get("nullable").asBoolean()).withFailMessage("label supports IS [NOT] EMPTY").isTrue();
         var ops = new java.util.ArrayList<String>();
         for (var o : label.get("operators")) ops.add(o.asText());
-        assert ops.equals(List.of("=", "!=", "IN", "IS EMPTY", "IS NOT EMPTY")) : ops;
+        assertThat(ops).as("%s", ops).isEqualTo(List.of("=", "!=", "IN", "IS EMPTY", "IS NOT EMPTY"));
 
-        assert schema.get("values").get("LABEL").size() == 200
-                : "the LABEL picklist is capped at 200, got " + schema.get("values").get("LABEL").size();
+        assertThat(schema.get("values").get("LABEL"))
+                .as(() -> "the LABEL picklist is capped at 200, got " + schema.get("values").get("LABEL").size())
+                .hasSize(200);
     }
 
     // ==================================================== /suggest
@@ -184,18 +208,23 @@ class LabelSearchTest extends LabelTestBase {
         createLabel(other, "foreign");
 
         // `_` is a literal underscore, not "any character": q=axb must NOT match a_b …
-        assert suggestions(ctx, "axb").equals(List.of("axb"));
+        assertThat(suggestions(ctx, "axb"))
+                .as("an underscore in a stored name is a literal character, so a wildcard-shaped query must not match it")
+                .isEqualTo(List.of("axb"));
         // … and q=a_b must NOT match axb.
-        assert suggestions(ctx, "a_b").equals(List.of("a_b"));
+        assertThat(suggestions(ctx, "a_b"))
+                .as("…and the query underscore is literal too, so it must not match the any-character spelling")
+                .isEqualTo(List.of("a_b"));
         // `%` is a literal percent, not "match everything".
-        assert suggestions(ctx, "%").equals(List.of("100% done"))
-                : "q=% must match only labels containing a literal %, got " + suggestions(ctx, "%");
+        assertThat(suggestions(ctx, "%"))
+                .as("q=% must match only labels containing a literal %, got " + suggestions(ctx, "%"))
+                .isEqualTo(List.of("100% done"));
         // an empty q lists the workspace's labels (bounded), never another tenant's
         var all = suggestions(ctx, "");
-        assert all.equals(List.of("100% done", "a_b", "axb", "plain")) : all;
-        assert !all.contains("foreign") : "suggest must never cross the workspace boundary";
+        assertThat(all).as("%s", all).isEqualTo(List.of("100% done", "a_b", "axb", "plain"));
+        assertThat(all).as("suggest must never cross the workspace boundary").doesNotContain("foreign");
         // case-insensitive substring match
-        assert suggestions(ctx, "PLA").equals(List.of("plain"));
+        assertThat(suggestions(ctx, "PLA")).as("suggest is a case-insensitive substring match").isEqualTo(List.of("plain"));
 
         // archived labels drop out of suggest (they are excluded from resolution too)
         UUID plainId = null;
@@ -203,10 +232,12 @@ class LabelSearchTest extends LabelTestBase {
             if (l.get("name").asText().equals("plain")) plainId = UUID.fromString(l.get("id").asText());
         }
         archiveLabel(ctx, ctx.token(), plainId).andExpect(status().isOk());
-        assert !suggestions(ctx, "").contains("plain");
+        assertThat(suggestions(ctx, "")).as("an archived label drops out of suggest").doesNotContain("plain");
 
         // the alias resolves to the same suggester
-        assert suggestions(ctx, "labels", "axb").equals(List.of("axb"));
+        assertThat(suggestions(ctx, "labels", "axb"))
+                .as("the plural alias resolves to the same suggester")
+                .isEqualTo(List.of("axb"));
         // and a non-member gets 404, never a peek at the vocabulary
         var outsider = login(user());
         mockMvc.perform(get("/api/workspaces/" + ctx.wsId() + "/search/suggest")

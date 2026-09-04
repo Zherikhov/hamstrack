@@ -7,6 +7,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -89,7 +90,9 @@ class LabelApiTest extends LabelTestBase {
         postLabel(b, b.token(), "{\"name\":\"tech debt\"}")
                 .andExpect(status().isCreated());
         // …and the first workspace kept the ORIGINAL casing.
-        assert listLabels(a, a.token(), null).get(0).get("name").asText().equals("Tech Debt");
+        assertThat(listLabels(a, a.token(), null).get(0).get("name").asText())
+                .as("the first workspace kept the ORIGINAL casing — the duplicate refusal must not rewrite it")
+                .isEqualTo("Tech Debt");
     }
 
     @Test
@@ -134,7 +137,9 @@ class LabelApiTest extends LabelTestBase {
                 .andExpect(jsonPath("$.detail", containsString("archived")));
 
         // beta is unharmed by either failed rename.
-        assert names(listLabels(ctx, ctx.token(), "?includeArchived=true")).contains("beta");
+        assertThat(names(listLabels(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the label that was renamed INTO is unharmed by either failed rename")
+                .contains("beta");
     }
 
     @Test
@@ -187,7 +192,9 @@ class LabelApiTest extends LabelTestBase {
 
         // …but reads stay open to every member.
         labelUsage(ctx, plain.token(), mine).andExpect(status().isOk());
-        assert listLabels(ctx, plain.token(), null).size() == 2;
+        assertThat(listLabels(ctx, plain.token(), null))
+                .as("reads stay open to every member: the admin gate is on the writes")
+                .hasSize(2);
 
         // and an ADMIN can do all four
         var admin = addMember(ctx, "ADMIN");
@@ -209,18 +216,22 @@ class LabelApiTest extends LabelTestBase {
         createIssue(ctx, "two", labelIdsJson(live));
         archiveLabel(ctx, ctx.token(), gone).andExpect(status().isOk());
 
-        assert names(listLabels(ctx, ctx.token(), null)).equals(List.of("live"))
-                : "archived labels must be hidden from the default list";
-        assert names(listLabels(ctx, ctx.token(), "?includeArchived=true")).equals(List.of("gone", "live"))
-                : "includeArchived must list both, ordered by lower(name)";
+        assertThat(names(listLabels(ctx, ctx.token(), null)))
+                .as("archived labels must be hidden from the default list")
+                .isEqualTo(List.of("live"));
+        assertThat(names(listLabels(ctx, ctx.token(), "?includeArchived=true")))
+                .as("includeArchived must list both, ordered by lower(name)")
+                .isEqualTo(List.of("gone", "live"));
 
         var withUsage = listLabels(ctx, ctx.token(), "?withUsage=true");
-        assert withUsage.get(0).get("issueCount").asInt() == 2 : "usage count must be batched and correct";
+        assertThat(withUsage.get(0).get("issueCount").asInt()).as("usage count must be batched and correct").isEqualTo(2);
         labelUsage(ctx, ctx.token(), live)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.issueCount").value(2));
         // no usage requested → the field is null, never a lie
-        assert listLabels(ctx, ctx.token(), null).get(0).get("issueCount").isNull();
+        assertThat(listLabels(ctx, ctx.token(), null).get(0).get("issueCount").isNull())
+                .withFailMessage("no usage requested means the field is null, never a lie about zero")
+                .isTrue();
     }
 
     @Test
@@ -231,9 +242,10 @@ class LabelApiTest extends LabelTestBase {
         archiveLabel(ctx, ctx.token(), id).andExpect(status().isOk());
 
         var node = getIssue(ctx, issue.get("number").asLong());
-        assert labelNames(node).equals(List.of("aging")) : "archive must preserve existing links";
-        assert node.get("labels").get(0).get("archived").asBoolean()
-                : "the ref must be flagged archived so the SPA can dim it";
+        assertThat(labelNames(node)).as("archive must preserve existing links").isEqualTo(List.of("aging"));
+        assertThat(node.get("labels").get(0).get("archived").asBoolean())
+                .withFailMessage("the ref must be flagged archived so the SPA can dim it")
+                .isTrue();
         labelUsage(ctx, ctx.token(), id).andExpect(jsonPath("$.issueCount").value(1));
     }
 
@@ -249,13 +261,17 @@ class LabelApiTest extends LabelTestBase {
         deleteLabel(ctx, ctx.token(), id, false)
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.detail", containsString("used on 1 issue")));
-        assert labelNames(getIssue(ctx, issue.get("number").asLong())).size() == 2
-                : "the refused delete must not have detached anything";
+        assertThat(labelNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("the refused delete must not have detached anything")
+                .hasSize(2);
 
         deleteLabel(ctx, ctx.token(), id, true).andExpect(status().isNoContent());
-        assert labelNames(getIssue(ctx, issue.get("number").asLong())).equals(List.of("keeper"))
-                : "force delete must drop exactly its own join rows";
-        assert names(listLabels(ctx, ctx.token(), "?includeArchived=true")).equals(List.of("keeper"));
+        assertThat(labelNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("force delete must drop exactly its own join rows")
+                .isEqualTo(List.of("keeper"));
+        assertThat(names(listLabels(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the forced delete removed the catalog row itself, archived listing included")
+                .isEqualTo(List.of("keeper"));
         labelUsage(ctx, ctx.token(), id).andExpect(status().isNotFound());
     }
 
@@ -286,7 +302,9 @@ class LabelApiTest extends LabelTestBase {
         var ctx = newProject();
         var id = createLabel(ctx, "unused");
         deleteLabel(ctx, ctx.token(), id, false).andExpect(status().isNoContent());
-        assert listLabels(ctx, ctx.token(), "?includeArchived=true").isEmpty();
+        assertThat(listLabels(ctx, ctx.token(), "?includeArchived=true"))
+                .as("deleting an unused label needs no force and leaves nothing behind")
+                .isEmpty();
     }
 
     // ==================================================== merge (bug #1)
@@ -323,14 +341,19 @@ class LabelApiTest extends LabelTestBase {
 
         for (var issue : List.of(onlyA, onlyB, both, already)) {
             var labels = labelNames(getIssue(ctx, issue.get("number").asLong()));
-            assert labels.equals(List.of("bug"))
-                    : "every merged issue must carry exactly one 'bug' row, got " + labels
-                      + " on " + issue.get("title").asText();
+            assertThat(labels)
+                    .as(() -> "every merged issue must carry exactly one 'bug' row, got " + labels
+                      + " on " + issue.get("title").asText())
+                    .isEqualTo(List.of("bug"));
         }
-        assert labelNames(getIssue(ctx, untouched.get("number").asLong())).isEmpty();
+        assertThat(labelNames(getIssue(ctx, untouched.get("number").asLong())))
+                .as("an issue that carried neither source is untouched by the merge")
+                .isEmpty();
 
         // The source catalog rows are gone; the target survived and absorbed the usage.
-        assert names(listLabels(ctx, ctx.token(), "?includeArchived=true")).equals(List.of("bug"));
+        assertThat(names(listLabels(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the source catalog rows are gone and the target survived to absorb the usage")
+                .isEqualTo(List.of("bug"));
         labelUsage(ctx, ctx.token(), target).andExpect(jsonPath("$.issueCount").value(4));
     }
 
@@ -352,7 +375,9 @@ class LabelApiTest extends LabelTestBase {
         mergeLabels(ctx, ctx.token(), target).andExpect(status().isBadRequest());
 
         // nothing merged by any of the rejected calls
-        assert names(listLabels(ctx, ctx.token(), null)).equals(List.of("source", "target"));
+        assertThat(names(listLabels(ctx, ctx.token(), null)))
+                .as("nothing was merged by any of the rejected calls")
+                .isEqualTo(List.of("source", "target"));
     }
 
     @Test
@@ -368,7 +393,9 @@ class LabelApiTest extends LabelTestBase {
         mergeLabels(ctx, ctx.token(), target, source)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.reassignedIssueCount").value(1));
-        assert labelNames(getIssue(ctx, issue.get("number").asLong())).equals(List.of("keep"));
+        assertThat(labelNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("an archived source still merges: archiving hides a row from pickers, it does not freeze it")
+                .isEqualTo(List.of("keep"));
     }
 
     // ==================================================== helpers

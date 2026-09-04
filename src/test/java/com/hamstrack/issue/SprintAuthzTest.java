@@ -7,6 +7,7 @@ import org.springframework.http.MediaType;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -68,8 +69,8 @@ class SprintAuthzTest extends SprintTestBase {
 
         // Nothing leaked through: the sprint is still exactly as the curator left it.
         var node = sprintNode(ctx, sprintId);
-        assert node.get("name").asText().equals("Sprint 1") : node;
-        assert node.get("state").asText().equals("ACTIVE") : node;
+        assertThat(node.get("name").asText()).as("%s", node).isEqualTo("Sprint 1");
+        assertThat(node.get("state").asText()).as("%s", node).isEqualTo("ACTIVE");
     }
 
     /**
@@ -130,8 +131,8 @@ class SprintAuthzTest extends SprintTestBase {
                 .andExpect(status().isOk());
         removeIssueFromSprint(ctx, member.token(), sprintId, idOf(a)).andExpect(status().isNoContent());
 
-        assert sprintName(getIssue(ctx, numberOf(a))) == null : "the member's removal did not apply";
-        assert "Sprint 1".equals(sprintName(getIssue(ctx, numberOf(b)))) : "the member's move did not apply";
+        assertThat(sprintName(getIssue(ctx, numberOf(a)))).as("the member's removal did not apply").isNull();
+        assertThat(sprintName(getIssue(ctx, numberOf(b)))).as("the member's move did not apply").isEqualTo("Sprint 1");
     }
 
     /** An archived project freezes every sprint mutation and every drag — 409, reads still work. */

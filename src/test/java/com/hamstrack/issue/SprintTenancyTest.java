@@ -6,6 +6,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -66,7 +67,7 @@ class SprintTenancyTest extends SprintTestBase {
                 .andExpect(status().isUnprocessableContent());
 
         // Nothing stuck to the issue through any of those attempts.
-        assert sprintName(getIssue(ctx, numberOf(issue))) == null : "a foreign sprint was assigned";
+        assertThat(sprintName(getIssue(ctx, numberOf(issue)))).as("a foreign sprint was assigned").isNull();
     }
 
     /** A foreign id in the LIST filter is not an error at all — it simply matches nothing. */
@@ -81,10 +82,10 @@ class SprintTenancyTest extends SprintTestBase {
         createIssue(ctx, "our work");
 
         var board = board(ctx, "?sprintId=" + theirSprint);
-        assert board.get("issues").isEmpty() : "a foreign sprint filter returned rows: " + board;
+        assertThat(board.get("issues")).as("a foreign sprint filter returned rows: " + board).isEmpty();
 
         var paged = backlog(ctx, "&sprintId=" + theirSprint);
-        assert paged.get("content").isEmpty() : "a foreign sprint filter returned rows: " + paged;
+        assertThat(paged.get("content")).as("a foreign sprint filter returned rows: " + paged).isEmpty();
     }
 
     /** No sprint list and no planning view ever contains another tenant's row. */
@@ -98,12 +99,12 @@ class SprintTenancyTest extends SprintTestBase {
         var mine = createSprint(ctx, "Mine");
 
         var page = listSprints(ctx, ctx.token(), null);
-        assert page.get("content").size() == 1 : "the list crossed a project/tenant boundary: " + page;
-        assert page.get("content").get(0).get("id").asText().equals(mine.toString()) : page;
+        assertThat(page.get("content")).as("the list crossed a project/tenant boundary: " + page).hasSize(1);
+        assertThat(page.get("content").get(0).get("id").asText()).as("%s", page).isEqualTo(mine.toString());
 
         var view = backlogView(ctx);
-        assert view.get("sprints").size() == 1 : "the planning view crossed a boundary: " + view;
-        assert view.get("sprints").get(0).get("sprint").get("id").asText().equals(mine.toString()) : view;
+        assertThat(view.get("sprints")).as("the planning view crossed a boundary: " + view).hasSize(1);
+        assertThat(view.get("sprints").get(0).get("sprint").get("id").asText()).as("%s", view).isEqualTo(mine.toString());
     }
 
     /** Bulk assignment resolves issue ids within the project too — a foreign one is a 422. */
@@ -120,8 +121,7 @@ class SprintTenancyTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail").value("Unknown issue"));
 
         // …and the legitimate half of the batch did NOT sneak through.
-        assert sprintName(getIssue(ctx, numberOf(mine))) == null
-                : "a partially-rejected bulk move applied anyway";
+        assertThat(sprintName(getIssue(ctx, numberOf(mine)))).as("a partially-rejected bulk move applied anyway").isNull();
 
         addIssuesToSprint(ctx, ctx.token(), sprintId, UUID.randomUUID())
                 .andExpect(status().isUnprocessableContent());

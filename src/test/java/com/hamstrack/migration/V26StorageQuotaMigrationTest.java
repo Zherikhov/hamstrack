@@ -10,6 +10,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>{@code V26__storage_quota.sql} (HD-191) replayed against a real pre-V26 database that
  * ALREADY HAS ATTACHMENTS</strong> — the backfill, the {@code SET NOT NULL} over populated data,
@@ -79,20 +81,24 @@ class V26StorageQuotaMigrationTest {
         try (var conn = DriverManager.getConnection(URL, USER, PASSWORD)) {
             var f = freshAt25(conn);
             try {
-                assert !columnExists(conn, "issue_attachments", "workspace_id") : """
+                assertThat(columnExists(conn, "issue_attachments", "workspace_id"))
+                        .withFailMessage("""
                         the pre-V26 schema already carries issue_attachments.workspace_id, so this \
                         file is watching nothing happen. Either V26 was folded into an earlier \
-                        migration (it must not be — V26 has shipped) or the target below is wrong.""";
-                assert !tableExists(conn, COUNTER_TABLE)
-                        : "the pre-V26 schema already carries " + COUNTER_TABLE;
+                        migration (it must not be — V26 has shipped) or the target below is wrong.""")
+                        .isFalse();
+                assertThat(tableExists(conn, COUNTER_TABLE))
+                        .withFailMessage("the pre-V26 schema already carries " + COUNTER_TABLE)
+                        .isFalse();
 
                 flyway("26").migrate();
 
                 // ---- the backfill ----
-                assert rowsOf(conn, """
+                assertThat(rowsOf(conn, """
                         SELECT count(*) FROM issue_attachments a JOIN issues i ON i.id = a.issue_id
                          WHERE a.workspace_id IS DISTINCT FROM i.workspace_id
-                        """) == 0 : """
+                        """))
+                        .as("""
                         AN ATTACHMENT'S DENORMALISED TENANT DISAGREES WITH ITS ISSUE'S. The \
                         backfill is UPDATE issue_attachments SET workspace_id = i.workspace_id \
                         FROM issues WHERE i.id = a.issue_id, and it is the only writer of this \
@@ -100,52 +106,62 @@ class V26StorageQuotaMigrationTest {
                         not a cosmetic problem: the trigger reads NEW.workspace_id, so the bytes \
                         would be counted against a workspace that does not hold the file, and the \
                         quota would then refuse uploads in one tenant for storage occupied by \
-                        another.""";
-                assert rowsOf(conn, "SELECT count(*) FROM issue_attachments WHERE workspace_id = '"
-                                    + f.workspaceA + "'") == 3
-                        : "all three pre-existing attachments must belong to workspace A";
+                        another.""")
+                        .isEqualTo(0);
+                assertThat(rowsOf(conn, "SELECT count(*) FROM issue_attachments WHERE workspace_id = '"
+                                    + f.workspaceA + "'"))
+                        .as("all three pre-existing attachments must belong to workspace A")
+                        .isEqualTo(3);
 
                 // ---- SET NOT NULL, against a table that already had rows ----
-                assert "NO".equals(scalar(conn, """
+                assertThat(scalar(conn, """
                         SELECT is_nullable FROM information_schema.columns
                          WHERE table_schema = '%s' AND table_name = 'issue_attachments'
                            AND column_name = 'workspace_id'
-                        """.formatted(SCHEMA))) : """
+                        """.formatted(SCHEMA)))
+                        .as("""
                         issue_attachments.workspace_id is still NULLABLE after V26. The ALTER \
                         succeeding at all is half the proof (it runs against populated data and \
                         fails outright if the backfill above missed a row); this is the other \
                         half. Nullable, a future insert that forgets the tenant is accepted, the \
                         trigger counts it against NULL, and the row is invisible to every \
-                        workspace-keyed query including the reconciler's.""";
+                        workspace-keyed query including the reconciler's.""")
+                        .isEqualTo("NO");
                 var noTenant = refusalOf(() -> exec(conn, """
                         INSERT INTO issue_attachments (id, issue_id, filename, storage_key,
                                                        size_bytes, content_type, uploaded_by)
                         VALUES ('%s', '%s', 'no-tenant.pdf', 'k-no-tenant', 10,
                                 'application/pdf', '%s')
                         """.formatted(UUID.randomUUID(), f.issue1, f.user)));
-                assert noTenant != null && NOT_NULL_VIOLATION.equals(noTenant.getSQLState()) : """
+                assertThat(noTenant != null && NOT_NULL_VIOLATION.equals(noTenant.getSQLState()))
+                        .withFailMessage(() -> """
                         an INSERT that omits workspace_id must be refused by the DATABASE. This is \
                         asserted behaviourally as well as from information_schema because \
                         ddl-auto=validate does not compare nullability the way it does not compare \
                         widths, so the entity and the column are kept in agreement by hand, and \
                         the loadtest fixture (ops/loadtest/fixture/10-generate.sql) is a writer \
                         outside the application that this constraint is what catches. Actual:\s"""
-                        + (noTenant == null ? "accepted" : noTenant.getSQLState());
+                        + (noTenant == null ? "accepted" : noTenant.getSQLState()))
+                        .isTrue();
 
                 // ---- the seed ----
-                assert bytesUsed(conn, f.workspaceA) == A1_BYTES + A2_BYTES + A3_BYTES : """
+                assertThat(bytesUsed(conn, f.workspaceA))
+                        .as("""
                         THE SEED DOES NOT MATCH THE ROWS THAT WERE ALREADY THERE. Nothing else in \
                         the product ever recomputes this from scratch except the nightly \
                         reconciler, so a wrong seed is a quota enforced against a wrong number \
                         from the moment of the upgrade until that pass runs — and if it seeded \
                         LOW, an instance that is already over its ceiling is not refused, which \
                         nobody notices at all. Expected\s"""
-                        + (A1_BYTES + A2_BYTES + A3_BYTES) + ", actual " + bytesUsed(conn, f.workspaceA);
-                assert attachmentCount(conn, f.workspaceA) == 3
-                        : "the seeded attachment_count must be 3, was " + attachmentCount(conn, f.workspaceA);
+                        + (A1_BYTES + A2_BYTES + A3_BYTES) + ", actual " + bytesUsed(conn, f.workspaceA))
+                        .isEqualTo(A1_BYTES + A2_BYTES + A3_BYTES);
+                assertThat(attachmentCount(conn, f.workspaceA))
+                        .as("the seeded attachment_count must be 3, was " + attachmentCount(conn, f.workspaceA))
+                        .isEqualTo(3);
 
-                assert rowsOf(conn, "SELECT count(*) FROM " + COUNTER_TABLE
-                                    + " WHERE workspace_id = '" + f.workspaceB + "'") == 1 : """
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + COUNTER_TABLE
+                                    + " WHERE workspace_id = '" + f.workspaceB + "'"))
+                        .as("""
                         THE EMPTY WORKSPACE GOT NO COUNTER ROW, so the seed's LEFT JOIN was \
                         written as an inner one. The migration's own header says every workspace \
                         gets a row INCLUDING the empty ones, so that the ordinary summary read is \
@@ -156,9 +172,14 @@ class V26StorageQuotaMigrationTest {
                         NOT that the reconciler would report the tenant — its drift query \
                         COALESCEs both sides to 0, so an empty workspace with no counter row \
                         matches nothing and is never named. That is the same absence read the \
-                        other way round.)""";
-                assert bytesUsed(conn, f.workspaceB) == 0 && attachmentCount(conn, f.workspaceB) == 0
-                        : "the empty workspace's row must be zeroed, not seeded from another tenant";
+                        other way round.)""")
+                        .isEqualTo(1);
+                assertThat(bytesUsed(conn, f.workspaceB))
+                        .as("the empty workspace's row must be zeroed, not seeded from another tenant")
+                        .isEqualTo(0);
+                assertThat(attachmentCount(conn, f.workspaceB))
+                        .as("the empty workspace's row must be zeroed, not seeded from another tenant")
+                        .isEqualTo(0);
             } finally {
                 dropSchema(conn);
             }
@@ -189,41 +210,47 @@ class V26StorageQuotaMigrationTest {
                           JOIN pg_namespace n ON n.oid = c.connamespace
                          WHERE n.nspname = '%s' AND c.conname = '%s'
                         """.formatted(SCHEMA, FK));
-                assert fk != null && fk.contains("FOREIGN KEY (issue_id, workspace_id)")
-                       && fk.contains("REFERENCES issues(id, workspace_id)") : """
+                assertThat(fk != null && fk.contains("FOREIGN KEY (issue_id, workspace_id)")
+                       && fk.contains("REFERENCES issues(id, workspace_id)"))
+                        .withFailMessage("""
                         the COMPOSITE foreign key is missing or is not composite. A plain FK on \
                         workspace_id alone would prove the workspace exists and say nothing about \
                         whether it is the issue's — which is the entire claim this column makes, \
                         and the one the trigger relies on when it counts NEW.workspace_id. It is \
                         the shape sprint_scope_events (V18) already uses against \
-                        issues_id_workspace_id_key. Actual:\s""" + fk;
-                assert "c".equals(scalar(conn, """
+                        issues_id_workspace_id_key. Actual:\s""" + fk)
+                        .isTrue();
+                assertThat(scalar(conn, """
                         SELECT c.confdeltype FROM pg_constraint c
                           JOIN pg_namespace n ON n.oid = c.connamespace
                          WHERE n.nspname = '%s' AND c.conname = '%s'
-                        """.formatted(SCHEMA, FK))) : """
+                        """.formatted(SCHEMA, FK)))
+                        .as("""
                         the composite FK is not ON DELETE CASCADE. An attachment has no meaning \
                         once its issue is gone, so this one cascades where sprint_scope_events \
                         deliberately does not (that ledger keeps its rows). NO ACTION here would \
                         make deleting any issue with an attachment fail against this constraint \
                         even though the single-column FK is happy to cascade — two FKs to the \
-                        same parent disagreeing about deletion.""";
+                        same parent disagreeing about deletion.""")
+                        .isEqualTo("c");
                 // ---- the counter table's own FK to workspaces ----
-                assert "c".equals(scalar(conn, """
+                assertThat(scalar(conn, """
                         SELECT c.confdeltype FROM pg_constraint c
                           JOIN pg_class t ON t.oid = c.conrelid
                           JOIN pg_class r ON r.oid = c.confrelid
                           JOIN pg_namespace n ON n.oid = t.relnamespace
                          WHERE n.nspname = '%s' AND t.relname = '%s'
                            AND r.relname = 'workspaces' AND c.contype = 'f'
-                        """.formatted(SCHEMA, COUNTER_TABLE))) : """
+                        """.formatted(SCHEMA, COUNTER_TABLE)))
+                        .as("""
                         workspace_storage_usage.workspace_id is not ON DELETE CASCADE to \
                         workspaces. The migration header and the entity both promise that a purged \
                         tenant takes its counter with it, and nothing else can check it: \
                         ddl-auto=validate does not look at foreign keys. Without the cascade, \
                         deleting a workspace is refused by this constraint — a counter row nobody \
                         reads would block the delete of the tenant it counts, and the remedy would \
-                        be a hand-written DELETE in whatever purge path meets it first.""";
+                        be a hand-written DELETE in whatever purge path meets it first.""")
+                        .isEqualTo("c");
 
                 var crossTenant = refusalOf(() -> exec(conn, """
                         INSERT INTO issue_attachments (id, issue_id, filename, storage_key,
@@ -232,23 +259,27 @@ class V26StorageQuotaMigrationTest {
                         VALUES ('%s', '%s', 'wrong-tenant.pdf', 'k-wrong', 10,
                                 'application/pdf', '%s', '%s')
                         """.formatted(UUID.randomUUID(), f.issue1, f.user, f.workspaceB)));
-                assert crossTenant != null && FK_VIOLATION.equals(crossTenant.getSQLState()) : """
+                assertThat(crossTenant != null && FK_VIOLATION.equals(crossTenant.getSQLState()))
+                        .withFailMessage("""
                         A ROW WHOSE TENANT DISAGREES WITH ITS ISSUE'S WAS ACCEPTED. That is the \
                         whole reason the FK is composite: "this attachment's workspace IS its \
                         issue's workspace" has to be a database fact, because the application \
                         writes the column from a resolved context and a future writer (a fixture, \
                         a restore, an import) will not. Accepted, those bytes are counted against \
-                        a tenant that does not hold the file.""";
+                        a tenant that does not hold the file.""")
+                        .isTrue();
 
                 // ---- the index ----
-                assert "workspace_id".equals(indexColumns(conn)) : """
+                assertThat(indexColumns(conn))
+                        .as("""
                         %s is missing or is not on (workspace_id). ddl-auto=validate does not look \
                         at indexes at all, so nothing else in this build fails without it — the \
                         symptom is that the reconciler's instance-wide drift query and the \
                         per-project breakdown both degrade to sequential scans over every \
                         attachment row on the instance, on a job that is supposed to be cheap \
                         enough that nobody switches it off. Actual:\s""".formatted(INDEX)
-                        + indexColumns(conn);
+                        + indexColumns(conn))
+                        .isEqualTo("workspace_id");
 
                 // ---- the trigger, and WHICH COLUMNS it watches ----
                 var trigger = scalar(conn, """
@@ -257,8 +288,9 @@ class V26StorageQuotaMigrationTest {
                           JOIN pg_namespace n ON n.oid = c.relnamespace
                          WHERE n.nspname = '%s' AND t.tgname = '%s'
                         """.formatted(SCHEMA, TRIGGER));
-                assert trigger != null : TRIGGER + " does not exist after V26";
-                assert trigger.contains("AFTER INSERT OR DELETE OR UPDATE OF size_bytes, workspace_id") : """
+                assertThat(trigger).as("%s", TRIGGER + " does not exist after V26").isNotNull();
+                assertThat(trigger)
+                        .as("""
                         THE TRIGGER'S UPDATE OF COLUMN LIST IS NOT (size_bytes, workspace_id). \
                         Both halves matter and they fail differently. Drop size_bytes and a \
                         changed file size never reaches the counter. Drop workspace_id and the \
@@ -271,13 +303,16 @@ class V26StorageQuotaMigrationTest {
                         which is exactly when nobody will think of this column list. The failure \
                         mode of being wrong about it is a permanently overstated counter in one \
                         tenant and an understated one in another, in opposite directions, which no \
-                        single-workspace recount explains. Actual:\s""" + trigger;
-                assert trigger.contains("FOR EACH ROW") : """
+                        single-workspace recount explains. Actual:\s""" + trigger)
+                        .contains("AFTER INSERT OR DELETE OR UPDATE OF size_bytes, workspace_id");
+                assertThat(trigger)
+                        .as("""
                         the trigger is not FOR EACH ROW. A statement-level trigger has no NEW/OLD \
                         row, so it cannot know the bytes — and, more importantly, row triggers are \
                         what ON DELETE CASCADE fires. A statement trigger would leave the counter \
                         untouched by every cascaded delete, i.e. a one-way ratchet. Actual:\s"""
-                        + trigger;
+                        + trigger)
+                        .contains("FOR EACH ROW");
             } finally {
                 dropSchema(conn);
             }
@@ -301,12 +336,14 @@ class V26StorageQuotaMigrationTest {
             try {
                 flyway("26").migrate();
 
-                assert bytesUsed(conn, f.workspaceA) == A1_BYTES + A2_BYTES + A3_BYTES
-                        : "precondition: the seed is the sum of the pre-existing rows";
+                assertThat(bytesUsed(conn, f.workspaceA))
+                        .as("precondition: the seed is the sum of the pre-existing rows")
+                        .isEqualTo(A1_BYTES + A2_BYTES + A3_BYTES);
 
                 exec(conn, "DELETE FROM projects WHERE id = '" + f.project2 + "'");
 
-                assert bytesUsed(conn, f.workspaceA) == A1_BYTES + A2_BYTES : """
+                assertThat(bytesUsed(conn, f.workspaceA))
+                        .as("""
                         DELETING A PROJECT DID NOT RETURN ITS BYTES. The counter's correctness \
                         through project delete, issue delete and any future purge rests entirely \
                         on one assumption the migration header states in prose: a row-level AFTER \
@@ -315,9 +352,11 @@ class V26StorageQuotaMigrationTest {
                         would only ever rise, tenants would be refused uploads for space they \
                         long ago freed, and the only thing that would ever notice is the nightly \
                         reconciler. Expected\s"""
-                        + (A1_BYTES + A2_BYTES) + ", actual " + bytesUsed(conn, f.workspaceA);
-                assert attachmentCount(conn, f.workspaceA) == 2
-                        : "the count must fall with the bytes, was " + attachmentCount(conn, f.workspaceA);
+                        + (A1_BYTES + A2_BYTES) + ", actual " + bytesUsed(conn, f.workspaceA))
+                        .isEqualTo(A1_BYTES + A2_BYTES);
+                assertThat(attachmentCount(conn, f.workspaceA))
+                        .as("the count must fall with the bytes, was " + attachmentCount(conn, f.workspaceA))
+                        .isEqualTo(2);
             } finally {
                 dropSchema(conn);
             }
@@ -348,27 +387,32 @@ class V26StorageQuotaMigrationTest {
             try {
                 flyway("26").migrate();
 
-                assert bytesUsed(conn, f.workspaceA) == A1_BYTES + A2_BYTES + A3_BYTES
-                        : "precondition: the seed is the sum of the pre-existing rows";
+                assertThat(bytesUsed(conn, f.workspaceA))
+                        .as("precondition: the seed is the sum of the pre-existing rows")
+                        .isEqualTo(A1_BYTES + A2_BYTES + A3_BYTES);
 
                 // A1 grows by 1 000. The counter must follow, and the COUNT must not move.
                 exec(conn, "UPDATE issue_attachments SET size_bytes = " + (A1_BYTES * 2)
                            + " WHERE size_bytes = " + A1_BYTES);
 
                 long expected = A1_BYTES * 2 + A2_BYTES + A3_BYTES;
-                assert bytesUsed(conn, f.workspaceA) == expected : """
+                assertThat(bytesUsed(conn, f.workspaceA))
+                        .as("""
                         A CHANGED FILE SIZE DID NOT REACH THE COUNTER. The trigger's size-only \
                         branch adds NEW.size_bytes - OLD.size_bytes, and it is the only writer \
                         that can: nothing arrives and nothing leaves, so neither the INSERT nor \
                         the DELETE branch is entered. Without it the quota enforces a number that \
                         is right about the files that exist and wrong about how big they are, \
                         until the nightly reconciler notices. Expected\s""" + expected
-                        + ", actual " + bytesUsed(conn, f.workspaceA);
-                assert attachmentCount(conn, f.workspaceA) == 3 : """
+                        + ", actual " + bytesUsed(conn, f.workspaceA))
+                        .isEqualTo(expected);
+                assertThat(attachmentCount(conn, f.workspaceA))
+                        .as("""
                         THE ATTACHMENT COUNT MOVED ON A SIZE-ONLY UPDATE. No row arrived and none \
                         left; a count that drifts on an ordinary size change is a count no reader \
                         can trust, and it drifts in whichever direction the branch was written \
-                        wrong. Actual:\s""" + attachmentCount(conn, f.workspaceA);
+                        wrong. Actual:\s""" + attachmentCount(conn, f.workspaceA))
+                        .isEqualTo(3);
 
                 // ...and with the counter row gone, the same UPDATE must match NOTHING rather than
                 // upsert a row carrying an invented attachment_count.
@@ -377,8 +421,9 @@ class V26StorageQuotaMigrationTest {
                 exec(conn, "UPDATE issue_attachments SET size_bytes = " + (A1_BYTES * 3)
                            + " WHERE size_bytes = " + (A1_BYTES * 2));
 
-                assert rowsOf(conn, "SELECT count(*) FROM " + COUNTER_TABLE
-                                    + " WHERE workspace_id = '" + f.workspaceA + "'") == 0 : """
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + COUNTER_TABLE
+                                    + " WHERE workspace_id = '" + f.workspaceA + "'"))
+                        .as("""
                         THE SIZE-ONLY BRANCH CREATED A COUNTER ROW. It must be a plain UPDATE that \
                         quietly affects nothing when there is none — it knows a DELTA and not a \
                         count, so an upsert here would write attachment_count = 1 for a workspace \
@@ -386,7 +431,8 @@ class V26StorageQuotaMigrationTest {
                         that was invented by a trigger rather than measured. An absent row reads \
                         as the zero it honestly is and the reconciler restores it. (The same shape \
                         matters inside a multi-level cascade, where an INSERT would fail the FK \
-                        against a workspace that is going away and break the delete outright.)""";
+                        against a workspace that is going away and break the delete outright.)""")
+                        .isEqualTo(0);
             } finally {
                 dropSchema(conn);
             }
@@ -554,14 +600,14 @@ class V26StorageQuotaMigrationTest {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             if (!rs.next()) return null;
             var value = rs.getString(1);
-            assert !rs.next() : "expected at most one row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected at most one row from: " + sql).isFalse();
             return value;
         }
     }
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

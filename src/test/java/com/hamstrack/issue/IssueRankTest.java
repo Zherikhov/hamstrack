@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -64,13 +65,14 @@ class IssueRankTest extends SprintTestBase {
         var a = createIssue(ctx, "alpha");
         var b = createIssue(ctx, "bravo");
         var c = createIssue(ctx, "charlie");
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, b, c)) : "creation order is the initial rank";
+        assertThat(backlogKeys(backlogView(ctx))).as("creation order is the initial rank").isEqualTo(keys(a, b, c));
 
         // Drag charlie to the very top, then file a fourth issue.
         rankBefore(ctx, numberOf(c), idOf(a)).andExpect(status().isOk());
         var d = createIssue(ctx, "delta");
-        assert backlogKeys(backlogView(ctx)).equals(keys(c, a, b, d))
-                : "a newly filed issue must append at the bottom, whatever the current order";
+        assertThat(backlogKeys(backlogView(ctx)))
+                .as("a newly filed issue must append at the bottom, whatever the current order")
+                .isEqualTo(keys(c, a, b, d));
     }
 
     /** Every anchor combination places the issue exactly where the drop indicator said. */
@@ -84,15 +86,15 @@ class IssueRankTest extends SprintTestBase {
 
         // after only → straight below the anchor (the server fills in the "before")
         rankAfter(ctx, numberOf(d), idOf(a)).andExpect(status().isOk());
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, d, b, c)) : backlogView(ctx);
+        assertThat(backlogKeys(backlogView(ctx))).as("%s", backlogView(ctx)).isEqualTo(keys(a, d, b, c));
 
         // before only → straight above the anchor
         rankBefore(ctx, numberOf(c), idOf(d)).andExpect(status().isOk());
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, c, d, b)) : backlogView(ctx);
+        assertThat(backlogKeys(backlogView(ctx))).as("%s", backlogView(ctx)).isEqualTo(keys(a, c, d, b));
 
         // both → exactly between them
         rankBetween(ctx, numberOf(b), idOf(a), idOf(c)).andExpect(status().isOk());
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, b, c, d)) : backlogView(ctx);
+        assertThat(backlogKeys(backlogView(ctx))).as("%s", backlogView(ctx)).isEqualTo(keys(a, b, c, d));
 
         // neither, plus a sprint change → appended to the (empty) sprint section
         var sprintId = createSprint(ctx, "Sprint 1");
@@ -100,17 +102,18 @@ class IssueRankTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sprint.id").value(sprintId.toString()));
         var view = backlogView(ctx);
-        assert sprintSectionKeys(view, sprintId).equals(keys(b)) : view;
-        assert backlogKeys(view).equals(keys(a, c, d)) : view;
+        assertThat(sprintSectionKeys(view, sprintId)).as("%s", view).isEqualTo(keys(b));
+        assertThat(backlogKeys(view)).as("%s", view).isEqualTo(keys(a, c, d));
 
         // …and back to the backlog in one request, keeping its relative place (rank is
         // preserved across sections — they share one order key).
         var cleared = json.readTree(rank(ctx, ctx.token(), numberOf(b), "{\"clearSprint\":true}")
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert sprintName(cleared) == null : "clearSprint left the issue in a sprint: " + cleared;
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, c, d, b))
-                : "clearSprint with no anchor appends to the backlog";
+        assertThat(sprintName(cleared)).as("clearSprint left the issue in a sprint: " + cleared).isNull();
+        assertThat(backlogKeys(backlogView(ctx)))
+                .as("clearSprint with no anchor appends to the backlog")
+                .isEqualTo(keys(a, c, d, b));
     }
 
     /** Dragging into a sprint sets {@code sprint_id} AND the rank in ONE request (§4.9). */
@@ -132,8 +135,8 @@ class IssueRankTest extends SprintTestBase {
                 .andExpect(jsonPath("$.sprint.id").value(sprintId.toString()));
 
         var view = backlogView(ctx);
-        assert sprintSectionKeys(view, sprintId).equals(keys(first, third, second)) : view;
-        assert backlogKeys(view).isEmpty() : view;
+        assertThat(sprintSectionKeys(view, sprintId)).as("%s", view).isEqualTo(keys(first, third, second));
+        assertThat(backlogKeys(view)).as("%s", view).isEmpty();
     }
 
     // ===================================================== rejections
@@ -183,7 +186,7 @@ class IssueRankTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("list changed")));
 
         // Nothing moved.
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, b, c)) : "a rejected drag half-applied";
+        assertThat(backlogKeys(backlogView(ctx))).as("a rejected drag half-applied").isEqualTo(keys(a, b, c));
     }
 
     @Test
@@ -214,16 +217,18 @@ class IssueRankTest extends SprintTestBase {
                 "{\"beforeIssueId\":\"" + idOf(a) + "\",\"version\":" + (current + 7) + "}")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.detail", containsString("modified by someone else")));
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, b)) : "the stale-version drag half-applied";
+        assertThat(backlogKeys(backlogView(ctx))).as("the stale-version drag half-applied").isEqualTo(keys(a, b));
 
         rank(ctx, ctx.token(), numberOf(b),
                 "{\"beforeIssueId\":\"" + idOf(a) + "\",\"version\":" + current + "}")
                 .andExpect(status().isOk());
-        assert backlogKeys(backlogView(ctx)).equals(keys(b, a)) : "the matching-version drag did not apply";
+        assertThat(backlogKeys(backlogView(ctx))).as("the matching-version drag did not apply").isEqualTo(keys(b, a));
 
         // …and with no version at all it just applies (last drag wins).
         rankAfter(ctx, numberOf(b), idOf(a)).andExpect(status().isOk());
-        assert backlogKeys(backlogView(ctx)).equals(keys(a, b));
+        assertThat(backlogKeys(backlogView(ctx)))
+                .as("with no version at all the drop just applies — last drag wins")
+                .isEqualTo(keys(a, b));
     }
 
     /** A rank move writes no history row — positional churn would drown the log (§4.5). */
@@ -235,13 +240,15 @@ class IssueRankTest extends SprintTestBase {
         var sprintId = createSprint(ctx, "Sprint 1");
 
         rankBefore(ctx, numberOf(b), idOf(a)).andExpect(status().isOk());
-        assert historyFields(ctx, numberOf(b)).isEmpty()
-                : "a rank move wrote history: " + historyFields(ctx, numberOf(b));
+        assertThat(historyFields(ctx, numberOf(b)))
+                .as("a rank move wrote history: " + historyFields(ctx, numberOf(b)))
+                .isEmpty();
 
         rank(ctx, ctx.token(), numberOf(b), "{\"sprintId\":\"" + sprintId + "\"}")
                 .andExpect(status().isOk());
-        assert historyFields(ctx, numberOf(b)).contains("sprint")
-                : "a sprint change must be audited: " + historyFields(ctx, numberOf(b));
+        assertThat(historyFields(ctx, numberOf(b)))
+                .as("a sprint change must be audited: " + historyFields(ctx, numberOf(b)))
+                .contains("sprint");
     }
 
     // ===================================================== the rebalance
@@ -291,11 +298,13 @@ class IssueRankTest extends SprintTestBase {
                 // that touches neither, guarded by hamstrack.skip_updated_at.
                 for (var id : before.keySet()) {
                     if (id.equals(idOf(moved))) continue;
-                    assert before.get(id).version() == after.get(id).version()
-                            : "the rebalance bumped @Version on an untouched issue " + id;
-                    assert before.get(id).updatedAt().equals(after.get(id).updatedAt())
-                            : "the rebalance changed updated_at on an untouched issue " + id
-                              + " — the hamstrack.skip_updated_at guard is not in force";
+                    assertThat(before.get(id).version())
+                            .as("the rebalance bumped @Version on an untouched issue " + id)
+                            .isEqualTo(after.get(id).version());
+                    assertThat(before.get(id).updatedAt())
+                            .as("the rebalance changed updated_at on an untouched issue " + id
+                              + " — the hamstrack.skip_updated_at guard is not in force")
+                            .isEqualTo(after.get(id).updatedAt());
                 }
                 // The whole project is renumbered at row_number() * RANK_STEP — every row
                 // except the freshly-placed one lands exactly on a step boundary, so the
@@ -304,30 +313,38 @@ class IssueRankTest extends SprintTestBase {
                 for (var id : order) {
                     if (id.equals(idOf(moved))) continue;
                     long p = after.get(id).position();
-                    assert p > 0 && p % RANK_STEP == 0
-                            : "issue " + id + " sits at " + p + ", not on a RANK_STEP boundary — "
-                              + "the renumber is not row_number() * RANK_STEP";
+                    assertThat(p)
+                            .as("issue " + id + " sits at " + p + ", not on a RANK_STEP boundary — "
+                              + "the renumber is not row_number() * RANK_STEP")
+                            .isGreaterThan(0);
+                    assertThat(p % RANK_STEP)
+                            .as("issue " + id + " sits at " + p + ", not on a RANK_STEP boundary — "
+                              + "the renumber is not row_number() * RANK_STEP")
+                            .isEqualTo(0);
                 }
                 // Everything the drag did NOT touch keeps its relative order.
-                assert without(orderOf(before), idOf(moved)).equals(without(order, idOf(moved)))
-                        : "the rebalance reordered the project";
+                assertThat(without(orderOf(before), idOf(moved)))
+                        .as("the rebalance reordered the project")
+                        .isEqualTo(without(order, idOf(moved)));
                 var positions = new java.util.HashSet<Long>();
                 after.values().forEach(r -> positions.add(r.position()));
-                assert positions.size() == after.size() : "the rebalance produced ties";
+                assertThat(positions).as("the rebalance produced ties").hasSize(after.size());
             }
             previous = idOf(moved);
         }
 
-        assert rebalances == 1
-                : "expected exactly one whole-project rebalance over 30 midpoints into one gap, got "
-                  + rebalances;
+        assertThat(rebalances)
+                .as("expected exactly one whole-project rebalance over 30 midpoints into one gap, got "
+                  + rebalances)
+                .isEqualTo(1);
 
         // The list still reads correctly end-to-end after the renumber.
         var keys = backlogKeys(backlogView(ctx));
-        assert keys.size() == 32 : keys;
-        assert keys.get(0).equals(issues.get(0).get("key").asText()) : "the top anchor moved: " + keys;
-        assert keys.get(1).equals(issues.get(31).get("key").asText())
-                : "the last-dropped issue must sit directly under the top anchor: " + keys;
+        assertThat(keys).as("%s", keys).hasSize(32);
+        assertThat(keys.get(0)).as("the top anchor moved: " + keys).isEqualTo(issues.get(0).get("key").asText());
+        assertThat(keys.get(1))
+                .as("the last-dropped issue must sit directly under the top anchor: " + keys)
+                .isEqualTo(issues.get(31).get("key").asText());
     }
 
     /**
@@ -359,25 +376,28 @@ class IssueRankTest extends SprintTestBase {
         // gap is exhausted after ~26 rounds — exactly the cheap-request run the throttle
         // exists for. Ask for TWO rebalances: the first must land, the second must not.
         var run = driveMidpointsIntoOneGap(ctx, top, a, b, 2);
-        assert run.rebalances() == 1
-                : "expected the first whole-project rebalance to succeed and the second to be "
-                  + "refused; observed " + run.rebalances() + " rebalances";
-        assert run.status() == 429
-                : "a second rebalance inside the cooldown must be a 429, got " + run.status()
-                  + " — " + run.body();
-        assert run.body().contains("re-spaced")
-                : "the 429 must explain what was throttled and for how long: " + run.body();
+        assertThat(run.rebalances())
+                .as(() -> "expected the first whole-project rebalance to succeed and the second to be "
+                  + "refused; observed " + run.rebalances() + " rebalances")
+                .isEqualTo(1);
+        assertThat(run.status())
+                .as("a second rebalance inside the cooldown must be a 429, got " + run.status()
+                  + " — " + run.body())
+                .isEqualTo(429);
+        assertThat(run.body())
+                .as("the 429 must explain what was throttled and for how long: " + run.body())
+                .contains("re-spaced");
 
         // Retry-After is the whole point of using RateLimitedException rather than a bare
         // ResponseStatusException: without it the SPA can only hammer.
         var retryAfter = run.retryAfter();
-        assert retryAfter != null : "the 429 carried no Retry-After header";
+        assertThat(retryAfter).as("the 429 carried no Retry-After header").isNotNull();
         long seconds = Long.parseLong(retryAfter);
-        assert seconds >= 1 && seconds <= 60 : "implausible Retry-After: " + retryAfter;
+        assertThat(seconds).as("implausible Retry-After: " + retryAfter).isGreaterThanOrEqualTo(1);
+        assertThat(seconds).as("implausible Retry-After: " + retryAfter).isLessThanOrEqualTo(60);
 
         // Nothing half-applied: the refused drag left every rank exactly where it was.
-        assert run.before().equals(snapshot(ctx.projectId()))
-                : "the throttled rebalance still rewrote ranks";
+        assertThat(run.before()).as("the throttled rebalance still rewrote ranks").isEqualTo(snapshot(ctx.projectId()));
 
         // An ordinary drag — one that needs no rebalance — is NOT throttled. The cooldown
         // guards the whole-project rewrite, not ranking. Moving the top row to the very
@@ -393,9 +413,14 @@ class IssueRankTest extends SprintTestBase {
         var siblingA = createIssue(sibling, "mover a");
         var siblingB = createIssue(sibling, "mover b");
         var siblingRun = driveMidpointsIntoOneGap(sibling, siblingTop, siblingA, siblingB, 1);
-        assert siblingRun.rebalances() == 1 && siblingRun.status() == 200
-                : "a sibling project was blocked by another project's cooldown: "
-                  + siblingRun.status() + " after " + siblingRun.rebalances() + " rebalances";
+        assertThat(siblingRun.rebalances())
+                .as(() -> "a sibling project was blocked by another project's cooldown: "
+                  + siblingRun.status() + " after " + siblingRun.rebalances() + " rebalances")
+                .isEqualTo(1);
+        assertThat(siblingRun.status())
+                .as(() -> "a sibling project was blocked by another project's cooldown: "
+                  + siblingRun.status() + " after " + siblingRun.rebalances() + " rebalances")
+                .isEqualTo(200);
     }
 
     /**
@@ -419,8 +444,9 @@ class IssueRankTest extends SprintTestBase {
         // Nothing is left set on the connection this test now borrows from the pool.
         var leaked = jdbcTemplate.queryForObject(
                 "SELECT coalesce(current_setting('hamstrack.skip_updated_at', true), '')", String.class);
-        assert leaked == null || leaked.isEmpty()
-                : "hamstrack.skip_updated_at leaked out of its transaction as '" + leaked + "'";
+        assertThat(leaked == null || leaked.isEmpty())
+                .withFailMessage("hamstrack.skip_updated_at leaked out of its transaction as '" + leaked + "'")
+                .isTrue();
 
         // …and the trigger is demonstrably back on: an ordinary PATCH still bumps updated_at.
         var victim = issues.get(5);
@@ -429,8 +455,9 @@ class IssueRankTest extends SprintTestBase {
         patchIssue(ctx, ctx.token(), numberOf(victim), "{\"title\":\"edited after a rebalance\"}")
                 .andExpect(status().isOk());
         var after = snapshot(ctx.projectId()).get(idOf(victim));
-        assert after.updatedAt().after(before.updatedAt())
-                : "a normal edit no longer stamps updated_at — the GUC survived its transaction";
+        assertThat(after.updatedAt().after(before.updatedAt()))
+                .withFailMessage("a normal edit no longer stamps updated_at — the GUC survived its transaction")
+                .isTrue();
     }
 
     // ===================================================== helpers

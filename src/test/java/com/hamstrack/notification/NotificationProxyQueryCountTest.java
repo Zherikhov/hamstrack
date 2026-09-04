@@ -24,6 +24,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.ArrayList;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>The bell's feed costs one statement, however many workspaces it spans.</strong>
  *
@@ -83,15 +85,17 @@ class NotificationProxyQueryCountTest {
 
         long statements = count(() -> {
             var feed = notificationService.list(reader);
-            assert feed.size() == WORKSPACES * ROWS_EACH
-                    : "the fixture stopped producing the rows this measures: " + feed.size();
-            assert feed.stream().allMatch(r -> r.workspaceId() != null)
-                    : "a response came back with no workspaceId, so nothing read the proxy at all "
-                      + "and the number below measures the wrong thing";
+            assertThat(feed)
+                    .as(() -> "the fixture stopped producing the rows this measures: " + feed.size())
+                    .hasSize(WORKSPACES * ROWS_EACH);
+            assertThat(feed.stream().allMatch(r -> r.workspaceId() != null))
+                    .withFailMessage("a response came back with no workspaceId, so nothing read the proxy at all "
+                      + "and the number below measures the wrong thing")
+                    .isTrue();
         });
 
-        assert statements == 1
-                : """
+        assertThat(statements)
+                .as(() -> """
                 GET /api/notifications took %d statements for %d rows across %d workspaces, not 1. \
                 One statement is the feed query; anything above it is Notification.workspace being \
                 INITIALISED rather than answered from the proxy's identifier. The excess is not a \
@@ -107,7 +111,8 @@ class NotificationProxyQueryCountTest {
                 hibernate.jpa.compliance.proxy was switched on, which disables the short-circuit \
                 by specification. Fix the cause, or switch the DTO to a projection and correct \
                 BOTH javadocs — do not just raise this number.\
-                """.formatted(statements, WORKSPACES * ROWS_EACH, WORKSPACES);
+                """.formatted(statements, WORKSPACES * ROWS_EACH, WORKSPACES))
+                .isEqualTo(1);
     }
 
     // ------------------------------------------------------------------ fixture

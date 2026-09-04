@@ -10,6 +10,7 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -75,8 +76,9 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.delivery.preset").value("KANBAN"))
                 .andExpect(jsonPath("$.delivery.releases").value(false));
-        assert deliveryOf(listProjects(ctx), projectId).get("preset").asText().equals("KANBAN")
-                : "the project list does not carry delivery — every surface reads it from there";
+        assertThat(deliveryOf(listProjects(ctx), projectId).get("preset").asText())
+                .as("the project list does not carry delivery — every surface reads it from there")
+                .isEqualTo("KANBAN");
     }
 
     /**
@@ -154,10 +156,15 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
 
         // The rejection is total: nothing in the same body was applied on the way to it.
         var delivery = deliveryOf(ctx);
-        assert delivery.get("board").asText().equals("SCRUM")
-                && delivery.get("releases").asBoolean()
-                && delivery.get("estimation").asBoolean()
-                : "a body rejected for carrying `preset` still applied its other members: " + delivery;
+        assertThat(delivery.get("board").asText())
+                .as("a body rejected for carrying `preset` still applied its other members: " + delivery)
+                .isEqualTo("SCRUM");
+        assertThat(delivery.get("releases").asBoolean())
+                .withFailMessage("a body rejected for carrying `preset` still applied its other members: " + delivery)
+                .isTrue();
+        assertThat(delivery.get("estimation").asBoolean())
+                .withFailMessage("a body rejected for carrying `preset` still applied its other members: " + delivery)
+                .isTrue();
 
         // …and on POST, where the same mistake would silently create the wrong project.
         createProject(ctx, "{\"name\":\"Echoed back\",\"key\":\"" + freshKey() + "\","
@@ -202,9 +209,10 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.detail", containsString("disagree")));
         var delivery = deliveryOf(ctx);
-        assert delivery.get("board").asText().equals("KANBAN") : "the rejected board was applied anyway";
-        assert !delivery.get("releases").asBoolean()
-                : "a body rejected for a boardMode/delivery.board disagreement still applied `releases`";
+        assertThat(delivery.get("board").asText()).as("the rejected board was applied anyway").isEqualTo("KANBAN");
+        assertThat(delivery.get("releases").asBoolean())
+                .withFailMessage("a body rejected for a boardMode/delivery.board disagreement still applied `releases`")
+                .isFalse();
 
         // 4) the legacy field never touches the OTHER two capabilities
         patchDelivery(ctx, "\"releases\":true,\"estimation\":true").andExpect(status().isOk());
@@ -319,17 +327,22 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
 
         // …and they ROUND-TRIP. "Accepted then quietly dropped" would be the same bug
         // wearing a 201.
-        assert issue.get("storyPoints").decimalValue().intValue() == 8
-                : "storyPoints was dropped on a project with estimation off: " + issue.get("storyPoints");
-        assert sprintId.toString().equals(sprintId(issue))
-                : "sprintId was dropped on a Kanban project: " + issue.get("sprint");
-        assert issue.get("fixVersions").size() == 1
-                : "fixVersionIds was dropped on a project with releases off: " + issue.get("fixVersions");
+        assertThat(issue.get("storyPoints").decimalValue().intValue())
+                .as(() -> "storyPoints was dropped on a project with estimation off: " + issue.get("storyPoints"))
+                .isEqualTo(8);
+        assertThat(sprintId.toString())
+                .as(() -> "sprintId was dropped on a Kanban project: " + issue.get("sprint"))
+                .isEqualTo(sprintId(issue));
+        assertThat(issue.get("fixVersions"))
+                .as(() -> "fixVersionIds was dropped on a project with releases off: " + issue.get("fixVersions"))
+                .hasSize(1);
 
         var reread = getIssue(lean, numberOf(issue));
-        assert reread.get("storyPoints").decimalValue().intValue() == 8 : reread.toString();
-        assert reread.get("fixVersions").size() == 1 : reread.toString();
-        assert sprintId.toString().equals(sprintId(reread)) : reread.toString();
+        assertThat(reread.get("storyPoints").decimalValue().intValue())
+                .as(() -> String.valueOf(reread.toString()))
+                .isEqualTo(8);
+        assertThat(reread.get("fixVersions")).as(() -> String.valueOf(reread.toString())).hasSize(1);
+        assertThat(sprintId.toString()).as(() -> String.valueOf(reread.toString())).isEqualTo(sprintId(reread));
 
         // ---- the same calls on the fully-enabled project answer identically ----
         // The point is not that they work; it is that the capability made NO difference.
@@ -344,11 +357,18 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
         // A "helpful" auto-enable would be Rule A from the other side: the API deciding a
         // presentation preference on the user's behalf.
         var delivery = deliveryOf(lean);
-        assert delivery.get("board").asText().equals("KANBAN")
-                && !delivery.get("releases").asBoolean()
-                && !delivery.get("estimation").asBoolean()
-                : "creating a sprint/version/estimate silently changed the project's declared "
-                  + "capabilities: " + delivery;
+        assertThat(delivery.get("board").asText())
+                .as("creating a sprint/version/estimate silently changed the project's declared "
+                  + "capabilities: " + delivery)
+                .isEqualTo("KANBAN");
+        assertThat(delivery.get("releases").asBoolean())
+                .withFailMessage("creating a sprint/version/estimate silently changed the project's declared "
+                  + "capabilities: " + delivery)
+                .isFalse();
+        assertThat(delivery.get("estimation").asBoolean())
+                .withFailMessage("creating a sprint/version/estimate silently changed the project's declared "
+                  + "capabilities: " + delivery)
+                .isFalse();
     }
 
     /**
@@ -378,26 +398,30 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
 
         // Nothing moved: the issue still carries all three values.
         var after = getIssue(ctx, numberOf(issue));
-        assert after.get("storyPoints").decimalValue().intValue() == 5
-                : "turning estimation off cleared a story point value";
-        assert sprintId.toString().equals(sprintId(after))
-                : "turning sprint planning off detached the issue from its sprint";
-        assert after.get("fixVersions").size() == 1
-                : "turning releases off removed an issue↔version link";
+        assertThat(after.get("storyPoints").decimalValue().intValue())
+                .as("turning estimation off cleared a story point value")
+                .isEqualTo(5);
+        assertThat(sprintId.toString())
+                .as("turning sprint planning off detached the issue from its sprint")
+                .isEqualTo(sprintId(after));
+        assertThat(after.get("fixVersions")).as("turning releases off removed an issue↔version link").hasSize(1);
 
         // The sprint is still ACTIVE and still completable by a curator (§6): a running
         // sprint must never become invisible OR unfinishable because of a UI preference.
-        assert sprintNode(ctx, sprintId).get("state").asText().equals("ACTIVE")
-                : "the running sprint was auto-completed by a capability change";
-        assert versionsCount(ctx) >= 1 : "a version row disappeared when releases went off";
+        assertThat(sprintNode(ctx, sprintId).get("state").asText())
+                .as("the running sprint was auto-completed by a capability change")
+                .isEqualTo("ACTIVE");
+        assertThat(versionsCount(ctx)).as("a version row disappeared when releases went off").isGreaterThanOrEqualTo(1);
         completeToBacklog(ctx, ctx.token(), sprintId).andExpect(status().isOk());
 
         // Re-enabling restores full function with no user action, because nothing was lost.
         patchDelivery(ctx, "\"board\":\"SCRUM\",\"releases\":true,\"estimation\":true")
                 .andExpect(status().isOk());
         var restored = getIssue(ctx, numberOf(issue));
-        assert restored.get("storyPoints").decimalValue().intValue() == 5 : restored.toString();
-        assert restored.get("fixVersions").size() == 1 : restored.toString();
+        assertThat(restored.get("storyPoints").decimalValue().intValue())
+                .as(() -> String.valueOf(restored.toString()))
+                .isEqualTo(5);
+        assertThat(restored.get("fixVersions")).as(() -> String.valueOf(restored.toString())).hasSize(1);
     }
 
     // ======================================================================= gates
@@ -453,8 +477,12 @@ class DeliveryCapabilitiesApiTest extends SprintTestBase {
 
         // Nothing above changed anything.
         var delivery = deliveryOf(ctx);
-        assert delivery.get("releases").asBoolean() && delivery.get("estimation").asBoolean()
-                : "a rejected caller still moved the needle: " + delivery;
+        assertThat(delivery.get("releases").asBoolean())
+                .withFailMessage("a rejected caller still moved the needle: " + delivery)
+                .isTrue();
+        assertThat(delivery.get("estimation").asBoolean())
+                .withFailMessage("a rejected caller still moved the needle: " + delivery)
+                .isTrue();
     }
 
     /**

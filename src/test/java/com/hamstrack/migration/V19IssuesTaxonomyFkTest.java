@@ -10,6 +10,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * {@code V19__issues_taxonomy_fk.sql} (HD-13) — the two restored foreign keys on
  * {@code issues.type_id} / {@code issues.status_id}, and the one behaviour the migration
@@ -83,33 +85,37 @@ class V19IssuesTaxonomyFkTest {
                        FROM pg_constraint
                       WHERE conrelid = '%s.issues'::regclass AND conname = '%s'
                      """.formatted(SCHEMA, name))) {
-            assert rs.next()
-                    : name + " does not exist. V19 is the migration that adds it; note that "
+            assertThat(rs.next())
+                    .withFailMessage("%s", name + " does not exist. V19 is the migration that adds it; note that "
                       + "ddl-auto=validate does NOT check foreign keys, so nothing else in the "
-                      + "suite would have noticed.";
-            assert rs.getBoolean("convalidated")
-                    : name + " exists but is NOT VALID — existing rows were never checked, so a "
+                      + "suite would have noticed.")
+                    .isTrue();
+            assertThat(rs.getBoolean("convalidated"))
+                    .withFailMessage("%s", name + " exists but is NOT VALID — existing rows were never checked, so a "
                       + "stranded reference could already be sitting in the table. V19 uses the "
-                      + "plain ADD CONSTRAINT form deliberately (HD-93: no rolling deploys).";
-            assert "a".equals(rs.getString("confdeltype"))
-                    : name + " has ON DELETE '" + rs.getString("confdeltype") + "', expected 'a' "
+                      + "plain ADD CONSTRAINT form deliberately (HD-93: no rolling deploys).")
+                    .isTrue();
+            assertThat(rs.getString("confdeltype"))
+                    .as("%s", name + " has ON DELETE '" + rs.getString("confdeltype") + "', expected 'a' "
                       + "(NO ACTION). 'c' would CASCADE — deleting one shared status would delete "
-                      + "every issue using it, across every tenant.";
-            assert "a".equals(rs.getString("confupdtype"))
-                    : name + " has a non-default ON UPDATE action";
-            assert !rs.getBoolean("condeferrable")
-                    : name + " is DEFERRABLE. It must not be: issues_priority_id_fkey is "
+                      + "every issue using it, across every tenant.")
+                    .isEqualTo("a");
+            assertThat(rs.getString("confupdtype")).as("%s", name + " has a non-default ON UPDATE action").isEqualTo("a");
+            assertThat(rs.getBoolean("condeferrable"))
+                    .withFailMessage("%s", name + " is DEFERRABLE. It must not be: issues_priority_id_fkey is "
                       + "immediate, so deferring these two would fix only two thirds of any "
-                      + "project purge while moving genuine violations to commit time.";
-            assert parent.equals(stripSchema(rs.getString("parent")))
-                    : name + " points at " + rs.getString("parent") + ", expected " + parent;
+                      + "project purge while moving genuine violations to commit time.")
+                    .isFalse();
+            assertThat(parent)
+                    .as("%s", name + " points at " + rs.getString("parent") + ", expected " + parent)
+                    .isEqualTo(stripSchema(rs.getString("parent")));
             // Single-column, and that is FORCED, not chosen — see V19's header. A composite
             // (id, workspace_id) shape would carry tenancy the way issues_component_fk does,
             // and is impossible here: statuses/issue_types have no workspace_id, and one
             // global catalog row is referenced by issues in every workspace at once.
-            assert rs.getString("def").equals(
-                    "FOREIGN KEY (" + column + ") REFERENCES " + parent + "(id)")
-                    : name + " is not the expected single-column shape: " + rs.getString("def");
+            assertThat(rs.getString("def"))
+                    .as("%s", name + " is not the expected single-column shape: " + rs.getString("def"))
+                    .isEqualTo("FOREIGN KEY (" + column + ") REFERENCES " + parent + "(id)");
         }
     }
 
@@ -199,14 +205,18 @@ class V19IssuesTaxonomyFkTest {
                 try {
                     exec(conn, "DELETE FROM projects WHERE id = '" + f.project() + "'");
 
-                    assert rowsOf(conn, "SELECT count(*) FROM issues WHERE id = '" + f.issue() + "'") == 0
-                            : "the issues cascade did not run";
-                    assert rowsOf(conn, "SELECT count(*) FROM statuses WHERE id = '" + f.status() + "'") == 0
-                            : "the project-scoped status was not cascaded away";
-                    assert rowsOf(conn, "SELECT count(*) FROM issue_types WHERE id = '" + f.type() + "'") == 0
-                            : "the project-scoped issue type was not cascaded away";
-                    assert rowsOf(conn, "SELECT count(*) FROM priorities WHERE id = '" + f.priority() + "'") == 0
-                            : "the project-scoped priority was not cascaded away";
+                    assertThat(rowsOf(conn, "SELECT count(*) FROM issues WHERE id = '" + f.issue() + "'"))
+                            .as("the issues cascade did not run")
+                            .isEqualTo(0);
+                    assertThat(rowsOf(conn, "SELECT count(*) FROM statuses WHERE id = '" + f.status() + "'"))
+                            .as("the project-scoped status was not cascaded away")
+                            .isEqualTo(0);
+                    assertThat(rowsOf(conn, "SELECT count(*) FROM issue_types WHERE id = '" + f.type() + "'"))
+                            .as("the project-scoped issue type was not cascaded away")
+                            .isEqualTo(0);
+                    assertThat(rowsOf(conn, "SELECT count(*) FROM priorities WHERE id = '" + f.priority() + "'"))
+                            .as("the project-scoped priority was not cascaded away")
+                            .isEqualTo(0);
                 } catch (SQLException e) {
                     throw new AssertionError("""
                             Deleting a project whose own issues use its own project-scoped status, \
@@ -397,9 +407,10 @@ class V19IssuesTaxonomyFkTest {
                     "expected SQLSTATE " + FK_VIOLATION + " from: " + sql + "\n  but it succeeded — "
                     + whatItMeans);
         } catch (SQLException e) {
-            assert FK_VIOLATION.equals(e.getSQLState())
-                    : "expected SQLSTATE " + FK_VIOLATION + " from: " + sql + "\n  but got "
-                      + e.getSQLState() + ": " + e.getMessage();
+            assertThat(e.getSQLState())
+                    .as(() -> "expected SQLSTATE " + FK_VIOLATION + " from: " + sql + "\n  but got "
+                      + e.getSQLState() + ": " + e.getMessage())
+                    .isEqualTo(FK_VIOLATION);
         } finally {
             conn.rollback();
             conn.setAutoCommit(true);
@@ -430,7 +441,7 @@ class V19IssuesTaxonomyFkTest {
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -106,52 +107,62 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
 
                 flyway("20").migrate();
 
-                assert produced.get(0).workspaceId().equals(workspaceOf(conn, rowA))
-                       && produced.get(1).workspaceId().equals(workspaceOf(conn, rowB))
-                        : """
+                assertThat(produced.get(0).workspaceId().equals(workspaceOf(conn, rowA))
+                       && produced.get(1).workspaceId().equals(workspaceOf(conn, rowB)))
+                        .withFailMessage("""
                         V20's backfill did not recover the workspace from a link that \
                         CommentService actually produced. The link format and V20's regex are \
                         one coupling spanning two languages and nothing in the build relates \
                         them — this test is the relation. If the link shape changed, V20 is now \
                         silently deleting every mention notification on any instance that \
                         upgrades; fix the regex (in a NEW migration if V20 has been applied \
-                        anywhere) rather than this assertion.""";
+                        anywhere) rather than this assertion.""")
+                        .isTrue();
 
-                assert !exists(conn, ghost)
-                        : "a notification whose link names a workspace that does not exist survived "
+                assertThat(exists(conn, ghost))
+                        .withFailMessage("a notification whose link names a workspace that does not exist survived "
                           + "the backfill. It cannot have a workspace_id, so SET NOT NULL would "
-                          + "abort the deploy — the DELETE is what keeps the migration runnable.";
-                assert !exists(conn, noLink)
-                        : "a notification with a NULL link survived. Nothing can recover its "
-                          + "workspace, so it is a permanently invisible row under the new rule.";
-                assert !exists(conn, junk)
-                        : "a notification whose link is not UUID-shaped survived. The strict regex "
-                          + "is also what stops ::uuid raising 22P02 and aborting the migration.";
-                assert count(conn, "SELECT count(*) FROM notifications") == 2
-                        : "the backstop DELETE removed rows it should have kept — it is a backstop, "
-                          + "not a data-loss plan";
-                assert count(conn, "SELECT count(*) FROM notifications WHERE workspace_id IS NULL") == 0
-                        : "a row survived with a NULL workspace_id, which SET NOT NULL should have "
-                          + "made impossible";
+                          + "abort the deploy — the DELETE is what keeps the migration runnable.")
+                        .isFalse();
+                assertThat(exists(conn, noLink))
+                        .withFailMessage("a notification with a NULL link survived. Nothing can recover its "
+                          + "workspace, so it is a permanently invisible row under the new rule.")
+                        .isFalse();
+                assertThat(exists(conn, junk))
+                        .withFailMessage("a notification whose link is not UUID-shaped survived. The strict regex "
+                          + "is also what stops ::uuid raising 22P02 and aborting the migration.")
+                        .isFalse();
+                assertThat(count(conn, "SELECT count(*) FROM notifications"))
+                        .as("the backstop DELETE removed rows it should have kept — it is a backstop, "
+                          + "not a data-loss plan")
+                        .isEqualTo(2);
+                assertThat(count(conn, "SELECT count(*) FROM notifications WHERE workspace_id IS NULL"))
+                        .as("a row survived with a NULL workspace_id, which SET NOT NULL should have "
+                          + "made impossible")
+                        .isEqualTo(0);
 
                 // --- the quarantine copy -----------------------------------------
-                assert quarantineExists(conn)
-                        : "three rows were deleted and notifications_unresolvable_v20 was not "
+                assertThat(quarantineExists(conn))
+                        .withFailMessage("three rows were deleted and notifications_unresolvable_v20 was not "
                           + "created. The copy is the only thing that keeps 'how many, and which "
                           + "ones?' answerable AFTER the deploy — without it the answer exists for "
                           + "exactly as long as the pre-flight window, and an operator who read "
-                          + "about this afterwards has nothing to read.";
-                assert count(conn, "SELECT count(*) FROM notifications_unresolvable_v20") == 3
-                        : "the quarantine table does not hold every deleted row. A partial copy is "
-                          + "worse than none: it answers the question wrongly.";
-                assert count(conn, "SELECT count(*) FROM notifications_unresolvable_v20 "
-                                   + "WHERE id = '" + noLink + "' AND link IS NULL") == 1
-                        : "the NULL-link row was deleted but not quarantined — the shapes hardest "
-                          + "to diagnose are exactly the ones the copy exists for";
-                assert count(conn, "SELECT count(*) FROM notifications_unresolvable_v20 "
-                                   + "WHERE body = 'excerpt'") == 3
-                        : "the quarantine kept the rows but not their content, so it cannot answer "
-                          + "what was lost";
+                          + "about this afterwards has nothing to read.")
+                        .isTrue();
+                assertThat(count(conn, "SELECT count(*) FROM notifications_unresolvable_v20"))
+                        .as("the quarantine table does not hold every deleted row. A partial copy is "
+                          + "worse than none: it answers the question wrongly.")
+                        .isEqualTo(3);
+                assertThat(count(conn, "SELECT count(*) FROM notifications_unresolvable_v20 "
+                                   + "WHERE id = '" + noLink + "' AND link IS NULL"))
+                        .as("the NULL-link row was deleted but not quarantined — the shapes hardest "
+                          + "to diagnose are exactly the ones the copy exists for")
+                        .isEqualTo(1);
+                assertThat(count(conn, "SELECT count(*) FROM notifications_unresolvable_v20 "
+                                   + "WHERE body = 'excerpt'"))
+                        .as("the quarantine kept the rows but not their content, so it cannot answer "
+                          + "what was lost")
+                        .isEqualTo(3);
             } finally {
                 dropSchema(conn);
             }
@@ -185,21 +196,23 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
                 exec(conn, "SET search_path TO " + SCHEMA);
 
                 assertConstraint(conn);
-                assert count(conn, """
+                assertThat(count(conn, """
                         SELECT count(*) FROM pg_indexes
                          WHERE schemaname = '%s' AND indexname = 'idx_notifications_workspace'
-                        """.formatted(SCHEMA)) == 1
-                        : "idx_notifications_workspace is missing. It backs the CASCADE's RI scan "
+                        """.formatted(SCHEMA)))
+                        .as("idx_notifications_workspace is missing. It backs the CASCADE's RI scan "
                           + "and the per-workspace queries the column exists to make possible; it "
-                          + "is NOT the index the read filter uses (that is idx_notifications_user).";
+                          + "is NOT the index the read filter uses (that is idx_notifications_user).")
+                        .isEqualTo(1);
 
                 // --- and a clean install inherits no artefact of a condition it never met ---
-                assert !quarantineExists(conn)
-                        : "notifications_unresolvable_v20 exists on a schema that was migrated from "
+                assertThat(quarantineExists(conn))
+                        .withFailMessage("notifications_unresolvable_v20 exists on a schema that was migrated from "
                           + "scratch with no notifications in it. The copy has to be conditional on "
                           + "the count: an unconditional CREATE leaves every clean install with a "
                           + "permanent empty table documenting nothing, which is how a backstop "
-                          + "turns into schema noise.";
+                          + "turns into schema noise.")
+                        .isFalse();
 
                 // --- cascade, measured -------------------------------------------
                 var user = seedUser(conn);
@@ -213,14 +226,17 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
                 conn.setAutoCommit(false);
                 try {
                     exec(conn, "DELETE FROM workspaces WHERE id = '" + doomed + "'");
-                    assert !exists(conn, doomedRow)
-                            : "deleting a workspace left its notifications behind";
-                    assert exists(conn, keptRow)
-                            : "deleting one workspace took another workspace's notifications with "
-                              + "it — the cascade is following the wrong column";
-                    assert count(conn, "SELECT count(*) FROM users WHERE id = '" + user + "'") == 1
-                            : "the cascade reached the recipient's account. A notification's "
-                              + "workspace and its user are separate parents.";
+                    assertThat(exists(conn, doomedRow))
+                            .withFailMessage("deleting a workspace left its notifications behind")
+                            .isFalse();
+                    assertThat(exists(conn, keptRow))
+                            .withFailMessage("deleting one workspace took another workspace's notifications with "
+                              + "it — the cascade is following the wrong column")
+                            .isTrue();
+                    assertThat(count(conn, "SELECT count(*) FROM users WHERE id = '" + user + "'"))
+                            .as("the cascade reached the recipient's account. A notification's "
+                              + "workspace and its user are separate parents.")
+                            .isEqualTo(1);
                 } finally {
                     conn.rollback();
                     conn.setAutoCommit(true);
@@ -239,24 +255,27 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
                       WHERE conrelid = '%s.notifications'::regclass
                         AND conname = 'notifications_workspace_id_fkey'
                      """.formatted(SCHEMA))) {
-            assert rs.next()
-                    : "notifications_workspace_id_fkey does not exist. V20 adds it, and "
+            assertThat(rs.next())
+                    .withFailMessage("notifications_workspace_id_fkey does not exist. V20 adds it, and "
                       + "ddl-auto=validate does not check foreign keys, so nothing else in the "
-                      + "suite would have noticed its absence.";
-            assert rs.getBoolean("convalidated")
-                    : "the constraint is NOT VALID — existing rows were never checked, so a "
-                      + "notification pointing at no workspace could already be sitting there";
-            assert "c".equals(rs.getString("confdeltype"))
-                    : "ON DELETE is '" + rs.getString("confdeltype") + "', expected 'c' (CASCADE). "
+                      + "suite would have noticed its absence.")
+                    .isTrue();
+            assertThat(rs.getBoolean("convalidated"))
+                    .withFailMessage("the constraint is NOT VALID — existing rows were never checked, so a "
+                      + "notification pointing at no workspace could already be sitting there")
+                    .isTrue();
+            assertThat(rs.getString("confdeltype"))
+                    .as("ON DELETE is '" + rs.getString("confdeltype") + "', expected 'c' (CASCADE). "
                       + "A notification whose workspace is gone is unrenderable and unreachable, so "
                       + "NO ACTION here would make a future workspace purge fail on a table nobody "
                       + "would think to look at. Cascade is the norm for children of workspaces but "
                       + "it is NOT universal — issues.workspace_id deliberately does not cascade — "
                       + "which is why this row's choice is asserted rather than inherited from a "
-                      + "category.";
-            assert ("FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE")
-                    .equals(rs.getString("def"))
-                    : "not the expected single-column shape: " + rs.getString("def");
+                      + "category.")
+                    .isEqualTo("c");
+            assertThat(("FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE"))
+                    .as("not the expected single-column shape: " + rs.getString("def"))
+                    .isEqualTo(rs.getString("def"));
         }
     }
 
@@ -298,15 +317,27 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
                 .map(n -> new Produced(n.getWorkspace().getId(), n.getLink()))
                 .toList());
 
-        assert produced != null && produced.size() == 2
-                : "the fixture did not produce two mention notifications — nothing below is "
-                  + "measuring the producer any more";
+        assertThat(produced)
+                .as("the fixture did not produce two mention notifications — nothing below is "
+                  + "measuring the producer any more")
+                .isNotNull();
+        assertThat(produced)
+                .as("the fixture did not produce two mention notifications — nothing below is "
+                  + "measuring the producer any more")
+                .hasSize(2);
         for (var p : produced) {
-            assert p.link() != null && !p.link().isBlank()
-                    : "the producer stored a notification with no link at all. V20's backfill has "
+            assertThat(p.link())
+                    .as("the producer stored a notification with no link at all. V20's backfill has "
                       + "nothing to parse for such a row and deletes it, so this is not a test "
                       + "failure to paper over: it means mention notifications written by THIS "
-                      + "build would not survive the migration.";
+                      + "build would not survive the migration.")
+                    .isNotNull();
+            assertThat(p.link())
+                    .as("the producer stored a notification with no link at all. V20's backfill has "
+                      + "nothing to parse for such a row and deletes it, so this is not a test "
+                      + "failure to paper over: it means mention notifications written by THIS "
+                      + "build would not survive the migration.")
+                    .isNotBlank();
         }
         return produced;
     }
@@ -404,7 +435,7 @@ class V20NotificationsWorkspaceScopeTest extends ComponentTestBase {
 
     private static long count(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

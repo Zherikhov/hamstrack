@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>The unit invariants of the one authorization primitive</strong>
  * (roles-permissions-proposal §5.1, §6.4).
@@ -43,29 +45,34 @@ class PermissionSetTest {
     void anOwnOnlyGrantNeverSatisfiesAnUnrestrictedCheck() {
         var set = PermissionSet.of(List.of(new PermissionSet.Grant(Permission.ISSUE_DELETE, true)));
 
-        assert !set.has(Permission.ISSUE_DELETE)
-                : "has(p) asks 'may you do this to ANYONE's object?' and an own-only grant must "
+        assertThat(set.has(Permission.ISSUE_DELETE))
+                .withFailMessage("has(p) asks 'may you do this to ANYONE's object?' and an own-only grant must "
                   + "answer no. This is the whole ownership modifier (§6.4): the curator call "
                   + "sites (label archive/merge/delete, issue delete, attachment moderation) pass "
-                  + "NO ownership argument precisely so an own-only grant cannot reach them.";
-        assert !set.has(Permission.ISSUE_DELETE, false)
-                : "has(p, false) is the same question with the answer spelled out";
-        assert set.has(Permission.ISSUE_DELETE, true)
-                : "the actor's OWN object is what an own-only grant is for";
-        assert set.hasAtAll(Permission.ISSUE_DELETE)
-                : "hasAtAll is the role-editor question ('is this granted in any form?') and must "
-                  + "see the own-only grant — it is deliberately NOT an authorization check";
+                  + "NO ownership argument precisely so an own-only grant cannot reach them.")
+                .isFalse();
+        assertThat(set.has(Permission.ISSUE_DELETE, false))
+                .withFailMessage("has(p, false) is the same question with the answer spelled out")
+                .isFalse();
+        assertThat(set.has(Permission.ISSUE_DELETE, true))
+                .withFailMessage("the actor's OWN object is what an own-only grant is for")
+                .isTrue();
+        assertThat(set.hasAtAll(Permission.ISSUE_DELETE))
+                .withFailMessage("hasAtAll is the role-editor question ('is this granted in any form?') and must "
+                  + "see the own-only grant — it is deliberately NOT an authorization check")
+                .isTrue();
 
         boolean refusedUnrestricted = false;
         try {
             set.require(Permission.ISSUE_DELETE);
         } catch (MissingPermissionException e) {
             refusedUnrestricted = true;
-            assert e.getMessage().contains(Permission.ISSUE_DELETE.key())
-                    : "a 403 must name the permission — it is the only thing that tells an "
-                      + "operator which grant to add. Got: " + e.getMessage();
+            assertThat(e.getMessage())
+                    .as(() -> "a 403 must name the permission — it is the only thing that tells an "
+                      + "operator which grant to add. Got: " + e.getMessage())
+                    .contains(Permission.ISSUE_DELETE.key());
         }
-        assert refusedUnrestricted : "require(p) accepted an own-only grant";
+        assertThat(refusedUnrestricted).withFailMessage("require(p) accepted an own-only grant").isTrue();
 
         boolean refusedForeign = false;
         try {
@@ -73,7 +80,7 @@ class PermissionSetTest {
         } catch (MissingPermissionException e) {
             refusedForeign = true;
         }
-        assert refusedForeign : "require(p, false) accepted an own-only grant";
+        assertThat(refusedForeign).withFailMessage("require(p, false) accepted an own-only grant").isTrue();
 
         set.require(Permission.ISSUE_DELETE, true); // must not throw
     }
@@ -81,10 +88,16 @@ class PermissionSetTest {
     @Test
     void anUnrestrictedGrantAnswersEveryObject() {
         var set = PermissionSet.of(List.of(new PermissionSet.Grant(Permission.ISSUE_DELETE, false)));
-        assert set.has(Permission.ISSUE_DELETE);
-        assert set.has(Permission.ISSUE_DELETE, false);
-        assert set.has(Permission.ISSUE_DELETE, true);
-        assert set.hasAtAll(Permission.ISSUE_DELETE);
+        assertThat(set.has(Permission.ISSUE_DELETE))
+                .withFailMessage("an unrestricted grant answers the plain question")
+                .isTrue();
+        assertThat(set.has(Permission.ISSUE_DELETE, false)).withFailMessage("…and the any-object question").isTrue();
+        assertThat(set.has(Permission.ISSUE_DELETE, true))
+                .withFailMessage("…and the own-object one: unrestricted covers own, the subset rule's whole point")
+                .isTrue();
+        assertThat(set.hasAtAll(Permission.ISSUE_DELETE))
+                .withFailMessage("…and hasAtAll, which asks only whether the permission is held at any width")
+                .isTrue();
     }
 
     @Test
@@ -94,19 +107,33 @@ class PermissionSetTest {
         // project.administer.all grant feeds the other.
         var stored = PermissionSet.of(
                 List.of(new PermissionSet.Grant(Permission.COMMENT_EDIT, false)));
-        assert !stored.has(Permission.COMMENT_EDIT) && stored.has(Permission.COMMENT_EDIT, true)
-                : "a stored row claiming unrestricted comment.edit was honoured. A bad row (or a "
-                  + "pre-§17.3 database) must be narrowed on read, not trusted: " + stored;
+        assertThat(stored.has(Permission.COMMENT_EDIT))
+                .withFailMessage("a stored row claiming unrestricted comment.edit was honoured. A bad row (or a "
+                  + "pre-§17.3 database) must be narrowed on read, not trusted: " + stored)
+                .isFalse();
+        assertThat(stored.has(Permission.COMMENT_EDIT, true))
+                .withFailMessage("a stored row claiming unrestricted comment.edit was honoured. A bad row (or a "
+                  + "pre-§17.3 database) must be narrowed on read, not trusted: " + stored)
+                .isTrue();
 
         var implied = PermissionSet.granting(Set.of(Permission.COMMENT_EDIT));
-        assert !implied.has(Permission.COMMENT_EDIT) && implied.has(Permission.COMMENT_EDIT, true)
-                : "granting() handed out unrestricted comment.edit — so project.administer.all "
+        assertThat(implied.has(Permission.COMMENT_EDIT))
+                .withFailMessage("granting() handed out unrestricted comment.edit — so project.administer.all "
                   + "(which is granting(allOf(PROJECT))) would let a 'Program manager' custom role "
-                  + "edit other people's words. §17.3 says no role ships that: " + implied;
+                  + "edit other people's words. §17.3 says no role ships that: " + implied)
+                .isFalse();
+        assertThat(implied.has(Permission.COMMENT_EDIT, true))
+                .withFailMessage("granting() handed out unrestricted comment.edit — so project.administer.all "
+                  + "(which is granting(allOf(PROJECT))) would let a 'Program manager' custom role "
+                  + "edit other people's words. §17.3 says no role ships that: " + implied)
+                .isTrue();
 
-        assert PermissionSet.allOf(RoleScope.PROJECT).has(Permission.COMMENT_EDIT, true)
-                && !PermissionSet.allOf(RoleScope.PROJECT).has(Permission.COMMENT_EDIT)
-                : "allOf(PROJECT) is what project.administer.all unions in — same rule applies";
+        assertThat(PermissionSet.allOf(RoleScope.PROJECT).has(Permission.COMMENT_EDIT, true))
+                .withFailMessage("allOf(PROJECT) is what project.administer.all unions in — same rule applies")
+                .isTrue();
+        assertThat(PermissionSet.allOf(RoleScope.PROJECT).has(Permission.COMMENT_EDIT))
+                .withFailMessage("allOf(PROJECT) is what project.administer.all unions in — same rule applies")
+                .isFalse();
     }
 
     // ==================================================================== union
@@ -120,17 +147,24 @@ class PermissionSetTest {
                 new PermissionSet.Grant(Permission.ATTACHMENT_DELETE, false)));
 
         for (var merged : List.of(own.union(unrestricted), unrestricted.union(own))) {
-            assert merged.has(Permission.ATTACHMENT_DELETE)
-                    : "union narrowed an unrestricted grant to own-only. The resolver unions the "
+            assertThat(merged.has(Permission.ATTACHMENT_DELETE))
+                    .withFailMessage("union narrowed an unrestricted grant to own-only. The resolver unions the "
                       + "project role with the workspace-level 'in every project' grants (§17.2), "
                       + "so this would silently REVOKE moderation from someone who holds both. "
-                      + "Got " + merged;
-            assert merged.has(Permission.ISSUE_EDIT, true) && !merged.has(Permission.ISSUE_EDIT)
-                    : "a permission only one side holds must survive at ITS width, not the "
-                      + "other's. Got " + merged;
-            assert merged.asWireStrings().stream().noneMatch(s -> s.equals("attachment.delete:own"))
-                    : "the wire form carries both widths of one key — a client would gate on "
-                      + "whichever it found first. Got " + merged.asWireStrings();
+                      + "Got " + merged)
+                    .isTrue();
+            assertThat(merged.has(Permission.ISSUE_EDIT, true))
+                    .withFailMessage("a permission only one side holds must survive at ITS width, not the "
+                      + "other's. Got " + merged)
+                    .isTrue();
+            assertThat(merged.has(Permission.ISSUE_EDIT))
+                    .withFailMessage("a permission only one side holds must survive at ITS width, not the "
+                      + "other's. Got " + merged)
+                    .isFalse();
+            assertThat(merged.asWireStrings().stream().noneMatch(s -> s.equals("attachment.delete:own")))
+                    .withFailMessage(() -> "the wire form carries both widths of one key — a client would gate on "
+                      + "whichever it found first. Got " + merged.asWireStrings())
+                    .isTrue();
         }
     }
 
@@ -141,13 +175,17 @@ class PermissionSetTest {
                 new PermissionSet.Grant(Permission.COMMENT_DELETE, true)));
 
         for (var merged : List.of(set.union(PermissionSet.empty()), PermissionSet.empty().union(set))) {
-            assert merged.asWireStrings().equals(set.asWireStrings())
-                    : "unioning with the empty set changed the grants: " + merged;
+            assertThat(merged.asWireStrings())
+                    .as("unioning with the empty set changed the grants: " + merged)
+                    .isEqualTo(set.asWireStrings());
         }
-        assert PermissionSet.empty().union(PermissionSet.empty()).isEmpty();
-        assert PermissionSet.empty().isEmpty() && PermissionSet.empty().asWireStrings().isEmpty()
-                : "empty() is a real answer, not an error state (§12) — a Viewer, and a member "
-                  + "with no project role in a STRICT workspace, both hold exactly this";
+        assertThat(PermissionSet.empty().union(PermissionSet.empty()).isEmpty())
+                .withFailMessage("the empty set unioned with itself is still empty — union never conjures a grant")
+                .isTrue();
+        assertThat(PermissionSet.empty().isEmpty() && PermissionSet.empty().asWireStrings().isEmpty())
+                .withFailMessage("empty() is a real answer, not an error state (§12) — a Viewer, and a member "
+                  + "with no project role in a STRICT workspace, both hold exactly this")
+                .isTrue();
     }
 
     @Test
@@ -157,10 +195,11 @@ class PermissionSetTest {
         var set = PermissionSet.of(List.of(
                 new PermissionSet.Grant(Permission.ISSUE_EDIT, true),
                 new PermissionSet.Grant(Permission.ISSUE_EDIT, false)));
-        assert set.has(Permission.ISSUE_EDIT) : "the wider grant must win: " + set;
-        assert set.asWireStrings().equals(List.of("issue.edit"))
-                : "one key must appear exactly once on the wire, at one width. Got "
-                  + set.asWireStrings();
+        assertThat(set.has(Permission.ISSUE_EDIT)).withFailMessage("the wider grant must win: " + set).isTrue();
+        assertThat(set.asWireStrings())
+                .as(() -> "one key must appear exactly once on the wire, at one width. Got "
+                  + set.asWireStrings())
+                .isEqualTo(List.of("issue.edit"));
     }
 
     // ============================================================ the memoised allOf
@@ -176,7 +215,9 @@ class PermissionSetTest {
                 .union(first);
         first.union(PermissionSet.empty());
         first.has(Permission.PROJECT_ARCHIVE);
-        assert !derived.isEmpty();
+        assertThat(!derived.isEmpty())
+                .withFailMessage("the fixture is non-empty, so the memoised set being unchanged is a real claim and not a vacuous one")
+                .isTrue();
 
         boolean wireFormIsImmutable = false;
         try {
@@ -184,20 +225,23 @@ class PermissionSetTest {
         } catch (UnsupportedOperationException expected) {
             wireFormIsImmutable = true;
         }
-        assert wireFormIsImmutable
-                : "asWireStrings() handed out a mutable list. It is rendered straight into a "
+        assertThat(wireFormIsImmutable)
+                .withFailMessage("asWireStrings() handed out a mutable list. It is rendered straight into a "
                   + "response body and, for the memoised set, is derived from a process-wide "
                   + "shared instance; a caller that appended to it would be editing what every "
-                  + "later request sees.";
+                  + "later request sees.")
+                .isTrue();
 
-        assert PermissionSet.allOf(RoleScope.PROJECT) == first
-                : "allOf must return the SAME instance every call — §9.2's constant cost depends "
-                  + "on it not being rebuilt on the request path";
-        assert first.asWireStrings().equals(before)
-                : "the memoised set changed after being used. It is shared by every resolution "
+        assertThat(PermissionSet.allOf(RoleScope.PROJECT))
+                .as("allOf must return the SAME instance every call — §9.2's constant cost depends "
+                  + "on it not being rebuilt on the request path")
+                .isSameAs(first);
+        assertThat(first.asWireStrings())
+                .as(() -> "the memoised set changed after being used. It is shared by every resolution "
                   + "of project.administer.all in the process, so a mutation here is an instance-"
                   + "wide privilege change with no audit trail. Was " + before + ", now "
-                  + first.asWireStrings();
+                  + first.asWireStrings())
+                .isEqualTo(before);
     }
 
     @Test
@@ -208,12 +252,13 @@ class PermissionSetTest {
         for (var p : Permission.values()) {
             var owning = p.scope() == RoleScope.PROJECT ? project : workspace;
             var other = p.scope() == RoleScope.PROJECT ? workspace : project;
-            assert owning.hasAtAll(p) : "allOf(" + p.scope() + ") is missing " + p.key();
-            assert !other.hasAtAll(p)
-                    : "allOf leaked " + p.key() + " into the " + (p.scope() == RoleScope.PROJECT
+            assertThat(owning.hasAtAll(p)).withFailMessage(() -> "allOf(" + p.scope() + ") is missing " + p.key()).isTrue();
+            assertThat(other.hasAtAll(p))
+                    .withFailMessage(() -> "allOf leaked " + p.key() + " into the " + (p.scope() == RoleScope.PROJECT
                       ? "WORKSPACE" : "PROJECT") + " scope. project.administer.all unions "
                       + "allOf(PROJECT) into a ProjectContext, so a workspace permission in there "
-                      + "would satisfy workspace-scoped require(...) calls for a project role.";
+                      + "would satisfy workspace-scoped require(...) calls for a project role.")
+                    .isFalse();
         }
     }
 
@@ -226,10 +271,10 @@ class PermissionSetTest {
                 new PermissionSet.Grant(Permission.WORKSPACE_EDIT, false),
                 new PermissionSet.Grant(Permission.ISSUE_CREATE, false)));
 
-        assert set.asWireStrings().equals(
-                List.of("workspace.edit", "issue.create", "comment.delete" + PermissionSet.OWN_SUFFIX))
-                : "the wire form must be in catalog (declaration) order so a response body is "
+        assertThat(set.asWireStrings())
+                .as(() -> "the wire form must be in catalog (declaration) order so a response body is "
                   + "stable and diffable across requests and installs, and an own-only grant must "
-                  + "carry the ':own' suffix. Got " + set.asWireStrings();
+                  + "carry the ':own' suffix. Got " + set.asWireStrings())
+                .isEqualTo(List.of("workspace.edit", "issue.create", "comment.delete" + PermissionSet.OWN_SUFFIX));
     }
 }

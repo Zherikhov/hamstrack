@@ -9,6 +9,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>{@code V25__mail_send_events_anonymous_index.sql} (HD-202 review) replayed against a real
  * pre-V25 database</strong> — the index exists, it is on the right table, it is PARTIAL, and its
@@ -81,14 +83,17 @@ class V25MailAnonymousIndexTest {
                 flyway("24").migrate();
                 exec(conn, "SET search_path TO " + SCHEMA);
 
-                assert tableOf(conn, INDEX) == null : """
+                assertThat(tableOf(conn, INDEX))
+                        .as("""
                         the pre-V25 schema already carries the index, so this file is watching \
                         nothing happen. Either V25 was folded into an earlier migration (it must \
-                        not be — V21..V24 are applied everywhere) or the target above is wrong.""";
+                        not be — V21..V24 are applied everywhere) or the target above is wrong.""")
+                        .isNull();
 
                 flyway("25").migrate();
 
-                assert TABLE.equals(tableOf(conn, INDEX)) : """
+                assertThat(tableOf(conn, INDEX))
+                        .as("""
                         %s does not exist on %s after V25. ddl-auto=validate does NOT look at \
                         indexes, so nothing else in this build fails when it is gone: the \
                         application boots clean, and the only symptom is that \
@@ -99,25 +104,31 @@ class V25MailAnonymousIndexTest {
                         MailConcentrationGaugeStale (rules.yml) and docs/observability.md tell a \
                         paged operator to check for this object BY NAME, so a rename is a \
                         three-file edit, not a one-file one. Found on table:\s"""
-                                .formatted(INDEX, TABLE) + tableOf(conn, INDEX);
+                                .formatted(INDEX, TABLE) + tableOf(conn, INDEX))
+                        .isEqualTo(TABLE);
 
                 var predicate = predicateOf(conn, INDEX);
-                assert predicate != null : """
+                assertThat(predicate)
+                        .as("""
                         the index is not PARTIAL. A full index on the same two columns still \
                         answers the query, so this assertion is the only thing standing between \
                         that edit and a silent cost increase: without WHERE sender_user_id IS \
                         NULL the index carries every authenticated invitation row on the \
                         instance, which is the majority of the table anywhere real work happens, \
                         and the relation the five-minute aggregate walks grows with traffic that \
-                        has nothing to do with what it measures.""";
-                assert predicate.contains("sender_user_id") : """
+                        has nothing to do with what it measures.""")
+                        .isNotNull();
+                assertThat(predicate)
+                        .as("""
                         the index is partial on something other than the sender. The predicate \
                         has to be the query's own constant — sender_user_id IS NULL — or the \
                         planner cannot prove the index covers the rows being asked for and will \
-                        not use it at all. Actual:\s""" + predicate;
+                        not use it at all. Actual:\s""" + predicate)
+                        .contains("sender_user_id");
 
                 var columns = columnsOf(conn, INDEX);
-                assert "created_at,recipient_key".equals(columns) : """
+                assertThat(columns)
+                        .as("""
                         the index columns are not (created_at, recipient_key) in that order. \
                         Leading on created_at is what turns "created_at > :since" into a range \
                         scan; carrying recipient_key SECOND is what answers the GROUP BY from the \
@@ -125,7 +136,8 @@ class V25MailAnonymousIndexTest {
                         (sender_user_id, created_at) lacks — which is why that index did not \
                         already solve this. Reversed, this is a different index wearing the right \
                         name, and every operator surface that names it would still find it. \
-                        Actual:\s""" + columns;
+                        Actual:\s""" + columns)
+                        .isEqualTo("created_at,recipient_key");
             } finally {
                 dropSchema(conn);
             }
@@ -205,7 +217,7 @@ class V25MailAnonymousIndexTest {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             if (!rs.next()) return null;
             var value = rs.getString(1);
-            assert !rs.next() : "expected at most one row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected at most one row from: " + sql).isFalse();
             return value;
         }
     }

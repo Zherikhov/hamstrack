@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>{@code V27__taxonomy_palette_alignment.sql} (HD-176) replayed against a real pre-V27
  * database that ALREADY HAS TENANT DATA</strong> — which is the only fixture on which this file
@@ -99,7 +101,8 @@ class V27TaxonomyPaletteMigrationTest {
 
                 for (var table : new String[]{"statuses", "priorities", "issue_types"}) {
                     var def = columnDefault(conn, table);
-                    assert def != null && def.contains(DEFAULT_COLOR) : """
+                    assertThat(def != null && def.contains(DEFAULT_COLOR))
+                            .withFailMessage(() -> """
                             %s.color still defaults to %s. The column default governs RAW-SQL \
                             writers — a support script, a data import, anything inserting outside \
                             JPA — and priorities.color's old one (#8B8680) is a warm grey from the \
@@ -108,7 +111,8 @@ class V27TaxonomyPaletteMigrationTest {
                             field initialiser, kept equal by hand because ddl-auto=validate \
                             compares neither defaults nor widths), which is exactly why nothing \
                             else would ever notice this being wrong."""
-                            .formatted(table, def);
+                            .formatted(table, def))
+                            .isTrue();
                 }
             } finally {
                 dropSchema(conn);
@@ -135,11 +139,13 @@ class V27TaxonomyPaletteMigrationTest {
                 flyway("27").migrate();
 
                 var after = catalogWithoutColour(conn);
-                assert before.equals(after) : """
+                assertThat(before)
+                        .as(() -> """
                         V27 changed something other than a colour. It is a data-only palette \
                         alignment: no id, name, category, icon, position or archived_at may move, \
                         and no row may be created or deleted. Before: %s After: %s"""
-                        .formatted(before, after);
+                        .formatted(before, after))
+                        .isEqualTo(after);
             } finally {
                 dropSchema(conn);
             }
@@ -248,18 +254,22 @@ class V27TaxonomyPaletteMigrationTest {
 
                 flyway("27").migrate();
 
-                assert "#123456".equals(globalColour(conn, "statuses", "Done")) : """
+                assertThat(globalColour(conn, "statuses", "Done"))
+                        .as("""
                         a global seed an operator had already recoloured was overwritten. Every \
                         UPDATE in V27 is guarded on the EXACT V1 literal for this reason: a row \
                         holding anything else was changed by the one party who can change it — the \
                         instance operator's system admin, since no tenant console can reach a \
                         global row — and re-imposing the product's choice over that is the \
-                        migration rewriting a decision it did not make.""";
-                assert "#667085".equals(globalColour(conn, "statuses", "To Do")) : """
+                        migration rewriting a decision it did not make.""")
+                        .isEqualTo("#123456");
+                assertThat(globalColour(conn, "statuses", "To Do"))
+                        .as("""
                         the untouched siblings must still align. A partially-edited database has \
                         to end in a defensible state EITHER WAY, which is what independently \
                         guarded statements buy — one operator edit must not disable the rest of \
-                        the alignment.""";
+                        the alignment.""")
+                        .isEqualTo("#667085");
             } finally {
                 dropSchema(conn);
             }
@@ -297,16 +307,20 @@ class V27TaxonomyPaletteMigrationTest {
 
                 flyway("27").migrate();
 
-                assert "#B45309".equals(globalColour(conn, "priorities", "Low")) : """
+                assertThat(globalColour(conn, "priorities", "Low"))
+                        .as("""
                         the 'Medium' statement repainted 'Low'. Both rows are global and both held \
                         #B45309, so the scope and colour predicates matched each of them — only \
                         AND name = 'Medium' keeps one statement to one row. The row it hit was an \
                         operator's deliberate edit (a global row is unreachable from every tenant \
                         console), and it is now holding a colour the palette declares for a \
-                        different priority, with nothing in the application able to notice.""";
-                assert "#EAB308".equals(globalColour(conn, "priorities", "Medium")) : """
+                        different priority, with nothing in the application able to notice.""")
+                        .isEqualTo("#B45309");
+                assertThat(globalColour(conn, "priorities", "Medium"))
+                        .as("""
                         'Medium' itself did not align. The name predicate must narrow a statement \
-                        to its own row, not disable it.""";
+                        to its own row, not disable it.""")
+                        .isEqualTo("#EAB308");
             } finally {
                 dropSchema(conn);
             }
@@ -319,7 +333,8 @@ class V27TaxonomyPaletteMigrationTest {
             throws SQLException {
         for (var e : expected.entrySet()) {
             var actual = globalColour(conn, table, e.getKey());
-            assert e.getValue().equals(actual) : """
+            assertThat(actual)
+                    .as(() -> """
                     global %s '%s' is %s, expected %s. THE VALUE IS NOT A CONTRAST TARGET — several \
                     of these measure WORSE than the V1 colours they replace, and that is the \
                     decision (ADR-0027: the stored colour is an identity hue and the readable ink \
@@ -329,7 +344,8 @@ class V27TaxonomyPaletteMigrationTest {
                     correct as one that measures 5. What it owes DESIGN.md is being the hue that \
                     document declares. If you are here because a colour "looks unreadable", the \
                     fix belongs in the renderer."""
-                    .formatted(table, e.getKey(), actual, e.getValue());
+                    .formatted(table, e.getKey(), actual, e.getValue()))
+                    .isEqualTo(e.getValue());
         }
     }
 
@@ -341,7 +357,8 @@ class V27TaxonomyPaletteMigrationTest {
     private void assertUntouched(Connection conn, String table, UUID id, String before)
             throws SQLException {
         var after = rowTuple(conn, table, id);
-        assert before.equals(after) : """
+        assertThat(before)
+                .as(() -> """
                 A CUSTOMER'S %s WAS CHANGED BY V27. The row is tenant-scoped and carries the same \
                 name AND the same hex as a global seed, so the name predicate and the colour \
                 predicate both match it — the SCOPE predicate \
@@ -357,14 +374,15 @@ class V27TaxonomyPaletteMigrationTest {
                 permits exactly the tenant row this case pins), validate does not look at rows, \
                 and the only symptom is a customer's colour changing overnight. \
                 Before: %s After: %s"""
-                .formatted(table, before, after);
+                .formatted(table, before, after))
+                .isEqualTo(after);
     }
 
     /** Every column of one row, rendered as text — the full tuple {@link #assertUntouched} pins. */
     private String rowTuple(Connection conn, String table, UUID id) throws SQLException {
         try (Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery("SELECT * FROM " + table + " WHERE id = '" + id + "'")) {
-            assert rs.next() : "the fixture row disappeared from " + table + " (id " + id + ")";
+            assertThat(rs.next()).withFailMessage("the fixture row disappeared from " + table + " (id " + id + ")").isTrue();
             var meta = rs.getMetaData();
             var tuple = new StringBuilder();
             for (var i = 1; i <= meta.getColumnCount(); i++) {
@@ -381,9 +399,11 @@ class V27TaxonomyPaletteMigrationTest {
         dropSchema(conn);
         flyway("26").migrate();
         exec(conn, "SET search_path TO " + SCHEMA);
-        assert "#6B7280".equals(globalColour(conn, "statuses", "To Do")) : """
+        assertThat(globalColour(conn, "statuses", "To Do"))
+                .as("""
                 the pre-V27 schema does not carry V1's seeded colours, so every assertion below \
-                would be measuring something other than this migration.""";
+                would be measuring something other than this migration.""")
+                .isEqualTo("#6B7280");
     }
 
     private UUID workspace(Connection conn) throws SQLException {
@@ -515,7 +535,7 @@ class V27TaxonomyPaletteMigrationTest {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
             if (!rs.next()) return null;
             var value = rs.getString(1);
-            assert !rs.next() : "expected at most one row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected at most one row from: " + sql).isFalse();
             return value;
         }
     }

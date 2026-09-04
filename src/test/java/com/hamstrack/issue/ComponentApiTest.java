@@ -11,6 +11,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -61,15 +62,22 @@ class ComponentApiTest extends ComponentTestBase {
                 .andExpect(jsonPath("$.autoAssign").value(true))
                 .andExpect(jsonPath("$.archived").value(false))
                 .andReturn().getResponse().getContentAsString());
-        assert body.get("issueCount").isNull() : "issueCount stays null unless withUsage was asked for";
-        assert !body.get("createdAt").isNull() && !body.get("updatedAt").isNull()
-                : "audited timestamps must be populated immediately after save (@CreatedDate)";
+        assertThat(body.get("issueCount").isNull())
+                .withFailMessage("issueCount stays null unless withUsage was asked for")
+                .isTrue();
+        assertThat(body.get("createdAt").isNull())
+                .withFailMessage("audited timestamps must be populated immediately after save (@CreatedDate)")
+                .isFalse();
+        assertThat(body.get("updatedAt").isNull())
+                .withFailMessage("audited timestamps must be populated immediately after save (@CreatedDate)")
+                .isFalse();
 
         // lower(name) ordering, not insertion order and not the ASCII order ("apple" > "Zebra").
         createComponent(ctx, "Zebra");
         createComponent(ctx, "apple");
-        assert names(listComponents(ctx, ctx.token(), null)).equals(List.of("apple", "Billing", "Zebra"))
-                : names(listComponents(ctx, ctx.token(), null));
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("%s", names(listComponents(ctx, ctx.token(), null)))
+                .isEqualTo(List.of("apple", "Billing", "Zebra"));
 
         getComponent(ctx, ctx.token(), UUID.fromString(body.get("id").asText()))
                 .andExpect(status().isOk())
@@ -137,9 +145,10 @@ class ComponentApiTest extends ComponentTestBase {
         // the plain one then collides with it.
         var other = newProject();
         createComponent(other, "plat" + NBSP + "form");
-        assert names(listComponents(other, other.token(), null)).equals(List.of("plat form"))
-                : "the stored display name must be the normalized, single-spaced one: "
-                  + names(listComponents(other, other.token(), null));
+        assertThat(names(listComponents(other, other.token(), null)))
+                .as("the stored display name must be the normalized, single-spaced one: "
+                  + names(listComponents(other, other.token(), null)))
+                .isEqualTo(List.of("plat form"));
         postComponent(other, other.token(), "{\"name\":\"plat form\"}").andExpect(status().isConflict());
         // Other spoof shapes collapse the same way: padding, tabs, doubled spaces…
         postComponent(other, other.token(), "{\"name\":\"  plat \\t  form  \"}")
@@ -190,20 +199,29 @@ class ComponentApiTest extends ComponentTestBase {
         // can dim it) and stays fully editable — including re-sending the same id, which
         // is not a change.
         long n = carrier.get("number").asLong();
-        assert "stale".equals(componentName(getIssue(ctx, n)));
-        assert getIssue(ctx, n).get("component").get("archived").asBoolean();
+        assertThat(componentName(getIssue(ctx, n)))
+                .as("an issue already carrying an archived component keeps it")
+                .isEqualTo("stale");
+        assertThat(getIssue(ctx, n).get("component").get("archived").asBoolean())
+                .withFailMessage("the archived flag rides along on the issue so the UI can dim it")
+                .isTrue();
         patchIssue(ctx, ctx.token(), n, "{\"title\":\"still editable\"}").andExpect(status().isOk());
         patchIssue(ctx, ctx.token(), n, "{\"componentId\":\"" + stale + "\"}").andExpect(status().isOk());
         // Moving OFF an archived component is allowed — that is not "attaching" it.
         patchIssue(ctx, ctx.token(), n, "{\"componentId\":\"" + fresh + "\"}").andExpect(status().isOk());
-        assert "fresh".equals(componentName(getIssue(ctx, n)));
+        assertThat(componentName(getIssue(ctx, n)))
+                .as("moving OFF an archived component is allowed — that is not attaching it")
+                .isEqualTo("fresh");
         patchIssue(ctx, ctx.token(), n, "{\"clearComponent\":true}").andExpect(status().isOk());
-        assert componentName(getIssue(ctx, n)) == null;
+        assertThat(componentName(getIssue(ctx, n))).as("clearComponent detaches the component outright").isNull();
 
         // Archived rows leave the default catalog read but stay reachable explicitly.
-        assert names(listComponents(ctx, ctx.token(), null)).equals(List.of("fresh"));
-        assert names(listComponents(ctx, ctx.token(), "?includeArchived=true"))
-                .equals(List.of("fresh", "stale"));
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("archived rows leave the default catalog read")
+                .isEqualTo(List.of("fresh"));
+        assertThat(names(listComponents(ctx, ctx.token(), "?includeArchived=true")))
+                .as("…and stay reachable explicitly with includeArchived=true")
+                .isEqualTo(List.of("fresh", "stale"));
     }
 
     // ==================================================== archived project freeze
@@ -223,7 +241,9 @@ class ComponentApiTest extends ComponentTestBase {
         deleteComponent(ctx, ctx.token(), id, true).andExpect(status().isConflict());
 
         // Reads are NOT frozen — an archived project's catalog stays inspectable.
-        assert names(listComponents(ctx, ctx.token(), null)).equals(List.of("billing"));
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("reads are NOT frozen: an archived project's catalog stays inspectable")
+                .isEqualTo(List.of("billing"));
         getComponent(ctx, ctx.token(), id).andExpect(status().isOk());
 
         // Unarchiving the project thaws curation again.
@@ -241,7 +261,7 @@ class ComponentApiTest extends ComponentTestBase {
         postComponent(ctx, ctx.token(), "{\"name\":\"billing\",\"autoAssign\":true}")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("Auto-assign needs a lead")));
-        assert listComponents(ctx, ctx.token(), null).isEmpty() : "nothing may have been created";
+        assertThat(listComponents(ctx, ctx.token(), null)).as("nothing may have been created").isEmpty();
 
         var lead = addMember(ctx, "MEMBER");
         postComponent(ctx, ctx.token(),
@@ -265,7 +285,7 @@ class ComponentApiTest extends ComponentTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.autoAssign").value(false))
                 .andReturn().getResponse().getContentAsString());
-        assert body.get("leadId").isNull() : "the lead must actually be cleared, got " + body;
+        assertThat(body.get("leadId").isNull()).withFailMessage("the lead must actually be cleared, got " + body).isTrue();
     }
 
     /**
@@ -317,8 +337,9 @@ class ComponentApiTest extends ComponentTestBase {
         removeFromWorkspace(ctx, lead.user());
 
         var row = listComponents(ctx, ctx.token(), null).get(0);
-        assert row.get("leadId").asText().equals(lead.user().getId().toString())
-                : "the row survives its lead leaving the workspace (§5.4), got " + row;
+        assertThat(row.get("leadId").asText())
+                .as("the row survives its lead leaving the workspace (§5.4), got " + row)
+                .isEqualTo(lead.user().getId().toString());
     }
 
     // ==================================================== delete
@@ -339,22 +360,35 @@ class ComponentApiTest extends ComponentTestBase {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.detail", containsString("used on 2 issue")));
         // Nothing happened: still catalogued, still attached.
-        assert "billing".equals(componentName(getIssue(ctx, one.get("number").asLong())));
+        assertThat(componentName(getIssue(ctx, one.get("number").asLong())))
+                .as("a refused delete changed nothing: still catalogued, still attached")
+                .isEqualTo("billing");
 
         deleteComponent(ctx, ctx.token(), id, true).andExpect(status().isNoContent());
 
         // The API says null…
-        assert componentName(getIssue(ctx, one.get("number").asLong())) == null;
-        assert componentName(getIssue(ctx, two.get("number").asLong())) == null;
+        assertThat(componentName(getIssue(ctx, one.get("number").asLong())))
+                .as("a force delete detaches the component from every issue that carried it")
+                .isNull();
+        assertThat(componentName(getIssue(ctx, two.get("number").asLong())))
+                .as("…from the second carrier too, not just the first one the sweep reached")
+                .isNull();
         // …and so does the DB: no dangling id survived the delete (the §5.2 trap — a
         // stale managed Issue flushed afterwards would write the old id back).
-        assert rawComponentId(one.get("id").asText()) == null
-                : "issues.component_id must be NULL in the DB after a force delete";
-        assert rawComponentId(two.get("id").asText()) == null;
+        assertThat(rawComponentId(one.get("id").asText()))
+                .as("issues.component_id must be NULL in the DB after a force delete")
+                .isNull();
+        assertThat(rawComponentId(two.get("id").asText()))
+                .as("issues.component_id must be NULL in the DB after a force delete, on every affected row")
+                .isNull();
         // An unrelated issue kept its own component.
-        assert "keep".equals(componentName(getIssue(ctx, untouched.get("number").asLong())));
+        assertThat(componentName(getIssue(ctx, untouched.get("number").asLong())))
+                .as("an unrelated issue kept its own component — force is scoped to the deleted row")
+                .isEqualTo("keep");
         // The catalog row is gone and its name slot is free again.
-        assert names(listComponents(ctx, ctx.token(), "?includeArchived=true")).equals(List.of("keep"));
+        assertThat(names(listComponents(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the catalog row is gone and its name slot is free again, archived listing included")
+                .isEqualTo(List.of("keep"));
         postComponent(ctx, ctx.token(), "{\"name\":\"billing\"}").andExpect(status().isCreated());
         // Deleting an unused component needs no force at all.
         var unused = createComponent(ctx, "unused");
@@ -385,12 +419,17 @@ class ComponentApiTest extends ComponentTestBase {
         componentRepository.flush();
 
         // The issue is still there…
-        assert jdbcTemplate.queryForObject("SELECT count(*) FROM issues WHERE id = ?",
-                Integer.class, UUID.fromString(carrier.get("id").asText())) == 1
-                : "ON DELETE SET NULL, not CASCADE — the issues must survive";
+        assertThat(jdbcTemplate.queryForObject("SELECT count(*) FROM issues WHERE id = ?",
+                Integer.class, UUID.fromString(carrier.get("id").asText())))
+                .as("ON DELETE SET NULL, not CASCADE — the issues must survive")
+                .isEqualTo(1);
         // …with a NULL component and no dangling id.
-        assert rawComponentId(carrier.get("id").asText()) == null;
-        assert componentName(getIssue(ctx, carrier.get("number").asLong())) == null;
+        assertThat(rawComponentId(carrier.get("id").asText()))
+                .as("the issue survives the raw row delete with a NULL component and no dangling id")
+                .isNull();
+        assertThat(componentName(getIssue(ctx, carrier.get("number").asLong())))
+                .as("…and the API agrees with the column: no phantom component on the issue")
+                .isNull();
     }
 
     /**
@@ -413,18 +452,21 @@ class ComponentApiTest extends ComponentTestBase {
         patchIssue(ctx, ctx.token(), n, "{\"clearComponent\":true}").andExpect(status().isOk());
 
         var transitions = componentTransitions(ctx, n);
-        assert transitions.size() == 3 : "expected 3 component history rows, got " + transitions;
-        assert transitions.contains("null->Billing") : transitions;
-        assert transitions.contains("Billing->Ingest") : transitions;
-        assert transitions.contains("Ingest->null") : transitions;
+        assertThat(transitions).as("expected 3 component history rows, got " + transitions).hasSize(3);
+        assertThat(transitions).as("%s", transitions).contains("null->Billing");
+        assertThat(transitions).as("%s", transitions).contains("Billing->Ingest");
+        assertThat(transitions).as("%s", transitions).contains("Ingest->null");
 
         // Now the force delete: the component vanishes from the issue with no new row.
         patchIssue(ctx, ctx.token(), n, "{\"componentId\":\"" + billing + "\"}").andExpect(status().isOk());
         int before = componentTransitions(ctx, n).size();
         deleteComponent(ctx, ctx.token(), billing, true).andExpect(status().isNoContent());
-        assert componentName(getIssue(ctx, n)) == null;
-        assert componentTransitions(ctx, n).size() == before
-                : "a force delete must not write per-issue history (§5.4)";
+        assertThat(componentName(getIssue(ctx, n)))
+                .as("the force delete detached the component, which is what makes the missing history row a claim about auditing and not about the write")
+                .isNull();
+        assertThat(componentTransitions(ctx, n))
+                .as("a force delete must not write per-issue history (§5.4)")
+                .hasSize(before);
     }
 
     // ==================================================== usage counts
@@ -441,14 +483,20 @@ class ComponentApiTest extends ComponentTestBase {
         createIssue(sibling, "c", "\"componentId\":\"" + siblingBilling + "\"");
 
         var rows = listComponents(ctx, ctx.token(), "?withUsage=true");
-        assert names(rows).equals(List.of("billing", "idle"));
-        assert rows.get(0).get("issueCount").asInt() == 2 : "got " + rows.get(0);
-        assert rows.get(1).get("issueCount").asInt() == 0 : "an unused component reports 0, not null";
+        assertThat(names(rows))
+                .as("withUsage returns the same catalog rows, in the same order, plus the counts")
+                .isEqualTo(List.of("billing", "idle"));
+        assertThat(rows.get(0).get("issueCount").asInt()).as(() -> "got " + rows.get(0)).isEqualTo(2);
+        assertThat(rows.get(1).get("issueCount").asInt()).as("an unused component reports 0, not null").isEqualTo(0);
         // The sibling's identically-named component counts only its own issue.
-        assert listComponents(sibling, sibling.token(), "?withUsage=true").get(0)
-                .get("issueCount").asInt() == 1;
+        assertThat(listComponents(sibling, sibling.token(), "?withUsage=true").get(0)
+                .get("issueCount").asInt())
+                .as("the sibling project's identically-named component counts only its own issues")
+                .isEqualTo(1);
         // Without the flag the field is null, not zero.
-        assert listComponents(ctx, ctx.token(), null).get(0).get("issueCount").isNull();
+        assertThat(listComponents(ctx, ctx.token(), null).get(0).get("issueCount").isNull())
+                .withFailMessage("without the flag the count field is null, not zero — absent is not the same claim as none")
+                .isTrue();
 
         componentUsage(ctx, ctx.token(), billing)
                 .andExpect(status().isOk())
@@ -489,19 +537,19 @@ class ComponentApiTest extends ComponentTestBase {
         createIssue(ctx, "on last", "\"componentId\":\"" + last.getId() + "\"");
 
         var rows = listComponents(ctx, ctx.token(), "?withUsage=true");
-        assert rows.size() == 501 : "expected the whole catalog, got " + rows.size();
+        assertThat(rows).as(() -> "expected the whole catalog, got " + rows.size()).hasSize(501);
         int counted = 0;
         for (var row : rows) {
             String name = row.get("name").asText();
             int count = row.get("issueCount").asInt();
             if (name.equals("bulk-0000") || name.equals("bulk-0500")) {
-                assert count == 1 : name + " should count 1, got " + count;
+                assertThat(count).as("%s", name + " should count 1, got " + count).isEqualTo(1);
                 counted++;
             } else {
-                assert count == 0 : name + " should count 0, got " + count;
+                assertThat(count).as("%s", name + " should count 0, got " + count).isEqualTo(0);
             }
         }
-        assert counted == 2 : "both seam components must have been found";
+        assertThat(counted).as("both seam components must have been found").isEqualTo(2);
     }
 
     // ==================================================== helpers

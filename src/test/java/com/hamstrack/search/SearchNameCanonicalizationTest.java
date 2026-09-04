@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -100,24 +101,36 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
         createIssue(ctx, "unversioned");
 
         // the exact name still works (the fix must not move the baseline)
-        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("ships-in-240"));
+        assertThat(found(ctx, "fixVersion = \"2.4.0\""))
+                .as("the exact name still resolves — the separator tolerance must not move the baseline")
+                .isEqualTo(Set.of("ships-in-240"));
         // …and now the copy-pasted spellings resolve to the same row
-        assert found(ctx, "fixVersion = \"2.4.0 \"").equals(Set.of("ships-in-240"))
-                : "a trailing ASCII space must not change which version this names";
-        assert found(ctx, "fixVersion = \"2.4.0" + NBSP + "\"").equals(Set.of("ships-in-240"))
-                : "U+00A0 is invisible and is NOT \\s — trim()-shaped fixes miss exactly this";
-        assert found(ctx, "fixVersion = \"" + NBSP + " 2.4.0\"").equals(Set.of("ships-in-240"))
-                : "a LEADING separator run folds away too";
+        assertThat(found(ctx, "fixVersion = \"2.4.0 \""))
+                .as("a trailing ASCII space must not change which version this names")
+                .isEqualTo(Set.of("ships-in-240"));
+        assertThat(found(ctx, "fixVersion = \"2.4.0" + NBSP + "\""))
+                .as("U+00A0 is invisible and is NOT \\s — trim()-shaped fixes miss exactly this")
+                .isEqualTo(Set.of("ships-in-240"));
+        assertThat(found(ctx, "fixVersion = \"" + NBSP + " 2.4.0\""))
+                .as("a LEADING separator run folds away too")
+                .isEqualTo(Set.of("ships-in-240"));
 
         // affectsVersion is a second field over the same join table — prove it, don't assume it
-        assert found(ctx, "affectsVersion = \"2.3.9 \"").equals(Set.of("breaks-in-239"));
-        assert found(ctx, "affectsVersion = \"2.3.9" + NBSP + "\"").equals(Set.of("breaks-in-239"));
+        assertThat(found(ctx, "affectsVersion = \"2.3.9 \""))
+                .as("affectsVersion is a second field over the same join table: prove it folds too, do not assume it")
+                .isEqualTo(Set.of("breaks-in-239"));
+        assertThat(found(ctx, "affectsVersion = \"2.3.9" + NBSP + "\""))
+                .as("a non-breaking space folds away on affectsVersion exactly as a plain one does")
+                .isEqualTo(Set.of("breaks-in-239"));
 
         // the tolerance is about NAMING, not about matching more rows: != and IN keep
         // their meaning when the operand arrives with stray separators.
-        assert found(ctx, "fixVersion != \"2.4.0" + NBSP + "\"")
-                .equals(Set.of("breaks-in-239", "unversioned"));
-        assert found(ctx, "fixVersion IN (\"2.4.0 \", \"2.3.9 \")").equals(Set.of("ships-in-240"));
+        assertThat(found(ctx, "fixVersion != \"2.4.0" + NBSP + "\""))
+                .as("the tolerance is about NAMING, not about matching more rows: != keeps its meaning when the operand arrives with stray separators")
+                .isEqualTo(Set.of("breaks-in-239", "unversioned"));
+        assertThat(found(ctx, "fixVersion IN (\"2.4.0 \", \"2.3.9 \")"))
+                .as("IN keeps its meaning too — each operand folds on its own, and the unmatched one adds nothing")
+                .isEqualTo(Set.of("ships-in-240"));
 
         // an operand that is not merely differently-spaced is still an honest 422
         search(ctx, "fixVersion = \"2.4.0.1\"")
@@ -142,20 +155,36 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
         createIssue(ctx, "componented", "\"componentId\":\"" + billing + "\"");
         createIssue(ctx, "bare");
 
-        assert found(ctx, "label = \"hot fix\"").equals(Set.of("labelled"));
-        assert found(ctx, "label = \"hot fix \"").equals(Set.of("labelled"));
-        assert found(ctx, "label = \"hot fix" + NBSP + "\"").equals(Set.of("labelled"));
+        assertThat(found(ctx, "label = \"hot fix\""))
+                .as("the exact label name resolves — the baseline the folding must not move")
+                .isEqualTo(Set.of("labelled"));
+        assertThat(found(ctx, "label = \"hot fix \""))
+                .as("a trailing plain space folds away on a label name")
+                .isEqualTo(Set.of("labelled"));
+        assertThat(found(ctx, "label = \"hot fix" + NBSP + "\""))
+                .as("a trailing non-breaking space folds away too — the invisible one is the one users paste")
+                .isEqualTo(Set.of("labelled"));
         // an INNER separator that differs only in width is the same name, too
-        assert found(ctx, "label = \"hot" + NBSP + "fix\"").equals(Set.of("labelled"))
-                : "U+00A0 between the words is still one separator, so this is 'hot fix'";
+        assertThat(found(ctx, "label = \"hot" + NBSP + "fix\""))
+                .as("U+00A0 between the words is still one separator, so this is 'hot fix'")
+                .isEqualTo(Set.of("labelled"));
         // the plural alias shares the descriptor and therefore the tolerance
-        assert found(ctx, "labels = \"HOT FIX \"").equals(Set.of("labelled"))
-                : "case-insensitivity and separator folding compose";
+        assertThat(found(ctx, "labels = \"HOT FIX \""))
+                .as("case-insensitivity and separator folding compose")
+                .isEqualTo(Set.of("labelled"));
 
-        assert found(ctx, "component = \"Billing Core\"").equals(Set.of("componented"));
-        assert found(ctx, "component = \"Billing Core \"").equals(Set.of("componented"));
-        assert found(ctx, "component = \"Billing" + NBSP + "Core\"").equals(Set.of("componented"));
-        assert found(ctx, "components = \"billing core" + NBSP + "\"").equals(Set.of("componented"));
+        assertThat(found(ctx, "component = \"Billing Core\""))
+                .as("the exact component name resolves — components fold on the same rule as labels")
+                .isEqualTo(Set.of("componented"));
+        assertThat(found(ctx, "component = \"Billing Core \""))
+                .as("a trailing plain space folds away on a component name")
+                .isEqualTo(Set.of("componented"));
+        assertThat(found(ctx, "component = \"Billing" + NBSP + "Core\""))
+                .as("an INTERNAL non-breaking space folds to a plain one, not just a trailing run")
+                .isEqualTo(Set.of("componented"));
+        assertThat(found(ctx, "components = \"billing core" + NBSP + "\""))
+                .as("the plural alias, a different casing and a trailing non-breaking space all compose")
+                .isEqualTo(Set.of("componented"));
 
         search(ctx, "label = \"hot fixes\"")
                 .andExpect(status().isUnprocessableContent())
@@ -199,22 +228,31 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
                 default -> priorityName;
             };
             // 1) the EXACT stored spelling — this is what used to work and must keep working
-            assert found(ctx, field + " = " + lit(stored)).equals(Set.of("frozen"))
-                    : "operand-only normalization would have broken the stored spelling of " + field;
+            assertThat(found(ctx, field + " = " + lit(stored)))
+                    .as("operand-only normalization would have broken the stored spelling of " + field)
+                    .isEqualTo(Set.of("frozen"));
             // 2) the collapsed spelling — the new tolerance
-            assert found(ctx, field + " = " + lit(stored.replace("  ", " "))).equals(Set.of("frozen"))
-                    : "the single-space spelling must reach the same catalog row for " + field;
+            assertThat(found(ctx, field + " = " + lit(stored.replace("  ", " "))))
+                    .as("the single-space spelling must reach the same catalog row for " + field)
+                    .isEqualTo(Set.of("frozen"));
             // 3) …and the copy-paste variants, same as every other name
-            assert found(ctx, field + " = " + lit(stored + " ")).equals(Set.of("frozen"));
-            assert found(ctx, field + " = " + lit(stored + NBSP)).equals(Set.of("frozen"));
+            assertThat(found(ctx, field + " = " + lit(stored + " ")))
+                    .as("the copy-paste variants reach a stored double-space name like they reach any other")
+                    .isEqualTo(Set.of("frozen"));
+            assertThat(found(ctx, field + " = " + lit(stored + NBSP)))
+                    .as("a trailing non-breaking space reaches the stored double-space name too")
+                    .isEqualTo(Set.of("frozen"));
         }
 
         // priority comparisons resolve the name through resolvePriorityPosition(), a
         // SECOND code path — the set has exactly one priority, so >= must find it by
         // either spelling.
-        assert found(ctx, "priority >= " + lit(priorityName)).equals(Set.of("frozen"));
-        assert found(ctx, "priority >= " + lit(priorityName.replace("  ", " "))).equals(Set.of("frozen"))
-                : "the ordered-comparison path needs the same canonical key as '='";
+        assertThat(found(ctx, "priority >= " + lit(priorityName)))
+                .as("a priority comparison resolves the name through resolvePriorityPosition(), a SECOND code path that must fold the same way")
+                .isEqualTo(Set.of("frozen"));
+        assertThat(found(ctx, "priority >= " + lit(priorityName.replace("  ", " "))))
+                .as("the ordered-comparison path needs the same canonical key as '='")
+                .isEqualTo(Set.of("frozen"));
 
         // and an unknown name is still a 422 quoting what the user actually typed
         search(ctx, "status = \"Deep Frozen\"")
@@ -256,7 +294,9 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
                 .andExpect(jsonPath("$.field").value("priority"));
 
         // and the blank operand did NOT quietly match anything on the way
-        assert found(ctx, "fixVersion IS NOT EMPTY").equals(Set.of("ships-in-240"));
+        assertThat(found(ctx, "fixVersion IS NOT EMPTY"))
+                .as("the blank operand was refused and did not quietly match anything on the way")
+                .isEqualTo(Set.of("ships-in-240"));
     }
 
     /**
@@ -286,17 +326,33 @@ class SearchNameCanonicalizationTest extends VersionTestBase {
         String env = environment.getKey();
 
         // the option ID keeps resolving (slug path, unchanged by HD-90)
-        assert found(ctx, sev + " = \"critical\"").equals(Set.of("critical"));
+        assertThat(found(ctx, sev + " = \"critical\""))
+                .as("the option ID keeps resolving — the slug path is unchanged by the label folding")
+                .isEqualTo(Set.of("critical"));
         // the stored double-space LABEL resolves by its exact spelling…
-        assert found(ctx, sev + " = \"Blocks  Release\"").equals(Set.of("critical"));
+        assertThat(found(ctx, sev + " = \"Blocks  Release\""))
+                .as("a stored double-space option label resolves by its exact spelling")
+                .isEqualTo(Set.of("critical"));
         // …and by the collapsed one, and with stray/invisible separators
-        assert found(ctx, sev + " = \"Blocks Release\"").equals(Set.of("critical"));
-        assert found(ctx, sev + " = \"Blocks  Release \"").equals(Set.of("critical"));
-        assert found(ctx, sev + " = \"blocks release" + NBSP + "\"").equals(Set.of("critical"));
+        assertThat(found(ctx, sev + " = \"Blocks Release\""))
+                .as("…and by the collapsed single-space spelling of the same label")
+                .isEqualTo(Set.of("critical"));
+        assertThat(found(ctx, sev + " = \"Blocks  Release \""))
+                .as("…and with a stray trailing separator on top of the double space")
+                .isEqualTo(Set.of("critical"));
+        assertThat(found(ctx, sev + " = \"blocks release" + NBSP + "\""))
+                .as("case-insensitivity and separator folding compose on option labels as well")
+                .isEqualTo(Set.of("critical"));
 
-        assert found(ctx, env + " = \"Production EU \"").equals(Set.of("critical"));
-        assert found(ctx, env + " = \"Production" + NBSP + "EU\"").equals(Set.of("critical"));
-        assert found(ctx, env + " IN (\"Dev Box \", \"Production EU \")").equals(Set.of("critical"));
+        assertThat(found(ctx, env + " = \"Production EU \""))
+                .as("a second custom field folds its option labels the same way — this is the field type's rule, not one field's")
+                .isEqualTo(Set.of("critical"));
+        assertThat(found(ctx, env + " = \"Production" + NBSP + "EU\""))
+                .as("an internal non-breaking space folds inside an option label too")
+                .isEqualTo(Set.of("critical"));
+        assertThat(found(ctx, env + " IN (\"Dev Box \", \"Production EU \")"))
+                .as("IN folds each option label on its own, and the unmatched one adds nothing")
+                .isEqualTo(Set.of("critical"));
 
         // unknown option → 422 anchored on the custom-field key (not a silent empty page)
         search(ctx, sev + " = \"Blocks Everything\"")

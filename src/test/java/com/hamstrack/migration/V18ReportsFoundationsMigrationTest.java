@@ -13,6 +13,8 @@ import java.sql.Timestamp;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * {@code V18__reports_foundations.sql} — the {@code issues.started_at} backfill of
  * reports-proposal §5.1, replayed against a REAL pre-V18 database.
@@ -86,40 +88,48 @@ class V18ReportsFoundationsMigrationTest {
                 flyway("17").migrate();
                 var ids = seedPreV18Fixture(conn);
 
-                assert !hasColumn(conn, "issues", "started_at")
-                        : "the fixture schema already has started_at — nothing was migrated";
+                assertThat(hasColumn(conn, "issues", "started_at"))
+                        .withFailMessage("the fixture schema already has started_at — nothing was migrated")
+                        .isFalse();
 
                 // ---- the migration under test ----
                 flyway("18").migrate();
 
                 // === 1) what it CAN know ==============================================
-                assert startedAt(conn, ids.workedThenDone()).equals(Timestamp.valueOf("2026-02-03 10:00:00"))
-                        : "the FIRST move into an in-progress status is the start, not the last";
-                assert startedAt(conn, ids.straightToDone()).equals(Timestamp.valueOf("2026-02-06 08:30:00"))
-                        : "an issue dragged straight to Done was started then finished — DONE "
-                          + "counts as a start, or the fastest work is silently excluded";
-                assert startedAt(conn, ids.doneThenReopened()).equals(Timestamp.valueOf("2026-02-03 10:00:00"))
-                        : "a re-open must not move the start date backwards or forwards";
+                assertThat(startedAt(conn, ids.workedThenDone()))
+                        .as("the FIRST move into an in-progress status is the start, not the last")
+                        .isEqualTo(Timestamp.valueOf("2026-02-03 10:00:00"));
+                assertThat(startedAt(conn, ids.straightToDone()))
+                        .as("an issue dragged straight to Done was started then finished — DONE "
+                          + "counts as a start, or the fastest work is silently excluded")
+                        .isEqualTo(Timestamp.valueOf("2026-02-06 08:30:00"));
+                assertThat(startedAt(conn, ids.doneThenReopened()))
+                        .as("a re-open must not move the start date backwards or forwards")
+                        .isEqualTo(Timestamp.valueOf("2026-02-03 10:00:00"));
 
                 // === 2) what it must ADMIT it cannot know =============================
                 for (var unknowable : ids.unknowable()) {
-                    assert startedAt(conn, unknowable) == null : """
+                    assertThat(startedAt(conn, unknowable))
+                            .as(() -> """
                             Issue %s came out of the backfill with a start date it cannot \
                             possibly know. The backfill is name-keyed and therefore \
                             approximate; every issue it cannot resolve keeps NULL and is \
                             reported as missingStartCount. Falling back to created_at (or \
                             to closed_at) turns cycle time into something else wearing its \
-                            name.""".formatted(unknowable);
+                            name.""".formatted(unknowable))
+                            .isNull();
                 }
 
                 // === 3) it is a backfill, not an edit ================================
                 for (var issue : ids.all()) {
-                    assert updatedAt(conn, issue).equals(Timestamp.valueOf("2020-01-02 03:04:05")) : """
+                    assertThat(updatedAt(conn, issue))
+                            .as(() -> """
                             V18 stamped issues.updated_at on %s — the \
                             hamstrack.skip_updated_at guard is not in effect. It only works \
                             inside a transaction; check Flyway's transaction settings. \
                             Without it a release marks every touched issue as freshly \
-                            edited and poisons Home / My work / ORDER BY updated.""".formatted(issue);
+                            edited and poisons Home / My work / ORDER BY updated.""".formatted(issue))
+                            .isEqualTo(Timestamp.valueOf("2020-01-02 03:04:05"));
                 }
 
                 // === 4) idempotent ====================================================
@@ -129,23 +139,29 @@ class V18ReportsFoundationsMigrationTest {
                         + " WHERE id = '" + ids.workedThenDone() + "'");
                 exec(conn, "SET search_path TO " + SCHEMA);
                 exec(conn, backfillStatementFromTheMigration());
-                assert startedAt(conn, ids.workedThenDone()).equals(Timestamp.valueOf("2026-06-06 06:06:06"))
-                        : "re-running the backfill overwrote a value the application had "
+                assertThat(startedAt(conn, ids.workedThenDone()))
+                        .as("re-running the backfill overwrote a value the application had "
                           + "since written — `AND i.started_at IS NULL` is what makes a "
-                          + "migration safe to replay, and a later better backfill safe to add";
+                          + "migration safe to replay, and a later better backfill safe to add")
+                        .isEqualTo(Timestamp.valueOf("2026-06-06 06:06:06"));
 
                 // === 5) the ledger's vocabulary is closed =============================
-                assert hasColumn(conn, "sprint_scope_events", "occurred_at")
-                        && hasColumn(conn, "sprint_scope_events", "created_at")
-                        : "the ledger must carry BOTH when-it-happened and when-it-was-written";
-                assert rejectsUnknownEventType(conn, ids)
-                        : "sprint_scope_events accepted a third event kind — scope is computed "
+                assertThat(hasColumn(conn, "sprint_scope_events", "occurred_at"))
+                        .withFailMessage("the ledger must carry BOTH when-it-happened and when-it-was-written")
+                        .isTrue();
+                assertThat(hasColumn(conn, "sprint_scope_events", "created_at"))
+                        .withFailMessage("the ledger must carry BOTH when-it-happened and when-it-was-written")
+                        .isTrue();
+                assertThat(rejectsUnknownEventType(conn, ids))
+                        .withFailMessage("sprint_scope_events accepted a third event kind — scope is computed "
                           + "as count(ADDED) - count(REMOVED), so a third value is not a new "
-                          + "feature, it is a wrong number";
+                          + "feature, it is a wrong number")
+                        .isTrue();
 
                 // === 6) the three ids belong to ONE tenant, and the DB says so ========
                 var accepted = crossTenantRowsAccepted(conn, ids);
-                assert accepted.isEmpty() : """
+                assertThat(accepted)
+                        .as(() -> """
                         sprint_scope_events accepted %s. Since V8 §3.8 every \
                         workspace-denormalised table references BOTH parents by \
                         (id, workspace_id), so a cross-tenant row is unrepresentable rather \
@@ -159,7 +175,8 @@ class V18ReportsFoundationsMigrationTest {
                         leaves a schema that still refuses a foreign SPRINT and happily \
                         files a foreign ISSUE into this tenant's velocity sweep. That is \
                         precisely the "quietly forgot to carry it forward" failure this \
-                        test exists for.""".formatted(accepted);
+                        test exists for.""".formatted(accepted))
+                        .isEmpty();
             } finally {
                 dropSchema(conn);
             }
@@ -300,7 +317,7 @@ class V18ReportsFoundationsMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT started_at AT TIME ZONE 'UTC' FROM " + SCHEMA
                      + ".issues WHERE id = '" + issue + "'")) {
-            assert rs.next() : "issue row vanished: " + issue;
+            assertThat(rs.next()).withFailMessage("issue row vanished: " + issue).isTrue();
             return rs.getTimestamp(1);
         }
     }
@@ -309,7 +326,7 @@ class V18ReportsFoundationsMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT updated_at AT TIME ZONE 'UTC' FROM " + SCHEMA
                      + ".issues WHERE id = '" + issue + "'")) {
-            assert rs.next() : "issue row vanished: " + issue;
+            assertThat(rs.next()).withFailMessage("issue row vanished: " + issue).isTrue();
             return rs.getTimestamp(1);
         }
     }
@@ -479,12 +496,12 @@ class V18ReportsFoundationsMigrationTest {
      */
     private String backfillStatementFromTheMigration() throws Exception {
         var url = getClass().getClassLoader().getResource("db/migration/V18__reports_foundations.sql");
-        assert url != null : "V18 is not on the test classpath";
+        assertThat(url).as("V18 is not on the test classpath").isNotNull();
         var sql = new String(url.openStream().readAllBytes(), StandardCharsets.UTF_8);
         int from = sql.indexOf("UPDATE issues i");
-        assert from >= 0 : "the backfill statement is no longer recognisable in V18";
+        assertThat(from).as("the backfill statement is no longer recognisable in V18").isGreaterThanOrEqualTo(0);
         int to = sql.indexOf(';', from);
-        assert to > from : "the backfill statement is not terminated";
+        assertThat(to).as("the backfill statement is not terminated").isGreaterThan(from);
         return sql.substring(from, to + 1);
     }
 
@@ -512,7 +529,7 @@ class V18ReportsFoundationsMigrationTest {
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

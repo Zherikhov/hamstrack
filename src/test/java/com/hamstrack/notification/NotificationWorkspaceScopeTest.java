@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
@@ -91,16 +92,19 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
 
         // --- list: B only, and not one character of A's content --------------------
         var listed = bodyOf(inbox(f.token(), get("/api/notifications")).andExpect(status().isOk()));
-        assert !listed.contains(A_SECRET)
-                : "GET /api/notifications handed a removed member the comment excerpt from the "
+        assertThat(listed)
+                .as("GET /api/notifications handed a removed member the comment excerpt from the "
                   + "workspace they were removed from. The body IS the disclosure — it was copied "
-                  + "into the row at delivery time and cannot be redacted at render time.";
-        assert !listed.contains(A_MENTIONER)
-                : "the list leaked the mentioning user's display name from a workspace the caller "
-                  + "has left — the title is denormalised workspace content too";
-        assert listed.contains(B_TEXT)
-                : "the notification from the workspace the caller is STILL a member of vanished: "
-                  + "this hides everything rather than hiding what was revoked";
+                  + "into the row at delivery time and cannot be redacted at render time.")
+                .doesNotContain(A_SECRET);
+        assertThat(listed)
+                .as("the list leaked the mentioning user's display name from a workspace the caller "
+                  + "has left — the title is denormalised workspace content too")
+                .doesNotContain(A_MENTIONER);
+        assertThat(listed)
+                .as("the notification from the workspace the caller is STILL a member of vanished: "
+                  + "this hides everything rather than hiding what was revoked")
+                .contains(B_TEXT);
 
         // --- unread count: B's one row --------------------------------------------
         var counted = bodyOf(inbox(f.token(), get("/api/notifications/unread-count"))
@@ -108,23 +112,29 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
         // Equality, not containment: "{\"count\":10}" contains "\"count\":1", and the AC-9
         // fixture next door puts 36 rows in play, so a substring match would pass on exactly
         // the number that proves the filter is missing.
-        assert counted.equals("{\"count\":1}")
-                : "unread-count still counts rows from a workspace the caller has left: " + counted;
+        assertThat(counted)
+                .as("unread-count still counts rows from a workspace the caller has left: " + counted)
+                .isEqualTo("{\"count\":1}");
 
         // --- read receipt: 404, and no content in the refusal ----------------------
         var refused = bodyOf(inbox(f.token(), post("/api/notifications/" + f.aRowId() + "/read"))
                 .andExpect(status().isNotFound()));
-        assert !refused.contains(A_SECRET) && !refused.contains(A_MENTIONER)
-                : "POST /{id}/read answered 404 but its body still carried the notification's "
-                  + "content: " + refused;
+        assertThat(refused)
+                .as("POST /{id}/read answered 404 but its body still carried the notification's "
+                  + "content: " + refused)
+                .doesNotContain(A_SECRET);
+        assertThat(refused)
+                .as("POST /{id}/read answered 404 but its body still carried the notification's "
+                  + "content: " + refused)
+                .doesNotContain(A_MENTIONER);
 
         // --- read-all: leaves the invisible row alone ------------------------------
         inbox(f.token(), post("/api/notifications/read-all")).andExpect(status().isNoContent());
-        assert readAt(f.aRowId()) == null
-                : "read-all marked a row the caller cannot see. \"All\" means everything visible; "
-                  + "mutating a hidden row pre-clears an inbox a re-added member gets back.";
-        assert readAt(f.bRowId()) != null
-                : "read-all skipped the visible row — the filter is too wide";
+        assertThat(readAt(f.aRowId()))
+                .as("read-all marked a row the caller cannot see. \"All\" means everything visible; "
+                  + "mutating a hidden row pre-clears an inbox a re-added member gets back.")
+                .isNull();
+        assertThat(readAt(f.bRowId())).as("read-all skipped the visible row — the filter is too wide").isNotNull();
 
         // --- and the receipt still WORKS for the workspace they are still in -------
         // Every assertion above measures a refusal, and a predicate that refused
@@ -136,9 +146,10 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
         // retired that assertion. The order is the only thing keeping both honest.
         var receipt = bodyOf(inbox(f.token(), post("/api/notifications/" + f.bRowId() + "/read"))
                 .andExpect(status().isOk()));
-        assert receipt.contains(B_TEXT)
-                : "POST /{id}/read answered 200 for the surviving workspace but not with that "
-                  + "row's content: " + receipt;
+        assertThat(receipt)
+                .as("POST /{id}/read answered 200 for the surviving workspace but not with that "
+                  + "row's content: " + receipt)
+                .contains(B_TEXT);
     }
 
     // ============================================================ AC-6
@@ -158,14 +169,15 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
         rejoin(f.a(), f.recipient());
 
         var listed = bodyOf(inbox(f.token(), get("/api/notifications")).andExpect(status().isOk()));
-        assert listed.contains(f.aRowId().toString())
-                : "a re-added member did not get their old notifications back. Nothing deletes "
-                  + "these rows (§4.1) — if they are gone, something started purging them.";
-        assert listed.contains(A_SECRET)
-                : "the row came back without its content";
-        assert readAt(f.aRowId()) != null
-                : "the restored row came back UNREAD although it was read before the removal — "
-                  + "hiding a row must not mutate it";
+        assertThat(listed)
+                .as("a re-added member did not get their old notifications back. Nothing deletes "
+                  + "these rows (§4.1) — if they are gone, something started purging them.")
+                .contains(f.aRowId().toString());
+        assertThat(listed).as("the row came back without its content").contains(A_SECRET);
+        assertThat(readAt(f.aRowId()))
+                .as("the restored row came back UNREAD although it was read before the removal — "
+                  + "hiding a row must not mutate it")
+                .isNotNull();
     }
 
     // ============================================================ AC-7
@@ -183,8 +195,7 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
 
         var listed = bodyOf(inbox(login(stranger), get("/api/notifications"))
                 .andExpect(status().isOk()));
-        assert listed.equals("[]")
-                : "a user with no membership anywhere got a non-empty feed: " + listed;
+        assertThat(listed).as("a user with no membership anywhere got a non-empty feed: " + listed).isEqualTo("[]");
     }
 
     // ============================================================ AC-9
@@ -207,12 +218,12 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
         removeFromWorkspaceViaApi(f.a(), f.recipient());
 
         var listed = bodyOf(inbox(f.token(), get("/api/notifications")).andExpect(status().isOk()));
-        assert listed.contains(B_TEXT)
-                : "with 35 hidden rows newer than it, the visible notification fell off the feed. "
+        assertThat(listed)
+                .as("with 35 hidden rows newer than it, the visible notification fell off the feed. "
                   + "That is the signature of a filter applied AFTER the 30-row page was fetched — "
-                  + "the predicate has to be in the statement that applies the limit.";
-        assert !listed.contains(A_SECRET)
-                : "the hidden rows are still being returned";
+                  + "the predicate has to be in the statement that applies the limit.")
+                .contains(B_TEXT);
+        assertThat(listed).as("the hidden rows are still being returned").doesNotContain(A_SECRET);
     }
 
     // ============================================================ AC-10, AC-11
@@ -227,11 +238,13 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
     void theProducerWritesTheWorkspaceTheContentCameFrom() throws Exception {
         var f = twoWorkspaceInbox();
 
-        assert workspaceIdOf(f.aRowId()).equals(f.a().wsId())
-                : "the mention notification was not written into the workspace of the issue its "
-                  + "comment is on";
-        assert workspaceIdOf(f.bRowId()).equals(f.b().wsId())
-                : "two workspaces, and a row is attributed to the wrong one";
+        assertThat(workspaceIdOf(f.aRowId()))
+                .as("the mention notification was not written into the workspace of the issue its "
+                  + "comment is on")
+                .isEqualTo(f.a().wsId());
+        assertThat(workspaceIdOf(f.bRowId()))
+                .as("two workspaces, and a row is attributed to the wrong one")
+                .isEqualTo(f.b().wsId());
 
         verify(sseRegistry, atLeastOnce()).sendToUser(
                 eq(f.a().wsId()), eq(f.recipient().getId()), eq("NOTIFICATION"), any());
@@ -257,10 +270,11 @@ class NotificationWorkspaceScopeTest extends ComponentTestBase {
         mention(b, "@" + RECIPIENT + " " + B_TEXT);
 
         var rows = notificationsOf(recipient);
-        assert rows.size() == 2
-                : "the fixture produced " + rows.size() + " notifications instead of one per "
+        assertThat(rows)
+                .as(() -> "the fixture produced " + rows.size() + " notifications instead of one per "
                   + "workspace — the mention parser or the comment endpoint changed, and every "
-                  + "assertion in this class rests on it";
+                  + "assertion in this class rests on it")
+                .hasSize(2);
         return new Inbox(a, b, recipient, login(recipient),
                 rowIn(rows, a.wsId()), rowIn(rows, b.wsId()));
     }

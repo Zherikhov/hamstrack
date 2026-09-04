@@ -11,6 +11,8 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * {@code V13__roles.sql} + {@code V14__role_assignments.sql} +
  * {@code V15__drop_legacy_role_columns.sql} replayed against a REAL pre-V13 database —
@@ -92,111 +94,143 @@ class V15RoleBackfillMigrationTest {
                 flyway("12").migrate();
                 var f = seedPreV13Fixture(conn);
 
-                assert hasColumn(conn, "workspace_members", "role")
-                        : "the fixture schema has no legacy role column — nothing to migrate";
-                assert !hasColumn(conn, "workspace_members", "role_id")
-                        : "the fixture schema is already migrated";
+                assertThat(hasColumn(conn, "workspace_members", "role"))
+                        .withFailMessage("the fixture schema has no legacy role column — nothing to migrate")
+                        .isTrue();
+                assertThat(hasColumn(conn, "workspace_members", "role_id"))
+                        .withFailMessage("the fixture schema is already migrated")
+                        .isFalse();
 
                 // ---- the migrations under test ----
                 flyway("15").migrate();
 
                 // === 7) the built-in templates exist with the §7 sets =================
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".roles WHERE built_in") == 7
-                        : "expected exactly the 7 built-in role templates of §7";
-                assert grants(conn, WS_OWNER) == 8 && grants(conn, WS_ADMIN) == 8
-                        : "Owner and Admin must hold the same EIGHT of the nine workspace "
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".roles WHERE built_in"))
+                        .as("expected exactly the 7 built-in role templates of §7")
+                        .isEqualTo(7);
+                assertThat(grants(conn, WS_OWNER))
+                        .as("Owner and Admin must hold the same EIGHT of the nine workspace "
                           + "permissions — `isAtLeast(ADMIN)` is the only workspace role test in "
                           + "the codebase, so encoding a difference between them would be "
-                          + "dishonest (§7.1)";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".role_permissions"
-                        + " WHERE permission = 'project.administer.all'") == 0
-                        : "a built-in role was seeded with project.administer.all. The ninth "
+                          + "dishonest (§7.1)")
+                        .isEqualTo(8);
+                assertThat(grants(conn, WS_ADMIN))
+                        .as("Owner and Admin must hold the same EIGHT of the nine workspace "
+                          + "permissions — `isAtLeast(ADMIN)` is the only workspace role test in "
+                          + "the codebase, so encoding a difference between them would be "
+                          + "dishonest (§7.1)")
+                        .isEqualTo(8);
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".role_permissions"
+                        + " WHERE permission = 'project.administer.all'"))
+                        .as("a built-in role was seeded with project.administer.all. The ninth "
                           + "workspace permission is deliberately held by NOTHING: today's "
                           + "workspace-admin bypass is requireProjectCurator only, so Owner/Admin "
                           + "get `project.curate.all` (project.edit + component/version/sprint."
                           + "manage). Seeding the wide one hands every Owner in every install "
                           + "project.archive, project.member.manage, project.taxonomy.manage, "
-                          + "issue.delete and attachment moderation on upgrade (§7.1, §17.2).";
-                assert grants(conn, WS_MEMBER) == 3
-                        : "the built-in workspace Member holds exactly {project.create, "
-                          + "label.create, label.manage:own}";
-                assert ownOnly(conn, WS_MEMBER, "label.manage")
-                        : "Member's label.manage must be OWN-ONLY. Unrestricted would let any "
+                          + "issue.delete and attachment moderation on upgrade (§7.1, §17.2).")
+                        .isEqualTo(0);
+                assertThat(grants(conn, WS_MEMBER))
+                        .as("the built-in workspace Member holds exactly {project.create, "
+                          + "label.create, label.manage:own}")
+                        .isEqualTo(3);
+                assertThat(ownOnly(conn, WS_MEMBER, "label.manage"))
+                        .withFailMessage("Member's label.manage must be OWN-ONLY. Unrestricted would let any "
                           + "member rename anyone's label; dropping the row entirely would take "
                           + "away the right they have TODAY to rename a label they created "
-                          + "(LabelService.requireEditor short-circuits for the creator).";
-                assert grants(conn, P_MANAGER) == 20
-                        : "Project admin must hold all 20 project permissions";
-                assert grants(conn, P_MEMBER) == 12
-                        : "Contributor is the load-bearing row (§7.2): its 12 grants ARE everything "
+                          + "(LabelService.requireEditor short-circuits for the creator).")
+                        .isTrue();
+                assertThat(grants(conn, P_MANAGER)).as("Project admin must hold all 20 project permissions").isEqualTo(20);
+                assertThat(grants(conn, P_MEMBER))
+                        .as("Contributor is the load-bearing row (§7.2): its 12 grants ARE everything "
                           + "a workspace member can do in a project today, and they are what makes "
                           + "the upgrade a no-op. A grant removed here silently removes an ability "
-                          + "from every user in every install.";
-                assert grants(conn, P_VIEWER) == 0
-                        : "Viewer grants nothing — 'read-only' must be expressible (§11.4)";
-                assert ownOnly(conn, P_MANAGER, "comment.edit")
-                        : "even Project admin edits only their OWN comments (§17.3)";
-                assert !ownOnly(conn, P_MANAGER, "comment.delete")
-                        : "Project admin moderates comments — that is the intended widening (§10.3.5)";
+                          + "from every user in every install.")
+                        .isEqualTo(12);
+                assertThat(grants(conn, P_VIEWER))
+                        .as("Viewer grants nothing — 'read-only' must be expressible (§11.4)")
+                        .isEqualTo(0);
+                assertThat(ownOnly(conn, P_MANAGER, "comment.edit"))
+                        .withFailMessage("even Project admin edits only their OWN comments (§17.3)")
+                        .isTrue();
+                assertThat(ownOnly(conn, P_MANAGER, "comment.delete"))
+                        .withFailMessage("Project admin moderates comments — that is the intended widening (§10.3.5)")
+                        .isFalse();
 
                 // === 1) every membership and invite kept its role =====================
-                assert memberRole(conn, f.owner()).equals(WS_OWNER) : "an OWNER was not mapped to Owner";
-                assert memberRole(conn, f.admin()).equals(WS_ADMIN) : "an ADMIN was not mapped to Admin";
-                assert memberRole(conn, f.plain()).equals(WS_MEMBER) : "a MEMBER was not mapped to Member";
-                assert inviteRole(conn, f.inviteAdmin()).equals(WS_ADMIN)
-                        : "a pending ADMIN invite would grant the wrong role on acceptance";
-                assert inviteRole(conn, f.inviteMember()).equals(WS_MEMBER);
-                assert projectRole(conn, f.pManager()).equals(P_MANAGER)
-                        : "a project MANAGER was not mapped to Project admin";
-                assert projectRole(conn, f.pMember()).equals(P_MEMBER);
+                assertThat(memberRole(conn, f.owner())).as("an OWNER was not mapped to Owner").isEqualTo(WS_OWNER);
+                assertThat(memberRole(conn, f.admin())).as("an ADMIN was not mapped to Admin").isEqualTo(WS_ADMIN);
+                assertThat(memberRole(conn, f.plain())).as("a MEMBER was not mapped to Member").isEqualTo(WS_MEMBER);
+                assertThat(inviteRole(conn, f.inviteAdmin()))
+                        .as("a pending ADMIN invite would grant the wrong role on acceptance")
+                        .isEqualTo(WS_ADMIN);
+                assertThat(inviteRole(conn, f.inviteMember()))
+                        .as("a pending MEMBER invite would grant the wrong role on acceptance")
+                        .isEqualTo(WS_MEMBER);
+                assertThat(projectRole(conn, f.pManager()))
+                        .as("a project MANAGER was not mapped to Project admin")
+                        .isEqualTo(P_MANAGER);
+                assertThat(projectRole(conn, f.pMember()))
+                        .as("a project MEMBER was not mapped to Project member")
+                        .isEqualTo(P_MEMBER);
 
                 // === 2) VIEWER -> MEMBER, not Viewer =================================
-                assert projectRole(conn, f.pViewer()).equals(P_MEMBER)
-                        : "a pre-upgrade VIEWER row was mapped to the new (empty) Viewer role. Today "
+                assertThat(projectRole(conn, f.pViewer()))
+                        .as("a pre-upgrade VIEWER row was mapped to the new (empty) Viewer role. Today "
                           + "a VIEWER row grants EVERYTHING (§2.2 — ProjectRole.isAtLeast(VIEWER) is "
                           + "true for every role, so no gate anywhere distinguishes it from MEMBER). "
                           + "Mapping it like-for-like takes every ability away from exactly the users "
-                          + "who were marked read-only — the precise inversion of this epic's goal.";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".project_members"
-                        + " WHERE role_id = '" + P_VIEWER + "'") == 0
-                        : "no existing row may land on the new Viewer role";
+                          + "who were marked read-only — the precise inversion of this epic's goal.")
+                        .isEqualTo(P_MEMBER);
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".project_members"
+                        + " WHERE role_id = '" + P_VIEWER + "'"))
+                        .as("no existing row may land on the new Viewer role")
+                        .isEqualTo(0);
 
                 // === 3) nothing invented ============================================
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".project_members") == 3
-                        : "the migration inserted project_members rows. §8.4 forbids it: a row per "
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".project_members"))
+                        .as("the migration inserted project_members rows. §8.4 forbids it: a row per "
                           + "(workspace member x project) would turn an implicit rule into N*M rows "
                           + "and destroy the 'explicitly added' vs 'inherits the default' distinction "
-                          + "that private projects will need.";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".workspace_members") == 3;
+                          + "that private projects will need.")
+                        .isEqualTo(3);
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".workspace_members"))
+                        .as("the backfill invented no workspace_members rows — it translated the ones that were there")
+                        .isEqualTo(3);
 
                 // === 4) every workspace is OPEN with a NULL default ==================
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".workspaces"
-                        + " WHERE project_access_mode <> 'OPEN' OR default_project_role_id IS NOT NULL") == 0
-                        : "an existing workspace did not come out OPEN with the Contributor default — "
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".workspaces"
+                        + " WHERE project_access_mode <> 'OPEN' OR default_project_role_id IS NOT NULL"))
+                        .as("an existing workspace did not come out OPEN with the Contributor default — "
                           + "that combination IS today's behaviour, and anything else tightens on "
-                          + "upgrade";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
-                        + " WHERE default_project_role_id IS NOT NULL") == 0;
+                          + "upgrade")
+                        .isEqualTo(0);
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
+                        + " WHERE default_project_role_id IS NOT NULL"))
+                        .as("no project got an explicit default role: an existing project must inherit, which is what today's behaviour is")
+                        .isEqualTo(0);
 
                 // === legacy storage is gone =========================================
                 for (var table : new String[]{"workspace_members", "project_members", "workspace_invites"}) {
-                    assert !hasColumn(conn, table, "role")
-                            : table + " still has the legacy role column after V15";
-                    assert rowsOf(conn, "SELECT count(*) FROM information_schema.columns"
+                    assertThat(hasColumn(conn, table, "role"))
+                            .withFailMessage("%s", table + " still has the legacy role column after V15")
+                            .isFalse();
+                    assertThat(rowsOf(conn, "SELECT count(*) FROM information_schema.columns"
                             + " WHERE table_schema = '" + SCHEMA + "' AND table_name = '" + table + "'"
-                            + " AND column_name = 'role_id' AND is_nullable = 'NO'") == 1
-                            : table + ".role_id is not NOT NULL — V15's second step did not run";
+                            + " AND column_name = 'role_id' AND is_nullable = 'NO'"))
+                            .as("%s", table + ".role_id is not NOT NULL — V15's second step did not run")
+                            .isEqualTo(1);
                 }
 
                 // === 6) no updated_at was stamped ===================================
-                assert updatedAt(conn, "workspaces", f.workspace())
-                        .equals(Timestamp.valueOf("2020-01-02 03:04:05"))
-                        : "V14 stamped workspaces.updated_at — the hamstrack.skip_updated_at guard is "
+                assertThat(updatedAt(conn, "workspaces", f.workspace()))
+                        .as("V14 stamped workspaces.updated_at — the hamstrack.skip_updated_at guard is "
                           + "not in effect (it only works inside a transaction; check Flyway's "
-                          + "transaction settings)";
-                assert updatedAt(conn, "projects", f.project())
-                        .equals(Timestamp.valueOf("2020-01-02 03:04:05"))
-                        : "V14 stamped projects.updated_at — see above";
+                          + "transaction settings)")
+                        .isEqualTo(Timestamp.valueOf("2020-01-02 03:04:05"));
+                assertThat(updatedAt(conn, "projects", f.project()))
+                        .as("V14 stamped projects.updated_at — see above")
+                        .isEqualTo(Timestamp.valueOf("2020-01-02 03:04:05"));
             } finally {
                 dropSchema(conn);
             }
@@ -225,14 +259,18 @@ class V15RoleBackfillMigrationTest {
                     flyway("15").migrate();
                 } catch (RuntimeException e) {
                     aborted = true;
-                    assert rootMessage(e).contains("V14")
-                            : "V15 failed, but not with the pre-flight message that tells an operator "
-                              + "which migration to look at. Got: " + rootMessage(e);
+                    assertThat(rootMessage(e))
+                            .as(() -> "V15 failed, but not with the pre-flight message that tells an operator "
+                              + "which migration to look at. Got: " + rootMessage(e))
+                            .contains("V14");
                 }
-                assert aborted : "V15 dropped the legacy columns while a role_id was still NULL. The "
-                        + "pre-flight DO block is what makes a half-migrated database impossible.";
-                assert hasColumn(conn, "workspace_members", "role")
-                        : "V15 aborted but had already dropped a column — the guard must run FIRST";
+                assertThat(aborted)
+                        .withFailMessage("V15 dropped the legacy columns while a role_id was still NULL. The "
+                        + "pre-flight DO block is what makes a half-migrated database impossible.")
+                        .isTrue();
+                assertThat(hasColumn(conn, "workspace_members", "role"))
+                        .withFailMessage("V15 aborted but had already dropped a column — the guard must run FIRST")
+                        .isTrue();
             } finally {
                 dropSchema(conn);
             }
@@ -346,7 +384,7 @@ class V15RoleBackfillMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT updated_at AT TIME ZONE 'UTC' FROM " + SCHEMA + "."
                      + table + " WHERE id = '" + id + "'")) {
-            assert rs.next() : "row vanished: " + table + " " + id;
+            assertThat(rs.next()).withFailMessage("row vanished: " + table + " " + id).isTrue();
             return rs.getTimestamp(1);
         }
     }
@@ -389,14 +427,14 @@ class V15RoleBackfillMigrationTest {
 
     private static String scalar(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getString(1);
         }
     }
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

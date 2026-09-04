@@ -20,6 +20,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mockingDetails;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -219,9 +220,10 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
     void everyDoorOntoSprintMembershipIsRegistered() throws Exception {
         var found = new LinkedHashMap<String, String>();
         var root = SOURCE_ROOT;
-        assert Files.isDirectory(root)
-                : "the backend sources are not where this test looks (" + root.toAbsolutePath()
-                  + ") — it is guarding nothing";
+        assertThat(Files.isDirectory(root))
+                .withFailMessage(() -> "the backend sources are not where this test looks (" + root.toAbsolutePath()
+                  + ") — it is guarding nothing")
+                .isTrue();
         try (var walk = Files.walk(root)) {
             for (var file : walk.filter(p -> p.toString().endsWith(".java")).toList()) {
                 // The ledger's OWN rows carry a sprint FK (SprintScopeEvent.setSprint).
@@ -259,7 +261,8 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
 
         var unregistered = new TreeSet<>(found.keySet());
         unregistered.removeAll(DOORS.keySet());
-        assert unregistered.isEmpty() : """
+        assertThat(unregistered)
+                .as(() -> """
                 You added a door and didn't tell me.
 
                 These statements change an issue's sprint membership but are not in \
@@ -276,36 +279,42 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
                 in DOORS with the reason. The burn-up's scope line is silently wrong when \
                 one of these is missed — no error, no symptom, just a chart that disagrees \
                 with reality.""".formatted(String.join("\n  ",
-                        unregistered.stream().map(k -> k + "   at " + found.get(k)).toList()));
+                        unregistered.stream().map(k -> k + "   at " + found.get(k)).toList())))
+                .isEmpty();
 
         var vanished = new TreeSet<>(DOORS.keySet());
         vanished.removeAll(found.keySet());
-        assert vanished.isEmpty()
-                : "these registered doors no longer exist in the source — if a door was "
+        assertThat(vanished)
+                .as("these registered doors no longer exist in the source — if a door was "
                   + "removed or renamed, update DOORS (and check the ledger call went with "
-                  + "it): " + vanished;
+                  + "it): " + vanished)
+                .isEmpty();
 
         // The exception list is kept honest as far as it CAN be: the member must still
         // exist. Whether it calls the ledger is not checkable here by construction (see
         // UNSCANNABLE_DOORS) and is pinned by SprintScopeLedgerIntegrityTest.
         var overlap = new TreeSet<>(UNSCANNABLE_DOORS.keySet());
         overlap.retainAll(DOORS.keySet());
-        assert overlap.isEmpty() : """
+        assertThat(overlap)
+                .as(() -> """
                 %s is registered BOTH as a scanned door and as one the scan cannot see. \
                 Pick one: if the scan finds it, it belongs in DOORS and is enforced; if it \
                 does not, it belongs only in UNSCANNABLE_DOORS and needs a behavioural \
-                test named there.""".formatted(overlap);
+                test named there.""".formatted(overlap))
+                .isEmpty();
         for (var entry : UNSCANNABLE_DOORS.entrySet()) {
             var type = entry.getKey().substring(0, entry.getKey().indexOf('.'));
             var member = entry.getKey().substring(entry.getKey().indexOf('.') + 1);
-            assert declaresMember(root, type + ".java", member) : """
+            assertThat(declaresMember(root, type + ".java", member))
+                    .withFailMessage(() -> """
                     UNSCANNABLE_DOORS names %s, which no longer exists. It is registered \
                     because the source scan structurally cannot find it (a DELETE ends a \
                     sprint membership without writing sprint_id), so this name is the ONLY \
                     link between the registry and the code — a silent rename would leave \
                     door 8 undocumented and unenforced at once.
 
-                    %s""".formatted(entry.getKey(), entry.getValue());
+                    %s""".formatted(entry.getKey(), entry.getValue()))
+                    .isTrue();
         }
     }
 
@@ -338,9 +347,10 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
     @Test
     void everyDeletionShapedPathOntoSprintMembershipIsRegistered() throws Exception {
         var found = new LinkedHashMap<String, String>();
-        assert Files.isDirectory(SOURCE_ROOT)
-                : "the backend sources are not where this test looks (" + SOURCE_ROOT.toAbsolutePath()
-                  + ") — it is guarding nothing";
+        assertThat(Files.isDirectory(SOURCE_ROOT))
+                .withFailMessage(() -> "the backend sources are not where this test looks (" + SOURCE_ROOT.toAbsolutePath()
+                  + ") — it is guarding nothing")
+                .isTrue();
         try (var walk = Files.walk(SOURCE_ROOT)) {
             for (var file : walk.filter(p -> p.toString().endsWith(".java")).toList()) {
                 var lines = Files.readAllLines(file);
@@ -363,7 +373,8 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
 
         var unregistered = new TreeSet<>(found.keySet());
         unregistered.removeAll(UNSCANNABLE_DOORS.keySet());
-        assert unregistered.isEmpty() : """
+        assertThat(unregistered)
+                .as(() -> """
                 You added a way to DELETE issues and didn't tell me.
 
                 These statements can remove issue rows — which ends any sprint membership \
@@ -381,17 +392,20 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
                 A bulk path additionally has to hand the ledger the rows its own statement \
                 removed, for the reason recordBulkMove spells out: a separate SELECT is a \
                 different snapshot.""".formatted(String.join("\n  ",
-                        unregistered.stream().map(k -> k + "   at " + found.get(k)).toList()));
+                        unregistered.stream().map(k -> k + "   at " + found.get(k)).toList())))
+                .isEmpty();
 
         var vanished = new TreeSet<>(UNSCANNABLE_DOORS.keySet());
         vanished.removeAll(found.keySet());
-        assert vanished.isEmpty() : """
+        assertThat(vanished)
+                .as(() -> """
                 These deletion-shaped doors are registered but no longer match anything in \
                 the source: %s.
 
                 Either the path was removed (delete the entry, and check its ledger call \
                 went with it) or it changed shape and DELETION_DOOR no longer sees it — in \
-                which case the registry is now enforcing nothing for it.""".formatted(vanished);
+                which case the registry is now enforcing nothing for it.""".formatted(vanished))
+                .isEmpty();
     }
 
     /** Does {@code fileName} under {@code root} declare a member called {@code member}? */
@@ -443,7 +457,8 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
         // loop below never runs it because no runner was written. A prose value is not an
         // exercise.
         var runners = new TreeSet<>(doors().stream().map(Door::registryKey).toList());
-        assert runners.equals(new TreeSet<>(DOORS.keySet())) : """
+        assertThat(runners)
+                .as(() -> """
                 DOORS and doors() disagree.
 
                   registered with no runner: %s
@@ -452,7 +467,8 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
                 Every entry in DOORS needs a Door that actually opens it over HTTP — \
                 otherwise the door is documented and unexercised, which is the state this \
                 class exists to make impossible.""".formatted(
-                        subtract(DOORS.keySet(), runners), subtract(runners, DOORS.keySet()));
+                        subtract(DOORS.keySet(), runners), subtract(runners, DOORS.keySet())))
+                .isEqualTo(new TreeSet<>(DOORS.keySet()));
 
         for (var door : doors()) {
             var ctx = newProject();
@@ -463,34 +479,43 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
             var handedToTheLedger = issueIdsHandedToTheLedger();
             var historied = fence.newSprintHistoryIssueIds();
 
-            assert handedToTheLedger.containsAll(historied) : """
+            assertThat(handedToTheLedger)
+                    .as(() -> """
                     Door "%s" wrote a `sprint` issue_history row for %s but handed the \
                     ledger %s.
 
                     Every path that records a membership change in the audit log must record \
                     it in sprint_scope_events too, or the burn-up's scope line silently \
                     disagrees with the issue's own history.""".formatted(
-                            door.name(), historied, handedToTheLedger);
-            assert handedToTheLedger.containsAll(moved) : """
+                            door.name(), historied, handedToTheLedger))
+                    .containsAll(historied);
+            assertThat(handedToTheLedger)
+                    .as(() -> """
                     Door "%s" moved %s but the ledger was only told about %s. A door that \
                     records a subset has the right row COUNT and the wrong chart.""".formatted(
-                            door.name(), moved, handedToTheLedger);
-            assert !handedToTheLedger.isEmpty()
-                    : "door \"" + door.name() + "\" never called SprintScopeLedger at all";
+                            door.name(), moved, handedToTheLedger))
+                    .containsAll(moved);
+            assertThat(handedToTheLedger)
+                    .as(() -> "door \"" + door.name() + "\" never called SprintScopeLedger at all")
+                    .isNotEmpty();
 
             var written = fence.newLedgerIssueIds();
             if (door.survives()) {
-                assert written.containsAll(moved) : """
+                assertThat(written)
+                        .as(() -> """
                         Door "%s" called the ledger for %s but sprint_scope_events only \
                         gained rows for %s — the call happened and the rows did not \
                         (evicted by a clearAutomatically, rolled back, or gated out).""".formatted(
-                                door.name(), moved, written);
+                                door.name(), moved, written))
+                        .containsAll(moved);
             } else {
-                assert written.isEmpty() : """
+                assertThat(written)
+                        .as(() -> """
                         Door "%s" is registered as one whose rows cascade away with the \
                         sprint, but rows for %s survived. Either the FK stopped being \
                         ON DELETE CASCADE or this door no longer deletes the sprint — \
-                        both change what past reports say.""".formatted(door.name(), written);
+                        both change what past reports say.""".formatted(door.name(), written))
+                        .isEmpty();
             }
         }
     }
@@ -595,18 +620,24 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
                 .andExpect(status().isOk());
 
         var events = eventsOf(sprint);
-        assert events.size() == 2 : "expected one ADDED per member, got " + events;
+        assertThat(events).as("expected one ADDED per member, got " + events).hasSize(2);
         for (var e : events) {
-            assert e.get("event").equals("ADDED") : "the commitment batch is ADDED: " + events;
-            assert "2026-03-02T09:00".equals(e.get("occurred_utc"))
-                    : "the commitment must be dated the sprint's start, not the click: " + events;
+            assertThat(e.get("event")).as("the commitment batch is ADDED: " + events).isEqualTo("ADDED");
+            assertThat(e.get("occurred_utc"))
+                    .as("the commitment must be dated the sprint's start, not the click: " + events)
+                    .isEqualTo("2026-03-02T09:00");
         }
         // Points ride along, so a points burn-up needs no second read of today's estimate.
         var points = events.stream().map(e -> e.get("story_points")).toList();
-        assert points.contains(null) && points.stream().anyMatch(p -> p != null
-                && p.toString().startsWith("3"))
-                : "the estimate at the moment of the event must be recorded (null = unestimated): "
-                  + points;
+        assertThat(points)
+                .as("the estimate at the moment of the event must be recorded (null = unestimated): "
+                  + points)
+                .containsNull();
+        assertThat(points.stream().anyMatch(p -> p != null
+                && p.toString().startsWith("3")))
+                .withFailMessage("the estimate at the moment of the event must be recorded (null = unestimated): "
+                  + points)
+                .isTrue();
     }
 
     /** A second start loses on affected rows (409) and must write NOTHING. */
@@ -620,8 +651,7 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
 
         startSprint(ctx, ctx.token(), sprint).andExpect(status().isConflict());
 
-        assert eventsOf(sprint).size() == 1
-                : "a double-start must commit N rows, not 2N: " + eventsOf(sprint);
+        assertThat(eventsOf(sprint)).as(() -> "a double-start must commit N rows, not 2N: " + eventsOf(sprint)).hasSize(1);
     }
 
     /**
@@ -639,13 +669,15 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
         removeIssueFromSprint(ctx, ctx.token(), future, idOf(issue))
                 .andExpect(status().isNoContent());
         addIssuesToSprint(ctx, ctx.token(), future, idOf(issue)).andExpect(status().isOk());
-        assert eventsOf(future).isEmpty()
-                : "a sprint that has not started has no scope to change: " + eventsOf(future);
+        assertThat(eventsOf(future))
+                .as(() -> "a sprint that has not started has no scope to change: " + eventsOf(future))
+                .isEmpty();
 
         startSprint(ctx, ctx.token(), future).andExpect(status().isOk());
 
-        assert eventsOf(future).size() == 1
-                : "the start batch is the whole commitment, once per member: " + eventsOf(future);
+        assertThat(eventsOf(future))
+                .as(() -> "the start batch is the whole commitment, once per member: " + eventsOf(future))
+                .hasSize(1);
     }
 
     /**
@@ -664,8 +696,8 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
         addIssuesToSprint(ctx, ctx.token(), running, idOf(issue)).andExpect(status().isOk());
 
         var kinds = eventsOf(running).stream().map(e -> e.get("event")).toList();
-        assert kinds.equals(List.of("ADDED", "REMOVED", "ADDED")) : "unexpected ledger: " + kinds;
-        assert scopeOf(running) == 1 : "scope must return to 1, was " + scopeOf(running);
+        assertThat(kinds).as("unexpected ledger: " + kinds).isEqualTo(List.of("ADDED", "REMOVED", "ADDED"));
+        assertThat(scopeOf(running)).as(() -> "scope must return to 1, was " + scopeOf(running)).isEqualTo(1);
     }
 
     /** A re-estimate is not a membership change, so it is not a scope event (§2.3). */
@@ -680,9 +712,10 @@ class SprintScopeLedgerDoorsTest extends SprintTestBase {
         patchIssue(ctx, ctx.token(), numberOf(issue), "{\"storyPoints\":8}")
                 .andExpect(status().isOk());
 
-        assert eventsOf(running).size() == before
-                : "a re-estimate must change the scope line's HEIGHT, never step it: "
-                  + eventsOf(running);
+        assertThat(eventsOf(running))
+                .as(() -> "a re-estimate must change the scope line's HEIGHT, never step it: "
+                  + eventsOf(running))
+                .hasSize(before);
     }
 
     // Door 8 (DELETE /issues/{n}) is asserted by SprintScopeLedgerIntegrityTest, not

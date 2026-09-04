@@ -8,6 +8,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The "no N+1" half of §3.7 / §4.6: a board or backlog page of labelled issues must
  * cost a <strong>constant</strong> number of SQL statements, whatever the page size —
@@ -45,21 +47,23 @@ class LabelQueryCountTest extends LabelTestBase {
 
         long smallBoard = countStatements(() -> board(small, null));
         long largeBoard = countStatements(() -> board(large, null));
-        assert smallBoard == largeBoard
-                : "board is N+1: " + smallBoard + " statements for 3 issues vs "
-                  + largeBoard + " for 40";
+        assertThat(smallBoard)
+                .as("board is N+1: " + smallBoard + " statements for 3 issues vs "
+                  + largeBoard + " for 40")
+                .isEqualTo(largeBoard);
 
         long smallBacklog = countStatements(() -> board(small, "?size=100"));
         long largeBacklog = countStatements(() -> board(large, "?size=100"));
-        assert smallBacklog == largeBacklog
-                : "backlog is N+1: " + smallBacklog + " statements for 3 issues vs "
-                  + largeBacklog + " for 40";
+        assertThat(smallBacklog)
+                .as("backlog is N+1: " + smallBacklog + " statements for 3 issues vs "
+                  + largeBacklog + " for 40")
+                .isEqualTo(largeBacklog);
 
         // Sanity: the labels really are there (an empty board would pass trivially).
         var node = board(large, null);
-        assert node.get("issues").size() == 40 : "expected all 40 issues on the board";
+        assertThat(node.get("issues")).as("expected all 40 issues on the board").hasSize(40);
         for (var issue : node.get("issues")) {
-            assert issue.get("labels").size() >= 1 : "every issue must carry labels";
+            assertThat(issue.get("labels").size()).as("every issue must carry labels").isGreaterThanOrEqualTo(1);
         }
     }
 

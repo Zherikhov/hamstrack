@@ -10,6 +10,9 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatObject;
+
 /**
  * {@code V22__invite_uniqueness.sql} (HD-133) replayed against a real pre-V22 database — its
  * <strong>two cleanup steps</strong>, and the index they clear the way for.
@@ -94,8 +97,9 @@ class V22InviteUniquenessMigrationTest {
                 var wsA = workspace(conn, inviter, "A");
                 var wsB = workspace(conn, inviter, "B");
 
-                assert !hasIndex(conn)
-                        : "the fixture schema already carries " + INDEX + " — nothing to migrate";
+                assertThat(hasIndex(conn))
+                        .withFailMessage("the fixture schema already carries " + INDEX + " — nothing to migrate")
+                        .isFalse();
 
                 // (1) A LONE mixed-case unaccepted row. Nobody this application created can accept
                 //     it (acceptInvite compares with equals against a folded address), and from
@@ -154,15 +158,18 @@ class V22InviteUniquenessMigrationTest {
                 flyway("22").migrate();
 
                 // === step 1 ============================================================
-                assert !exists(conn, lone) : """
+                assertThat(exists(conn, lone))
+                        .withFailMessage("""
                         a lone mixed-case UNACCEPTED row survived step 1. It is unredeemable by \
                         anyone this application created — acceptInvite matches invite.email \
                         against users.email with equals, and every users row written by \
                         AuthService/AdminUserService/DataSeeder is folded at signup — and from \
                         V22 onward it occupies the slot, so the corrective re-invitation to the \
                         correct spelling is refused with DUPLICATE_INVITE until an administrator \
-                        withdraws it.""";
-                assert exists(conn, pairLower) && !exists(conn, pairMixed) : """
+                        withdraws it.""")
+                        .isFalse();
+                assertThat(exists(conn, pairLower) && !exists(conn, pairMixed))
+                        .withFailMessage("""
                         THE ONE ORDERING THIS FILE EXISTS FOR. With step 1 removed, or moved \
                         below step 2, the NEWER mixed-case row wins "newest per (workspace, \
                         lower(email))" and step 2 DELETES the lowercase one — a live, redeemable \
@@ -170,57 +177,85 @@ class V22InviteUniquenessMigrationTest {
                         can accept. The survivor must be the lowercase row. Note that the gentler \
                         looking repair, UPDATE ... SET email = lower(email), is the one step 1 \
                         refuses to perform: that row was mailed to the mixed-case spelling, and \
-                        CHANGING THE ADDRESS CHANGES WHO THE OFFER GOES TO.""";
-                assert "HIST@example.test".equals(emailOf(conn, acceptedMixed)) : """
+                        CHANGING THE ADDRESS CHANGES WHO THE OFFER GOES TO.""")
+                        .isTrue();
+                assertThat(emailOf(conn, acceptedMixed))
+                        .as("""
                         an ACCEPTED mixed-case row was deleted or re-cased. It is the only record \
                         that a person was invited at all, and it sits outside the partial index \
-                        by design, so it costs the live population nothing.""";
+                        by design, so it costs the live population nothing.""")
+                        .isEqualTo("HIST@example.test");
 
                 // === step 2 ============================================================
-                assert exists(conn, dupeNew) && !exists(conn, dupeOld) : """
+                assertThat(exists(conn, dupeNew) && !exists(conn, dupeOld))
+                        .withFailMessage("""
                         of two unaccepted rows for one address the NEWEST must survive: it \
                         carries the most recent intent and the most recent role, and — while \
                         expires_at stays a fixed seven-day offset from creation — it is also the \
                         last to lapse, so "keep the newest" can never drop a live row in favour \
-                        of a lapsed one. If the TTL ever becomes configurable, re-read this.""";
-                assert TIE_HIGHER_ID.equals(survivorId(conn, wsA, "tie@example.test")) : """
+                        of a lapsed one. If the TTL ever becomes configurable, re-read this.""")
+                        .isTrue();
+                assertThat(survivorId(conn, wsA, "tie@example.test"))
+                        .as("""
                         two rows sharing created_at to the microsecond (one seeding transaction, \
                         a scripted import) must be resolved by id DESC, not by whichever row the \
                         planner happened to return first. UUID v7 is time-ordered, so the higher \
-                        id continues the same ordering created_at was expressing.""";
-                assert exists(conn, bothAccepted) && exists(conn, bothPending) : """
+                        id continues the same ordering created_at was expressing.""")
+                        .isEqualTo(TIE_HIGHER_ID);
+                assertThat(exists(conn, bothAccepted) && exists(conn, bothPending))
+                        .withFailMessage("""
                         an accepted row and a pending row for the same address must BOTH survive: \
                         the index is partial precisely so invited -> joined -> removed -> invited \
-                        again stays a normal sequence.""";
-                assert exists(conn, lapsed) : """
+                        again stays a normal sequence.""")
+                        .isTrue();
+                assertThat(exists(conn, lapsed))
+                        .withFailMessage("""
                         an EXPIRED unaccepted row must survive. It keeps its slot on purpose — \
                         the same shape as labels/components/versions/sprints, where an archived \
                         row keeps its name — and the refusal's job is to name who clears it. \
                         Deleting it here would be the retention sweep this ticket explicitly does \
-                        not ship.""";
-                assert exists(conn, foreignDupe) : """
+                        not ship.""")
+                        .isTrue();
+                assertThat(exists(conn, foreignDupe))
+                        .withFailMessage("""
                         step 2's de-duplication reached into another workspace. It is PARTITIONed \
                         by workspace_id because uniqueness is per workspace by definition, and \
                         this row is the newest of the three sharing this folded address — so a \
                         PARTITION BY that forgot workspace_id would keep exactly this one and \
                         delete workspace A's, which is one tenant's invitation destroyed by \
-                        another tenant's traffic.""";
-                assert !exists(conn, foreignMixed) : """
+                        another tenant's traffic.""")
+                        .isTrue();
+                assertThat(exists(conn, foreignMixed))
+                        .withFailMessage("""
                         step 1 is deliberately NOT workspace-scoped, and this is the assertion \
                         that says so rather than leaving it to look like an oversight. "Addressed \
                         to a spelling nobody this application created can redeem" is a property \
                         of the ROW, not of the tenant holding it, so the repair is global while \
                         the de-duplication above it is per workspace. Scoping step 1 would leave \
                         unredeemable rows standing in every workspace the fixture did not name, \
-                        each one occupying a slot from V22 onward.""";
+                        each one occupying a slot from V22 onward.""")
+                        .isFalse();
 
-                assert unacceptedFor(conn, wsA, "pair@example.test") == 1
-                       && unacceptedFor(conn, wsA, "dupe@example.test") == 1
-                       && unacceptedFor(conn, wsA, "tie@example.test") == 1
-                       && unacceptedFor(conn, wsA, "both@example.test") == 1
-                        : "the cleanup left more than one unaccepted row for some address — which "
+                assertThat(unacceptedFor(conn, wsA, "pair@example.test"))
+                        .as("the cleanup left more than one unaccepted row for some address — which "
                           + "is a state the CREATE UNIQUE INDEX after it could not have built on, "
-                          + "so this assertion can only fail together with a migration that threw";
+                          + "so this assertion can only fail together with a migration that threw")
+                        .isEqualTo(1);
+                assertThat(unacceptedFor(conn, wsA, "dupe@example.test"))
+                        .as("the cleanup left more than one unaccepted row for some address — which "
+                          + "is a state the CREATE UNIQUE INDEX after it could not have built on, "
+                          + "so this assertion can only fail together with a migration that threw")
+                        .isEqualTo(1);
+                assertThat(unacceptedFor(conn, wsA, "tie@example.test"))
+                        .as("the cleanup left more than one unaccepted row for some address — which "
+                          + "is a state the CREATE UNIQUE INDEX after it could not have built on, "
+                          + "so this assertion can only fail together with a migration that threw")
+                        .isEqualTo(1);
+                assertThat(unacceptedFor(conn, wsA, "both@example.test"))
+                        .as("the cleanup left more than one unaccepted row for some address — which "
+                          + "is a state the CREATE UNIQUE INDEX after it could not have built on, "
+                          + "so this assertion can only fail together with a migration that threw")
+                        .isEqualTo(1);
 
                 // === step 3: the invariant itself ======================================
                 // pg_indexes renders the expression with the cast PostgreSQL inserted for a
@@ -228,8 +263,9 @@ class V22InviteUniquenessMigrationTest {
                 // than pinned: it is an artefact of the column type, not part of the decision.
                 var definition = indexDefinition(conn);
                 var normalised = definition.replace("(email)::text", "email");
-                assert normalised.contains("(workspace_id, lower(email))")
-                       && normalised.contains("WHERE (accepted_at IS NULL)") : """
+                assertThat(normalised.contains("(workspace_id, lower(email))")
+                       && normalised.contains("WHERE (accepted_at IS NULL)"))
+                        .withFailMessage("""
                         the constraint is PARTIAL and FUNCTIONAL, and neither half is decoration. \
                         Without lower() the index stops enforcing anything the moment the \
                         boundary fold in inviteMember is moved, weakened, or forgotten on a new \
@@ -238,40 +274,54 @@ class V22InviteUniquenessMigrationTest {
                         UNIQUE(workspace_id, email), and accepted rows would keep their slots for \
                         ever: invited -> joined -> removed -> invited again would stop working. \
                         And workspace_id leads, so the index is also the access path for the \
-                        two-key pre-check. Actual:\s""" + definition;
+                        two-key pre-check. Actual:\s""" + definition)
+                        .isTrue();
 
                 var collision = refusalOf(() ->
                         invite(conn, wsA, inviter, "dupe@example.test", "2026-02-01 10:00:00+00"));
-                assert collision != null && UNIQUE_VIOLATION.equals(collision.getSQLState())
-                        : "a second UNACCEPTED row for an address already pending in this "
+                assertThatObject(collision)
+                        .as("a second UNACCEPTED row for an address already pending in this "
                           + "workspace must be refused by the DATABASE, not merely by the "
                           + "pre-check in inviteMember. The pre-check is the sentence; two "
-                          + "concurrent requests both pass it and only the index arbitrates";
-                assert namesTheIndex(collision) : """
+                          + "concurrent requests both pass it and only the index arbitrates")
+                        .isNotNull();
+                assertThat(collision.getSQLState())
+                        .as("a second UNACCEPTED row for an address already pending in this "
+                          + "workspace must be refused by the DATABASE, not merely by the "
+                          + "pre-check in inviteMember. The pre-check is the sentence; two "
+                          + "concurrent requests both pass it and only the index arbitrates")
+                        .isEqualTo(UNIQUE_VIOLATION);
+                assertThat(namesTheIndex(collision))
+                        .withFailMessage("""
                         the violation must name the index in its PRIMARY message. That is what \
                         WorkspaceService.isDuplicateInvite translates into the 409 — through \
                         Hibernate's dialect extractor, and through the fallback that matches the \
                         name itself for servers whose lc_messages is not English — and it is the \
                         half that survives logServerErrorDetail=false, which drops the DETAIL \
-                        line carrying the colliding address.""";
-                assert UNIQUE_VIOLATION.equals(stateOf(() ->
+                        line carrying the colliding address.""")
+                        .isTrue();
+                assertThat(stateOf(() ->
                         invite(conn, wsA, inviter, "DUPE@example.test", "2026-02-02 10:00:00+00")))
-                        : "a case-only variant must collide. lower() in the index is what makes "
-                          + "that true independently of the boundary fold in inviteMember";
-                assert stateOf(() -> invite(conn, wsA, inviter, "dupe@example.test",
-                        "2026-02-03 10:00:00+00", "2026-02-03 11:00:00+00", null)) == null
-                        : "an ACCEPTED row for the same address must still insert: the index is "
+                        .as("a case-only variant must collide. lower() in the index is what makes "
+                          + "that true independently of the boundary fold in inviteMember")
+                        .isEqualTo(UNIQUE_VIOLATION);
+                assertThat(stateOf(() -> invite(conn, wsA, inviter, "dupe@example.test",
+                        "2026-02-03 10:00:00+00", "2026-02-03 11:00:00+00", null)))
+                        .as("an ACCEPTED row for the same address must still insert: the index is "
                           + "partial, so accepting is the fourth way the slot is freed, alongside "
-                          + "withdraw, decline and member removal";
-                assert UNIQUE_VIOLATION.equals(stateOf(() ->
+                          + "withdraw, decline and member removal")
+                        .isNull();
+                assertThat(stateOf(() ->
                         invite(conn, wsA, inviter, "lapsed@example.test", "2026-02-04 10:00:00+00")))
-                        : "an EXPIRED row blocks. now() is STABLE, so no index predicate can "
+                        .as("an EXPIRED row blocks. now() is STABLE, so no index predicate can "
                           + "exempt it — which is why DuplicateInviteException carries a second, "
-                          + "'has lapsed' wording instead of a narrower index";
-                assert stateOf(() -> invite(conn, wsB, inviter, "lapsed@example.test",
-                        "2026-02-05 10:00:00+00")) == null
-                        : "the index leads on workspace_id: an address pending in workspace A "
-                          + "must not block the same address in workspace B";
+                          + "'has lapsed' wording instead of a narrower index")
+                        .isEqualTo(UNIQUE_VIOLATION);
+                assertThat(stateOf(() -> invite(conn, wsB, inviter, "lapsed@example.test",
+                        "2026-02-05 10:00:00+00")))
+                        .as("the index leads on workspace_id: an address pending in workspace A "
+                          + "must not block the same address in workspace B")
+                        .isNull();
             } finally {
                 dropSchema(conn);
             }
@@ -414,16 +464,16 @@ class V22InviteUniquenessMigrationTest {
 
     private static String scalar(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             var value = rs.getString(1);
-            assert !rs.next() : "expected exactly one row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected exactly one row from: " + sql).isFalse();
             return value;
         }
     }
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

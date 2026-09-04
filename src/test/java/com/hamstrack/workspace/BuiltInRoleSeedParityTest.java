@@ -30,6 +30,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.Predicate;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>The proof that HD-123 did not change anyone's abilities</strong> — the successor
  * to {@code PermissionParityTest}, renamed in HD-126 (S3) to say what it actually proves
@@ -264,17 +266,19 @@ class BuiltInRoleSeedParityTest {
         }
 
         // A table that silently shrank would make this test pass by testing nothing.
-        assert cells == table.size() * ARCHETYPES.size() : "cell count mismatch";
-        assert table.size() == SITES
-                : "the parity table is now " + table.size() + " sites, not " + SITES + ". The "
+        assertThat(cells).as("cell count mismatch").isEqualTo(table.size() * ARCHETYPES.size());
+        assertThat(table)
+                .as(() -> "the parity table is now " + table.size() + " sites, not " + SITES + ". The "
                   + "inventory is the ~42 authorization matches across 13 files, expanded to one "
                   + "row per distinct verdict. Rows are not removed until their call site is gone, "
-                  + "and a new authorization site needs one.";
+                  + "and a new authorization site needs one.")
+                .hasSize(SITES);
 
-        assert failures.isEmpty()
-                : "\n\n" + String.join("\n\n", failures) + "\n\n"
+        assertThat(failures)
+                .as("\n\n" + String.join("\n\n", failures) + "\n\n"
                   + failures.size() + " of " + cells + " (call site x archetype) cells disagree "
-                  + "with the pre-HD-123 model.\n";
+                  + "with the pre-HD-123 model.\n")
+                .isEmpty();
     }
 
     /**
@@ -293,21 +297,26 @@ class BuiltInRoleSeedParityTest {
         for (var gone : List.of("com.hamstrack.admin.scope.ScopeResolver",
                 "com.hamstrack.workspace.entity.WorkspaceRole",
                 "com.hamstrack.project.entity.ProjectRole")) {
-            assert !classExists(gone)
-                    : gone + " is back. HD-126 (§10.4) deleted it because two authorization "
+            assertThat(classExists(gone))
+                    .withFailMessage("%s", gone + " is back. HD-126 (§10.4) deleted it because two authorization "
                       + "predicates for one question is the condition HD-123 exists to remove — "
                       + "and because an ordinal ladder cannot rank a custom role, which S4 ships. "
                       + "If it is back for a good reason, this table's left column has to be "
                       + "re-examined too: it is a TRANSCRIPTION of that code, and a transcription "
-                      + "that can be replaced by a live read stops being an independent oracle.";
+                      + "that can be replaced by a live read stops being an independent oracle.")
+                    .isFalse();
         }
         // The ladders are the transcription's load-bearing half — a reorder inverts every
         // legacy verdict in the table, silently, in the permissive direction for some rows
         // and the restrictive direction for others.
-        assert LegacyModel.WORKSPACE_LADDER.equals(List.of("OWNER", "ADMIN", "MEMBER"))
-                && LegacyModel.PROJECT_LADDER.equals(List.of("MANAGER", "MEMBER", "VIEWER"))
-                : "the frozen ordinal ladders have been edited. They are a historical record of "
-                  + "deleted code, not a model anybody may improve.";
+        assertThat(List.of("OWNER", "ADMIN", "MEMBER"))
+                .as("the frozen ordinal ladders have been edited. They are a historical record of "
+                  + "deleted code, not a model anybody may improve.")
+                .isEqualTo(LegacyModel.WORKSPACE_LADDER);
+        assertThat(List.of("MANAGER", "MEMBER", "VIEWER"))
+                .as("the frozen ordinal ladders have been edited. They are a historical record of "
+                  + "deleted code, not a model anybody may improve.")
+                .isEqualTo(LegacyModel.PROJECT_LADDER);
     }
 
     /**
@@ -332,9 +341,10 @@ class BuiltInRoleSeedParityTest {
     void theFrozenColumnNeverReadsTheLiveModel() throws Exception {
         var source = java.nio.file.Path.of(
                 "src/test/java/com/hamstrack/workspace/BuiltInRoleSeedParityTest.java");
-        assert java.nio.file.Files.exists(source)
-                : "cannot find " + source + " — this tripwire reads the source tree and must run "
-                  + "from the project root.";
+        assertThat(java.nio.file.Files.exists(source))
+                .withFailMessage("cannot find " + source + " — this tripwire reads the source tree and must run "
+                  + "from the project root.")
+                .isTrue();
         var text = java.nio.file.Files.readString(source, java.nio.charset.StandardCharsets.UTF_8);
         // Both markers are split so they cannot match anything in THIS method: written out
         // whole, the file's first occurrence of each would be the search string itself, and
@@ -342,24 +352,27 @@ class BuiltInRoleSeedParityTest {
         // Keep them split, and keep the marker text out of the comments here.
         int from = text.indexOf("private List<" + "Site> table()");
         int to = text.indexOf("private static final String COMMENT_MODERATION" + "_WIDENING", from);
-        assert from > 0 && to > from : "table() is no longer where this tripwire looks for it.";
+        assertThat(from).as("table() is no longer where this tripwire looks for it.").isGreaterThan(0);
+        assertThat(to).as("table() is no longer where this tripwire looks for it.").isGreaterThan(from);
         var body = text.substring(from, to);
 
         int rows = count(body, "new Site(");
         int resolverCalls = count(body, "wsPermissions(a)") + count(body, "projectPermissions(a)");
 
-        assert rows == SITE_CONSTRUCTIONS
-                : "table() now builds " + rows + " Site expressions, not " + SITE_CONSTRUCTIONS
+        assertThat(rows)
+                .as("table() now builds " + rows + " Site expressions, not " + SITE_CONSTRUCTIONS
                   + " (39 literal rows + 2 built in a loop). Update both constants together, and "
-                  + "while you are here check the new row's LEFT column is a frozen predicate.";
-        assert resolverCalls == rows - 1
-                : "table() calls the live permission resolver " + resolverCalls + " times across "
+                  + "while you are here check the new row's LEFT column is a frozen predicate.")
+                .isEqualTo(SITE_CONSTRUCTIONS);
+        assertThat(resolverCalls)
+                .as("table() calls the live permission resolver " + resolverCalls + " times across "
                   + rows + " rows. It must be called exactly once per row — in the `current` "
                   + "column — except ProjectService.listMembers, whose `current` is the constant "
                   + "`a -> true` (no gate at all). A second call in a row means its FROZEN column "
                   + "now reads the live model, which turns that row's 6 cells into a tautology "
                   + "that can never fail: the left column is a transcription of DELETED code and "
-                  + "may only be `a -> true`, `a -> false` or one of the legacy* predicates.";
+                  + "may only be `a -> true`, `a -> false` or one of the legacy* predicates.")
+                .isEqualTo(rows - 1);
     }
 
     /** 39 rows written out, plus the two built inside {@code for (var caller : …)} loops. */
@@ -404,34 +417,38 @@ class BuiltInRoleSeedParityTest {
         for (var archetype : List.of(WS_OWNER, WS_ADMIN)) {
             var actor = actors.get(archetype);
             var workspace = wsPermissions(actor);
-            assert workspace.has(Permission.PROJECT_CURATE_ALL)
-                    : archetype.label() + " lost project.curate.all — that IS the pre-HD-123 "
+            assertThat(workspace.has(Permission.PROJECT_CURATE_ALL))
+                    .withFailMessage(() -> String.valueOf(archetype.label() + " lost project.curate.all — that IS the pre-HD-123 "
                       + "requireProjectCurator bypass (16 call sites), so without it a workspace "
                       + "Owner can no longer edit project settings, components, versions or "
-                      + "sprints in a project they are not a member of.";
-            assert !workspace.has(Permission.PROJECT_ADMINISTER_ALL)
-                    : archetype.label() + " holds project.administer.all. No built-in role may: "
+                      + "sprints in a project they are not a member of."))
+                    .isTrue();
+            assertThat(workspace.has(Permission.PROJECT_ADMINISTER_ALL))
+                    .withFailMessage(() -> String.valueOf(archetype.label() + " holds project.administer.all. No built-in role may: "
                       + "it grants all 20 project permissions, and the old bypass granted 4. It "
                       + "stays in the catalog for a custom 'Program manager' role (§17.2) and is "
-                      + "seeded on nothing.";
+                      + "seeded on nothing."))
+                    .isFalse();
 
             var inProject = projectPermissions(actor);
             for (var p : Permission.projectCuration()) {
-                assert inProject.has(p)
-                        : archetype.label() + " does not hold " + p.key() + " in a project they "
-                          + "have no row in. requireProjectCurator let them through.";
+                assertThat(inProject.has(p))
+                        .withFailMessage(() -> String.valueOf(archetype.label() + " does not hold " + p.key() + " in a project they "
+                          + "have no row in. requireProjectCurator let them through."))
+                        .isTrue();
             }
             // The gates that were MANAGER-only and must stay shut.
             for (var p : List.of(Permission.PROJECT_ARCHIVE, Permission.PROJECT_MEMBER_MANAGE,
                     Permission.PROJECT_TAXONOMY_MANAGE, Permission.ISSUE_DELETE,
                     Permission.ATTACHMENT_DELETE, Permission.COMMENT_DELETE)) {
-                assert !inProject.has(p)
-                        : archetype.label() + " gained unrestricted " + p.key() + " in a project "
+                assertThat(inProject.has(p))
+                        .withFailMessage(() -> String.valueOf(archetype.label() + " gained unrestricted " + p.key() + " in a project "
                           + "they are not a member of. That is a widening: it was project-MANAGER-"
                           + "only and a workspace Owner with no project_members row was refused "
                           + "it. §18 calls a too-loose mapping the worse failure mode. For "
                           + "comment.delete specifically: moderation is a PROJECT admin's, and "
-                          + "deliberately not a workspace admin's (§10.3.5).";
+                          + "deliberately not a workspace admin's (§10.3.5)."))
+                        .isFalse();
             }
         }
     }
@@ -450,17 +467,20 @@ class BuiltInRoleSeedParityTest {
         seedFixture();
         var member = wsPermissions(actors.get(WS_MEMBER));
 
-        assert member.has(Permission.LABEL_MANAGE, true)
-                : "a workspace Member cannot rename a label they created. They could before "
+        assertThat(member.has(Permission.LABEL_MANAGE, true))
+                .withFailMessage("a workspace Member cannot rename a label they created. They could before "
                   + "HD-123 (LabelService.requireEditor short-circuited for the creator), so this "
-                  + "is a silent capability loss on upgrade — the §18 failure mode.";
-        assert !member.has(Permission.LABEL_MANAGE)
-                : "a workspace Member holds label.manage UNRESTRICTED. The grant must be own-only: "
-                  + "renaming someone else's label was ADMIN-only.";
-        assert !member.has(Permission.LABEL_MANAGE, false)
-                : "the curator sites (archive/unarchive/merge/delete) ask for the unrestricted "
+                  + "is a silent capability loss on upgrade — the §18 failure mode.")
+                .isTrue();
+        assertThat(member.has(Permission.LABEL_MANAGE))
+                .withFailMessage("a workspace Member holds label.manage UNRESTRICTED. The grant must be own-only: "
+                  + "renaming someone else's label was ADMIN-only.")
+                .isFalse();
+        assertThat(member.has(Permission.LABEL_MANAGE, false))
+                .withFailMessage("the curator sites (archive/unarchive/merge/delete) ask for the unrestricted "
                   + "grant with no ownership argument, and an own-only grant must never satisfy "
-                  + "one. If this fails, `own` has stopped meaning what §6.4 says it means.";
+                  + "one. If this fails, `own` has stopped meaning what §6.4 says it means.")
+                .isFalse();
     }
 
     /**
@@ -487,18 +507,20 @@ class BuiltInRoleSeedParityTest {
         seedFixture();
         var viewer = roleCatalog.view(BuiltInRoles.PROJECT_VIEWER).permissions();
 
-        assert viewer.isEmpty()
-                : "the built-in project Viewer grants " + viewer + ". It must grant NOTHING (§7.2): "
+        assertThat(viewer.isEmpty())
+                .withFailMessage("the built-in project Viewer grants " + viewer + ". It must grant NOTHING (§7.2): "
                   + "'read-only' is the one thing the legacy ladder could not express, and it is "
-                  + "why VIEWER changes meaning under this epic.";
+                  + "why VIEWER changes meaning under this epic.")
+                .isTrue();
         for (var p : List.of(Permission.ISSUE_EDIT, Permission.ISSUE_TRANSITION,
                 Permission.ISSUE_ASSIGNABLE, Permission.COMMENT_CREATE)) {
-            assert !viewer.hasAtAll(p) : "the built-in Viewer holds " + p.key();
+            assertThat(viewer.hasAtAll(p)).withFailMessage(() -> "the built-in Viewer holds " + p.key()).isFalse();
         }
         // Not even as an own-only grant: `own` narrows a grant, it does not create one.
-        assert !viewer.has(Permission.ISSUE_EDIT, true)
-                : "the built-in Viewer may edit its own issues — `own` is a qualifier on a grant "
-                  + "the role holds, never a grant of its own (§6.4).";
+        assertThat(viewer.has(Permission.ISSUE_EDIT, true))
+                .withFailMessage("the built-in Viewer may edit its own issues — `own` is a qualifier on a grant "
+                  + "the role holds, never a grant of its own (§6.4).")
+                .isFalse();
     }
 
     // ============================================================ the sites
@@ -921,11 +943,18 @@ class BuiltInRoleSeedParityTest {
      */
     private void requireSeedIdentity(RoleScope scope, String key) {
         var view = roleCatalog.view(BuiltInRoles.id(scope, key));
-        assert view.key().equals(key) && view.builtIn()
-                : "the archetype asks for the built-in " + scope + " role '" + key + "', but the "
+        assertThat(view.key())
+                .as(() -> "the archetype asks for the built-in " + scope + " role '" + key + "', but the "
                   + "row BuiltInRoles points at carries key '" + view.key() + "'. The constants and "
                   + "V13 have drifted, so this table's LEFT column is describing a different role "
-                  + "from the one it seeded — see RoleIdsMatchMigrationTest, which owns this rule.";
+                  + "from the one it seeded — see RoleIdsMatchMigrationTest, which owns this rule.")
+                .isEqualTo(key);
+        assertThat(view.builtIn())
+                .withFailMessage(() -> "the archetype asks for the built-in " + scope + " role '" + key + "', but the "
+                  + "row BuiltInRoles points at carries key '" + view.key() + "'. The constants and "
+                  + "V13 have drifted, so this table's LEFT column is describing a different role "
+                  + "from the one it seeded — see RoleIdsMatchMigrationTest, which owns this rule.")
+                .isTrue();
     }
 
     /** The archetype's role KEY — the identity half of the model, not its grants. */

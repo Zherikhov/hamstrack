@@ -31,6 +31,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -107,9 +108,10 @@ class AdminCatalogReplacementScopeTest {
                 .andExpect(status().isNotFound());
 
         assertNotRemapped(issue, ownStatus.getId(), "status");
-        assert statusRepository.findById(ownStatus.getId()).isPresent()
-                : "the status was deleted even though the replacement was refused — the delete "
-                  + "must not be partially applied";
+        assertThat(statusRepository.findById(ownStatus.getId()))
+                .as("the status was deleted even though the replacement was refused — the delete "
+                  + "must not be partially applied")
+                .isPresent();
     }
 
     @Test
@@ -127,8 +129,9 @@ class AdminCatalogReplacementScopeTest {
                 .andExpect(status().isNotFound());
 
         assertNotRemapped(issue, ownType.getId(), "type");
-        assert issueTypeRepository.findById(ownType.getId()).isPresent()
-                : "the issue type was deleted even though the replacement was refused";
+        assertThat(issueTypeRepository.findById(ownType.getId()))
+                .as("the issue type was deleted even though the replacement was refused")
+                .isPresent();
     }
 
     /**
@@ -152,8 +155,9 @@ class AdminCatalogReplacementScopeTest {
                 .andExpect(status().isNotFound());
 
         assertNotRemapped(issue, ownPriority.getId(), "priority");
-        assert priorityRepository.findById(ownPriority.getId()).isPresent()
-                : "the priority was deleted even though the replacement was refused";
+        assertThat(priorityRepository.findById(ownPriority.getId()))
+                .as("the priority was deleted even though the replacement was refused")
+                .isPresent();
     }
 
     /**
@@ -190,8 +194,9 @@ class AdminCatalogReplacementScopeTest {
                 .andExpect(status().isNotFound());
 
         assertNotRemapped(issue, globalStatus.getId(), "status");
-        assert statusRepository.findById(globalStatus.getId()).isPresent()
-                : "the global status was deleted even though the replacement was refused";
+        assertThat(statusRepository.findById(globalStatus.getId()))
+                .as("the global status was deleted even though the replacement was refused")
+                .isPresent();
 
         // Cleanup: this row is GLOBAL, so leaving it behind would be visible to every other test
         // on the instance. The delete above was refused in full, so it is still here.
@@ -219,10 +224,10 @@ class AdminCatalogReplacementScopeTest {
                 .andExpect(status().isNoContent());
 
         var after = issueRepository.findById(issue.getId()).orElseThrow();
-        assert after.getStatus().getId().equals(replacement.getId())
-                : "the issue was not remapped onto the replacement";
-        assert statusRepository.findById(ownStatus.getId()).isEmpty()
-                : "the deleted status is still present";
+        assertThat(after.getStatus().getId())
+                .as("the issue was not remapped onto the replacement")
+                .isEqualTo(replacement.getId());
+        assertThat(statusRepository.findById(ownStatus.getId())).as("the deleted status is still present").isEmpty();
     }
 
     // ================================================================ assertions
@@ -235,11 +240,12 @@ class AdminCatalogReplacementScopeTest {
             case "priority" -> after.getPriority().getId();
             default -> throw new IllegalArgumentException(what);
         };
-        assert expected.equals(actual)
-                : "the issue's " + what + " was remapped to " + actual + " even though the "
+        assertThat(actual)
+                .as("the issue's " + what + " was remapped to " + actual + " even though the "
                   + "replacement was refused. A refused request must not have written anything: "
                   + "the whole delete runs in one transaction, so a 404 that still remapped "
-                  + "would mean the rollback did not happen.";
+                  + "would mean the rollback did not happen.")
+                .isEqualTo(expected);
     }
 
     // ================================================================ the fixture

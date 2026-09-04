@@ -288,7 +288,7 @@ class SeedAdminSquatterRefusalTest {
         try (var conn = DriverManager.getConnection(URL, USER, PASSWORD);
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getString(1);
         }
     }

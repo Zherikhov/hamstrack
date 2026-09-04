@@ -15,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>The test {@link BuiltInRoles} says exists</strong> — "{@code
  * RoleIdsMatchMigrationTest} pins the two lists together so they cannot drift". It did not,
@@ -114,23 +116,27 @@ class RoleIdsMatchMigrationTest {
         for (var scoped : BuiltInRoles.all().entrySet()) {
             for (var entry : scoped.getValue().entrySet()) {
                 var view = roleCatalog.view(entry.getValue());
-                assert view.key().equals(entry.getKey())
-                        : "BuiltInRoles." + scoped.getKey() + "/" + entry.getKey() + " points at "
+                assertThat(view.key())
+                        .as(() -> "BuiltInRoles." + scoped.getKey() + "/" + entry.getKey() + " points at "
                           + entry.getValue() + ", whose key is '" + view.key() + "'. The constant "
                           + "and V13__roles.sql have drifted, so every membership assigned through "
-                          + "RoleCatalog.reference(...) now carries the WRONG role.";
-                assert view.scope() == scoped.getKey()
-                        : entry.getKey() + " is seeded at scope " + view.scope() + ", not "
+                          + "RoleCatalog.reference(...) now carries the WRONG role.")
+                        .isEqualTo(entry.getKey());
+                assertThat(view.scope())
+                        .as(() -> String.valueOf(entry.getKey() + " is seeded at scope " + view.scope() + ", not "
                           + scoped.getKey() + ". A workspace role reachable as a project role puts "
-                          + "workspace.edit into a ProjectContext (§12).";
-                assert view.builtIn()
-                        : entry.getKey() + " is not built_in. The legacy bridges refuse a custom "
+                          + "workspace.edit into a ProjectContext (§12)."))
+                        .isEqualTo(scoped.getKey());
+                assertThat(view.builtIn())
+                        .withFailMessage(() -> String.valueOf(entry.getKey() + " is not built_in. The legacy bridges refuse a custom "
                           + "role, so every isAtLeast(...) call site S2/S3 has not converted would "
-                          + "start throwing IllegalStateException.";
-                assert view.workspaceId() == null
-                        : entry.getKey() + " is owned by workspace " + view.workspaceId()
+                          + "start throwing IllegalStateException."))
+                        .isTrue();
+                assertThat(view.workspaceId())
+                        .as(() -> String.valueOf(entry.getKey() + " is owned by workspace " + view.workspaceId()
                           + ". A built-in template is shared by every install and every tenant; "
-                          + "an owned one is invisible to all the others.";
+                          + "an owned one is invisible to all the others."))
+                        .isNull();
             }
         }
     }
@@ -140,21 +146,23 @@ class RoleIdsMatchMigrationTest {
     void thereAreExactlyEightBuiltInRolesAndNothingElseIsGlobal() {
         var builtIns = ((Number) em.createNativeQuery(
                 "SELECT count(*) FROM roles WHERE built_in").getSingleResult()).longValue();
-        assert builtIns == 8
-                : "the install holds " + builtIns + " built-in roles, not the 8 this build ships "
+        assertThat(builtIns)
+                .as("the install holds " + builtIns + " built-in roles, not the 8 this build ships "
                   + "(§7's seven, plus V16's Team lead). A built-in is offered in every workspace "
                   + "of the instance and cannot be edited or deleted through the S4 editor, so "
                   + "seeding a ninth is a product decision — as the eighth was (HD-136: the "
                   + "adoption path has to have a role to grant, and granting Project admin for it "
-                  + "was an escalation).";
+                  + "was an escalation).")
+                .isEqualTo(8);
 
         var globalButCustom = ((Number) em.createNativeQuery(
                 "SELECT count(*) FROM roles WHERE workspace_id IS NULL AND NOT built_in")
                 .getSingleResult()).longValue();
-        assert globalButCustom == 0
-                : "a role belongs to no workspace and is not built_in. roles_builtin_ck is meant "
+        assertThat(globalButCustom)
+                .as("a role belongs to no workspace and is not built_in. roles_builtin_ck is meant "
                   + "to make that unrepresentable — such a row would be assignable in every "
-                  + "workspace and editable through the S4 editor (§11.4).";
+                  + "workspace and editable through the S4 editor (§11.4).")
+                .isEqualTo(0);
     }
 
     @Test
@@ -162,14 +170,15 @@ class RoleIdsMatchMigrationTest {
     void everyBuiltInGrantsExactlyTheSetSectionSevenDeclares() {
         for (var expected : EXPECTED_GRANTS.entrySet()) {
             var view = roleCatalog.view(expected.getKey());
-            assert view.permissions().asWireStrings().equals(expected.getValue())
-                    : "the built-in '" + view.key() + "' (" + view.name() + ") grants\n    "
+            assertThat(view.permissions().asWireStrings())
+                    .as(() -> "the built-in '" + view.key() + "' (" + view.name() + ") grants\n    "
                       + view.permissions().asWireStrings() + "\nbut §7 declares\n    "
                       + expected.getValue() + "\nA COUNT would not have seen this: the "
                       + "V15 migration test asserts how MANY grants each built-in has, and a swap "
                       + "keeps the count. Every entry here is a decision — an added one widens "
                       + "what that role may do in every install, a removed one silently takes an "
-                      + "ability away from everybody who holds it (§18).";
+                      + "ability away from everybody who holds it (§18).")
+                    .isEqualTo(expected.getValue());
         }
     }
 
@@ -185,23 +194,32 @@ class RoleIdsMatchMigrationTest {
     @Transactional
     void theRoleAPreUpgradeViewerIsMigratedToGrantsExactlyTodaysAbilities() {
         var migrated = roleCatalog.view(BuiltInRoles.PROJECT_MEMBER);
-        assert migrated.scope() == RoleScope.PROJECT && migrated.key().equals("MEMBER")
-                : "V14 rewrites every pre-upgrade VIEWER row to " + BuiltInRoles.PROJECT_MEMBER
+        assertThat(migrated.scope())
+                .as(() -> "V14 rewrites every pre-upgrade VIEWER row to " + BuiltInRoles.PROJECT_MEMBER
                   + ", which is supposed to be the project-scoped Contributor. It is now "
-                  + migrated.scope() + "/" + migrated.key() + ".";
-        assert migrated.permissions().asWireStrings().equals(CONTRIBUTOR)
-                : "the role a pre-upgrade VIEWER is migrated to grants "
+                  + migrated.scope() + "/" + migrated.key() + ".")
+                .isEqualTo(RoleScope.PROJECT);
+        assertThat(migrated.key())
+                .as(() -> "V14 rewrites every pre-upgrade VIEWER row to " + BuiltInRoles.PROJECT_MEMBER
+                  + ", which is supposed to be the project-scoped Contributor. It is now "
+                  + migrated.scope() + "/" + migrated.key() + ".")
+                .isEqualTo("MEMBER");
+        assertThat(migrated.permissions().asWireStrings())
+                .as(() -> "the role a pre-upgrade VIEWER is migrated to grants "
                   + migrated.permissions().asWireStrings() + ", not today's abilities. A legacy "
                   + "VIEWER row granted EVERYTHING (isAtLeast(VIEWER) is true for all three legacy "
                   + "roles), so anything narrower here takes abilities away from exactly the users "
-                  + "an admin marked read-only — the precise inversion of this epic's goal (§8.4).";
+                  + "an admin marked read-only — the precise inversion of this epic's goal (§8.4).")
+                .isEqualTo(CONTRIBUTOR);
 
-        assert roleCatalog.defaultProjectRole().id().equals(BuiltInRoles.PROJECT_MEMBER)
-                : "the fallback default project role is no longer Contributor. A member with no "
+        assertThat(roleCatalog.defaultProjectRole().id())
+                .as("the fallback default project role is no longer Contributor. A member with no "
                   + "project_members row — nearly every real user (§2.3) — inherits it, so this is "
-                  + "the single row that makes the upgrade a no-op for them.";
-        assert roleCatalog.view(BuiltInRoles.PROJECT_VIEWER).permissions().isEmpty()
-                : "the NEW Viewer must grant nothing — 'read-only' has to be expressible (§11.4), "
-                  + "and no existing row is ever migrated onto it";
+                  + "the single row that makes the upgrade a no-op for them.")
+                .isEqualTo(BuiltInRoles.PROJECT_MEMBER);
+        assertThat(roleCatalog.view(BuiltInRoles.PROJECT_VIEWER).permissions().isEmpty())
+                .withFailMessage("the NEW Viewer must grant nothing — 'read-only' has to be expressible (§11.4), "
+                  + "and no existing row is ever migrated onto it")
+                .isTrue();
     }
 }

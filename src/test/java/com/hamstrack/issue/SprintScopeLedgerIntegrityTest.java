@@ -30,6 +30,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -164,7 +165,7 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
     void eachTenantsSprintCarriesExactlyItsOwnLedger() throws Exception {
         var one = newProject();
         var two = newProject();          // a different user, a different workspace
-        assert !one.wsId().equals(two.wsId()) : "the fixture is not two tenants";
+        assertThat(one.wsId()).as("the fixture is not two tenants").isNotEqualTo(two.wsId());
 
         var sprintOne = startedSprint(one, "Sprint 1");
         var sprintTwo = startedSprint(two, "Sprint 1");
@@ -190,7 +191,8 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
                 "SELECT event, workspace_id FROM sprint_scope_events WHERE sprint_id = ? "
                 + "ORDER BY occurred_at, created_at", sprintId);
         var actual = rows.stream().map(r -> (String) r.get("event")).toList();
-        assert actual.equals(expected) : """
+        assertThat(actual)
+                .as(() -> """
                 Sprint %s's ledger is %s, expected %s.
 
                 Each tenant's doors were opened a known number of times, so this is an \
@@ -199,9 +201,11 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
                 constrain the workspace, not which sprint of it); too many means a door \
                 wrote twice; a different order means the arithmetic reads a different \
                 scope at every T in between. None of these has a symptom outside a \
-                chart.""".formatted(sprintId, actual, expected);
+                chart.""".formatted(sprintId, actual, expected))
+                .isEqualTo(expected);
         for (var row : rows) {
-            assert workspace.equals(row.get("workspace_id")) : """
+            assertThat(workspace)
+                    .as(() -> """
                     A scope event of sprint %s is filed under workspace %s, not %s.
 
                     Note this is NOT what enforces tenancy — the DATABASE does, via the \
@@ -210,7 +214,8 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
                     corroboration, and it is here because workspace_id is denormalised so \
                     a velocity sweep can filter by tenant WITHOUT joining through projects \
                     (idx_sprint_scope_events_ws).""".formatted(
-                            sprintId, row.get("workspace_id"), workspace);
+                            sprintId, row.get("workspace_id"), workspace))
+                    .isEqualTo(row.get("workspace_id"));
         }
     }
 
@@ -236,14 +241,18 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
         // refusals below are about the tenant mismatch and not about the statement.
         insertEvent(one.wsId(), sprintOne, issueOne);
 
-        assert refused(() -> insertEvent(one.wsId(), sprintTwo, issueOne)) : """
+        assertThat(refused(() -> insertEvent(one.wsId(), sprintTwo, issueOne)))
+                .withFailMessage("""
                 sprint_scope_events accepted a row whose sprint belongs to another \
                 workspace. sprint_scope_events_sprint_fk must be the COMPOSITE
-                (sprint_id, workspace_id) -> sprints (id, workspace_id).""";
-        assert refused(() -> insertEvent(one.wsId(), sprintOne, issueTwo)) : """
+                (sprint_id, workspace_id) -> sprints (id, workspace_id).""")
+                .isTrue();
+        assertThat(refused(() -> insertEvent(one.wsId(), sprintOne, issueTwo)))
+                .withFailMessage("""
                 sprint_scope_events accepted a row whose issue belongs to another \
                 workspace. sprint_scope_events_issue_fk must be the COMPOSITE
-                (issue_id, workspace_id) -> issues (id, workspace_id).""";
+                (issue_id, workspace_id) -> issues (id, workspace_id).""")
+                .isTrue();
     }
 
     private void insertEvent(UUID workspaceId, UUID sprintId, UUID issueId) {
@@ -295,22 +304,24 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
                 "{\"startAt\":\"" + iso(future) + "\",\"endAt\":\"" + iso(future.plusDays(14)) + "\"}")
                 .andExpect(status().isUnprocessableContent())
                 .andReturn().getResponse().getContentAsString();
-        assert refusal.contains("start it when it actually begins") : """
+        assertThat(refusal)
+                .as(() -> """
                 The refusal must name an action its reader can perform. They are holding a \
                 FUTURE sprint, so telling them to start it when it begins is reachable; \
                 "fix the date" is not, because the date they typed is exactly the one the \
-                server just rejected. Body was: %s""".formatted(refusal);
+                server just rejected. Body was: %s""".formatted(refusal))
+                .contains("start it when it actually begins");
 
         // Nothing half-applied — and the recovery the message promises really exists.
-        assert sprintNode(ctx, sprint).get("state").asText().equals("FUTURE")
-                : "a rejected start must leave the sprint planned";
-        assert eventsOf(sprint).isEmpty()
-                : "a rejected start must commit nothing: " + eventsOf(sprint);
+        assertThat(sprintNode(ctx, sprint).get("state").asText())
+                .as("a rejected start must leave the sprint planned")
+                .isEqualTo("FUTURE");
+        assertThat(eventsOf(sprint)).as(() -> "a rejected start must commit nothing: " + eventsOf(sprint)).isEmpty();
         patchSprint(ctx, ctx.token(), sprint, "{\"startAt\":\"" + iso(future) + "\","
                                               + "\"endAt\":\"" + iso(future.plusDays(14)) + "\"}")
                 .andExpect(status().isOk());
         startSprint(ctx, ctx.token(), sprint).andExpect(status().isOk());
-        assert eventsOf(sprint).size() == 2 : "starting it for real commits both members";
+        assertThat(eventsOf(sprint)).as("starting it for real commits both members").hasSize(2);
 
         // A client clock a couple of minutes fast is skew, not an intention: START_CLOCK_SKEW
         // exists so the most ordinary action in the feature does not 422 on an unsynced laptop.
@@ -331,26 +342,31 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
                 .andExpect(status().isOk());
 
         var persisted = OffsetDateTime.parse(sprintNode(ctx, next).get("startAt").asText());
-        assert !persisted.isAfter(OffsetDateTime.now(ZoneOffset.UTC)) : """
+        assertThat(persisted.isAfter(OffsetDateTime.now(ZoneOffset.UTC)))
+                .withFailMessage(() -> """
                 A start admitted inside START_CLOCK_SKEW persisted start_at = %s, which is \
                 still in the future. The tolerance is for a CLOCK: "a couple of minutes fast \
                 means now", not "a couple of minutes fast means a sprint that starts after \
                 its own commitment". Clamp the value you PERSIST, not only the one you \
-                stamp.""".formatted(persisted);
-        assert eventsOf(next).size() == 1
-                : "precondition: the fast-clock start committed its one member, else the "
-                  + "window check below is vacuous: " + eventsOf(next);
+                stamp.""".formatted(persisted))
+                .isFalse();
+        assertThat(eventsOf(next))
+                .as(() -> "precondition: the fast-clock start committed its one member, else the "
+                  + "window check below is vacuous: " + eventsOf(next))
+                .hasSize(1);
         Integer beforeItsOwnStart = jdbc.queryForObject("""
                 SELECT count(*) FROM sprint_scope_events e
                   JOIN sprints s ON s.id = e.sprint_id
                  WHERE e.sprint_id = ? AND e.occurred_at < s.start_at
                 """, Integer.class, next);
-        assert beforeItsOwnStart != null && beforeItsOwnStart == 0 : """
+        assertThat(beforeItsOwnStart != null && beforeItsOwnStart == 0)
+                .withFailMessage(() -> """
                 %d of this sprint's commitment rows are dated BEFORE its own start_at, so a \
                 burn-up windowed on occurred_at >= start_at reads a committed scope of 0 — \
                 all of it, not a bit of it. start_at and the commitment stamp must be the \
                 same instant for every door, including the one that was a minute \
-                fast.""".formatted(beforeItsOwnStart);
+                fast.""".formatted(beforeItsOwnStart))
+                .isTrue();
     }
 
     /**
@@ -380,11 +396,13 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
         Integer ahead = jdbc.queryForObject(
                 "SELECT count(*) FROM sprint_scope_events WHERE sprint_id = ? AND occurred_at > now()",
                 Integer.class, running);
-        assert ahead != null && ahead == 0 : """
+        assertThat(ahead != null && ahead == 0)
+                .withFailMessage(() -> """
                 %d scope events are dated in the FUTURE. SprintScopeLedger.recordCommitment \
                 must clamp its stamp to now regardless of what its caller passes: it is the \
                 single writer, and being correct only for the door that happens to call it \
-                today is exactly the property this class exists to refuse.""".formatted(ahead);
+                today is exactly the property this class exists to refuse.""".formatted(ahead))
+                .isTrue();
     }
 
     /**
@@ -478,55 +496,66 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
         // A DONE issue keeps its sprint_id through completion — that IS the delivery record.
         completeToBacklog(ctx, ctx.token(), closed).andExpect(status().isOk());
         var before = eventsOf(closed);
-        assert before.size() == 1 && "ADDED".equals(before.get(0).get("event"))
-                : "precondition: the delivered issue was recorded once: " + before;
+        assertThat(before).as("precondition: the delivered issue was recorded once: " + before).hasSize(1);
+        assertThat(before.get(0).get("event"))
+                .as("precondition: the delivered issue was recorded once: " + before)
+                .isEqualTo("ADDED");
         var key = (String) before.get(0).get("issue_key");
-        assert key != null && key.endsWith("-" + numberOf(delivered))
-                : "the row must snapshot the issue key, was " + key;
+        assertThat(key).as("the row must snapshot the issue key, was " + key).isNotNull();
+        assertThat(key).as("the row must snapshot the issue key, was " + key).endsWith("-" + numberOf(delivered));
 
         deleteIssue(ctx, numberOf(delivered));
 
         var after = eventsOf(closed);
-        assert after.size() == 1 : """
+        assertThat(after)
+                .as(() -> """
                 Deleting an issue changed a COMPLETED sprint's review record (%s). Either \
                 the row was cascaded away or a REMOVED was appended — both re-draw a \
                 delivered fact, and appending one hands the actor requireDetachable \
-                refuses (422) exactly the effect it refuses.""".formatted(after);
-        assert "ADDED".equals(after.get(0).get("event")) : "the surviving row must be the ADDED: " + after;
-        assert after.get(0).get("issue_id") == null
-                : "issue_id must be NULL, not dangling: " + after;
-        assert key.equals(after.get(0).get("issue_key"))
-                : "the snapshot is what makes the surviving row readable: " + after;
-        assert after.get(0).get("story_points") != null
-                : "the estimate at the moment of the event must survive too: " + after;
-        assert scopeOf(closed) == 1
-                : "the completed sprint's scope must keep the step the deleted issue caused";
+                refuses (422) exactly the effect it refuses.""".formatted(after))
+                .hasSize(1);
+        assertThat(after.get(0).get("event")).as("the surviving row must be the ADDED: " + after).isEqualTo("ADDED");
+        assertThat(after.get(0).get("issue_id")).as("issue_id must be NULL, not dangling: " + after).isNull();
+        assertThat(key)
+                .as("the snapshot is what makes the surviving row readable: " + after)
+                .isEqualTo(after.get(0).get("issue_key"));
+        assertThat(after.get(0).get("story_points"))
+                .as("the estimate at the moment of the event must survive too: " + after)
+                .isNotNull();
+        assertThat(scopeOf(closed))
+                .as("the completed sprint's scope must keep the step the deleted issue caused")
+                .isEqualTo(1);
 
         // ---- 2) ACTIVE: nothing is frozen, so the scope must come back down. ----
         var running = startedSprint(ctx, "Sprint 2");
         var inFlight = createIssue(ctx, "in flight, then deleted", "\"storyPoints\":3");
         addIssuesToSprint(ctx, ctx.token(), running, idOf(inFlight)).andExpect(status().isOk());
-        assert scopeOf(running) == 1 : "precondition: the add raised the scope to 1";
+        assertThat(scopeOf(running)).as("precondition: the add raised the scope to 1").isEqualTo(1);
 
         deleteIssue(ctx, numberOf(inFlight));
 
         var live = eventsOf(running);
-        assert live.stream().map(e -> e.get("event")).toList().equals(List.of("ADDED", "REMOVED")) : """
+        assertThat(live.stream().map(e -> e.get("event")).toList())
+                .as(() -> """
                 Deleting an issue out of a RUNNING sprint recorded %s. requireDetachable \
                 PERMITS this removal through the API, so there is no frozen record to \
                 protect — and with no REMOVED the sprint's scope line never comes back \
                 down: the burn-up keeps counting work that no longer exists, with no \
                 error and nothing anywhere for a user to see.""".formatted(
-                        live.stream().map(e -> e.get("event")).toList());
-        assert scopeOf(running) == 0 : """
+                        live.stream().map(e -> e.get("event")).toList()))
+                .isEqualTo(List.of("ADDED", "REMOVED"));
+        assertThat(scopeOf(running))
+                .as(() -> """
                 The running sprint's scope is still %d after its only issue was deleted. \
                 ADDED minus REMOVED has to come back out even, exactly as it does when the \
                 issue is removed through DELETE /sprints/{id}/issues/{issueId}.""".formatted(
-                        scopeOf(running));
+                        scopeOf(running)))
+                .isEqualTo(0);
         for (var row : live) {
-            assert row.get("issue_id") == null : "issue_id must be NULL, not dangling: " + live;
-            assert key(row).endsWith("-" + numberOf(inFlight))
-                    : "both rows must stay readable by their snapshotted key: " + live;
+            assertThat(row.get("issue_id")).as("issue_id must be NULL, not dangling: " + live).isNull();
+            assertThat(key(row))
+                    .as("both rows must stay readable by their snapshotted key: " + live)
+                    .endsWith("-" + numberOf(inFlight));
         }
     }
 
@@ -604,22 +633,27 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
 
         completeToBacklog(ctx, ctx.token(), running).andExpect(status().isOk());
 
-        assert !Interleaving.HOOKS.containsKey("moveUnfinishedOutOfSprint")
-                : "the interleaving never happened — this test proved nothing";
-        assert sprintIdOf(idOf(latecomer)) == null
-                : "precondition: the completion did carry the latecomer out of the sprint";
-        assert carryOverHistory(idOf(latecomer)) == 1 : """
+        assertThat(Interleaving.HOOKS)
+                .as("the interleaving never happened — this test proved nothing")
+                .doesNotContainKey("moveUnfinishedOutOfSprint");
+        assertThat(sprintIdOf(idOf(latecomer)))
+                .as("precondition: the completion did carry the latecomer out of the sprint")
+                .isNull();
+        assertThat(carryOverHistory(idOf(latecomer)))
+                .as("""
                 The completion moved the late issue out of the sprint and wrote NO history \
                 row for it — after this request nothing records that it was ever in the \
                 sprint (security review L2). The write-list must come from the UPDATE's own \
-                RETURNING, not from a SELECT taken before it.""";
-        assert netScopeOf(running, idOf(latecomer)) == 0 : """
+                RETURNING, not from a SELECT taken before it.""")
+                .isEqualTo(1);
+        assertThat(netScopeOf(running, idOf(latecomer)))
+                .as("""
                 The late issue is still counted in the completed sprint's scope (net %d) \
                 while its sprint_id points at the backlog. An ADDED with no matching \
                 REMOVED is a burn-up that never comes back down.""".formatted(
-                        netScopeOf(running, idOf(latecomer)));
-        assert netScopeOf(running, idOf(present)) == 0
-                : "the ordinary member must still net out too";
+                        netScopeOf(running, idOf(latecomer))))
+                .isEqualTo(0);
+        assertThat(netScopeOf(running, idOf(present))).as("the ordinary member must still net out too").isEqualTo(0);
     }
 
     /**
@@ -645,13 +679,16 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
 
         deleteSprint(ctx, ctx.token(), planned, true).andExpect(status().isNoContent());
 
-        assert !Interleaving.HOOKS.containsKey("clearSprint")
-                : "the interleaving never happened — this test proved nothing";
-        assert sprintIdOf(idOf(latecomer)) == null : "precondition: the force-delete detached it";
-        assert carryOverHistory(idOf(latecomer)) == 1 : """
+        assertThat(Interleaving.HOOKS)
+                .as("the interleaving never happened — this test proved nothing")
+                .doesNotContainKey("clearSprint");
+        assertThat(sprintIdOf(idOf(latecomer))).as("precondition: the force-delete detached it").isNull();
+        assertThat(carryOverHistory(idOf(latecomer)))
+                .as("""
                 The force-delete detached the late issue and wrote no history row for it. \
                 The sprint is gone, so that row was the last thing that could ever say the \
-                issue had been in it (security review L2).""";
+                issue had been in it (security review L2).""")
+                .isEqualTo(1);
     }
 
     // ============================================================ plumbing
@@ -673,7 +710,7 @@ class SprintScopeLedgerIntegrityTest extends SprintTestBase {
             Thread.currentThread().interrupt();
             throw new AssertionError("interrupted waiting for the concurrent request", e);
         }
-        assert !thread.isAlive() : "the concurrent request never finished — deadlock?";
+        assertThat(thread.isAlive()).withFailMessage("the concurrent request never finished — deadlock?").isFalse();
         if (failure.get() != null) {
             throw new AssertionError("the concurrent request failed", failure.get());
         }

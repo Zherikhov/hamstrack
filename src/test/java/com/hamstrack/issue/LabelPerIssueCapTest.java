@@ -6,6 +6,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -42,13 +43,14 @@ class LabelPerIssueCapTest extends LabelTestBase {
                 .andExpect(jsonPath("$.detail", containsString("At most 2 labels per issue")));
 
         var issue = createIssue(ctx, "two labels", labelIdsJson(a, b));
-        assert labelNames(issue).equals(List.of("a", "b")) : "exactly at the cap is fine";
+        assertThat(labelNames(issue)).as("exactly at the cap is fine").isEqualTo(List.of("a", "b"));
 
         patchIssue(ctx, ctx.token(), issue.get("number").asLong(), "{" + labelIdsJson(a, b, c) + "}")
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("At most 2 labels per issue")));
-        assert labelNames(getIssue(ctx, issue.get("number").asLong())).equals(List.of("a", "b"))
-                : "the rejected PATCH must not have partially applied";
+        assertThat(labelNames(getIssue(ctx, issue.get("number").asLong())))
+                .as("the rejected PATCH must not have partially applied")
+                .isEqualTo(List.of("a", "b"));
 
         // De-duplication happens BEFORE the cap check: 3 ids that are really 2 pass.
         patchIssue(ctx, ctx.token(), issue.get("number").asLong(), "{" + labelIdsJson(a, b, b) + "}")
@@ -69,6 +71,8 @@ class LabelPerIssueCapTest extends LabelTestBase {
                 .andExpect(jsonPath("$.detail", containsString("At most 2 labelId filter values")));
 
         // at the cap it still works
-        assert board(ctx, "?labelId=" + a + "&labelId=" + b).get("issues").size() == 0;
+        assertThat(board(ctx, "?labelId=" + a + "&labelId=" + b).get("issues"))
+                .as("at the cap the filter still runs, so the refusal above is the cap and not a broken endpoint")
+                .isEmpty();
     }
 }

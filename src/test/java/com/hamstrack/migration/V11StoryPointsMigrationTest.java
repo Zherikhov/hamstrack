@@ -11,6 +11,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * {@code V11__sprints.sql} §3.4 — the story-point promotion, replayed against a REAL
  * pre-V11 database.
@@ -78,54 +80,64 @@ class V11StoryPointsMigrationTest {
 
                 // === 1) a numeric value is promoted AND its legacy row is gone ==========
                 assertPoints(conn, ids.numeric(), new BigDecimal("5.00"));
-                assert legacyRows(conn, ids.numeric()) == 0
-                        : "the migrated story-point value was left behind — the same estimate now "
-                          + "renders twice on that issue (natively and as a legacy field value)";
+                assertThat(legacyRows(conn, ids.numeric()))
+                        .as("the migrated story-point value was left behind — the same estimate now "
+                          + "renders twice on that issue (natively and as a legacy field value)")
+                        .isEqualTo(0);
 
                 // …including the values only the clamp/round make representable:
                 // LEAST/GREATEST clamp to the column's 0…999 domain, round() to its scale.
                 assertPoints(conn, ids.oversized(), new BigDecimal("999.00"));
-                assert legacyRows(conn, ids.oversized()) == 0 : "a clamped value kept its legacy row";
+                assertThat(legacyRows(conn, ids.oversized())).as("a clamped value kept its legacy row").isEqualTo(0);
                 assertPoints(conn, ids.overPrecise(), new BigDecimal("1.24"));
-                assert legacyRows(conn, ids.overPrecise()) == 0 : "a rounded value kept its legacy row";
+                assertThat(legacyRows(conn, ids.overPrecise())).as("a rounded value kept its legacy row").isEqualTo(0);
 
                 // === 2) a value the backfill SKIPPED survives untouched ================
                 // jsonb_typeof(value) <> 'number' — a string estimate left by an older
                 // client. It could not be copied, so it must not be deleted, and the
                 // native column must stay NULL rather than guess.
-                assert pointsOf(conn, ids.stringValued()) == null
-                        : "a non-numeric legacy value was coerced into the native column";
-                assert legacyRows(conn, ids.stringValued()) == 1
-                        : "a value the backfill could NOT migrate was deleted anyway — that row is "
-                          + "the only remaining copy of the data";
-                assert pointsOf(conn, ids.nullValued()) == null : "a JSON null became a number";
-                assert legacyRows(conn, ids.nullValued()) == 1 : "a JSON-null value row was deleted";
+                assertThat(pointsOf(conn, ids.stringValued()))
+                        .as("a non-numeric legacy value was coerced into the native column")
+                        .isNull();
+                assertThat(legacyRows(conn, ids.stringValued()))
+                        .as("a value the backfill could NOT migrate was deleted anyway — that row is "
+                          + "the only remaining copy of the data")
+                        .isEqualTo(1);
+                assertThat(pointsOf(conn, ids.nullValued())).as("a JSON null became a number").isNull();
+                assertThat(legacyRows(conn, ids.nullValued())).as("a JSON-null value row was deleted").isEqualTo(1);
 
                 // === 3) only the GLOBAL system field is the source =====================
                 // A workspace-scoped field that reuses the key is a different field: its
                 // values are neither promoted nor deleted.
-                assert pointsOf(conn, ids.workspaceScoped()) == null
-                        : "a workspace-scoped field that merely reuses the `story_points` key "
-                          + "was swallowed into the native column";
-                assert legacyRows(conn, ids.workspaceScoped()) == 1
-                        : "a workspace-scoped field's value was deleted by the global backfill";
+                assertThat(pointsOf(conn, ids.workspaceScoped()))
+                        .as("a workspace-scoped field that merely reuses the `story_points` key "
+                          + "was swallowed into the native column")
+                        .isNull();
+                assertThat(legacyRows(conn, ids.workspaceScoped()))
+                        .as("a workspace-scoped field's value was deleted by the global backfill")
+                        .isEqualTo(1);
 
                 // === 4) the placeholders are ARCHIVED, never deleted ===================
-                assert archivedAt(conn, "story_points") != null
-                        : "the global story_points placeholder must be archived, not left live";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".field_defs"
-                        + " WHERE key = 'story_points'") == 2
-                        : "a field def was DELETED — V11 archives placeholders, it never drops them";
-                assert archivedAt(conn, "sprint") != null
-                        : "the never-usable `sprint` SELECT placeholder must be archived too";
+                assertThat(archivedAt(conn, "story_points"))
+                        .as("the global story_points placeholder must be archived, not left live")
+                        .isNotNull();
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".field_defs"
+                        + " WHERE key = 'story_points'"))
+                        .as("a field def was DELETED — V11 archives placeholders, it never drops them")
+                        .isEqualTo(2);
+                assertThat(archivedAt(conn, "sprint"))
+                        .as("the never-usable `sprint` SELECT placeholder must be archived too")
+                        .isNotNull();
 
                 // === 5) the rank rescale ==============================================
                 // Positions were 1..N with zero room between neighbours; V11 multiplies
                 // them by RANK_STEP so every pair has ~26 midpoints of headroom.
-                assert positionOf(conn, ids.numeric()) == RANK_STEP
-                        : "V11 did not rescale issues.position by RANK_STEP";
-                assert positionOf(conn, ids.stringValued()) == 4 * RANK_STEP
-                        : "the position rescale did not preserve the order";
+                assertThat(positionOf(conn, ids.numeric()))
+                        .as("V11 did not rescale issues.position by RANK_STEP")
+                        .isEqualTo(RANK_STEP);
+                assertThat(positionOf(conn, ids.stringValued()))
+                        .as("the position rescale did not preserve the order")
+                        .isEqualTo(4 * RANK_STEP);
             } finally {
                 dropSchema(conn);
             }
@@ -228,15 +240,17 @@ class V11StoryPointsMigrationTest {
 
     private void assertPoints(Connection conn, UUID issue, BigDecimal expected) throws SQLException {
         var actual = pointsOf(conn, issue);
-        assert actual != null && actual.compareTo(expected) == 0
-                : "story_points for issue " + issue + " is " + actual + ", expected " + expected;
+        assertThat(actual).as("story_points for issue " + issue + " is " + actual + ", expected " + expected).isNotNull();
+        assertThat(actual.compareTo(expected))
+                .as("story_points for issue " + issue + " is " + actual + ", expected " + expected)
+                .isEqualTo(0);
     }
 
     private BigDecimal pointsOf(Connection conn, UUID issue) throws SQLException {
         try (var st = conn.createStatement();
              var rs = st.executeQuery(
                      "SELECT story_points FROM " + SCHEMA + ".issues WHERE id = '" + issue + "'")) {
-            assert rs.next() : "issue row vanished: " + issue;
+            assertThat(rs.next()).withFailMessage("issue row vanished: " + issue).isTrue();
             return rs.getBigDecimal(1);
         }
     }
@@ -257,7 +271,7 @@ class V11StoryPointsMigrationTest {
              var rs = st.executeQuery("SELECT archived_at FROM " + SCHEMA + ".field_defs"
                      + " WHERE key = '" + key + "'"
                      + " AND scope_workspace_id IS NULL AND scope_project_id IS NULL")) {
-            assert rs.next() : "the " + key + " placeholder field def is gone entirely";
+            assertThat(rs.next()).withFailMessage("the " + key + " placeholder field def is gone entirely").isTrue();
             return rs.getObject(1);
         }
     }
@@ -286,14 +300,14 @@ class V11StoryPointsMigrationTest {
 
     private static UUID single(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return (UUID) rs.getObject(1);
         }
     }
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

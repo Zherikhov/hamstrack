@@ -13,6 +13,7 @@ import org.springframework.http.MediaType;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -81,8 +82,8 @@ class LabelTenancyTest extends LabelTestBase {
 
         // B's label survived every attempt, under its original name.
         var bList = listLabels(b, b.token(), null);
-        assert bList.size() == 1 && bList.get(0).get("name").asText().equals("b-only")
-                : "B's label must be untouched, got " + bList;
+        assertThat(bList).as("B's label must be untouched, got " + bList).hasSize(1);
+        assertThat(bList.get(0).get("name").asText()).as("B's label must be untouched, got " + bList).isEqualTo("b-only");
     }
 
     @Test
@@ -93,11 +94,15 @@ class LabelTenancyTest extends LabelTestBase {
         createLabel(b, "beta");
 
         var aList = listLabels(a, a.token(), "?includeArchived=true&withUsage=true");
-        assert aList.size() == 1 && aList.get(0).get("name").asText().equals("alpha")
-                : "A's list must contain only A's labels, got " + aList;
+        assertThat(aList).as("A's list must contain only A's labels, got " + aList).hasSize(1);
+        assertThat(aList.get(0).get("name").asText())
+                .as("A's list must contain only A's labels, got " + aList)
+                .isEqualTo("alpha");
         var bList = listLabels(b, b.token(), "?includeArchived=true&withUsage=true");
-        assert bList.size() == 1 && bList.get(0).get("name").asText().equals("beta")
-                : "B's list must contain only B's labels, got " + bList;
+        assertThat(bList).as("B's list must contain only B's labels, got " + bList).hasSize(1);
+        assertThat(bList.get(0).get("name").asText())
+                .as("B's list must contain only B's labels, got " + bList)
+                .isEqualTo("beta");
     }
 
     // ==================================================== (b) non-member → 404 never 403
@@ -129,7 +134,7 @@ class LabelTenancyTest extends LabelTestBase {
         expect404(get(base + "/" + labelId + "/usage"), outsider);
 
         // The label is still there for its real owner — nothing above half-succeeded.
-        assert listLabels(a, a.token(), null).size() == 1 : "owner's catalog must be intact";
+        assertThat(listLabels(a, a.token(), null)).as("owner's catalog must be intact").hasSize(1);
     }
 
     /**
@@ -155,7 +160,9 @@ class LabelTenancyTest extends LabelTestBase {
 
         // B's label is in use on a B issue — the row that must survive.
         var bIssue = createIssue(b, "b issue", labelIdsJson(foreignSource));
-        assert labelNames(bIssue).equals(java.util.List.of("theirs"));
+        assertThat(labelNames(bIssue))
+                .as("B's label is still on B's issue — the refused merge reassigned nothing across the tenant boundary")
+                .isEqualTo(java.util.List.of("theirs"));
 
         mergeLabels(a, a.token(), target, mineSource, foreignSource)
                 .andExpect(status().isUnprocessableContent())
@@ -164,16 +171,20 @@ class LabelTenancyTest extends LabelTestBase {
 
         // Nothing in B moved: the label still exists, still non-archived, still attached.
         var bLabels = listLabels(b, b.token(), "?withUsage=true");
-        assert bLabels.size() == 1 && bLabels.get(0).get("name").asText().equals("theirs")
-                : "B's label must survive a cross-tenant merge attempt";
-        assert bLabels.get(0).get("issueCount").asInt() == 1
-                : "B's attachment must survive, got " + bLabels.get(0);
-        assert labelNames(getIssue(b, bIssue.get("number").asLong())).equals(java.util.List.of("theirs"))
-                : "B's issue must still carry its label";
+        assertThat(bLabels).as("B's label must survive a cross-tenant merge attempt").hasSize(1);
+        assertThat(bLabels.get(0).get("name").asText())
+                .as("B's label must survive a cross-tenant merge attempt")
+                .isEqualTo("theirs");
+        assertThat(bLabels.get(0).get("issueCount").asInt())
+                .as(() -> "B's attachment must survive, got " + bLabels.get(0))
+                .isEqualTo(1);
+        assertThat(labelNames(getIssue(b, bIssue.get("number").asLong())))
+                .as("B's issue must still carry its label")
+                .isEqualTo(java.util.List.of("theirs"));
 
         // And A's own source was NOT merged either — the whole request was rejected.
         var aLabels = listLabels(a, a.token(), null);
-        assert aLabels.size() == 2 : "A's catalog must be unchanged (atomic rejection), got " + aLabels;
+        assertThat(aLabels).as("A's catalog must be unchanged (atomic rejection), got " + aLabels).hasSize(2);
     }
 
     @Test
@@ -186,7 +197,7 @@ class LabelTenancyTest extends LabelTestBase {
         // Same shape, mirrored: B tries to swallow A's label. 422, not 404/200.
         mergeLabels(b, b.token(), bTarget, aLabel)
                 .andExpect(status().isUnprocessableContent());
-        assert listLabels(a, a.token(), null).size() == 1 : "A's label must survive";
+        assertThat(listLabels(a, a.token(), null)).as("A's label must survive").hasSize(1);
     }
 
     // ==================================================== (d) foreign labelIds on an issue
@@ -207,14 +218,16 @@ class LabelTenancyTest extends LabelTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", org.hamcrest.Matchers.containsString("Unknown label")));
 
-        assert labelNames(getIssue(a, issue.get("number").asLong())).isEmpty()
-                : "the rejected PATCH must not have attached anything";
+        assertThat(labelNames(getIssue(a, issue.get("number").asLong())))
+                .as("the rejected PATCH must not have attached anything")
+                .isEmpty();
         // Mixing a valid local id with a foreign one still rejects the WHOLE payload.
         var local = createLabel(a, "local");
         patchIssue(a, a.token(), issue.get("number").asLong(), "{" + labelIdsJson(local, foreign) + "}")
                 .andExpect(status().isUnprocessableContent());
-        assert labelNames(getIssue(a, issue.get("number").asLong())).isEmpty()
-                : "a partially-foreign set must attach nothing at all";
+        assertThat(labelNames(getIssue(a, issue.get("number").asLong())))
+                .as("a partially-foreign set must attach nothing at all")
+                .isEmpty();
     }
 
     // ==================================================== (e) foreign labelId filter
@@ -231,13 +244,16 @@ class LabelTenancyTest extends LabelTestBase {
 
         // A foreign id is just an id that matches nothing here — 200 + empty.
         var filtered = board(a, "?labelId=" + foreign);
-        assert filtered.get("issues").size() == 0
-                : "a foreign labelId must match nothing, got " + filtered.get("issues");
+        assertThat(filtered.get("issues"))
+                .as(() -> "a foreign labelId must match nothing, got " + filtered.get("issues"))
+                .isEmpty();
         // …and never widens: mixing it with a local id still only yields local matches.
         var mixed = board(a, "?labelId=" + foreign + "&labelId=" + mine);
-        assert titles(mixed).equals(java.util.Set.of("labelled")) : "got " + titles(mixed);
+        assertThat(titles(mixed)).as("got " + titles(mixed)).isEqualTo(java.util.Set.of("labelled"));
         // A never-existed id behaves identically.
-        assert board(a, "?labelId=" + UUID.randomUUID()).get("issues").size() == 0;
+        assertThat(board(a, "?labelId=" + UUID.randomUUID()).get("issues"))
+                .as("a never-existed labelId behaves identically to a foreign one: empty, not an error and not a leak")
+                .isEmpty();
     }
 
     // ==================================================== DB-level composite-FK guard
@@ -296,6 +312,8 @@ class LabelTenancyTest extends LabelTestBase {
         row.setWorkspace(workspaceRepository.findById(a.wsId()).orElseThrow());
         issueLabelRepository.saveAndFlush(row);
 
-        assert labelNames(getIssue(a, issue.getNumber())).equals(java.util.List.of("ok"));
+        assertThat(labelNames(getIssue(a, issue.getNumber())))
+                .as("a same-tenant join row persists and reads back — the guard refuses foreigners, not neighbours")
+                .isEqualTo(java.util.List.of("ok"));
     }
 }

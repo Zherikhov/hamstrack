@@ -10,6 +10,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -69,7 +70,9 @@ class ComponentAuthzTest extends ComponentTestBase {
         expect404(get(base + "/" + componentId + "/usage"), outsider);
 
         // Nothing half-succeeded: the catalog is intact for its real curator.
-        assert names(listComponents(ctx, ctx.token(), null)).equals(java.util.List.of("billing"));
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("nothing half-succeeded: the catalog is intact for its real curator")
+                .isEqualTo(java.util.List.of("billing"));
     }
 
     /**
@@ -97,7 +100,9 @@ class ComponentAuthzTest extends ComponentTestBase {
                 .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"hijack\"}"), adminOfA.token());
 
         // B's catalog is untouched, under its original name.
-        assert names(listComponents(b, b.token(), null)).equals(java.util.List.of("b-only"));
+        assertThat(names(listComponents(b, b.token(), null)))
+                .as("B's catalog is untouched, under its original name")
+                .isEqualTo(java.util.List.of("b-only"));
     }
 
     // ==================================================== 403 — inside, but not a curator
@@ -133,7 +138,9 @@ class ComponentAuthzTest extends ComponentTestBase {
             deleteComponent(ctx, actor.token(), componentId, true).andExpect(status().isForbidden());
         }
         // …and none of the refusals mutated anything.
-        assert names(listComponents(ctx, ctx.token(), null)).equals(java.util.List.of("billing"));
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("none of the refusals mutated anything")
+                .isEqualTo(java.util.List.of("billing"));
     }
 
     /** Reads are open to any project member — the 403 above is about WRITES only. */
@@ -145,7 +152,9 @@ class ComponentAuthzTest extends ComponentTestBase {
         var noProjectRole = actorWith(ctx, "MEMBER", null);
 
         for (var actor : java.util.List.of(viewer, noProjectRole)) {
-            assert names(listComponents(ctx, actor.token(), null)).equals(java.util.List.of("billing"));
+            assertThat(names(listComponents(ctx, actor.token(), null)))
+                    .as("a plain project member can still READ the catalog — the gate is on the writes")
+                    .isEqualTo(java.util.List.of("billing"));
             getComponent(ctx, actor.token(), componentId).andExpect(status().isOk());
             componentUsage(ctx, actor.token(), componentId).andExpect(status().isOk());
         }
@@ -213,17 +222,19 @@ class ComponentAuthzTest extends ComponentTestBase {
 
         for (var role : java.util.List.of("OWNER", "ADMIN")) {
             var permissions = roleCatalog.builtIn(RoleScope.WORKSPACE, role).permissions();
-            assert permissions.has(Permission.PROJECT_CURATE_ALL)
-                    : "the built-in workspace " + role + " lost project.curate.all — that IS the "
-                      + "workspace-admin bypass the 2xx rows above assert.";
+            assertThat(permissions.has(Permission.PROJECT_CURATE_ALL))
+                    .withFailMessage("the built-in workspace " + role + " lost project.curate.all — that IS the "
+                      + "workspace-admin bypass the 2xx rows above assert.")
+                    .isTrue();
         }
-        assert !wsMember.has(Permission.PROJECT_CURATE_ALL)
-                : "the built-in workspace Member gained the curator bypass, so the 403 rows above "
-                  + "are now testing nothing.";
+        assertThat(wsMember.has(Permission.PROJECT_CURATE_ALL))
+                .withFailMessage("the built-in workspace Member gained the curator bypass, so the 403 rows above "
+                  + "are now testing nothing.")
+                .isFalse();
         for (var p : Permission.projectCuration()) {
-            assert projectAdmin.has(p) : "the built-in Project admin lost " + p.key();
-            assert !contributor.has(p) : "the built-in Contributor gained " + p.key();
-            assert !viewer.has(p) : "the built-in Viewer gained " + p.key();
+            assertThat(projectAdmin.has(p)).withFailMessage(() -> "the built-in Project admin lost " + p.key()).isTrue();
+            assertThat(contributor.has(p)).withFailMessage(() -> "the built-in Contributor gained " + p.key()).isFalse();
+            assertThat(viewer.has(p)).withFailMessage(() -> "the built-in Viewer gained " + p.key()).isFalse();
         }
     }
 

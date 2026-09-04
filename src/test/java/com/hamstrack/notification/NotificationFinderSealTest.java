@@ -16,6 +16,8 @@ import java.util.Arrays;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>HD-135 AC-8 — the finder set on {@code notifications} is sealed.</strong>
  *
@@ -110,7 +112,7 @@ class NotificationFinderSealTest {
                 offenders.add(m.getName() + " (missing: " + missing + ")");
             }
         }
-        assert offenders.isEmpty() : CHECKLIST + offenders;
+        assertThat(offenders).as("%s", CHECKLIST + offenders).isEmpty();
     }
 
     /**
@@ -131,8 +133,8 @@ class NotificationFinderSealTest {
     @Test
     void theRepositoryInheritsNoFindersAtAll() {
         var supertypes = NotificationRepository.class.getInterfaces();
-        assert supertypes.length == 1 && supertypes[0] == Repository.class
-                : """
+        assertThat(supertypes.length == 1 && supertypes[0] == Repository.class)
+                .withFailMessage(() -> """
                 NotificationRepository now extends %s. Spring Data's marker interface \
                 `Repository` is the only supertype allowed here: every other one — \
                 JpaRepository, CrudRepository, ListCrudRepository, PagingAndSortingRepository, \
@@ -141,7 +143,8 @@ class NotificationFinderSealTest {
                 contract is that no unfiltered finder exists. Re-declare the handful of methods \
                 actually needed (Spring Data's "selectively expose CRUD methods" pattern, as \
                 RoleRepository does) instead of inheriting twenty that are not.\
-                """.formatted(Arrays.toString(supertypes));
+                """.formatted(Arrays.toString(supertypes)))
+                .isTrue();
     }
 
     // ================================================================ the table, not the interface
@@ -188,13 +191,15 @@ class NotificationFinderSealTest {
                 }
             }
         }
-        assert offenders.isEmpty() : """
+        assertThat(offenders)
+                .as("""
                 A query outside NotificationRepository names the notifications table. Every read \
                 of that table has to carry the membership predicate — the title and body are \
                 denormalised copies of workspace content, so a row that reaches a caller has \
                 already disclosed and nothing downstream can redact it. Move the query into \
                 NotificationRepository (concatenating VISIBLE), where NotificationFinderSealTest \
                 checks it, or state in the same diff why this one is exempt. Found: """
-                + offenders;
+                + offenders)
+                .isEmpty();
     }
 }

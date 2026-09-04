@@ -9,6 +9,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import java.util.ArrayList;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -62,37 +63,44 @@ class SprintCompletionTest extends SprintTestBase {
         var preview = json.readTree(completionPreview(ctx, ctx.token(), sprintId)
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert preview.get("totalIssueCount").asInt() == 4 : preview;
-        assert preview.get("doneIssueCount").asInt() == 2 : preview;
-        assert preview.get("unfinishedIssueCount").asInt() == 2 : preview;
-        assert preview.get("totalPoints").asDouble() == 10.0 : preview;
-        assert preview.get("donePoints").asDouble() == 8.0 : preview;
-        assert preview.get("unfinishedPoints").asDouble() == 2.0 : preview;
-        assert preview.get("targetCandidates").isEmpty() : "no FUTURE sprint exists yet: " + preview;
+        assertThat(preview.get("totalIssueCount").asInt()).as("%s", preview).isEqualTo(4);
+        assertThat(preview.get("doneIssueCount").asInt()).as("%s", preview).isEqualTo(2);
+        assertThat(preview.get("unfinishedIssueCount").asInt()).as("%s", preview).isEqualTo(2);
+        assertThat(preview.get("totalPoints").asDouble()).as("%s", preview).isEqualTo(10.0);
+        assertThat(preview.get("donePoints").asDouble()).as("%s", preview).isEqualTo(8.0);
+        assertThat(preview.get("unfinishedPoints").asDouble()).as("%s", preview).isEqualTo(2.0);
+        assertThat(preview.get("targetCandidates")).as("no FUTURE sprint exists yet: " + preview).isEmpty();
 
         // ---- and the result reports exactly the same ----
         var result = json.readTree(completeToBacklog(ctx, ctx.token(), sprintId)
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert result.get("completedIssueCount").asInt() == 2 : result;
-        assert result.get("carriedOverIssueCount").asInt() == 2 : result;
-        assert result.get("donePoints").asDouble() == 8.0 : result;
-        assert result.get("carriedOverPoints").asDouble() == 2.0 : result;
-        assert result.get("carriedOverToSprintId").isNull() : "BACKLOG carries over to nothing: " + result;
-        assert result.get("sprint").get("state").asText().equals("COMPLETED") : result;
+        assertThat(result.get("completedIssueCount").asInt()).as("%s", result).isEqualTo(2);
+        assertThat(result.get("carriedOverIssueCount").asInt()).as("%s", result).isEqualTo(2);
+        assertThat(result.get("donePoints").asDouble()).as("%s", result).isEqualTo(8.0);
+        assertThat(result.get("carriedOverPoints").asDouble()).as("%s", result).isEqualTo(2.0);
+        assertThat(result.get("carriedOverToSprintId").isNull())
+                .withFailMessage("BACKLOG carries over to nothing: " + result)
+                .isTrue();
+        assertThat(result.get("sprint").get("state").asText()).as("%s", result).isEqualTo("COMPLETED");
 
         // ---- what actually moved ----
-        assert sprintId.toString().equals(sprintId(getIssue(ctx, numberOf(a))))
-                : "a DONE issue lost its sprint — that is the sprint's delivery record";
-        assert sprintId.toString().equals(sprintId(getIssue(ctx, numberOf(b))));
-        assert sprintName(getIssue(ctx, numberOf(c))) == null : "an unfinished issue kept its sprint";
-        assert sprintName(getIssue(ctx, numberOf(d))) == null;
+        assertThat(sprintId.toString())
+                .as("a DONE issue lost its sprint — that is the sprint's delivery record")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(a))));
+        assertThat(sprintId.toString())
+                .as("the second DONE issue kept its sprint too, so the record is the sprint's and not one row's")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(b))));
+        assertThat(sprintName(getIssue(ctx, numberOf(c)))).as("an unfinished issue kept its sprint").isNull();
+        assertThat(sprintName(getIssue(ctx, numberOf(d))))
+                .as("the second unfinished issue was carried out of the sprint as well")
+                .isNull();
 
         // The completed sprint still counts its delivery (2 issues / 8 points).
         var closed = sprintNode(ctx, sprintId);
-        assert closed.get("issueCount").asInt() == 2 : closed;
-        assert closed.get("doneIssueCount").asInt() == 2 : closed;
-        assert closed.get("points").asDouble() == 8.0 : closed;
+        assertThat(closed.get("issueCount").asInt()).as("%s", closed).isEqualTo(2);
+        assertThat(closed.get("doneIssueCount").asInt()).as("%s", closed).isEqualTo(2);
+        assertThat(closed.get("points").asDouble()).as("%s", closed).isEqualTo(8.0);
 
         // A double submit is a 409, never a second (destructive) run.
         completeToBacklog(ctx, ctx.token(), sprintId).andExpect(status().isConflict());
@@ -126,25 +134,28 @@ class SprintCompletionTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
         var candidates = preview.get("targetCandidates");
-        assert candidates.size() == 1 && candidates.get(0).get("id").asText().equals(next.toString())
-                : "the only FUTURE sprint must be offered as a target: " + preview;
+        assertThat(candidates).as("the only FUTURE sprint must be offered as a target: " + preview).hasSize(1);
+        assertThat(candidates.get(0).get("id").asText())
+                .as("the only FUTURE sprint must be offered as a target: " + preview)
+                .isEqualTo(next.toString());
 
         var result = json.readTree(completeSprint(ctx, ctx.token(), running,
                 "{\"moveUnfinishedTo\":\"SPRINT\",\"targetSprintId\":\"" + next + "\"}")
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert result.get("carriedOverIssueCount").asInt() == 2 : result;
-        assert result.get("carriedOverPoints").asDouble() == 5.0 : result;
-        assert next.toString().equals(result.get("carriedOverToSprintId").asText()) : result;
+        assertThat(result.get("carriedOverIssueCount").asInt()).as("%s", result).isEqualTo(2);
+        assertThat(result.get("carriedOverPoints").asDouble()).as("%s", result).isEqualTo(5.0);
+        assertThat(next.toString()).as("%s", result).isEqualTo(result.get("carriedOverToSprintId").asText());
 
-        assert next.toString().equals(sprintId(getIssue(ctx, numberOf(first)))) : "not carried over";
-        assert next.toString().equals(sprintId(getIssue(ctx, numberOf(third)))) : "not carried over";
-        assert running.toString().equals(sprintId(getIssue(ctx, numberOf(second))))
-                : "the DONE issue must stay in the sprint it was delivered in";
+        assertThat(next.toString()).as("not carried over").isEqualTo(sprintId(getIssue(ctx, numberOf(first))));
+        assertThat(next.toString()).as("not carried over").isEqualTo(sprintId(getIssue(ctx, numberOf(third))));
+        assertThat(running.toString())
+                .as("the DONE issue must stay in the sprint it was delivered in")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(second))));
 
         // Rank preserved: same relative order, now inside the target section.
         var after = sprintSectionKeys(backlogView(ctx), next);
-        assert after.equals(before) : "carry-over rewrote the rank: " + before + " → " + after;
+        assertThat(after).as("carry-over rewrote the rank: " + before + " → " + after).isEqualTo(before);
     }
 
     /** Carrying over to the backlog also preserves the rank (§4.5). */
@@ -161,8 +172,9 @@ class SprintCompletionTest extends SprintTestBase {
 
         completeToBacklog(ctx, ctx.token(), sprintId).andExpect(status().isOk());
 
-        assert backlogKeys(backlogView(ctx)).equals(before)
-                : "the backlog order after a completion must match the sprint order";
+        assertThat(backlogKeys(backlogView(ctx)))
+                .as("the backlog order after a completion must match the sprint order")
+                .isEqualTo(before);
     }
 
     /**
@@ -205,8 +217,9 @@ class SprintCompletionTest extends SprintTestBase {
                 "{\"moveUnfinishedTo\":\"SPRINT\",\"targetSprintId\":\"" + running + "\"}")
                 .andExpect(status().isUnprocessableContent());
 
-        assert sprintNode(ctx, running).get("state").asText().equals("ACTIVE")
-                : "a rejected completion must not half-apply";
+        assertThat(sprintNode(ctx, running).get("state").asText())
+                .as("a rejected completion must not half-apply")
+                .isEqualTo("ACTIVE");
     }
 
     /** A COMPLETED sprint cannot receive carried-over work either (§4.5). */
@@ -246,13 +259,15 @@ class SprintCompletionTest extends SprintTestBase {
         var preview = json.readTree(completionPreview(ctx, member.token(), sprintId)
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert preview.get("totalIssueCount").asInt() == 1 : preview;
-        assert preview.get("unfinishedPoints").asDouble() == 8.0 : preview;
+        assertThat(preview.get("totalIssueCount").asInt()).as("%s", preview).isEqualTo(1);
+        assertThat(preview.get("unfinishedPoints").asDouble()).as("%s", preview).isEqualTo(8.0);
 
-        assert sprintNode(ctx, sprintId).get("state").asText().equals("ACTIVE")
-                : "a preview must not move the lifecycle";
-        assert sprintId.toString().equals(sprintId(getIssue(ctx, numberOf(issue))))
-                : "a preview must not move issues";
+        assertThat(sprintNode(ctx, sprintId).get("state").asText())
+                .as("a preview must not move the lifecycle")
+                .isEqualTo("ACTIVE");
+        assertThat(sprintId.toString())
+                .as("a preview must not move issues")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(issue))));
     }
 
     /** The DB row agrees with the API: the completion really rewrote {@code sprint_id}. */
@@ -267,15 +282,15 @@ class SprintCompletionTest extends SprintTestBase {
         markDone(ctx, numberOf(kept));
         completeToBacklog(ctx, ctx.token(), sprintId).andExpect(status().isOk());
 
-        assert sprintIdOfRow(idOf(kept)) != null : "the DONE issue lost sprint_id in the DB";
-        assert sprintIdOfRow(idOf(moved)) == null : "the unfinished issue kept sprint_id in the DB";
+        assertThat(sprintIdOfRow(idOf(kept))).as("the DONE issue lost sprint_id in the DB").isNotNull();
+        assertThat(sprintIdOfRow(idOf(moved))).as("the unfinished issue kept sprint_id in the DB").isNull();
     }
 
     /** The sprint id as the DATABASE holds it — never through the JPA session under test. */
     private Object sprintIdOfRow(UUID issueId) {
         var rows = jdbcTemplate.query("SELECT sprint_id FROM issues WHERE id = ?",
                 (rs, i) -> rs.getObject("sprint_id"), issueId);
-        assert rows.size() == 1 : "issue row vanished: " + issueId;
+        assertThat(rows).as("issue row vanished: " + issueId).hasSize(1);
         return rows.get(0);
     }
 }

@@ -10,6 +10,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -58,7 +59,7 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 // no body and a stored plan date → the plan date is what ships
                 .andExpect(jsonPath("$.releaseDate").value("2026-09-01"));
         var releasedAt = OffsetDateTime.parse(versionNode(ctx, id).get("releasedAt").asText());
-        assert releasedAt.isAfter(before) : "releasedAt must be stamped, got " + releasedAt;
+        assertThat(releasedAt.isAfter(before)).withFailMessage("releasedAt must be stamped, got " + releasedAt).isTrue();
 
         unreleaseVersion(ctx, ctx.token(), id)
                 .andExpect(status().isOk())
@@ -94,7 +95,9 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.detail", containsString("not released")));
 
-        assert !versionNode(ctx, id).get("released").asBoolean();
+        assertThat(versionNode(ctx, id).get("released").asBoolean())
+                .withFailMessage("a refused unrelease leaves the version in the state it already had")
+                .isFalse();
     }
 
     /**
@@ -114,9 +117,12 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 "{\"moveUnresolvedToVersionId\":\"" + next + "\"}")
                 .andExpect(status().isConflict());
 
-        assert fixVersionNames(getIssue(ctx, open.get("number").asLong())).equals(List.of("2.4.0"))
-                : "the rejected second release must not have moved anything";
-        assert versionNode(ctx, next).get("issueCount").asInt() == 0;
+        assertThat(fixVersionNames(getIssue(ctx, open.get("number").asLong())))
+                .as("the rejected second release must not have moved anything")
+                .isEqualTo(List.of("2.4.0"));
+        assertThat(versionNode(ctx, next).get("issueCount").asInt())
+                .as("the rejected second release must not have run its move — the target gained nothing")
+                .isEqualTo(0);
     }
 
     // ==================================================== the release date
@@ -186,36 +192,45 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 .andExpect(jsonPath("$.released").value(true));
 
         // unresolved FIX → moved
-        assert fixVersionNames(getIssue(ctx, openFix.get("number").asLong())).equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, openFix.get("number").asLong())))
+                .as("an unresolved fix link is what the move exists to repoint")
+                .isEqualTo(List.of("2.5.0"));
         // DONE FIX → stays on the released version, which is the point of the move
-        assert fixVersionNames(getIssue(ctx, doneFix.get("number").asLong())).equals(List.of("2.4.0"));
+        assertThat(fixVersionNames(getIssue(ctx, doneFix.get("number").asLong())))
+                .as("a DONE fix link stays on the released version — that is the point of the move")
+                .isEqualTo(List.of("2.4.0"));
         // unresolved collision → collapsed to ONE row, no UNIQUE violation (§6.4 T2)
-        assert fixVersionNames(getIssue(ctx, collision.get("number").asLong()))
-                .equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, collision.get("number").asLong())))
+                .as("an unresolved collision collapses to ONE row instead of a UNIQUE violation")
+                .isEqualTo(List.of("2.5.0"));
         // DONE collision → untouched, so it legitimately keeps BOTH links
-        assert fixVersionNames(getIssue(ctx, doneCollision.get("number").asLong()))
-                .equals(List.of("2.4.0", "2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, doneCollision.get("number").asLong())))
+                .as("a DONE collision is untouched, so it legitimately keeps BOTH links")
+                .isEqualTo(List.of("2.4.0", "2.5.0"));
         // an AFFECTS link is a statement about where a defect exists — never moved
         var affects = getIssue(ctx, affectsOnly.get("number").asLong());
-        assert affectsVersionNames(affects).equals(List.of("2.4.0")) : affects;
-        assert fixVersionNames(affects).isEmpty();
+        assertThat(affectsVersionNames(affects)).as("%s", affects).isEqualTo(List.of("2.4.0"));
+        assertThat(fixVersionNames(affects))
+                .as("an affects link is a statement about where a defect exists — the move must not turn it into a fix link")
+                .isEmpty();
         // the cross-role issue moves only its FIX link; the AFFECTS one on the target stays
         var cross = getIssue(ctx, crossRole.get("number").asLong());
-        assert fixVersionNames(cross).equals(List.of("2.5.0")) : cross;
-        assert affectsVersionNames(cross).equals(List.of("2.5.0")) : cross;
+        assertThat(fixVersionNames(cross)).as("%s", cross).isEqualTo(List.of("2.5.0"));
+        assertThat(affectsVersionNames(cross)).as("%s", cross).isEqualTo(List.of("2.5.0"));
         // an issue that was never on the source is not touched at all
-        assert fixVersionNames(getIssue(ctx, untouched.get("number").asLong()))
-                .equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, untouched.get("number").asLong())))
+                .as("an issue that was never on the source version is not touched at all")
+                .isEqualTo(List.of("2.5.0"));
 
         // The roll-ups agree with the links: 2.4.0 keeps its two DONE fix issues.
         var source = versionNode(ctx, shipping);
-        assert source.get("issueCount").asInt() == 2 : source;
-        assert source.get("doneIssueCount").asInt() == 2 : source;
-        assert source.get("affectsIssueCount").asInt() == 1 : source;
+        assertThat(source.get("issueCount").asInt()).as("%s", source).isEqualTo(2);
+        assertThat(source.get("doneIssueCount").asInt()).as("%s", source).isEqualTo(2);
+        assertThat(source.get("affectsIssueCount").asInt()).as("%s", source).isEqualTo(1);
         var target = versionNode(ctx, next);
-        assert target.get("issueCount").asInt() == 5 : target;   // open, collision, cross, untouched, doneCollision
-        assert target.get("doneIssueCount").asInt() == 1 : target;
-        assert target.get("affectsIssueCount").asInt() == 1 : target;
+        assertThat(target.get("issueCount").asInt()).as("%s", target).isEqualTo(5);   // open, collision, cross, untouched, doneCollision
+        assertThat(target.get("doneIssueCount").asInt()).as("%s", target).isEqualTo(1);
+        assertThat(target.get("affectsIssueCount").asInt()).as("%s", target).isEqualTo(1);
     }
 
     /**
@@ -260,19 +275,28 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 .andExpect(jsonPath("$.detail", containsString("Unknown version")));
 
         // Nothing was released and nothing was moved by ANY of the five rejects.
-        assert !versionNode(ctx, shipping).get("released").asBoolean()
-                : "validation must run before the conditional UPDATE";
-        assert fixVersionNames(getIssue(ctx, open.get("number").asLong())).equals(List.of("2.4.0"));
-        assert versionNode(ctx, shipping).get("issueCount").asInt() == 1;
+        assertThat(versionNode(ctx, shipping).get("released").asBoolean())
+                .withFailMessage("validation must run before the conditional UPDATE")
+                .isFalse();
+        assertThat(fixVersionNames(getIssue(ctx, open.get("number").asLong())))
+                .as("no reject moved a link: validation runs before the move, not alongside it")
+                .isEqualTo(List.of("2.4.0"));
+        assertThat(versionNode(ctx, shipping).get("issueCount").asInt())
+                .as("…and the source version's progress counter is unchanged by the rejects")
+                .isEqualTo(1);
         // The sibling project's version was never touched by the rejected requests.
-        assert versionNames(listVersions(sibling, sibling.token(), null)).equals(List.of("sibling 1.0"));
+        assertThat(versionNames(listVersions(sibling, sibling.token(), null)))
+                .as("the sibling project's version was never touched by the rejected requests")
+                .isEqualTo(List.of("sibling 1.0"));
 
         // The legal target still works afterwards, so the 422s were about the target.
         var next = createVersion(ctx, "2.5.0");
         releaseVersion(ctx, ctx.token(), shipping,
                 "{\"moveUnresolvedToVersionId\":\"" + next + "\"}")
                 .andExpect(status().isOk());
-        assert fixVersionNames(getIssue(ctx, open.get("number").asLong())).equals(List.of("2.5.0"));
+        assertThat(fixVersionNames(getIssue(ctx, open.get("number").asLong())))
+                .as("the legal request that follows the rejects still performs the move")
+                .isEqualTo(List.of("2.5.0"));
     }
 
     /** Releasing with open work is deliberately ALLOWED — the move is opt-in. */
@@ -287,7 +311,9 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
                 .andExpect(jsonPath("$.released").value(true))
                 .andExpect(jsonPath("$.issueCount").value(1))
                 .andExpect(jsonPath("$.doneIssueCount").value(0));
-        assert fixVersionNames(getIssue(ctx, open.get("number").asLong())).equals(List.of("2.4.0"));
+        assertThat(fixVersionNames(getIssue(ctx, open.get("number").asLong())))
+                .as("releasing with unresolved work is allowed and leaves the links exactly where they were")
+                .isEqualTo(List.of("2.4.0"));
     }
 
     /** A released version stays a legal FIX/AFFECTS target for new issues (§6.4). */
@@ -298,7 +324,9 @@ class VersionReleaseLifecycleTest extends VersionTestBase {
         releaseVersion(ctx, ctx.token(), shipped).andExpect(status().isOk());
 
         var issue = createIssue(ctx, "hotfix", fixVersionIdsJson(shipped));
-        assert fixVersionNames(issue).equals(List.of("2.3.1"));
+        assertThat(fixVersionNames(issue))
+                .as("a released version is still a legal link target — releasing is not archiving")
+                .isEqualTo(List.of("2.3.1"));
         // Only ARCHIVED is a barrier to linking — released is not.
         archiveVersion(ctx, ctx.token(), shipped).andExpect(status().isOk());
         postIssue(ctx, ctx.token(), "too late", fixVersionIdsJson(shipped))

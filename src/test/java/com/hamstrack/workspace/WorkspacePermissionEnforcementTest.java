@@ -16,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -176,8 +177,9 @@ class WorkspacePermissionEnforcementTest extends ComponentTestBase {
                         .header("Authorization", "Bearer " + member.token()))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
-        assert projects.contains(ctx.projectId().toString())
-                : "the 403 below is only defensible while the project is listed to this caller";
+        assertThat(projects)
+                .as("the 403 below is only defensible while the project is listed to this caller")
+                .contains(ctx.projectId().toString());
 
         mockMvc.perform(get(projectAdmin(ctx) + "/bindings")
                         .header("Authorization", "Bearer " + member.token()))

@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The cost claim for R6 (§2.6 "one {@code GROUP BY} over the existing search Criteria query with
  * page/sort dropped"), pinned the way every other report in this epic pins its own.
@@ -63,11 +65,12 @@ class InsightsQueryCountTest extends InsightsTestBase {
         long one = count(() -> run(small, "STATUS", null));
         long twenty = count(() -> run(large, "STATUS", null));
 
-        assert one == twenty
-                : "insights is data-dependent: " + one + " statements for one issue and " + twenty
+        assertThat(one)
+                .as("insights is data-dependent: " + one + " statements for one issue and " + twenty
                   + " for twenty. The likeliest cause is a per-bucket lookup — a display name or an "
                   + "HQL fragment resolved with a query instead of read off the tuple or the "
-                  + "already-built ResolutionContext.";
+                  + "already-built ResolutionContext.")
+                .isEqualTo(twenty);
     }
 
     /**
@@ -107,11 +110,12 @@ class InsightsQueryCountTest extends InsightsTestBase {
         long flat = count(() -> run(ctx, "STATUS", null));
         long segmented = count(() -> run(ctx, "STATUS", "PRIORITY"));
 
-        assert segmented == flat + 2
-                : "a segmented insights request took " + segmented + " statements against " + flat
+        assertThat(segmented)
+                .as("a segmented insights request took " + segmented + " statements against " + flat
                   + " unsegmented. It must cost a fixed two more — the cell aggregate and the "
                   + "visible-project lookup SearchScope repeats per predicate — however many bars "
-                  + "there are. A number that grows with the bars is a per-bar breakdown query.";
+                  + "there are. A number that grows with the bars is a per-bar breakdown query.")
+                .isEqualTo(flat + 2);
     }
 
     /**
@@ -133,10 +137,11 @@ class InsightsQueryCountTest extends InsightsTestBase {
         long byStatus = count(() -> run(ctx, "STATUS", null));
         long byLabel = count(() -> run(ctx, "LABEL", null));
 
-        assert byStatus == byLabel
-                : "grouping by label took " + byLabel + " statements against " + byStatus
+        assertThat(byStatus)
+                .as("grouping by label took " + byLabel + " statements against " + byStatus
                   + " for a ToOne dimension — it must be the same single aggregate with one more "
-                  + "join, not a second pass over issue_labels.";
+                  + "join, not a second pass over issue_labels.")
+                .isEqualTo(byLabel);
     }
 
     // ------------------------------------------------------------------ plumbing

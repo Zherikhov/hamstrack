@@ -12,6 +12,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import jakarta.mail.internet.MimeMessage;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.timeout;
@@ -74,10 +75,13 @@ class MailDurabilityTest {
         await().atMost(Duration.ofSeconds(10)).until(() -> failedEmailRepository.count() == 1);
 
         var row = failedEmailRepository.findAll().getFirst();
-        assert row.getEmailType().equals("VERIFICATION")
-                : "email_type must record the critical type, got " + row.getEmailType();
-        assert row.getRecipient().equals("user@example.com") : "recipient recorded";
-        assert row.getAttempts() == 3 : "attempts must equal max-attempts (3), got " + row.getAttempts();
+        assertThat(row.getEmailType())
+                .as(() -> "email_type must record the critical type, got " + row.getEmailType())
+                .isEqualTo("VERIFICATION");
+        assertThat(row.getRecipient()).as("recipient recorded").isEqualTo("user@example.com");
+        assertThat(row.getAttempts())
+                .as(() -> "attempts must equal max-attempts (3), got " + row.getAttempts())
+                .isEqualTo(3);
 
         // No token must leak into ANY column of the dead-letter row (subject/error/etc.).
         assertNoToken(row, token);
@@ -91,9 +95,10 @@ class MailDurabilityTest {
         await().atMost(Duration.ofSeconds(10)).until(() -> failedEmailRepository.count() == 1);
 
         var row = failedEmailRepository.findAll().getFirst();
-        assert row.getEmailType().equals("PASSWORD_RESET")
-                : "email_type must be PASSWORD_RESET, got " + row.getEmailType();
-        assert row.getAttempts() == 3 : "attempts must equal max-attempts (3)";
+        assertThat(row.getEmailType())
+                .as(() -> "email_type must be PASSWORD_RESET, got " + row.getEmailType())
+                .isEqualTo("PASSWORD_RESET");
+        assertThat(row.getAttempts()).as("attempts must equal max-attempts (3)").isEqualTo(3);
         assertNoToken(row, token);
     }
 
@@ -112,13 +117,17 @@ class MailDurabilityTest {
     // ============================================================ helpers
 
     private void assertNoToken(FailedEmail row, String token) {
-        assert row.getSubject() == null || !row.getSubject().contains(token)
-                : "subject must not contain the raw token";
-        assert row.getLastError() == null || !row.getLastError().contains(token)
-                : "last_error must not contain the raw token";
-        assert row.getRecipient() == null || !row.getRecipient().contains(token)
-                : "recipient must not contain the raw token";
-        assert row.getEmailType() == null || !row.getEmailType().contains(token)
-                : "email_type must not contain the raw token";
+        assertThat(row.getSubject() == null || !row.getSubject().contains(token))
+                .withFailMessage("subject must not contain the raw token")
+                .isTrue();
+        assertThat(row.getLastError() == null || !row.getLastError().contains(token))
+                .withFailMessage("last_error must not contain the raw token")
+                .isTrue();
+        assertThat(row.getRecipient() == null || !row.getRecipient().contains(token))
+                .withFailMessage("recipient must not contain the raw token")
+                .isTrue();
+        assertThat(row.getEmailType() == null || !row.getEmailType().contains(token))
+                .withFailMessage("email_type must not contain the raw token")
+                .isTrue();
     }
 }

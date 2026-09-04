@@ -8,6 +8,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import java.util.List;
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -39,15 +40,19 @@ class LabelOnIssueTest extends LabelTestBase {
         var ui = createLabel(ctx, "ui");
 
         var issue = createIssue(ctx, "with labels", labelIdsJson(ui, bug));
-        assert labelNames(issue).equals(List.of("bug", "ui"))
-                : "labels come back ordered by lower(name), got " + labelNames(issue);
+        assertThat(labelNames(issue))
+                .as(() -> "labels come back ordered by lower(name), got " + labelNames(issue))
+                .isEqualTo(List.of("bug", "ui"));
         // duplicates in the payload are de-duped, not a 400/409
         var dupes = createIssue(ctx, "dupes", labelIdsJson(bug, bug, bug));
-        assert labelNames(dupes).equals(List.of("bug"));
+        assertThat(labelNames(dupes))
+                .as("duplicates in the payload are de-duped into one row, not answered with a 400 or a 409")
+                .isEqualTo(List.of("bug"));
 
         // create-time values write no history (consistent with custom fields)
-        assert historyFields(ctx, issue.get("number").asLong()).isEmpty()
-                : "no history row for labels set at creation time";
+        assertThat(historyFields(ctx, issue.get("number").asLong()))
+                .as("no history row for labels set at creation time")
+                .isEmpty();
     }
 
     @Test
@@ -72,18 +77,20 @@ class LabelOnIssueTest extends LabelTestBase {
         // present → replaces wholesale (beta dropped, gamma added)
         var replaced = json.readTree(patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(a, c) + "}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert labelNames(replaced).equals(List.of("alpha", "gamma")) : labelNames(replaced);
+        assertThat(labelNames(replaced)).as(() -> String.valueOf(labelNames(replaced))).isEqualTo(List.of("alpha", "gamma"));
 
         // absent → untouched (a title-only PATCH must not clear labels)
         var titleOnly = json.readTree(patchIssue(ctx, ctx.token(), n, "{\"title\":\"renamed\"}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert labelNames(titleOnly).equals(List.of("alpha", "gamma")) : labelNames(titleOnly);
+        assertThat(labelNames(titleOnly))
+                .as(() -> String.valueOf(labelNames(titleOnly)))
+                .isEqualTo(List.of("alpha", "gamma"));
 
         // [] → clears
         var cleared = json.readTree(patchIssue(ctx, ctx.token(), n, "{\"labelIds\":[]}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert labelNames(cleared).isEmpty() : labelNames(cleared);
-        assert labelNames(getIssue(ctx, n)).isEmpty() : "and it stuck";
+        assertThat(labelNames(cleared)).as(() -> String.valueOf(labelNames(cleared))).isEmpty();
+        assertThat(labelNames(getIssue(ctx, n))).as("and it stuck").isEmpty();
     }
 
     @Test
@@ -97,22 +104,24 @@ class LabelOnIssueTest extends LabelTestBase {
         // add beta AND remove alpha in one PATCH → ONE row, comma-joined display names
         patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(b) + "}").andExpect(status().isOk());
         var rows = historyRows(ctx, n, "labels");
-        assert rows.size() == 1 : "add+remove must produce exactly one history row, got " + rows;
-        assert rows.get(0).get("oldValue").asText().equals("alpha") : rows.get(0);
-        assert rows.get(0).get("newValue").asText().equals("beta") : rows.get(0);
+        assertThat(rows).as("add+remove must produce exactly one history row, got " + rows).hasSize(1);
+        assertThat(rows.get(0).get("oldValue").asText()).as(() -> String.valueOf(rows.get(0))).isEqualTo("alpha");
+        assertThat(rows.get(0).get("newValue").asText()).as(() -> String.valueOf(rows.get(0))).isEqualTo("beta");
 
         // re-sending the SAME set is a no-op → no second row
         patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(b) + "}").andExpect(status().isOk());
-        assert historyRows(ctx, n, "labels").size() == 1
-                : "an unchanged set must not write history, got " + historyRows(ctx, n, "labels");
+        assertThat(historyRows(ctx, n, "labels"))
+                .as("an unchanged set must not write history, got " + historyRows(ctx, n, "labels"))
+                .hasSize(1);
 
         // clearing writes a second row, with a null newValue (empty set → null)
         patchIssue(ctx, ctx.token(), n, "{\"labelIds\":[]}").andExpect(status().isOk());
         var afterClear = historyRows(ctx, n, "labels");
-        assert afterClear.size() == 2 : afterClear;
-        assert afterClear.stream().anyMatch(r -> r.get("newValue").isNull()
-                        && "beta".equals(r.get("oldValue").asText()))
-                : "clearing all labels records oldValue = 'beta', newValue = null, got " + afterClear;
+        assertThat(afterClear).as("%s", afterClear).hasSize(2);
+        assertThat(afterClear.stream().anyMatch(r -> r.get("newValue").isNull()
+                        && "beta".equals(r.get("oldValue").asText())))
+                .withFailMessage("clearing all labels records oldValue = 'beta', newValue = null, got " + afterClear)
+                .isTrue();
     }
 
     @Test
@@ -126,8 +135,9 @@ class LabelOnIssueTest extends LabelTestBase {
         var patched = json.readTree(patchIssue(ctx, ctx.token(), n,
                         "{\"version\":" + v0 + "," + labelIdsJson(a) + "}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert patched.get("version").asInt() == v0 + 1
-                : "a label-only PATCH must bump @Version by exactly 1, got " + patched.get("version");
+        assertThat(patched.get("version").asInt())
+                .as(() -> "a label-only PATCH must bump @Version by exactly 1, got " + patched.get("version"))
+                .isEqualTo(v0 + 1);
 
         // replaying the old version is a stale write → 409
         patchIssue(ctx, ctx.token(), n, "{\"version\":" + v0 + ",\"labelIds\":[]}")
@@ -141,11 +151,11 @@ class LabelOnIssueTest extends LabelTestBase {
         // optimistic-lock token).
         var noop = json.readTree(patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(a) + "}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert noop.get("version").asInt() == v0 + 1 : noop.get("version");
+        assertThat(noop.get("version").asInt()).as(() -> String.valueOf(noop.get("version"))).isEqualTo(v0 + 1);
         // …and a real change from there bumps it once more.
         var real = json.readTree(patchIssue(ctx, ctx.token(), n, "{\"labelIds\":[]}")
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert real.get("version").asInt() == v0 + 2 : real.get("version");
+        assertThat(real.get("version").asInt()).as(() -> String.valueOf(real.get("version"))).isEqualTo(v0 + 2);
     }
 
     // ==================================================== archived asymmetry
@@ -171,7 +181,9 @@ class LabelOnIssueTest extends LabelTestBase {
         // …and it may even gain another (live) label while keeping the archived one
         patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(stale, live) + "}")
                 .andExpect(status().isOk());
-        assert labelNames(getIssue(ctx, n)).equals(List.of("live", "stale"));
+        assertThat(labelNames(getIssue(ctx, n)))
+                .as("an issue carrying an archived label may still gain a live one while keeping the archived one")
+                .isEqualTo(List.of("live", "stale"));
         // dropping the archived one is allowed, re-adding it afterwards is not
         patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(live) + "}").andExpect(status().isOk());
         patchIssue(ctx, ctx.token(), n, "{" + labelIdsJson(live, stale) + "}")
@@ -191,20 +203,28 @@ class LabelOnIssueTest extends LabelTestBase {
         createIssue(ctx, "none");
 
         // no filter → everything (and no empty-IN crash)
-        assert titles(board(ctx, null)).equals(Set.of("only-a", "only-b", "both", "none"));
+        assertThat(titles(board(ctx, null)))
+                .as("no label filter means every issue, and no empty-IN crash on the way")
+                .isEqualTo(Set.of("only-a", "only-b", "both", "none"));
 
         // default = any (OR)
         var any = titles(board(ctx, "?labelId=" + a + "&labelId=" + b));
-        assert any.equals(Set.of("only-a", "only-b", "both")) : any;
-        assert titles(board(ctx, "?labelId=" + a + "&labelId=" + b + "&labelMatch=any")).equals(any);
+        assertThat(any).as("%s", any).isEqualTo(Set.of("only-a", "only-b", "both"));
+        assertThat(titles(board(ctx, "?labelId=" + a + "&labelId=" + b + "&labelMatch=any")))
+                .as("labelMatch=any is the default spelled out, so it must return what the default returned")
+                .isEqualTo(any);
 
         // all (AND) → strictly narrower
         var all = titles(board(ctx, "?labelId=" + a + "&labelId=" + b + "&labelMatch=all"));
-        assert all.equals(Set.of("both")) : all;
+        assertThat(all).as("%s", all).isEqualTo(Set.of("both"));
 
         // one label: any and all agree
-        assert titles(board(ctx, "?labelId=" + a)).equals(Set.of("only-a", "both"));
-        assert titles(board(ctx, "?labelId=" + a + "&labelMatch=all")).equals(Set.of("only-a", "both"));
+        assertThat(titles(board(ctx, "?labelId=" + a)))
+                .as("with ONE label there is nothing for any and all to disagree about")
+                .isEqualTo(Set.of("only-a", "both"));
+        assertThat(titles(board(ctx, "?labelId=" + a + "&labelMatch=all")))
+                .as("…so matchAll over a single label returns the same issues as the default")
+                .isEqualTo(Set.of("only-a", "both"));
     }
 
     @Test
@@ -227,8 +247,12 @@ class LabelOnIssueTest extends LabelTestBase {
                     .andExpect(status().isBadRequest());
         }
         // case-insensitivity IS supported for the two legal values
-        assert titles(board(ctx, q + "ALL")).equals(Set.of("both"));
-        assert titles(board(ctx, q + "Any")).equals(Set.of("only-a", "both"));
+        assertThat(titles(board(ctx, q + "ALL")))
+                .as("case-insensitivity IS supported for the two legal values")
+                .isEqualTo(Set.of("both"));
+        assertThat(titles(board(ctx, q + "Any")))
+                .as("…for both of them, and each keeps its own meaning")
+                .isEqualTo(Set.of("only-a", "both"));
     }
 
     @Test
@@ -241,10 +265,10 @@ class LabelOnIssueTest extends LabelTestBase {
         createIssue(ctx, "plain+progress", "\"statusId\":\"" + inProgress + "\"");
 
         var combined = titles(board(ctx, "?labelId=" + a + "&statusId=" + inProgress));
-        assert combined.equals(Set.of("a+progress")) : "label AND status, got " + combined;
+        assertThat(combined).as("label AND status, got " + combined).isEqualTo(Set.of("a+progress"));
 
         var assigned = titles(board(ctx, "?labelId=" + a + "&assigneeId=" + ctx.owner().getId()));
-        assert assigned.isEmpty() : "nothing is assigned, so the AND must be empty, got " + assigned;
+        assertThat(assigned).as("nothing is assigned, so the AND must be empty, got " + assigned).isEmpty();
 
         // the paged (backlog) variant applies the same filter
         var page = json.readTree(mockMvc.perform(
@@ -252,9 +276,11 @@ class LabelOnIssueTest extends LabelTestBase {
                                 .get(ctx.issuesBase() + "?size=50&labelId=" + a)
                                 .header("Authorization", "Bearer " + ctx.token()))
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
-        assert page.get("totalElements").asInt() == 2 : "backlog filter, got " + page.get("totalElements");
+        assertThat(page.get("totalElements").asInt())
+                .as(() -> "backlog filter, got " + page.get("totalElements"))
+                .isEqualTo(2);
         for (var i : page.get("content")) {
-            assert labelNames(i).contains("alpha") : "every returned row carries the label";
+            assertThat(labelNames(i)).as("every returned row carries the label").contains("alpha");
         }
     }
 

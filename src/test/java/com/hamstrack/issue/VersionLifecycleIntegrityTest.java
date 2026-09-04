@@ -16,6 +16,7 @@ import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -82,7 +83,7 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
         outer().executeWithoutResult(status -> {
             // (1) the PRE-RACE SNAPSHOT — loaded while the version is still unreleased
             var snapshot = versionRepository.findById(versionId).orElseThrow();
-            assert !snapshot.isReleased() : "precondition: the snapshot is taken unreleased";
+            assertThat(snapshot.isReleased()).withFailMessage("precondition: the snapshot is taken unreleased").isFalse();
 
             // (2) a CONCURRENT curator releases it, in its own committed transaction.
             //     REQUIRES_NEW suspends the outer persistence context, so the snapshot
@@ -90,7 +91,7 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
             int affected = requiresNew().execute(inner -> versionRepository.markReleased(
                     versionId, projectId,
                     OffsetDateTime.now(ZoneOffset.UTC), LocalDate.of(2026, 9, 1)));
-            assert affected == 1 : "the concurrent release must have won its conditional UPDATE";
+            assertThat(affected).as("the concurrent release must have won its conditional UPDATE").isEqualTo(1);
 
             // (3) the outer request finishes its own, unrelated work and flushes.
             snapshot.setDescription("edited by the stale snapshot");
@@ -99,14 +100,14 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
 
         var row = rawVersion(versionId);
         // THE assertion: the release survived a full-column UPDATE from a stale entity.
-        assert Boolean.TRUE.equals(row.get("released"))
-                : "a stale snapshot reverted the release — released/released_at must be "
-                + "@Column(updatable = false); got " + row;
-        assert row.get("released_at") != null
-                : "released_at was nulled out by the stale flush; got " + row;
+        assertThat(row.get("released"))
+                .as("a stale snapshot reverted the release — released/released_at must be "
+                + "@Column(updatable = false); got " + row)
+                .isEqualTo(Boolean.TRUE);
+        assertThat(row.get("released_at")).as("released_at was nulled out by the stale flush; got " + row).isNotNull();
         // …and the legitimate part of the stale write DID land, so the guard is
         // surgical rather than "the entity is read-only now".
-        assert "edited by the stale snapshot".equals(row.get("description")) : row;
+        assertThat(row.get("description")).as("%s", row).isEqualTo("edited by the stale snapshot");
 
         // The API agrees with the row — nothing is being papered over in the mapper.
         getVersion(ctx, ctx.token(), versionId)
@@ -136,9 +137,9 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
         });
 
         var row = rawVersion(versionId);
-        assert Boolean.TRUE.equals(row.get("released")) : row;
-        assert row.get("released_at") != null : row;
-        assert row.get("archived_at") != null : "the archive itself must still have applied; " + row;
+        assertThat(row.get("released")).as("%s", row).isEqualTo(Boolean.TRUE);
+        assertThat(row.get("released_at")).as("%s", row).isNotNull();
+        assertThat(row.get("archived_at")).as("the archive itself must still have applied; " + row).isNotNull();
     }
 
     /** And the mirror image: a stale snapshot must not resurrect an un-release either. */
@@ -152,17 +153,20 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
         outer().executeWithoutResult(status -> {
             // snapshot taken while RELEASED
             var snapshot = versionRepository.findById(versionId).orElseThrow();
-            assert snapshot.isReleased();
+            assertThat(snapshot.isReleased())
+                    .withFailMessage("the snapshot was taken while the version was RELEASED, which is what makes the stale flush below a real re-release attempt")
+                    .isTrue();
             requiresNew().execute(inner -> versionRepository.markUnreleased(versionId, projectId));
             snapshot.setDescription("edited after the un-release");
             versionRepository.saveAndFlush(snapshot);
         });
 
         var row = rawVersion(versionId);
-        assert Boolean.FALSE.equals(row.get("released"))
-                : "a stale snapshot re-released a version that had just been un-released; " + row;
-        assert row.get("released_at") == null : row;
-        assert "edited after the un-release".equals(row.get("description")) : row;
+        assertThat(row.get("released"))
+                .as("a stale snapshot re-released a version that had just been un-released; " + row)
+                .isEqualTo(Boolean.FALSE);
+        assertThat(row.get("released_at")).as("%s", row).isNull();
+        assertThat(row.get("description")).as("%s", row).isEqualTo("edited after the un-release");
     }
 
     // ==================================================== the single-threaded floor
@@ -174,10 +178,11 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
         var id = createVersion(ctx, "2.4.0");
 
         var row = rawVersion(id);
-        assert Boolean.FALSE.equals(row.get("released"))
-                : "updatable=false must not have broken the INSERT of released; " + row;
-        assert row.get("released_at") == null : row;
-        assert row.get("archived_at") == null : row;
+        assertThat(row.get("released"))
+                .as("updatable=false must not have broken the INSERT of released; " + row)
+                .isEqualTo(Boolean.FALSE);
+        assertThat(row.get("released_at")).as("%s", row).isNull();
+        assertThat(row.get("archived_at")).as("%s", row).isNull();
     }
 
     /**
@@ -206,10 +211,10 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
                 .andExpect(jsonPath("$.released").value(true));
 
         var row = rawVersion(id);
-        assert Boolean.TRUE.equals(row.get("released")) : row;
-        assert row.get("released_at") != null : row;
-        assert "2.4.0 final".equals(row.get("name")) : row;
-        assert "shipped on time".equals(row.get("description")) : row;
+        assertThat(row.get("released")).as("%s", row).isEqualTo(Boolean.TRUE);
+        assertThat(row.get("released_at")).as("%s", row).isNotNull();
+        assertThat(row.get("name")).as("%s", row).isEqualTo("2.4.0 final");
+        assertThat(row.get("description")).as("%s", row).isEqualTo("shipped on time");
     }
 
     /** Un-release flips the pair at the ROW level, and a second one is a 409. */
@@ -220,20 +225,22 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
 
         releaseVersion(ctx, ctx.token(), id).andExpect(status().isOk());
         var released = rawVersion(id);
-        assert Boolean.TRUE.equals(released.get("released")) && released.get("released_at") != null
-                : released;
+        assertThat(released.get("released")).as("%s", released).isEqualTo(Boolean.TRUE);
+        assertThat(released.get("released_at")).as("%s", released).isNotNull();
 
         unreleaseVersion(ctx, ctx.token(), id).andExpect(status().isOk());
         var unreleased = rawVersion(id);
-        assert Boolean.FALSE.equals(unreleased.get("released")) : unreleased;
-        assert unreleased.get("released_at") == null : unreleased;
+        assertThat(unreleased.get("released")).as("%s", unreleased).isEqualTo(Boolean.FALSE);
+        assertThat(unreleased.get("released_at")).as("%s", unreleased).isNull();
         // release_date is preserved — it is the plan, and losing it would make the
         // round trip lossy (the story's reversibility criterion).
-        assert unreleased.get("release_date") != null : unreleased;
+        assertThat(unreleased.get("release_date")).as("%s", unreleased).isNotNull();
 
         unreleaseVersion(ctx, ctx.token(), id).andExpect(status().isConflict());
         // The refused second call changed nothing at the row level either.
-        assert Boolean.FALSE.equals(rawVersion(id).get("released"));
+        assertThat(rawVersion(id).get("released"))
+                .as("the refused second unrelease changed nothing at the row level either")
+                .isEqualTo(Boolean.FALSE);
     }
 
     /**
@@ -286,9 +293,12 @@ class VersionLifecycleIntegrityTest extends VersionTestBase {
             jdbcTemplate.update(sql, id);
             throw new AssertionError("versions_released_ck did not reject: " + sql);
         } catch (org.springframework.dao.DataIntegrityViolationException expected) {
-            assert expected.getMessage() != null
-                    && expected.getMessage().contains("versions_released_ck")
-                    : "rejected, but not by versions_released_ck: " + expected.getMessage();
+            assertThat(expected.getMessage())
+                    .as(() -> "rejected, but not by versions_released_ck: " + expected.getMessage())
+                    .isNotNull();
+            assertThat(expected.getMessage())
+                    .as(() -> "rejected, but not by versions_released_ck: " + expected.getMessage())
+                    .contains("versions_released_ck");
         }
     }
 }

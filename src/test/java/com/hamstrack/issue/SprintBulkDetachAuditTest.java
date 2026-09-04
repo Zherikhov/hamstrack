@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -80,15 +81,16 @@ class SprintBulkDetachAuditTest extends SprintTestBase {
         // One row per issue that actually MOVED, naming both ends of the move.
         for (var issue : List.of(carried, alsoCarried)) {
             var moves = sprintHistory(ctx, numberOf(issue));
-            assert moves.size() == 2
-                    : "expected the bulk carry-over to be audited like a single-issue move: " + moves;
-            assert moves.get(1).equals("Sprint 1 → Sprint 2")
-                    : "the carry-over row must name where the issue came from and went: " + moves;
+            assertThat(moves).as("expected the bulk carry-over to be audited like a single-issue move: " + moves).hasSize(2);
+            assertThat(moves.get(1))
+                    .as("the carry-over row must name where the issue came from and went: " + moves)
+                    .isEqualTo("Sprint 1 → Sprint 2");
         }
         // The DONE issue did not move, so nothing was written about it.
-        assert sprintHistory(ctx, numberOf(delivered)).equals(List.of("null → Sprint 1"))
-                : "a delivered issue was audited as if it had been moved: "
-                  + sprintHistory(ctx, numberOf(delivered));
+        assertThat(sprintHistory(ctx, numberOf(delivered)))
+                .as("a delivered issue was audited as if it had been moved: "
+                  + sprintHistory(ctx, numberOf(delivered)))
+                .isEqualTo(List.of("null → Sprint 1"));
 
         // Under the fan-out bound every moved issue gets its event, so open boards refresh.
         verify(sseRegistry, times(2)).broadcast(any(), eq("ISSUE_UPDATED"), any());
@@ -104,10 +106,10 @@ class SprintBulkDetachAuditTest extends SprintTestBase {
 
         completeToBacklog(ctx, ctx.token(), running).andExpect(status().isOk());
 
-        assert sprintHistory(ctx, numberOf(carried)).equals(
-                List.of("null → Sprint 1", "Sprint 1 → null"))
-                : "the move back to the backlog was not audited: "
-                  + sprintHistory(ctx, numberOf(carried));
+        assertThat(sprintHistory(ctx, numberOf(carried)))
+                .as("the move back to the backlog was not audited: "
+                  + sprintHistory(ctx, numberOf(carried)))
+                .isEqualTo(List.of("null → Sprint 1", "Sprint 1 → null"));
     }
 
     // ==================================================== the force-delete's detach
@@ -132,9 +134,10 @@ class SprintBulkDetachAuditTest extends SprintTestBase {
         // The sprint row is gone, so this history IS the only record that these issues
         // were ever in it — written from the membership read BEFORE the detach.
         for (var number : numbers) {
-            assert sprintHistory(ctx, number).equals(List.of("null → Sprint 1", "Sprint 1 → null"))
-                    : "a force-detached issue kept no record of the sprint it was in: "
-                      + sprintHistory(ctx, number);
+            assertThat(sprintHistory(ctx, number))
+                    .as("a force-detached issue kept no record of the sprint it was in: "
+                      + sprintHistory(ctx, number))
+                    .isEqualTo(List.of("null → Sprint 1", "Sprint 1 → null"));
         }
         verify(sseRegistry, times(3)).broadcast(any(), eq("ISSUE_UPDATED"), any());
     }
@@ -167,8 +170,12 @@ class SprintBulkDetachAuditTest extends SprintTestBase {
                  WHERE i.project_id = ? AND h.field = 'sprint'
                    AND h.old_value = 'Big sprint' AND h.new_value IS NULL
                 """, Integer.class, ctx.projectId());
-        assert audited != null && audited == committed.size()
-                : "the bulk detach audited " + audited + " of " + committed.size() + " issues";
+        assertThat(audited)
+                .as(() -> "the bulk detach audited " + audited + " of " + committed.size() + " issues")
+                .isNotNull();
+        assertThat(audited)
+                .as(() -> "the bulk detach audited " + audited + " of " + committed.size() + " issues")
+                .isEqualTo(committed.size());
 
         verify(sseRegistry, never()).broadcast(any(), eq("ISSUE_UPDATED"), any());
     }

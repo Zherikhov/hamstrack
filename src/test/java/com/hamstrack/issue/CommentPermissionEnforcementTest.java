@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -114,8 +115,9 @@ class CommentPermissionEnforcementTest extends ComponentTestBase {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("comment.edit")));
 
-        assert body(ctx, number, commentId).equals("My words, revised")
-                : "a refused edit changed the comment anyway";
+        assertThat(body(ctx, number, commentId))
+                .as("a refused edit changed the comment anyway")
+                .isEqualTo("My words, revised");
     }
 
     // ==================================================== comment.delete (the widening)
@@ -151,8 +153,9 @@ class CommentPermissionEnforcementTest extends ComponentTestBase {
         deleteComment(ctx, workspaceOwner.token(), number, first)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("comment.delete")));
-        assert body(ctx, number, first).equals("Something regrettable")
-                : "a refused delete removed the comment anyway";
+        assertThat(body(ctx, number, first))
+                .as("a refused delete removed the comment anyway")
+                .isEqualTo("Something regrettable");
 
         // The project administrator: yes — this is the widening.
         deleteComment(ctx, admin.token(), number, first).andExpect(status().isNoContent());
@@ -195,7 +198,7 @@ class CommentPermissionEnforcementTest extends ComponentTestBase {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("comment.edit")));
 
-        assert body(ctx, number, theirs).equals("My words") : "a refused edit changed the comment";
+        assertThat(body(ctx, number, theirs)).as("a refused edit changed the comment").isEqualTo("My words");
     }
 
     /**

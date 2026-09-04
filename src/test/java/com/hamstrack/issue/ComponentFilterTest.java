@@ -6,6 +6,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -45,13 +46,17 @@ class ComponentFilterTest extends ComponentTestBase {
         createIssue(ctx, "bare 2");
 
         var all = board(ctx, null);
-        assert titles(all).equals(Set.of("with component", "bare 1", "bare 2"))
-                : "component-less issues must not be dropped from an unfiltered board, got "
-                  + titles(all);
-        assert all.get("totalAvailable").asLong() == 3
-                : "the filtered COUNT query must agree with the list, got " + all.get("totalAvailable");
+        assertThat(titles(all))
+                .as("component-less issues must not be dropped from an unfiltered board, got "
+                  + titles(all))
+                .isEqualTo(Set.of("with component", "bare 1", "bare 2"));
+        assertThat(all.get("totalAvailable").asLong())
+                .as(() -> "the filtered COUNT query must agree with the list, got " + all.get("totalAvailable"))
+                .isEqualTo(3);
         // The same is true of every other filter that leaves componentId unset.
-        assert titles(board(ctx, "?labelMatch=any")).size() == 3;
+        assertThat(titles(board(ctx, "?labelMatch=any")))
+                .as("every other filter that leaves componentId unset keeps the component-less issues too")
+                .hasSize(3);
     }
 
     @Test
@@ -63,13 +68,15 @@ class ComponentFilterTest extends ComponentTestBase {
         createIssue(ctx, "bare 2");
 
         var page = backlog(ctx, null);
-        assert pageTitles(page).equals(Set.of("with component", "bare 1", "bare 2"))
-                : "component-less issues must not be dropped from an unfiltered backlog, got "
-                  + pageTitles(page);
+        assertThat(pageTitles(page))
+                .as(() -> "component-less issues must not be dropped from an unfiltered backlog, got "
+                  + pageTitles(page))
+                .isEqualTo(Set.of("with component", "bare 1", "bare 2"));
         // The paged query has its OWN countQuery — a join there would break paging
         // arithmetic even if the content query stayed correct.
-        assert page.get("totalElements").asLong() == 3
-                : "the backlog's countQuery must agree with its content, got " + page;
+        assertThat(page.get("totalElements").asLong())
+                .as("the backlog's countQuery must agree with its content, got " + page)
+                .isEqualTo(3);
     }
 
     // ==================================================== the filter itself
@@ -84,11 +91,21 @@ class ComponentFilterTest extends ComponentTestBase {
         createIssue(ctx, "i1", "\"componentId\":\"" + ingest + "\"");
         createIssue(ctx, "bare");
 
-        assert titles(board(ctx, "?componentId=" + billing)).equals(Set.of("b1", "b2"));
-        assert board(ctx, "?componentId=" + billing).get("totalAvailable").asLong() == 2;
-        assert titles(board(ctx, "?componentId=" + ingest)).equals(Set.of("i1"));
-        assert pageTitles(backlog(ctx, "&componentId=" + billing)).equals(Set.of("b1", "b2"));
-        assert backlog(ctx, "&componentId=" + ingest).get("totalElements").asLong() == 1;
+        assertThat(titles(board(ctx, "?componentId=" + billing)))
+                .as("componentId returns exactly the issues carrying that component")
+                .isEqualTo(Set.of("b1", "b2"));
+        assertThat(board(ctx, "?componentId=" + billing).get("totalAvailable").asLong())
+                .as("the filtered COUNT query must agree with the filtered list")
+                .isEqualTo(2);
+        assertThat(titles(board(ctx, "?componentId=" + ingest)))
+                .as("a second component filters to its own issues, so the filter is not matching everything")
+                .isEqualTo(Set.of("i1"));
+        assertThat(pageTitles(backlog(ctx, "&componentId=" + billing)))
+                .as("the backlog is the second shape of the same filter and must agree with the board")
+                .isEqualTo(Set.of("b1", "b2"));
+        assertThat(backlog(ctx, "&componentId=" + ingest).get("totalElements").asLong())
+                .as("the backlog's own total must agree with its filtered page")
+                .isEqualTo(1);
         // There is deliberately no "has no component" filter value — that is HQL's
         // `component IS EMPTY` (see ComponentSearchTest), not a board parameter.
     }
@@ -109,20 +126,26 @@ class ComponentFilterTest extends ComponentTestBase {
         createIssue(ctx, "assignee only", "\"assigneeId\":\"" + assignee.user().getId() + "\"");
 
         // ANDed with assignee…
-        assert titles(board(ctx, "?componentId=" + billing + "&assigneeId=" + assignee.user().getId()))
-                .equals(Set.of("billing + assignee"));
+        assertThat(titles(board(ctx, "?componentId=" + billing + "&assigneeId=" + assignee.user().getId())))
+                .as("the component filter ANDs with assignee rather than replacing it")
+                .isEqualTo(Set.of("billing + assignee"));
         // …with the label filter…
-        assert titles(board(ctx, "?componentId=" + billing + "&labelId=" + label))
-                .equals(Set.of("billing + label"));
+        assertThat(titles(board(ctx, "?componentId=" + billing + "&labelId=" + label)))
+                .as("…and with the label filter")
+                .isEqualTo(Set.of("billing + label"));
         // …with status…
-        assert titles(board(ctx, "?componentId=" + billing + "&statusId=" + done))
-                .equals(Set.of("billing + done"));
+        assertThat(titles(board(ctx, "?componentId=" + billing + "&statusId=" + done)))
+                .as("…and with status")
+                .isEqualTo(Set.of("billing + done"));
         // …and with the backlog's excludeDone.
-        assert pageTitles(backlog(ctx, "&componentId=" + billing + "&excludeDone=true"))
-                .equals(Set.of("billing + assignee", "billing + label"));
+        assertThat(pageTitles(backlog(ctx, "&componentId=" + billing + "&excludeDone=true")))
+                .as("…and with the backlog's excludeDone")
+                .isEqualTo(Set.of("billing + assignee", "billing + label"));
         // A combination that matches nothing is an empty 200, never an error.
-        assert board(ctx, "?componentId=" + billing + "&assigneeId=" + ctx.owner().getId())
-                .get("issues").size() == 0;
+        assertThat(board(ctx, "?componentId=" + billing + "&assigneeId=" + ctx.owner().getId())
+                .get("issues"))
+                .as("a combination that matches nothing is an empty 200, never an error")
+                .isEmpty();
     }
 
     /** An archived component still filters — the issues carrying it are still real. */
@@ -134,8 +157,12 @@ class ComponentFilterTest extends ComponentTestBase {
         createIssue(ctx, "bare");
         archiveComponent(ctx, ctx.token(), stale).andExpect(status().isOk());
 
-        assert titles(board(ctx, "?componentId=" + stale)).equals(Set.of("carrier"));
-        assert titles(board(ctx, null)).equals(Set.of("carrier", "bare"));
+        assertThat(titles(board(ctx, "?componentId=" + stale)))
+                .as("filtering by an ARCHIVED component still returns its issues: archiving hides a catalog row, it does not hide work")
+                .isEqualTo(Set.of("carrier"));
+        assertThat(titles(board(ctx, null)))
+                .as("…and the unfiltered board still carries them alongside everything else")
+                .isEqualTo(Set.of("carrier", "bare"));
     }
 
     // ==================================================== helpers

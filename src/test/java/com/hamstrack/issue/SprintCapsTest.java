@@ -7,6 +7,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import java.util.ArrayList;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -68,16 +69,20 @@ class SprintCapsTest extends SprintTestBase {
         // Nothing from the rejected batch landed: all three issues are still in the
         // backlog section (whose stats span the whole section, cap or no cap).
         var rejected = backlogView(ctx);
-        assert rejected.get("backlog").get("stats").get("issueCount").asInt() == 3
-                : "a rejected bulk move moved issues out of the backlog";
-        assert sprintSection(rejected, sprintId).get("stats").get("issueCount").asInt() == 0
-                : "a rejected bulk move applied anyway";
+        assertThat(rejected.get("backlog").get("stats").get("issueCount").asInt())
+                .as("a rejected bulk move moved issues out of the backlog")
+                .isEqualTo(3);
+        assertThat(sprintSection(rejected, sprintId).get("stats").get("issueCount").asInt())
+                .as("a rejected bulk move applied anyway")
+                .isEqualTo(0);
 
         // At the cap exactly it still works, and de-duplication happens BEFORE the check.
         addIssuesToSprint(ctx, ctx.token(), sprintId,
                 "{\"issueIds\":[\"" + ids.get(0) + "\",\"" + ids.get(0) + "\",\"" + ids.get(1) + "\"]}")
                 .andExpect(status().isOk());
-        assert sprintSection(backlogView(ctx), sprintId).get("stats").get("issueCount").asInt() == 2;
+        assertThat(sprintSection(backlogView(ctx), sprintId).get("stats").get("issueCount").asInt())
+                .as("the repeated id was de-duped: a bulk move of three ids carrying one twice adds two issues")
+                .isEqualTo(2);
 
         // An empty list is a payload-level 400 (@NotEmpty), not a silent success.
         addIssuesToSprint(ctx, ctx.token(), sprintId, "{\"issueIds\":[]}")
@@ -101,12 +106,12 @@ class SprintCapsTest extends SprintTestBase {
 
         var view = backlogView(ctx);
         int cap = view.get("bulkMoveCap").asInt();
-        assert cap == 2
-                : "bulkMoveCap must report app.agile.max-issues-per-bulk-move (2 here), got " + cap;
-        assert view.has("sectionCap")
-                : "the view must keep advertising BOTH caps — they are independent knobs and a "
+        assertThat(cap).as("bulkMoveCap must report app.agile.max-issues-per-bulk-move (2 here), got " + cap).isEqualTo(2);
+        assertThat(view.has("sectionCap"))
+                .withFailMessage("the view must keep advertising BOTH caps — they are independent knobs and a "
                   + "client that chunks by the section cap sends a 400 as soon as they differ: "
-                  + view;
+                  + view)
+                .isTrue();
 
         // The advertised number is the one the server actually enforces: a chunk OF that
         // size is accepted, one issue more is the 400 the client is expected to avoid.
@@ -136,23 +141,30 @@ class SprintCapsTest extends SprintTestBase {
         for (int i = 0; i < 5; i++) createIssue(ctx, "backlog issue " + i);
 
         var view = backlogView(ctx);
-        assert view.get("sectionCap").asInt() == 2 : view.get("sectionCap");
+        assertThat(view.get("sectionCap").asInt()).as(() -> String.valueOf(view.get("sectionCap"))).isEqualTo(2);
 
         var section = sprintSection(view, sprintId);
-        assert section.get("issues").size() == 2 : "the section was not capped: " + section;
-        assert section.get("truncated").asBoolean() : "truncation was not reported: " + section;
-        assert section.get("totalAvailable").asInt() == 4 : section.get("totalAvailable");
-        assert section.get("stats").get("issueCount").asInt() == 4
-                : "stats were computed over the truncated page, not the whole section";
-        assert section.get("stats").get("points").asDouble() == 8.0
-                : "point sums must span the whole section: " + section.get("stats");
+        assertThat(section.get("issues")).as("the section was not capped: " + section).hasSize(2);
+        assertThat(section.get("truncated").asBoolean()).withFailMessage("truncation was not reported: " + section).isTrue();
+        assertThat(section.get("totalAvailable").asInt())
+                .as(() -> String.valueOf(section.get("totalAvailable")))
+                .isEqualTo(4);
+        assertThat(section.get("stats").get("issueCount").asInt())
+                .as("stats were computed over the truncated page, not the whole section")
+                .isEqualTo(4);
+        assertThat(section.get("stats").get("points").asDouble())
+                .as(() -> "point sums must span the whole section: " + section.get("stats"))
+                .isEqualTo(8.0);
 
         var backlog = view.get("backlog");
-        assert backlog.get("issues").size() == 2 : backlog;
-        assert backlog.get("truncated").asBoolean() : backlog;
-        assert backlog.get("totalAvailable").asInt() == 5 : backlog.get("totalAvailable");
-        assert backlog.get("stats").get("unestimatedCount").asInt() == 5
-                : "the backlog's unestimated count must span the whole section";
+        assertThat(backlog.get("issues")).as("%s", backlog).hasSize(2);
+        assertThat(backlog.get("truncated").asBoolean()).withFailMessage("%s", backlog).isTrue();
+        assertThat(backlog.get("totalAvailable").asInt())
+                .as(() -> String.valueOf(backlog.get("totalAvailable")))
+                .isEqualTo(5);
+        assertThat(backlog.get("stats").get("unestimatedCount").asInt())
+                .as("the backlog's unestimated count must span the whole section")
+                .isEqualTo(5);
     }
 
     /** The default sprint length is an operator setting, not a constant. */
@@ -162,7 +174,8 @@ class SprintCapsTest extends SprintTestBase {
         var sprintId = startedSprint(ctx, "Sprint 1");
 
         int days = sprintNode(ctx, sprintId).get("daysRemaining").asInt();
-        assert days == 6 || days == 7
-                : "endAt must default to startAt + app.agile.default-sprint-length-days (7), got " + days;
+        assertThat(days == 6 || days == 7)
+                .withFailMessage("endAt must default to startAt + app.agile.default-sprint-length-days (7), got " + days)
+                .isTrue();
     }
 }

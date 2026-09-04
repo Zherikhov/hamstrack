@@ -16,6 +16,8 @@ import org.springframework.cache.CacheManager;
 import java.time.LocalDate;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The cost claim, for R3 (reports-proposal §0, §12 "Performance"): a report is a <strong>fixed,
  * small number of statements</strong>, independent of how much the project contains. Same shape as
@@ -79,18 +81,20 @@ class CycleTimeQueryCountTest extends CycleTimeTestBase {
         long smallCount = count(() -> runCycleTime(small));
         long largeCount = count(() -> runCycleTime(large));
 
-        assert smallCount == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "the cycle-time report took " + smallCount + " statements, not "
+        assertThat(smallCount)
+                .as(() -> "the cycle-time report took " + smallCount + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + " (" + RESOLUTION_STATEMENTS
                   + " for the tenancy resolution + " + REPORT_STATEMENTS + " for the report: the "
                   + "bounded item query and the combined aggregate query). If this is higher, "
                   + "something is reading issues one at a time — most likely a per-item lookup of "
-                  + "the project key or the issue type.";
+                  + "the project key or the issue type.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert smallCount == largeCount
-                : "the cycle-time report is data-dependent: " + smallCount + " statements for a "
+        assertThat(smallCount)
+                .as("the cycle-time report is data-dependent: " + smallCount + " statements for a "
                   + "project with 3 completed issues vs " + largeCount + " for one with 25. The "
-                  + "row count may grow; the statement count may not.";
+                  + "row count may grow; the statement count may not.")
+                .isEqualTo(largeCount);
     }
 
     @Test
@@ -108,15 +112,17 @@ class CycleTimeQueryCountTest extends CycleTimeTestBase {
         long smallCount = count(() -> runAging(small));
         long largeCount = count(() -> runAging(large));
 
-        assert smallCount == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "the aging report took " + smallCount + " statements, not "
+        assertThat(smallCount)
+                .as(() -> "the aging report took " + smallCount + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + ". Either a combined query was "
                   + "split, or the workflow columns stopped coming from the cached "
-                  + "ProjectConfigService and are being read per request.";
+                  + "ProjectConfigService and are being read per request.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert smallCount == largeCount
-                : "the aging report is data-dependent: " + smallCount + " statements for 3 issues "
-                  + "vs " + largeCount + " for 25.";
+        assertThat(smallCount)
+                .as("the aging report is data-dependent: " + smallCount + " statements for 3 issues "
+                  + "vs " + largeCount + " for 25.")
+                .isEqualTo(largeCount);
     }
 
     /**
@@ -144,21 +150,24 @@ class CycleTimeQueryCountTest extends CycleTimeTestBase {
         long cold = count(() -> runAging(ctx));
         long warmAgain = count(() -> runAging(ctx));
 
-        assert warm == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "the warm aging report took " + warm + " statements, not "
+        assertThat(warm)
+                .as(() -> "the warm aging report took " + warm + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + ". If it is one higher, the "
                   + "lifetime percentiles are not being served from cache at all — most likely "
                   + "LifetimeCycleTimeCache was folded into its caller, where @Cacheable cannot "
-                  + "apply because the call is a self-invocation.";
+                  + "apply because the call is a self-invocation.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert cold == warm + 1
-                : "evicting the lifetime percentiles changed the aging report from " + warm
+        assertThat(cold)
+                .as(() -> "evicting the lifetime percentiles changed the aging report from " + warm
                   + " statements to " + cold + ", not " + (warm + 1) + ". Exactly one statement "
-                  + "is supposed to be behind that cache.";
+                  + "is supposed to be behind that cache.")
+                .isEqualTo(warm + 1);
 
-        assert warmAgain == warm
-                : "the aging report did not re-warm: " + warmAgain + " statements after a miss "
-                  + "that should have repopulated the cache.";
+        assertThat(warmAgain)
+                .as("the aging report did not re-warm: " + warmAgain + " statements after a miss "
+                  + "that should have repopulated the cache.")
+                .isEqualTo(warm);
     }
 
     // ------------------------------------------------------------------ plumbing

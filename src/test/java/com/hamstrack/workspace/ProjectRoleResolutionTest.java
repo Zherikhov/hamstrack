@@ -30,6 +30,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.fail;
+
 /**
  * <strong>The effective-project-role chain</strong> (roles-permissions-proposal §5.2) —
  * the rule that decides what a caller may do in a project when they have no
@@ -82,14 +85,21 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.projectRole() != null && ctx.projectRole().id().equals(BuiltInRoles.PROJECT_MEMBER)
-                : "a member with no project row and no configured default did not land on the "
+        assertThat(ctx.projectRole())
+                .as("a member with no project row and no configured default did not land on the "
                   + "built-in Contributor. V14 leaves EVERY workspace in exactly this state, so "
-                  + "this branch is the upgrade's no-op promise (§8.4). Got " + ctx.projectRole();
-        assert !ctx.explicitProjectRole()
-                : "the inherited role was reported as an explicit membership. §8.4 refused to "
+                  + "this branch is the upgrade's no-op promise (§8.4). Got " + ctx.projectRole())
+                .isNotNull();
+        assertThat(ctx.projectRole().id())
+                .as("a member with no project row and no configured default did not land on the "
+                  + "built-in Contributor. V14 leaves EVERY workspace in exactly this state, so "
+                  + "this branch is the upgrade's no-op promise (§8.4). Got " + ctx.projectRole())
+                .isEqualTo(BuiltInRoles.PROJECT_MEMBER);
+        assertThat(ctx.explicitProjectRole())
+                .withFailMessage("the inherited role was reported as an explicit membership. §8.4 refused to "
                   + "backfill a row per (member x project) precisely to keep 'added to this "
-                  + "project' distinguishable from 'inherits the default'.";
+                  + "project' distinguishable from 'inherits the default'.")
+                .isFalse();
     }
 
     /**
@@ -111,13 +121,17 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.projectRole().id().equals(projectDefault.getId())
-                : "the workspace default was applied to a project that names its own (§5.2 step 1 "
+        assertThat(ctx.projectRole().id())
+                .as("the workspace default was applied to a project that names its own (§5.2 step 1 "
                   + "precedes step 2). A project that deliberately tightens or loosens its default "
-                  + "would silently inherit the workspace's instead. Got " + ctx.projectRole();
-        assert ctx.permissions().has(Permission.VERSION_MANAGE)
-                && !ctx.permissions().has(Permission.ISSUE_CREATE)
-                : "the resolved permissions came from the wrong default: " + ctx.permissions();
+                  + "would silently inherit the workspace's instead. Got " + ctx.projectRole())
+                .isEqualTo(projectDefault.getId());
+        assertThat(ctx.permissions().has(Permission.VERSION_MANAGE))
+                .withFailMessage(() -> "the resolved permissions came from the wrong default: " + ctx.permissions())
+                .isTrue();
+        assertThat(ctx.permissions().has(Permission.ISSUE_CREATE))
+                .withFailMessage(() -> "the resolved permissions came from the wrong default: " + ctx.permissions())
+                .isFalse();
     }
 
     /**
@@ -139,11 +153,18 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.explicitProjectRole() && ctx.projectRole().key().equals("COMMENTER")
-                : "an explicit project_members row lost to the default chain: " + ctx.projectRole();
-        assert !ctx.permissions().has(Permission.VERSION_MANAGE)
-                && ctx.permissions().has(Permission.COMMENT_CREATE)
-                : "the Commenter got the default role's grants: " + ctx.permissions();
+        assertThat(ctx.explicitProjectRole())
+                .withFailMessage("an explicit project_members row lost to the default chain: " + ctx.projectRole())
+                .isTrue();
+        assertThat(ctx.projectRole().key())
+                .as("an explicit project_members row lost to the default chain: " + ctx.projectRole())
+                .isEqualTo("COMMENTER");
+        assertThat(ctx.permissions().has(Permission.VERSION_MANAGE))
+                .withFailMessage(() -> "the Commenter got the default role's grants: " + ctx.permissions())
+                .isFalse();
+        assertThat(ctx.permissions().has(Permission.COMMENT_CREATE))
+                .withFailMessage(() -> "the Commenter got the default role's grants: " + ctx.permissions())
+                .isTrue();
     }
 
     /**
@@ -167,15 +188,17 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert !ctx.permissions().has(Permission.WORKSPACE_MEMBER_MANAGE)
-                : "a WORKSPACE-scoped role was honoured as a project's default, so every member "
+        assertThat(ctx.permissions().has(Permission.WORKSPACE_MEMBER_MANAGE))
+                .withFailMessage(() -> "a WORKSPACE-scoped role was honoured as a project's default, so every member "
                   + "with no project row in this project now holds workspace.member.manage inside "
-                  + "a ProjectContext: " + ctx.permissions().asWireStrings();
-        assert ctx.projectRole().id().equals(BuiltInRoles.PROJECT_MEMBER)
-                : "a bad project default must degrade to the built-in Contributor — the same safe, "
+                  + "a ProjectContext: " + ctx.permissions().asWireStrings())
+                .isFalse();
+        assertThat(ctx.projectRole().id())
+                .as("a bad project default must degrade to the built-in Contributor — the same safe, "
                   + "documented answer as a bad workspace default, not silently to the workspace's "
                   + "own default (which is a DIFFERENT configured policy and would mask the data "
-                  + "error indefinitely). Got " + ctx.projectRole();
+                  + "error indefinitely). Got " + ctx.projectRole())
+                .isEqualTo(BuiltInRoles.PROJECT_MEMBER);
     }
 
     /** A foreign workspace's role as a project default: same fallback, tenancy flavour (§12). */
@@ -192,10 +215,13 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert !ctx.permissions().has(Permission.PROJECT_EDIT)
-                : "another tenant's role was applied as this project's default, to every member "
-                  + "with no explicit row: " + ctx.permissions().asWireStrings();
-        assert ctx.projectRole().id().equals(BuiltInRoles.PROJECT_MEMBER);
+        assertThat(ctx.permissions().has(Permission.PROJECT_EDIT))
+                .withFailMessage(() -> "another tenant's role was applied as this project's default, to every member "
+                  + "with no explicit row: " + ctx.permissions().asWireStrings())
+                .isFalse();
+        assertThat(ctx.projectRole().id())
+                .as("the fallback is the built-in Contributor, resolved by role id and not by a key that two scopes share")
+                .isEqualTo(BuiltInRoles.PROJECT_MEMBER);
     }
 
     /** A legitimate custom project-scoped default is honoured — the guard must not be a wall. */
@@ -210,15 +236,20 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.projectRole().id().equals(readOnlyish.getId())
-                : "a valid, workspace-owned, PROJECT-scoped custom role was refused as the "
+        assertThat(ctx.projectRole().id())
+                .as("a valid, workspace-owned, PROJECT-scoped custom role was refused as the "
                   + "default. The T2 guard must reject only what is unusable — falling back for a "
                   + "legitimate role would make the S7 picker look broken and quietly restore "
-                  + "Contributor's twelve grants to a workspace that deliberately narrowed them.";
-        assert ctx.permissions().has(Permission.ISSUE_CREATE)
-                && !ctx.permissions().has(Permission.ISSUE_TRANSITION)
-                : "the custom default's own set must be what applies, not Contributor's: "
-                  + ctx.permissions().asWireStrings();
+                  + "Contributor's twelve grants to a workspace that deliberately narrowed them.")
+                .isEqualTo(readOnlyish.getId());
+        assertThat(ctx.permissions().has(Permission.ISSUE_CREATE))
+                .withFailMessage(() -> "the custom default's own set must be what applies, not Contributor's: "
+                  + ctx.permissions().asWireStrings())
+                .isTrue();
+        assertThat(ctx.permissions().has(Permission.ISSUE_TRANSITION))
+                .withFailMessage(() -> "the custom default's own set must be what applies, not Contributor's: "
+                  + ctx.permissions().asWireStrings())
+                .isFalse();
     }
 
     // ======================================================= STRICT (§5.2, ProjectAccessMode)
@@ -238,14 +269,18 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.projectRole() == null
-                : "STRICT still handed out a default project role (" + ctx.projectRole() + "). "
+        assertThat(ctx.projectRole())
+                .as("STRICT still handed out a default project role (" + ctx.projectRole() + "). "
                   + "The mode exists so a workspace can say 'membership of a project is explicit'; "
-                  + "if the default chain still runs, the setting does nothing.";
-        assert ctx.permissions().isEmpty()
-                : "a member with no project role must hold the EMPTY set — a real answer, never "
-                  + "null (§12), and never Contributor's. Got " + ctx.permissions().asWireStrings();
-        assert !ctx.explicitProjectRole();
+                  + "if the default chain still runs, the setting does nothing.")
+                .isNull();
+        assertThat(ctx.permissions().isEmpty())
+                .withFailMessage(() -> "a member with no project role must hold the EMPTY set — a real answer, never "
+                  + "null (§12), and never Contributor's. Got " + ctx.permissions().asWireStrings())
+                .isTrue();
+        assertThat(ctx.explicitProjectRole())
+                .withFailMessage("the member holds nothing because they inherit nothing, not because a project_members row said so")
+                .isFalse();
     }
 
     /**
@@ -264,19 +299,21 @@ class ProjectRoleResolutionTest {
         em.flush();
 
         var ctx = workspaceAccess.resolveProject(owner, ws.getId(), project.getId());
-        assert ctx.projectRole() == null : "STRICT must still yield no project ROLE for an Owner";
+        assertThat(ctx.projectRole()).as("STRICT must still yield no project ROLE for an Owner").isNull();
         for (var p : Permission.projectCuration()) {
-            assert ctx.permissions().has(p)
-                    : "a workspace Owner lost " + p.key() + " in a STRICT workspace. The curator "
+            assertThat(ctx.permissions().has(p))
+                    .withFailMessage(() -> "a workspace Owner lost " + p.key() + " in a STRICT workspace. The curator "
                       + "bypass is workspace-scoped (project.curate.all) and must union on top of "
                       + "a null project role — ScopeResolver.requireProjectCurator lets them "
-                      + "through today regardless of any project membership.";
+                      + "through today regardless of any project membership.")
+                    .isTrue();
         }
-        assert ctx.permissions().asWireStrings().size() == Permission.projectCuration().size()
-                : "the Owner's STRICT project set is " + ctx.permissions().asWireStrings()
+        assertThat(ctx.permissions().asWireStrings())
+                .as(() -> "the Owner's STRICT project set is " + ctx.permissions().asWireStrings()
                   + ", which is more than the four curator permissions. With no project role to "
                   + "union against, the implied grant is the ONLY source of permissions here, so "
-                  + "anything extra means project.curate.all has quietly grown (§17.2).";
+                  + "anything extra means project.curate.all has quietly grown (§17.2).")
+                .hasSize(Permission.projectCuration().size());
     }
 
     // ======================================================= the other scope direction
@@ -303,9 +340,10 @@ class ProjectRoleResolutionTest {
         // Control: the SAME row with a correctly scoped role resolves. Without this the test
         // would pass just as happily on a fixture that never persisted the membership at all —
         // a missing membership throws WorkspaceNotFoundException too, from two lines earlier.
-        assert workspaceAccess.requireMember(actor, ws.getId()).permissions()
-                .has(Permission.PROJECT_CREATE)
-                : "fixture: the membership must resolve normally before its role is swapped";
+        assertThat(workspaceAccess.requireMember(actor, ws.getId()).permissions()
+                .has(Permission.PROJECT_CREATE))
+                .withFailMessage("fixture: the membership must resolve normally before its role is swapped")
+                .isTrue();
 
         m.setRole(roleCatalog.reference(RoleScope.PROJECT, "MANAGER")); // a PROJECT-scoped built-in
         workspaceMemberRepository.save(m);
@@ -313,13 +351,12 @@ class ProjectRoleResolutionTest {
 
         try {
             var ctx = workspaceAccess.requireMember(actor, ws.getId());
-            assert false
-                    : "a PROJECT role was accepted as a workspace role, and the caller now holds "
+            fail("a PROJECT role was accepted as a workspace role, and the caller now holds "
                       + ctx.permissions().asWireStrings() + " AT WORKSPACE SCOPE. A PermissionSet "
                       + "is a flat EnumSet with no memory of scope, so every workspace-scoped "
                       + "require(...) downstream would be satisfied honestly — and the role is a "
                       + "legitimate built-in belonging to no wrong workspace, so no tenancy check "
-                      + "upstream can catch it.";
+                      + "upstream can catch it.");
         } catch (WorkspaceNotFoundException expected) {
             // 404, never 403: a caller learns nothing from a consistency failure (§12).
         }
@@ -361,15 +398,17 @@ class ProjectRoleResolutionTest {
         em.clear();
 
         var ctx = workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
-        assert ctx.permissions().asWireStrings().equals(java.util.List.of("issue.create"))
-                : "resolving a role with unknown stored keys produced "
+        assertThat(ctx.permissions().asWireStrings())
+                .as(() -> "resolving a role with unknown stored keys produced "
                   + ctx.permissions().asWireStrings() + ". The known grants must survive intact "
                   + "and the unknown ones must vanish: dropping can only ever NARROW (§ the "
                   + "PermissionConverter javadoc), and an own_only unknown row must not leak in "
-                  + "as an own-only grant of anything.";
+                  + "as an own-only grant of anything.")
+                .isEqualTo(java.util.List.of("issue.create"));
         for (var p : Permission.values()) {
-            assert p == Permission.ISSUE_CREATE || !ctx.permissions().hasAtAll(p)
-                    : "dropping an unknown key WIDENED the role: it also granted " + p.key();
+            assertThat(p == Permission.ISSUE_CREATE || !ctx.permissions().hasAtAll(p))
+                    .withFailMessage(() -> "dropping an unknown key WIDENED the role: it also granted " + p.key())
+                    .isTrue();
         }
 
         // A role whose every grant is unknown — a downgrade past a whole feature. Resolution
@@ -380,9 +419,10 @@ class ProjectRoleResolutionTest {
         em.clear();
 
         var view = roleCatalog.view(allUnknown.getId());
-        assert view.permissions().isEmpty()
-                : "a role whose grants are ALL unknown resolved to " + view.permissions()
-                  + " instead of the empty set";
+        assertThat(view.permissions().isEmpty())
+                .withFailMessage(() -> "a role whose grants are ALL unknown resolved to " + view.permissions()
+                  + " instead of the empty set")
+                .isTrue();
     }
 
     // ------------------------------------------------------------------ fixture

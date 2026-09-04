@@ -8,6 +8,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import java.util.ArrayList;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -41,15 +42,16 @@ class SprintIssueApiTest extends SprintTestBase {
         var zero = createIssue(ctx, "zero", "\"storyPoints\":0");
         var half = createIssue(ctx, "half", "\"storyPoints\":0.5");
         var max = createIssue(ctx, "max", "\"storyPoints\":999");
-        assert zero.get("storyPoints").asDouble() == 0.0 : zero;
-        assert half.get("storyPoints").asDouble() == 0.5 : half;
-        assert max.get("storyPoints").asDouble() == 999.0 : max;
-        assert max.get("storyPoints").asText().equals("999")
-                : "a point value must be a plain number, not scientific notation: " + max;
+        assertThat(zero.get("storyPoints").asDouble()).as("%s", zero).isEqualTo(0.0);
+        assertThat(half.get("storyPoints").asDouble()).as("%s", half).isEqualTo(0.5);
+        assertThat(max.get("storyPoints").asDouble()).as("%s", max).isEqualTo(999.0);
+        assertThat(max.get("storyPoints").asText())
+                .as("a point value must be a plain number, not scientific notation: " + max)
+                .isEqualTo("999");
 
         // null is UNESTIMATED, which is deliberately not 0.
         var none = createIssue(ctx, "unestimated");
-        assert none.get("storyPoints").isNull() : none;
+        assertThat(none.get("storyPoints").isNull()).withFailMessage("%s", none).isTrue();
 
         // …and the out-of-range / over-precise ones are 422, on create AND on update.
         for (String bad : List.of("-1", "1000", "1.234")) {
@@ -58,8 +60,9 @@ class SprintIssueApiTest extends SprintTestBase {
             patchIssue(ctx, ctx.token(), numberOf(zero), "{\"storyPoints\":" + bad + "}")
                     .andExpect(status().isUnprocessableContent());
         }
-        assert getIssue(ctx, numberOf(zero)).get("storyPoints").asDouble() == 0.0
-                : "a rejected estimate half-applied";
+        assertThat(getIssue(ctx, numberOf(zero)).get("storyPoints").asDouble())
+                .as("a rejected estimate half-applied")
+                .isEqualTo(0.0);
     }
 
     @Test
@@ -70,25 +73,29 @@ class SprintIssueApiTest extends SprintTestBase {
 
         // create-time values write no history (the existing convention)
         var estimated = createIssue(ctx, "estimated at birth", "\"storyPoints\":3");
-        assert historyFields(ctx, numberOf(estimated)).isEmpty()
-                : "create-time values must not be audited";
+        assertThat(historyFields(ctx, numberOf(estimated))).as("create-time values must not be audited").isEmpty();
 
         patchIssue(ctx, ctx.token(), number, "{\"storyPoints\":5}").andExpect(status().isOk());
-        assert count(historyFields(ctx, number), "storyPoints") == 1 : "the change was not audited";
+        assertThat(count(historyFields(ctx, number), "storyPoints")).as("the change was not audited").isEqualTo(1);
 
         // 5 and 5.00 are the same estimate — a no-op writes nothing
         patchIssue(ctx, ctx.token(), number, "{\"storyPoints\":5.00}").andExpect(status().isOk());
-        assert count(historyFields(ctx, number), "storyPoints") == 1
-                : "a re-statement of the same estimate was audited as a change";
+        assertThat(count(historyFields(ctx, number), "storyPoints"))
+                .as("a re-statement of the same estimate was audited as a change")
+                .isEqualTo(1);
 
         // …and clearing it marks the issue unestimated again
         patchIssue(ctx, ctx.token(), number, "{\"clearStoryPoints\":true}").andExpect(status().isOk());
-        assert getIssue(ctx, number).get("storyPoints").isNull() : "clearStoryPoints did not unset";
-        assert count(historyFields(ctx, number), "storyPoints") == 2 : "the clear was not audited";
+        assertThat(getIssue(ctx, number).get("storyPoints").isNull())
+                .withFailMessage("clearStoryPoints did not unset")
+                .isTrue();
+        assertThat(count(historyFields(ctx, number), "storyPoints")).as("the clear was not audited").isEqualTo(2);
 
         // a second clear is a no-op
         patchIssue(ctx, ctx.token(), number, "{\"clearStoryPoints\":true}").andExpect(status().isOk());
-        assert count(historyFields(ctx, number), "storyPoints") == 2;
+        assertThat(count(historyFields(ctx, number), "storyPoints"))
+                .as("the change and the clear are audited once each, and the repeated clear adds nothing")
+                .isEqualTo(2);
     }
 
     // ===================================================== the issue payload
@@ -106,7 +113,7 @@ class SprintIssueApiTest extends SprintTestBase {
         // single GET
         var single = getIssue(ctx, numberOf(child));
         assertShape(single);
-        assert "Sprint 1".equals(sprintName(single)) : single;
+        assertThat(sprintName(single)).as("%s", single).isEqualTo("Sprint 1");
 
         // the board (capped list)
         for (var row : board(ctx, null).get("issues")) assertShape(row);
@@ -118,7 +125,7 @@ class SprintIssueApiTest extends SprintTestBase {
                                 .header("Authorization", "Bearer " + ctx.token()))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert !children.isEmpty() : "the parent must have a child row to assert on";
+        assertThat(children).as("the parent must have a child row to assert on").isNotEmpty();
         for (var row : children) assertShape(row);
         // the planning view
         var view = backlogView(ctx);
@@ -128,10 +135,11 @@ class SprintIssueApiTest extends SprintTestBase {
 
     /** Every issue payload must carry the two new fields and must NOT carry the rank. */
     private static void assertShape(JsonNode issue) {
-        assert issue.has("sprint") : "IssueResponse lost `sprint`: " + issue;
-        assert issue.has("storyPoints") : "IssueResponse lost `storyPoints`: " + issue;
-        assert !issue.has("position")
-                : "`position` is the server-written rank and must never be exposed: " + issue;
+        assertThat(issue.has("sprint")).withFailMessage("IssueResponse lost `sprint`: " + issue).isTrue();
+        assertThat(issue.has("storyPoints")).withFailMessage("IssueResponse lost `storyPoints`: " + issue).isTrue();
+        assertThat(issue.has("position"))
+                .withFailMessage("`position` is the server-written rank and must never be exposed: " + issue)
+                .isFalse();
     }
 
     // ===================================================== filters
@@ -148,15 +156,20 @@ class SprintIssueApiTest extends SprintTestBase {
         addIssuesToSprint(ctx, ctx.token(), sprintId, idOf(inSprint), idOf(alsoInSprint))
                 .andExpect(status().isOk());
 
-        assert titles(board(ctx, "?sprintId=" + sprintId))
-                .equals(java.util.Set.of("in sprint", "also in sprint"));
-        assert titles(board(ctx, "?noSprint=true")).equals(java.util.Set.of("in the backlog"));
+        assertThat(titles(board(ctx, "?sprintId=" + sprintId)))
+                .as("sprintId filters the board to that sprint's issues")
+                .isEqualTo(java.util.Set.of("in sprint", "also in sprint"));
+        assertThat(titles(board(ctx, "?noSprint=true")))
+                .as("noSprint=true is the complement — the issues in no sprint at all")
+                .isEqualTo(java.util.Set.of("in the backlog"));
         // composes (AND) with the pre-existing filters
-        assert titles(board(ctx, "?sprintId=" + sprintId + "&componentId=" + componentId))
-                .equals(java.util.Set.of("in sprint"));
+        assertThat(titles(board(ctx, "?sprintId=" + sprintId + "&componentId=" + componentId)))
+                .as("the sprint filter ANDs with the pre-existing ones rather than replacing them")
+                .isEqualTo(java.util.Set.of("in sprint"));
         // …and on the paged variant too
-        assert pageTitles(backlog(ctx, "&sprintId=" + sprintId))
-                .equals(java.util.Set.of("in sprint", "also in sprint"));
+        assertThat(pageTitles(backlog(ctx, "&sprintId=" + sprintId)))
+                .as("the paged backlog variant filters by sprint exactly as the board does")
+                .isEqualTo(java.util.Set.of("in sprint", "also in sprint"));
 
         // "in this sprint" AND "in no sprint" can never both hold — a malformed request,
         // not a silently empty result the caller would misread as "nothing matches".
@@ -186,39 +199,43 @@ class SprintIssueApiTest extends SprintTestBase {
         markDone(ctx, numberOf(doneInBacklog));
 
         var view = backlogView(ctx);
-        assert view.get("sectionCap").asInt() > 0 : view;
+        assertThat(view.get("sectionCap").asInt()).as("%s", view).isGreaterThan(0);
         var sections = view.get("sprints");
-        assert sections.size() == 2 : "only OPEN sprints get a section: " + view;
-        assert sections.get(0).get("sprint").get("id").asText().equals(active.toString())
-                : "the ACTIVE sprint must come first: " + view;
-        assert sections.get(1).get("sprint").get("id").asText().equals(future.toString()) : view;
+        assertThat(sections).as("only OPEN sprints get a section: " + view).hasSize(2);
+        assertThat(sections.get(0).get("sprint").get("id").asText())
+                .as("the ACTIVE sprint must come first: " + view)
+                .isEqualTo(active.toString());
+        assertThat(sections.get(1).get("sprint").get("id").asText()).as("%s", view).isEqualTo(future.toString());
 
         // The active section keeps its DONE issue — that is the sprint's record — and its
         // stats report both halves.
         var activeSection = sections.get(0);
-        assert activeSection.get("issues").size() == 2 : activeSection;
+        assertThat(activeSection.get("issues")).as("%s", activeSection).hasSize(2);
         var stats = activeSection.get("stats");
-        assert stats.get("issueCount").asInt() == 2 : stats;
-        assert stats.get("doneIssueCount").asInt() == 1 : stats;
-        assert stats.get("points").asDouble() == 5.0 : stats;
-        assert stats.get("donePoints").asDouble() == 2.0 : stats;
-        assert stats.get("unestimatedCount").asInt() == 0 : stats;
-        assert !activeSection.get("truncated").asBoolean() : activeSection;
-        assert activeSection.get("totalAvailable").asInt() == 2 : activeSection;
+        assertThat(stats.get("issueCount").asInt()).as("%s", stats).isEqualTo(2);
+        assertThat(stats.get("doneIssueCount").asInt()).as("%s", stats).isEqualTo(1);
+        assertThat(stats.get("points").asDouble()).as("%s", stats).isEqualTo(5.0);
+        assertThat(stats.get("donePoints").asDouble()).as("%s", stats).isEqualTo(2.0);
+        assertThat(stats.get("unestimatedCount").asInt()).as("%s", stats).isEqualTo(0);
+        assertThat(activeSection.get("truncated").asBoolean()).withFailMessage("%s", activeSection).isFalse();
+        assertThat(activeSection.get("totalAvailable").asInt()).as("%s", activeSection).isEqualTo(2);
 
         // The BACKLOG hides done work by default (a done, unranked issue is planning noise)…
         var backlogTitles = new ArrayList<String>();
         for (var row : view.get("backlog").get("issues")) backlogTitles.add(row.get("title").asText());
-        assert backlogTitles.equals(List.of("loose")) : backlogTitles;
-        assert view.get("backlog").get("stats").get("issueCount").asInt() == 1 : view.get("backlog");
+        assertThat(backlogTitles).as("%s", backlogTitles).isEqualTo(List.of("loose"));
+        assertThat(view.get("backlog").get("stats").get("issueCount").asInt())
+                .as(() -> String.valueOf(view.get("backlog")))
+                .isEqualTo(1);
 
         // …and includeDone brings it back.
         var withDone = backlogView(ctx, ctx.token(), "?includeDone=true");
         var withDoneTitles = new ArrayList<String>();
         for (var row : withDone.get("backlog").get("issues")) withDoneTitles.add(row.get("title").asText());
-        assert withDoneTitles.equals(List.of("loose", "done in the backlog")) : withDoneTitles;
-        assert withDone.get("backlog").get("stats").get("doneIssueCount").asInt() == 1
-                : withDone.get("backlog");
+        assertThat(withDoneTitles).as("%s", withDoneTitles).isEqualTo(List.of("loose", "done in the backlog"));
+        assertThat(withDone.get("backlog").get("stats").get("doneIssueCount").asInt())
+                .as(() -> String.valueOf(withDone.get("backlog")))
+                .isEqualTo(1);
     }
 
     // ===================================================== sprint validation
@@ -239,7 +256,7 @@ class SprintIssueApiTest extends SprintTestBase {
 
         // blank after normalization → the sequence-based default (never a 400 on create)
         var defaulted = createSprint(ctx, ctx.token(), "{\"name\":\"   \"}");
-        assert sprintNode(ctx, defaulted).get("name").asText().startsWith("Sprint ") : "not defaulted";
+        assertThat(sprintNode(ctx, defaulted).get("name").asText()).as("not defaulted").startsWith("Sprint ");
 
         // 61 characters → 400
         postSprint(ctx, ctx.token(), "{\"name\":\"" + "x".repeat(61) + "\"}")
@@ -272,8 +289,7 @@ class SprintIssueApiTest extends SprintTestBase {
                 "{\"startAt\":\"" + start + "\",\"endAt\":\"" + beforeStart + "\"}")
                 .andExpect(status().isUnprocessableContent());
 
-        assert sprintNode(ctx, sprintId).get("state").asText().equals("FUTURE")
-                : "a rejected start half-applied";
+        assertThat(sprintNode(ctx, sprintId).get("state").asText()).as("a rejected start half-applied").isEqualTo("FUTURE");
     }
 
     // ===================================================== assignment rules
@@ -301,8 +317,9 @@ class SprintIssueApiTest extends SprintTestBase {
         // …while the issue it delivered is still editable, sprint and all.
         patchIssue(ctx, ctx.token(), numberOf(delivered), "{\"title\":\"delivered, renamed\"}")
                 .andExpect(status().isOk());
-        assert sprintId.toString().equals(sprintId(getIssue(ctx, numberOf(delivered))))
-                : "editing a delivered issue detached it from its completed sprint";
+        assertThat(sprintId.toString())
+                .as("editing a delivered issue detached it from its completed sprint")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(delivered))));
     }
 
     /**
@@ -351,17 +368,20 @@ class SprintIssueApiTest extends SprintTestBase {
                 .andExpect(status().isUnprocessableContent());
 
         // Nothing moved and nothing was audited: a refused detach must not half-apply.
-        assert closed.toString().equals(sprintId(getIssue(ctx, numberOf(delivered))))
-                : "a refused detach still took the issue out of its completed sprint";
-        assert historyFields(ctx, numberOf(delivered)).size() == historyBefore
-                : "a refused detach wrote history";
+        assertThat(closed.toString())
+                .as("a refused detach still took the issue out of its completed sprint")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(delivered))));
+        assertThat(historyFields(ctx, numberOf(delivered)).size())
+                .as("a refused detach wrote history")
+                .isEqualTo(historyBefore);
 
         // …while a PURE rank move INSIDE the completed section is still allowed: it
         // changes no membership, so the delivery record is untouched. Only the sprint
         // change is frozen, not the ordering of what the sprint delivered.
         rankAfter(ctx, numberOf(alsoDelivered), idOf(delivered)).andExpect(status().isOk());
-        assert closed.toString().equals(sprintId(getIssue(ctx, numberOf(alsoDelivered))))
-                : "a rank move inside a completed section changed its membership";
+        assertThat(closed.toString())
+                .as("a rank move inside a completed section changed its membership")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(alsoDelivered))));
     }
 
     /**
@@ -396,25 +416,31 @@ class SprintIssueApiTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail").value("Sprint 'Sprint 1' is completed"));
 
         // The frozen one never left the sprint that delivered it, and nothing was audited.
-        assert closed.toString().equals(sprintId(getIssue(ctx, numberOf(delivered))))
-                : "an add-to-another-sprint pulled an issue out of its completed sprint";
-        assert historyFields(ctx, numberOf(delivered)).size() == deliveredHistoryBefore
-                : "a refused batch wrote history for the frozen issue";
+        assertThat(closed.toString())
+                .as("an add-to-another-sprint pulled an issue out of its completed sprint")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(delivered))));
+        assertThat(historyFields(ctx, numberOf(delivered)).size())
+                .as("a refused batch wrote history for the frozen issue")
+                .isEqualTo(deliveredHistoryBefore);
 
         // …and the innocent member of the same batch did NOT move: the validation runs
         // over the whole set before the first write, so the request is all-or-nothing.
-        assert sprintName(getIssue(ctx, numberOf(innocent))) == null
-                : "a batch rejected for one frozen member still moved the others";
-        assert historyFields(ctx, numberOf(innocent)).isEmpty()
-                : "a refused batch wrote history for an issue that never moved";
-        assert backlogKeys(backlogView(ctx)).contains(getIssue(ctx, numberOf(innocent)).get("key").asText())
-                : "the innocent issue left the backlog section of the planning view";
+        assertThat(sprintName(getIssue(ctx, numberOf(innocent))))
+                .as("a batch rejected for one frozen member still moved the others")
+                .isNull();
+        assertThat(historyFields(ctx, numberOf(innocent)))
+                .as("a refused batch wrote history for an issue that never moved")
+                .isEmpty();
+        assertThat(backlogKeys(backlogView(ctx)))
+                .as("the innocent issue left the backlog section of the planning view")
+                .contains(getIssue(ctx, numberOf(innocent)).get("key").asText());
 
         // The same batch minus the frozen member is an ordinary success — the refusal is
         // about the completed sprint, not about batches.
         addIssuesToSprint(ctx, ctx.token(), open, idOf(innocent)).andExpect(status().isOk());
-        assert open.toString().equals(sprintId(getIssue(ctx, numberOf(innocent))))
-                : "the innocent issue could not be added on its own afterwards";
+        assertThat(open.toString())
+                .as("the innocent issue could not be added on its own afterwards")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(innocent))));
     }
 
     /**
@@ -432,8 +458,8 @@ class SprintIssueApiTest extends SprintTestBase {
 
         removeIssueFromSprint(ctx, ctx.token(), closed, idOf(loose))
                 .andExpect(status().isNoContent());
-        assert historyFields(ctx, numberOf(loose)).isEmpty() : "a no-op removal wrote history";
-        assert sprintName(getIssue(ctx, numberOf(loose))) == null : "a no-op removal moved the issue";
+        assertThat(historyFields(ctx, numberOf(loose))).as("a no-op removal wrote history").isEmpty();
+        assertThat(sprintName(getIssue(ctx, numberOf(loose)))).as("a no-op removal moved the issue").isNull();
     }
 
     /**
@@ -454,10 +480,10 @@ class SprintIssueApiTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("not both")));
 
         // The contradictory request applied NEITHER interpretation.
-        assert sprintId.toString().equals(sprintId(getIssue(ctx, numberOf(issue))))
-                : "a contradictory sprint payload was half-applied";
-        assert count(historyFields(ctx, numberOf(issue)), "sprint") == 1
-                : "a rejected PATCH wrote history";
+        assertThat(sprintId.toString())
+                .as("a contradictory sprint payload was half-applied")
+                .isEqualTo(sprintId(getIssue(ctx, numberOf(issue))));
+        assertThat(count(historyFields(ctx, numberOf(issue)), "sprint")).as("a rejected PATCH wrote history").isEqualTo(1);
     }
 
     /** Re-assigning an issue to the sprint it is already in is a no-op: no history, no version bump. */
@@ -469,16 +495,18 @@ class SprintIssueApiTest extends SprintTestBase {
 
         addIssuesToSprint(ctx, ctx.token(), sprintId, idOf(issue)).andExpect(status().isOk());
         int version = getIssue(ctx, numberOf(issue)).get("version").asInt();
-        assert count(historyFields(ctx, numberOf(issue)), "sprint") == 1 : "the move was not audited";
+        assertThat(count(historyFields(ctx, numberOf(issue)), "sprint")).as("the move was not audited").isEqualTo(1);
 
         addIssuesToSprint(ctx, ctx.token(), sprintId, idOf(issue)).andExpect(status().isOk());
         patchIssue(ctx, ctx.token(), numberOf(issue), "{\"sprintId\":\"" + sprintId + "\"}")
                 .andExpect(status().isOk());
 
-        assert getIssue(ctx, numberOf(issue)).get("version").asInt() == version
-                : "a no-op assignment bumped @Version";
-        assert count(historyFields(ctx, numberOf(issue)), "sprint") == 1
-                : "a no-op assignment wrote a history row";
+        assertThat(getIssue(ctx, numberOf(issue)).get("version").asInt())
+                .as("a no-op assignment bumped @Version")
+                .isEqualTo(version);
+        assertThat(count(historyFields(ctx, numberOf(issue)), "sprint"))
+                .as("a no-op assignment wrote a history row")
+                .isEqualTo(1);
     }
 
     /** Removing an issue that is not in the sprint stays idempotent (204, no history). */
@@ -489,7 +517,7 @@ class SprintIssueApiTest extends SprintTestBase {
         var issue = createIssue(ctx, "never committed");
 
         removeIssueFromSprint(ctx, ctx.token(), sprintId, idOf(issue)).andExpect(status().isNoContent());
-        assert historyFields(ctx, numberOf(issue)).isEmpty() : "a no-op removal wrote history";
+        assertThat(historyFields(ctx, numberOf(issue))).as("a no-op removal wrote history").isEmpty();
     }
 
     // ===================================================== helpers

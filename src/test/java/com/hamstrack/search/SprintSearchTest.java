@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.hasItem;
@@ -58,17 +59,31 @@ class SprintSearchTest extends SprintTestBase {
         addIssuesToSprint(ctx, ctx.token(), one, idOf(inOne)).andExpect(status().isOk());
         addIssuesToSprint(ctx, ctx.token(), two, idOf(inTwo)).andExpect(status().isOk());
 
-        assert found(ctx, "sprint = \"Sprint 1\"").equals(Set.of("in-one"));
+        assertThat(found(ctx, "sprint = \"Sprint 1\""))
+                .as("sprint = resolves a sprint name to exactly the issues carrying it")
+                .isEqualTo(Set.of("in-one"));
         // != is "does not carry it", so the sprint-less issue matches too (the `component`
         // semantics this field reuses).
-        assert found(ctx, "sprint != \"Sprint 1\"").equals(Set.of("in-two", "loose"));
-        assert found(ctx, "sprint IN (\"Sprint 1\", \"Sprint 2\")").equals(Set.of("in-one", "in-two"));
-        assert found(ctx, "sprint IS EMPTY").equals(Set.of("loose"));
-        assert found(ctx, "sprint IS NOT EMPTY").equals(Set.of("in-one", "in-two"));
+        assertThat(found(ctx, "sprint != \"Sprint 1\""))
+                .as("sprint != is 'does not carry it', so the sprint-less issue matches too")
+                .isEqualTo(Set.of("in-two", "loose"));
+        assertThat(found(ctx, "sprint IN (\"Sprint 1\", \"Sprint 2\")"))
+                .as("sprint IN unions the named sprints and nothing else")
+                .isEqualTo(Set.of("in-one", "in-two"));
+        assertThat(found(ctx, "sprint IS EMPTY"))
+                .as("sprint IS EMPTY is the issues in no sprint at all")
+                .isEqualTo(Set.of("loose"));
+        assertThat(found(ctx, "sprint IS NOT EMPTY"))
+                .as("sprint IS NOT EMPTY is the complement of IS EMPTY over the same rows")
+                .isEqualTo(Set.of("in-one", "in-two"));
         // case-insensitive resolution + the plural alias is the same field
-        assert found(ctx, "sprints = \"SPRINT 1\"").equals(Set.of("in-one"));
+        assertThat(found(ctx, "sprints = \"SPRINT 1\""))
+                .as("the plural alias and a differently cased name resolve to the same field and the same sprint")
+                .isEqualTo(Set.of("in-one"));
         // …and it composes with the rest of the language
-        assert found(ctx, "sprint = \"Sprint 1\" AND text ~ \"in-\"").equals(Set.of("in-one"));
+        assertThat(found(ctx, "sprint = \"Sprint 1\" AND text ~ \"in-\""))
+                .as("sprint composes with the rest of the language instead of being a special case")
+                .isEqualTo(Set.of("in-one"));
     }
 
     /** Sprint order across projects has no common meaning — the field is not sortable. */
@@ -93,8 +108,12 @@ class SprintSearchTest extends SprintTestBase {
         addIssuesToSprint(a, a.token(), here, idOf(mine)).andExpect(status().isOk());
         addIssuesToSprint(b, b.token(), there, idOf(theirs)).andExpect(status().isOk());
 
-        assert found(a, "sprint = \"Shared name\"").equals(Set.of("a-issue"));
-        assert found(b, "sprint = \"Shared name\"").equals(Set.of("b-issue"));
+        assertThat(found(a, "sprint = \"Shared name\""))
+                .as("a sprint name resolves inside the caller's own workspace only")
+                .isEqualTo(Set.of("a-issue"));
+        assertThat(found(b, "sprint = \"Shared name\""))
+                .as("the other tenant's identical sprint name resolves to the other tenant's issue, never across")
+                .isEqualTo(Set.of("b-issue"));
 
         // A name owned by two VISIBLE projects of one workspace matches issues in both.
         var sibling = siblingProject(a);
@@ -105,7 +124,9 @@ class SprintSearchTest extends SprintTestBase {
         var mySprint = createSprint(a, "Cross-project");
         var myIssue = createIssue(a, "my-issue");
         addIssuesToSprint(a, a.token(), mySprint, idOf(myIssue)).andExpect(status().isOk());
-        assert found(a, "sprint = \"Cross-project\"").equals(Set.of("sibling-issue", "my-issue"));
+        assertThat(found(a, "sprint = \"Cross-project\""))
+                .as("one name held by two visible projects resolves to both sprints, not to one at random")
+                .isEqualTo(Set.of("sibling-issue", "my-issue"));
     }
 
     /**
@@ -121,7 +142,9 @@ class SprintSearchTest extends SprintTestBase {
         addIssuesToSprint(ctx, ctx.token(), sprintId, idOf(delivered)).andExpect(status().isOk());
         markDone(ctx, numberOf(delivered));
 
-        assert found(ctx, "sprint = \"Sprint 1\"").equals(Set.of("delivered"));
+        assertThat(found(ctx, "sprint = \"Sprint 1\""))
+                .as("a completed sprint drops out of name resolution, but the issues it carried still match")
+                .isEqualTo(Set.of("delivered"));
 
         completeToBacklog(ctx, ctx.token(), sprintId).andExpect(status().isOk());
 
@@ -129,8 +152,9 @@ class SprintSearchTest extends SprintTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
                 .andExpect(jsonPath("$.field").value("sprint"));
-        assert found(ctx, "sprint IS NOT EMPTY").equals(Set.of("delivered"))
-                : "the DONE issue keeps its sprint, so it must still match IS NOT EMPTY";
+        assertThat(found(ctx, "sprint IS NOT EMPTY"))
+                .as("the DONE issue keeps its sprint, so it must still match IS NOT EMPTY")
+                .isEqualTo(Set.of("delivered"));
     }
 
     @Test
@@ -155,24 +179,44 @@ class SprintSearchTest extends SprintTestBase {
         createIssue(ctx, "half", "\"storyPoints\":0.5");
         createIssue(ctx, "unestimated");
 
-        assert found(ctx, "storyPoints >= 5").equals(Set.of("five", "thirteen"));
-        assert found(ctx, "storyPoints > 5").equals(Set.of("thirteen"));
-        assert found(ctx, "storyPoints < 1").equals(Set.of("half"));
-        assert found(ctx, "storyPoints <= 1").equals(Set.of("half", "one"));
-        assert found(ctx, "storyPoints = 13").equals(Set.of("thirteen"));
-        assert found(ctx, "storyPoints = 0.5").equals(Set.of("half"));
+        assertThat(found(ctx, "storyPoints >= 5"))
+                .as("storyPoints >= is an ordered comparison, not a string one")
+                .isEqualTo(Set.of("five", "thirteen"));
+        assertThat(found(ctx, "storyPoints > 5"))
+                .as("storyPoints > excludes the boundary value")
+                .isEqualTo(Set.of("thirteen"));
+        assertThat(found(ctx, "storyPoints < 1"))
+                .as("storyPoints < compares fractional estimates numerically")
+                .isEqualTo(Set.of("half"));
+        assertThat(found(ctx, "storyPoints <= 1"))
+                .as("storyPoints <= includes the boundary value")
+                .isEqualTo(Set.of("half", "one"));
+        assertThat(found(ctx, "storyPoints = 13"))
+                .as("storyPoints = matches an exact estimate")
+                .isEqualTo(Set.of("thirteen"));
+        assertThat(found(ctx, "storyPoints = 0.5"))
+                .as("storyPoints = matches a fractional estimate exactly")
+                .isEqualTo(Set.of("half"));
         // `!=` deliberately also matches the UNESTIMATED issue: SQL's three-valued logic
         // would otherwise silently drop null rows, which reads as "13 points" to nobody.
-        assert found(ctx, "storyPoints != 13").equals(Set.of("one", "five", "half", "unestimated"));
+        assertThat(found(ctx, "storyPoints != 13"))
+                .as("storyPoints != keeps the unestimated issue: SQL three-valued logic would drop null rows, which reads as '13 points' to nobody")
+                .isEqualTo(Set.of("one", "five", "half", "unestimated"));
         // IS EMPTY is "unestimated" — deliberately NOT the same statement as = 0
-        assert found(ctx, "storyPoints IS EMPTY").equals(Set.of("unestimated"));
-        assert found(ctx, "points IS NOT EMPTY").equals(Set.of("one", "five", "thirteen", "half"));
+        assertThat(found(ctx, "storyPoints IS EMPTY"))
+                .as("storyPoints IS EMPTY is 'unestimated', deliberately not the same statement as = 0")
+                .isEqualTo(Set.of("unestimated"));
+        assertThat(found(ctx, "points IS NOT EMPTY"))
+                .as("the points alias is the same field, and IS NOT EMPTY is every estimated issue")
+                .isEqualTo(Set.of("one", "five", "thirteen", "half"));
 
         // sortable (unlike sprint): "show me the big ones first"
-        assert orderedTitles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC")
-                .equals(List.of("thirteen", "five", "one", "half"));
-        assert orderedTitles(ctx, "points IS NOT EMPTY ORDER BY points ASC")
-                .equals(List.of("half", "one", "five", "thirteen"));
+        assertThat(orderedTitles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC"))
+                .as("storyPoints is sortable (unlike sprint) and DESC puts the big ones first")
+                .isEqualTo(List.of("thirteen", "five", "one", "half"));
+        assertThat(orderedTitles(ctx, "points IS NOT EMPTY ORDER BY points ASC"))
+                .as("ASC is the same ordering read the other way, through the alias")
+                .isEqualTo(List.of("half", "one", "five", "thirteen"));
     }
 
     @Test
@@ -221,9 +265,15 @@ class SprintSearchTest extends SprintTestBase {
         }
 
         // The bounds are inclusive at both ends, and the domain's own values still run.
-        assert found(ctx, "storyPoints >= 0").equals(Set.of("estimated"));
-        assert found(ctx, "storyPoints <= 999").equals(Set.of("estimated"));
-        assert found(ctx, "storyPoints != 0.25").equals(Set.of("estimated"));
+        assertThat(found(ctx, "storyPoints >= 0"))
+                .as("the domain's lower bound is inclusive and the field's own values still run")
+                .isEqualTo(Set.of("estimated"));
+        assertThat(found(ctx, "storyPoints <= 999"))
+                .as("the domain's upper bound is inclusive")
+                .isEqualTo(Set.of("estimated"));
+        assertThat(found(ctx, "storyPoints != 0.25"))
+                .as("a fractional operand inside the domain is accepted, not refused with the out-of-domain ones")
+                .isEqualTo(Set.of("estimated"));
     }
 
     // ==================================================== /schema + saved filters
@@ -264,25 +314,26 @@ class SprintSearchTest extends SprintTestBase {
                 .andReturn().getResponse().getContentAsString());
 
         var sprint = fieldNamed(schema, "sprint");
-        assert sprint.get("type").asText().equals("ENUM_REF") : sprint;
-        assert sprint.get("valueSuggest").asText().equals("SPRINT") : sprint;
-        assert !sprint.get("sortable").asBoolean() : "sprint must NOT be sortable: " + sprint;
-        assert sprint.get("nullable").asBoolean() : sprint;
+        assertThat(sprint.get("type").asText()).as("%s", sprint).isEqualTo("ENUM_REF");
+        assertThat(sprint.get("valueSuggest").asText()).as("%s", sprint).isEqualTo("SPRINT");
+        assertThat(sprint.get("sortable").asBoolean()).withFailMessage("sprint must NOT be sortable: " + sprint).isFalse();
+        assertThat(sprint.get("nullable").asBoolean()).withFailMessage("%s", sprint).isTrue();
 
         var points = fieldNamed(schema, "storyPoints");
-        assert points.get("type").asText().equals("NUMBER") : points;
-        assert points.get("sortable").asBoolean() : "storyPoints IS sortable: " + points;
-        assert points.get("nullable").asBoolean() : points;
-        assert points.get("valueSuggest").isNull() : "a number has no picklist: " + points;
+        assertThat(points.get("type").asText()).as("%s", points).isEqualTo("NUMBER");
+        assertThat(points.get("sortable").asBoolean()).withFailMessage("storyPoints IS sortable: " + points).isTrue();
+        assertThat(points.get("nullable").asBoolean()).withFailMessage("%s", points).isTrue();
+        assertThat(points.get("valueSuggest").isNull()).withFailMessage("a number has no picklist: " + points).isTrue();
         var ops = new java.util.ArrayList<String>();
         for (var o : points.get("operators")) ops.add(o.asText());
-        assert ops.containsAll(List.of("=", "!=", ">", "<", ">=", "<=")) : ops;
+        assertThat(ops).as("%s", ops).containsAll(List.of("=", "!=", ">", "<", ">=", "<="));
 
         // The SPRINT picklist spans the visible projects' OPEN sprints only.
         var values = new java.util.HashSet<String>();
         for (var v : schema.get("values").get("SPRINT")) values.add(v.get("label").asText());
-        assert values.equals(Set.of("Sprint 1", "Sibling sprint"))
-                : "the SPRINT picklist must list open sprints of the visible projects, got " + values;
+        assertThat(values)
+                .as("the SPRINT picklist must list open sprints of the visible projects, got " + values)
+                .isEqualTo(Set.of("Sprint 1", "Sibling sprint"));
     }
 
     @Test
@@ -306,7 +357,9 @@ class SprintSearchTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.hql", containsString("sprint")));
 
-        assert found(ctx, created.get("hql").asText()).equals(Set.of("committed"));
+        assertThat(found(ctx, created.get("hql").asText()))
+                .as("a saved filter round-trips: the stored HQL runs and finds what it found when it was saved")
+                .isEqualTo(Set.of("committed"));
     }
 
     /** Search rows carry the new fields too, and still never carry the rank. */
@@ -321,9 +374,9 @@ class SprintSearchTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
         var row = body.get("content").get(0).get("issue");
-        assert "Sprint 1".equals(sprintName(row)) : row;
-        assert row.get("storyPoints").asDouble() == 3.0 : row;
-        assert !row.has("position") : "the rank must never be exposed: " + row;
+        assertThat(sprintName(row)).as("%s", row).isEqualTo("Sprint 1");
+        assertThat(row.get("storyPoints").asDouble()).as("%s", row).isEqualTo(3.0);
+        assertThat(row.has("position")).withFailMessage("the rank must never be exposed: " + row).isFalse();
     }
 
     /**

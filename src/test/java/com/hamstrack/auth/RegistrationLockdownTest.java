@@ -11,6 +11,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -48,7 +49,6 @@ class RegistrationLockdownTest {
                                 + "\"displayName\":\"Blocked User\",\"termsAccepted\":true}"))
                 .andExpect(status().isForbidden());
 
-        assert userRepository.findByEmail(email).isEmpty()
-                : "a blocked registration must not create a user";
+        assertThat(userRepository.findByEmail(email)).as("a blocked registration must not create a user").isEmpty();
     }
 }

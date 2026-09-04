@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -65,7 +66,9 @@ class ComponentTenancyTest extends ComponentTestBase {
 
         assert404OnEveryIdEndpoint(ctx, foreign);
         // The sibling's component survived every attempt, under its original name.
-        assert names(listComponents(sibling, sibling.token(), null)).equals(List.of("sibling-only"));
+        assertThat(names(listComponents(sibling, sibling.token(), null)))
+                .as("the sibling project's component survived every cross-project attempt, under its original name")
+                .isEqualTo(List.of("sibling-only"));
         // …and this project's own component still resolves, so the 404s above are
         // about scoping, not about a broken endpoint.
         getComponent(ctx, ctx.token(), mine).andExpect(status().isOk());
@@ -80,7 +83,9 @@ class ComponentTenancyTest extends ComponentTestBase {
         assert404OnEveryIdEndpoint(a, foreign);
         // A never-existed id is indistinguishable from B's.
         assert404OnEveryIdEndpoint(a, UUID.randomUUID());
-        assert names(listComponents(b, b.token(), null)).equals(List.of("b-only"));
+        assertThat(names(listComponents(b, b.token(), null)))
+                .as("the other workspace's component survived every cross-tenant attempt, under its original name")
+                .isEqualTo(List.of("b-only"));
     }
 
     private void assert404OnEveryIdEndpoint(Ctx ctx, UUID componentId) throws Exception {
@@ -102,12 +107,15 @@ class ComponentTenancyTest extends ComponentTestBase {
         createComponent(sibling, "beta");
         createComponent(other, "gamma");
 
-        assert names(listComponents(ctx, ctx.token(), "?includeArchived=true&withUsage=true"))
-                .equals(List.of("alpha"));
-        assert names(listComponents(sibling, sibling.token(), "?includeArchived=true&withUsage=true"))
-                .equals(List.of("beta"));
-        assert names(listComponents(other, other.token(), "?includeArchived=true&withUsage=true"))
-                .equals(List.of("gamma"));
+        assertThat(names(listComponents(ctx, ctx.token(), "?includeArchived=true&withUsage=true")))
+                .as("the widest listing a caller can ask for still shows only its own project's rows")
+                .isEqualTo(List.of("alpha"));
+        assertThat(names(listComponents(sibling, sibling.token(), "?includeArchived=true&withUsage=true")))
+                .as("the sibling project sees its own row and nothing else")
+                .isEqualTo(List.of("beta"));
+        assertThat(names(listComponents(other, other.token(), "?includeArchived=true&withUsage=true")))
+                .as("the other workspace sees its own row and nothing else")
+                .isEqualTo(List.of("gamma"));
     }
 
     // ==================================================== (b) foreign componentId on an issue
@@ -133,8 +141,9 @@ class ComponentTenancyTest extends ComponentTestBase {
                     .andExpect(status().isUnprocessableContent())
                     .andExpect(jsonPath("$.detail", containsString("Unknown component")));
         }
-        assert componentName(getIssue(ctx, issue.get("number").asLong())) == null
-                : "a rejected PATCH must not have attached anything";
+        assertThat(componentName(getIssue(ctx, issue.get("number").asLong())))
+                .as("a rejected PATCH must not have attached anything")
+                .isNull();
     }
 
     // ==================================================== (c) foreign componentId filter
@@ -150,14 +159,20 @@ class ComponentTenancyTest extends ComponentTestBase {
         createIssue(sibling, "sibling issue", "\"componentId\":\"" + foreign + "\"");
 
         // A foreign id is just an id that matches nothing here — 200 + empty, both shapes.
-        assert board(ctx, "?componentId=" + foreign).get("issues").size() == 0
-                : "a foreign componentId must match nothing on the board";
-        assert backlog(ctx, "&componentId=" + foreign).get("content").size() == 0
-                : "a foreign componentId must match nothing on the backlog";
+        assertThat(board(ctx, "?componentId=" + foreign).get("issues"))
+                .as("a foreign componentId must match nothing on the board")
+                .isEmpty();
+        assertThat(backlog(ctx, "&componentId=" + foreign).get("content"))
+                .as("a foreign componentId must match nothing on the backlog")
+                .isEmpty();
         // A never-existed id behaves identically.
-        assert board(ctx, "?componentId=" + UUID.randomUUID()).get("issues").size() == 0;
+        assertThat(board(ctx, "?componentId=" + UUID.randomUUID()).get("issues"))
+                .as("a never-existed componentId behaves identically to a foreign one: empty, not an error and not a leak")
+                .isEmpty();
         // And the local id still works, so the empties above are the filter, not a break.
-        assert titles(board(ctx, "?componentId=" + mine)).equals(Set.of("tagged"));
+        assertThat(titles(board(ctx, "?componentId=" + mine)))
+                .as("the local id still filters, so the empty results above are the filter working and not the endpoint broken")
+                .isEqualTo(Set.of("tagged"));
     }
 
     // ==================================================== (d) leadId enumeration
@@ -183,9 +198,9 @@ class ComponentTenancyTest extends ComponentTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andReturn().getResponse().getContentAsString();
 
-        assert json.readTree(strangerBody).get("detail").asText()
-                .equals(json.readTree(ghostBody).get("detail").asText())
-                : "a non-member lead and an unknown user id must be indistinguishable";
+        assertThat(json.readTree(strangerBody).get("detail").asText())
+                .as("a non-member lead and an unknown user id must be indistinguishable")
+                .isEqualTo(json.readTree(ghostBody).get("detail").asText());
 
         // Same rule on update.
         var id = createComponent(ctx, "billing");
@@ -193,8 +208,12 @@ class ComponentTenancyTest extends ComponentTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("Unknown lead")));
         // Nothing was created/changed by the rejected calls.
-        assert names(listComponents(ctx, ctx.token(), null)).equals(List.of("billing"));
-        assert listComponents(ctx, ctx.token(), null).get(0).get("leadId").isNull();
+        assertThat(names(listComponents(ctx, ctx.token(), null)))
+                .as("nothing was created or changed by the rejected calls")
+                .isEqualTo(List.of("billing"));
+        assertThat(listComponents(ctx, ctx.token(), null).get(0).get("leadId").isNull())
+                .withFailMessage("…and the existing component did not acquire the foreign lead it refused")
+                .isTrue();
     }
 
     // ==================================================== (e) the DB-level guard
@@ -232,7 +251,9 @@ class ComponentTenancyTest extends ComponentTestBase {
         issue.setComponent(component);
         issueRepository.saveAndFlush(issue);
 
-        assert "ok".equals(componentName(getIssue(ctx, issue.getNumber())));
+        assertThat(componentName(getIssue(ctx, issue.getNumber())))
+                .as("a same-project component reference persists and reads back — the tenancy guard refuses foreigners, not neighbours")
+                .isEqualTo("ok");
     }
 
     /**

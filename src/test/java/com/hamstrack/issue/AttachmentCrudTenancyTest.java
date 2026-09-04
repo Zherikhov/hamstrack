@@ -35,6 +35,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
@@ -124,8 +125,9 @@ class AttachmentCrudTenancyTest {
                         org.hamcrest.Matchers.containsString("report.txt")))
                 .andReturn();
 
-        assert java.util.Arrays.equals(res.getResponse().getContentAsByteArray(), bytes)
-                : "download must return the exact stored bytes";
+        assertThat(java.util.Arrays.equals(res.getResponse().getContentAsByteArray(), bytes))
+                .withFailMessage("download must return the exact stored bytes")
+                .isTrue();
     }
 
     @Test
@@ -152,21 +154,25 @@ class AttachmentCrudTenancyTest {
 
         // Blob exists on disk before delete.
         var storageKey = attachmentRepository.findById(attachmentId).orElseThrow().getStorageKey();
-        assert blobExists(storageKey) : "precondition: the blob must exist on disk after upload";
+        assertThat(blobExists(storageKey))
+                .withFailMessage("precondition: the blob must exist on disk after upload")
+                .isTrue();
 
         mockMvc.perform(delete(attachBase(ctx) + "/" + attachmentId)
                         .header("Authorization", "Bearer " + ctx.token))
                 .andExpect(status().isNoContent());
 
         // DB row gone.
-        assert attachmentRepository.findById(attachmentId).isEmpty()
-                : "delete must remove the attachment DB row";
+        assertThat(attachmentRepository.findById(attachmentId)).as("delete must remove the attachment DB row").isEmpty();
         // Blob gone from LocalFileStorage (deletion is registered afterCommit; the tx
         // has committed by the time the response returns).
-        assert !blobExists(storageKey)
-                : "delete must remove the stored blob from LocalFileStorage";
+        assertThat(blobExists(storageKey))
+                .withFailMessage("delete must remove the stored blob from LocalFileStorage")
+                .isFalse();
         // sanity: issue still exists
-        assert issueRepository.findById(issueId).isPresent();
+        assertThat(issueRepository.findById(issueId))
+                .as("the issue survived: deleting an attachment removes its row and blob, not its issue")
+                .isPresent();
     }
 
     /**
@@ -197,19 +203,19 @@ class AttachmentCrudTenancyTest {
         var uploaded = upload(ctx, "goes-with-it.txt", "attached bytes".getBytes());
         var attachmentId = UUID.fromString(uploaded.get("id").asText());
         var storageKey = attachmentRepository.findById(attachmentId).orElseThrow().getStorageKey();
-        assert blobExists(storageKey) : "precondition: the blob is on disk before the delete";
+        assertThat(blobExists(storageKey)).withFailMessage("precondition: the blob is on disk before the delete").isTrue();
 
         mockMvc.perform(delete("/api/workspaces/" + ctx.wsId + "/projects/" + ctx.projectId
                                 + "/issues/1")
                         .header("Authorization", "Bearer " + ctx.token))
                 .andExpect(status().isNoContent());
 
-        assert issueRepository.findById(issueId).isEmpty() : "the issue must be gone";
-        assert attachmentRepository.findById(attachmentId).isEmpty()
-                : "its attachment row must go with it";
-        assert !blobExists(storageKey)
-                : "and so must the blob — removeStoredFilesForIssue is what the issue "
-                  + "delete path calls instead of the per-attachment delete";
+        assertThat(issueRepository.findById(issueId)).as("the issue must be gone").isEmpty();
+        assertThat(attachmentRepository.findById(attachmentId)).as("its attachment row must go with it").isEmpty();
+        assertThat(blobExists(storageKey))
+                .withFailMessage("and so must the blob — removeStoredFilesForIssue is what the issue "
+                  + "delete path calls instead of the per-attachment delete")
+                .isFalse();
     }
 
     // ============================================================ tenancy (top bug class)
@@ -243,8 +249,9 @@ class AttachmentCrudTenancyTest {
         // delete -> 404, and A's row must survive
         mockMvc.perform(delete(base + "/" + attachmentId).header("Authorization", "Bearer " + bToken))
                 .andExpect(status().isNotFound());
-        assert attachmentRepository.findById(UUID.fromString(attachmentId)).isPresent()
-                : "a non-member's delete must not remove another tenant's attachment row";
+        assertThat(attachmentRepository.findById(UUID.fromString(attachmentId)))
+                .as("a non-member's delete must not remove another tenant's attachment row")
+                .isPresent();
     }
 
     /**
@@ -274,19 +281,20 @@ class AttachmentCrudTenancyTest {
         var bIssueId = createIssue(b);
         var bAttachmentId = UUID.fromString(upload(b, "b.txt", "tenant B bytes".getBytes()).get("id").asText());
         var bKey = attachmentRepository.findById(bAttachmentId).orElseThrow().getStorageKey();
-        assert blobExists(aKey) && blobExists(bKey) : "precondition: both tenants' blobs are on disk";
+        assertThat(blobExists(aKey)).withFailMessage("precondition: both tenants' blobs are on disk").isTrue();
+        assertThat(blobExists(bKey)).withFailMessage("precondition: both tenants' blobs are on disk").isTrue();
 
         mockMvc.perform(delete("/api/workspaces/" + a.wsId + "/projects/" + a.projectId + "/issues/1")
                         .header("Authorization", "Bearer " + a.token))
                 .andExpect(status().isNoContent());
 
-        assert !blobExists(aKey) : "precondition on the delete itself: A's own blob is gone";
-        assert blobExists(bKey)
-                : "workspace B's blob must survive workspace A's issue delete — a widened "
-                  + "findStorageKeysByIssue predicate destroys files rather than leaking them";
-        assert attachmentRepository.findById(bAttachmentId).isPresent()
-                : "and B's attachment row must survive too";
-        assert issueRepository.findById(bIssueId).isPresent() : "as must B's issue";
+        assertThat(blobExists(aKey)).withFailMessage("precondition on the delete itself: A's own blob is gone").isFalse();
+        assertThat(blobExists(bKey))
+                .withFailMessage("workspace B's blob must survive workspace A's issue delete — a widened "
+                  + "findStorageKeysByIssue predicate destroys files rather than leaking them")
+                .isTrue();
+        assertThat(attachmentRepository.findById(bAttachmentId)).as("and B's attachment row must survive too").isPresent();
+        assertThat(issueRepository.findById(bIssueId)).as("as must B's issue").isPresent();
     }
 
     // ============================================================ helpers

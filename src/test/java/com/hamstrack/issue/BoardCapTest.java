@@ -25,6 +25,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -67,16 +68,22 @@ class BoardCapTest {
         for (int i = 0; i < 5; i++) createIssue(ctx, ctx.todoStatusId());
 
         var node = getBoard(ctx);
-        assert node.has("issues") && node.get("issues").isArray()
-                : "board (no size) must be an object with an issues array, not a bare array";
-        assert node.get("issues").size() == 3
-                : "issues must be capped at app.board.max-issues=3, got " + node.get("issues").size();
-        assert node.get("truncated").asBoolean()
-                : "truncated must be true when the project exceeds the cap";
-        assert node.get("totalAvailable").asLong() == 5
-                : "totalAvailable must report the full filtered count (5)";
-        assert node.get("cap").asInt() == 3
-                : "cap must reflect app.board.max-issues";
+        assertThat(node.has("issues"))
+                .withFailMessage("board (no size) must be an object with an issues array, not a bare array")
+                .isTrue();
+        assertThat(node.get("issues").isArray())
+                .withFailMessage("board (no size) must be an object with an issues array, not a bare array")
+                .isTrue();
+        assertThat(node.get("issues"))
+                .as(() -> "issues must be capped at app.board.max-issues=3, got " + node.get("issues").size())
+                .hasSize(3);
+        assertThat(node.get("truncated").asBoolean())
+                .withFailMessage("truncated must be true when the project exceeds the cap")
+                .isTrue();
+        assertThat(node.get("totalAvailable").asLong())
+                .as("totalAvailable must report the full filtered count (5)")
+                .isEqualTo(5);
+        assertThat(node.get("cap").asInt()).as("cap must reflect app.board.max-issues").isEqualTo(3);
     }
 
     @Test
@@ -86,10 +93,11 @@ class BoardCapTest {
         createIssue(ctx, ctx.todoStatusId());
 
         var node = getBoard(ctx);
-        assert node.get("issues").size() == 2 : "all issues returned when under the cap";
-        assert !node.get("truncated").asBoolean() : "truncated must be false under the cap";
-        assert node.get("totalAvailable").asLong() == 2
-                : "totalAvailable equals the issue count when not truncated";
+        assertThat(node.get("issues")).as("all issues returned when under the cap").hasSize(2);
+        assertThat(node.get("truncated").asBoolean()).withFailMessage("truncated must be false under the cap").isFalse();
+        assertThat(node.get("totalAvailable").asLong())
+                .as("totalAvailable equals the issue count when not truncated")
+                .isEqualTo(2);
     }
 
     @Test
@@ -101,11 +109,16 @@ class BoardCapTest {
                         .header("Authorization", "Bearer " + ctx.token))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString());
-        assert node.has("content") && node.get("content").isArray()
-                : "size-present must return the PageResponse envelope (content array)";
-        assert node.get("content").size() == 2 : "page size respected";
-        assert !node.has("truncated")
-                : "the paged envelope must not carry the board 'truncated' flag";
+        assertThat(node.has("content"))
+                .withFailMessage("size-present must return the PageResponse envelope (content array)")
+                .isTrue();
+        assertThat(node.get("content").isArray())
+                .withFailMessage("size-present must return the PageResponse envelope (content array)")
+                .isTrue();
+        assertThat(node.get("content")).as("page size respected").hasSize(2);
+        assertThat(node.has("truncated"))
+                .withFailMessage("the paged envelope must not carry the board 'truncated' flag")
+                .isFalse();
     }
 
     // ============================================================ helpers

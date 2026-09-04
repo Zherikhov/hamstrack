@@ -13,6 +13,8 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.time.LocalDate;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * The cost claim behind the whole reports epic (reports-proposal §0, §12 "Performance"):
  * a report is a <strong>fixed, small number of statements</strong>, independent of how
@@ -61,18 +63,20 @@ class FlowReportQueryCountTest extends FlowReportTestBase {
         long smallCount = count(() -> run(small));
         long largeCount = count(() -> run(large));
 
-        assert smallCount == RESOLUTION_STATEMENTS + REPORT_STATEMENTS
-                : "the flow report took " + smallCount + " statements, not "
+        assertThat(smallCount)
+                .as(() -> "the flow report took " + smallCount + " statements, not "
                   + (RESOLUTION_STATEMENTS + REPORT_STATEMENTS) + " (" + RESOLUTION_STATEMENTS
                   + " for the tenancy resolution + " + REPORT_STATEMENTS + " for the report: "
                   + "created-per-bucket, resolved-per-bucket, and the combined counts). If this "
                   + "is higher, something is reading issues instead of aggregating them, or the "
-                  + "combined opening-balance/basedOnIssues query has been split up.";
+                  + "combined opening-balance/basedOnIssues query has been split up.")
+                .isEqualTo(RESOLUTION_STATEMENTS + REPORT_STATEMENTS);
 
-        assert smallCount == largeCount
-                : "the flow report is data-dependent: " + smallCount + " statements for a project "
+        assertThat(smallCount)
+                .as("the flow report is data-dependent: " + smallCount + " statements for a project "
                   + "with 4 issues vs " + largeCount + " for one with 60. Every number in this "
-                  + "report is computed by PostgreSQL; nothing may loop over issues.";
+                  + "report is computed by PostgreSQL; nothing may loop over issues.")
+                .isEqualTo(largeCount);
     }
 
     // ------------------------------------------------------------------ plumbing

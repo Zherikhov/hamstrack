@@ -11,6 +11,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -51,12 +52,13 @@ class SprintLifecycleTest extends SprintTestBase {
         // ---- created FUTURE, named from its sequence when the payload omits a name ----
         var sprintId = createSprint(ctx, ctx.token(), "{}");
         var created = sprintNode(ctx, sprintId);
-        assert created.get("state").asText().equals("FUTURE") : created;
-        assert created.get("sequence").asInt() == 1 : created;
-        assert created.get("name").asText().equals("Sprint 1") : created;
-        assert created.get("startAt").isNull() && created.get("endAt").isNull() : created;
-        assert created.get("completedAt").isNull() : created;
-        assert created.get("daysRemaining").isNull() : "a FUTURE sprint counts nothing down";
+        assertThat(created.get("state").asText()).as("%s", created).isEqualTo("FUTURE");
+        assertThat(created.get("sequence").asInt()).as("%s", created).isEqualTo(1);
+        assertThat(created.get("name").asText()).as("%s", created).isEqualTo("Sprint 1");
+        assertThat(created.get("startAt").isNull()).withFailMessage("%s", created).isTrue();
+        assertThat(created.get("endAt").isNull()).withFailMessage("%s", created).isTrue();
+        assertThat(created.get("completedAt").isNull()).withFailMessage("%s", created).isTrue();
+        assertThat(created.get("daysRemaining").isNull()).withFailMessage("a FUTURE sprint counts nothing down").isTrue();
 
         // ---- start with no body: now + the default length (14d) ----
         startSprint(ctx, ctx.token(), sprintId)
@@ -66,8 +68,9 @@ class SprintLifecycleTest extends SprintTestBase {
                 .andExpect(jsonPath("$.endAt").isNotEmpty());
         var active = sprintNode(ctx, sprintId);
         int days = active.get("daysRemaining").asInt();
-        assert days == 13 || days == 14
-                : "endAt must default to startAt + app.agile.default-sprint-length-days; got " + days;
+        assertThat(days == 13 || days == 14)
+                .withFailMessage("endAt must default to startAt + app.agile.default-sprint-length-days; got " + days)
+                .isTrue();
 
         // ---- a double submit is a 409, not a silent success ----
         startSprint(ctx, ctx.token(), sprintId)
@@ -86,8 +89,10 @@ class SprintLifecycleTest extends SprintTestBase {
         // ---- and it can never go back ----
         startSprint(ctx, ctx.token(), sprintId).andExpect(status().isConflict());
         var completed = sprintNode(ctx, sprintId);
-        assert completed.get("state").asText().equals("COMPLETED") : completed;
-        assert completed.get("daysRemaining").isNull() : "a COMPLETED sprint counts nothing down";
+        assertThat(completed.get("state").asText()).as("%s", completed).isEqualTo("COMPLETED");
+        assertThat(completed.get("daysRemaining").isNull())
+                .withFailMessage("a COMPLETED sprint counts nothing down")
+                .isTrue();
     }
 
     /**
@@ -107,9 +112,10 @@ class SprintLifecycleTest extends SprintTestBase {
                 "{\"name\":\"Renamed\",\"state\":\"FUTURE\",\"completedAt\":null}");
 
         var after = sprintNode(ctx, sprintId);
-        assert after.get("state").asText().equals("COMPLETED")
-                : "a PATCH re-opened a completed sprint: " + after;
-        assert !after.get("completedAt").isNull() : "completedAt was cleared by a PATCH: " + after;
+        assertThat(after.get("state").asText()).as("a PATCH re-opened a completed sprint: " + after).isEqualTo("COMPLETED");
+        assertThat(after.get("completedAt").isNull())
+                .withFailMessage("completedAt was cleared by a PATCH: " + after)
+                .isFalse();
     }
 
     // ===================================================== the one-active invariant
@@ -126,7 +132,7 @@ class SprintLifecycleTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("already active")));
 
         // The loser stayed FUTURE — the failed start must not have half-applied.
-        assert sprintNode(ctx, second).get("state").asText().equals("FUTURE") : "half-applied start";
+        assertThat(sprintNode(ctx, second).get("state").asText()).as("half-applied start").isEqualTo("FUTURE");
 
         // A sibling project has its own active slot: the invariant is per PROJECT.
         var sibling = siblingProject(ctx);
@@ -157,8 +163,9 @@ class SprintLifecycleTest extends SprintTestBase {
             throw new AssertionError(
                     "the DB accepted a second ACTIVE sprint — sprints_one_active_per_project_uk is gone");
         } catch (DataIntegrityViolationException expected) {
-            assert String.valueOf(expected.getMessage()).contains("sprints_one_active_per_project_uk")
-                    : "rejected, but not by the partial unique index: " + expected.getMessage();
+            assertThat(String.valueOf(expected.getMessage()))
+                    .as(() -> "rejected, but not by the partial unique index: " + expected.getMessage())
+                    .contains("sprints_one_active_per_project_uk");
         }
     }
 
@@ -180,8 +187,9 @@ class SprintLifecycleTest extends SprintTestBase {
                     foreignSprint, idOf(issue));
             throw new AssertionError("the DB accepted a cross-tenant sprint_id — issues_sprint_fk is gone");
         } catch (DataIntegrityViolationException expected) {
-            assert String.valueOf(expected.getMessage()).contains("issues_sprint_fk")
-                    : "rejected, but not by the composite FK: " + expected.getMessage();
+            assertThat(String.valueOf(expected.getMessage()))
+                    .as(() -> "rejected, but not by the composite FK: " + expected.getMessage())
+                    .contains("issues_sprint_fk");
         }
     }
 
@@ -209,11 +217,12 @@ class SprintLifecycleTest extends SprintTestBase {
 
         // The issue survives, detached — in the API AND in the row (the ON DELETE SET
         // NULL trap: a stale managed copy flushed later must not write the old id back).
-        assert sprintName(getIssue(ctx, numberOf(issue))) == null : "sprint not cleared in the API";
+        assertThat(sprintName(getIssue(ctx, numberOf(issue)))).as("sprint not cleared in the API").isNull();
         var raw = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM issues WHERE id = ? AND sprint_id IS NULL",
                 Integer.class, idOf(issue));
-        assert raw != null && raw == 1 : "sprint_id not cleared in the DB";
+        assertThat(raw).as("sprint_id not cleared in the DB").isNotNull();
+        assertThat(raw).as("sprint_id not cleared in the DB").isEqualTo(1);
 
         // An empty COMPLETED sprint deletes without force.
         deleteSprint(ctx, ctx.token(), running, false).andExpect(status().isNoContent());
@@ -242,14 +251,15 @@ class SprintLifecycleTest extends SprintTestBase {
         // sprint — and it says so with an affected-row count, not an exception.
         Integer strayed = txTemplate.execute(s ->
                 sprintRepository.deleteByIdAndProject(sprintId, sibling.projectId()));
-        assert strayed != null && strayed == 0
-                : "a delete keyed by the wrong project affected " + strayed + " rows";
+        assertThat(strayed).as("a delete keyed by the wrong project affected " + strayed + " rows").isNotNull();
+        assertThat(strayed).as("a delete keyed by the wrong project affected " + strayed + " rows").isEqualTo(0);
         getSprint(ctx, ctx.token(), sprintId).andExpect(status().isOk());
 
         // Now play the winner of the race: the row goes away underneath the request…
         Integer won = txTemplate.execute(s ->
                 sprintRepository.deleteByIdAndProject(sprintId, ctx.projectId()));
-        assert won != null && won == 1 : "the conditional delete did not remove its own row";
+        assertThat(won).as("the conditional delete did not remove its own row").isNotNull();
+        assertThat(won).as("the conditional delete did not remove its own row").isEqualTo(1);
 
         // …and the loser gets a 404, never a 500.
         deleteSprint(ctx, ctx.token(), sprintId, false).andExpect(status().isNotFound());
@@ -273,8 +283,9 @@ class SprintLifecycleTest extends SprintTestBase {
         var planned = createSprint(ctx, ctx.token(),
                 "{\"name\":\"Sprint 1\",\"goal\":\"Ship the beta\"}");
         startSprint(ctx, ctx.token(), planned).andExpect(status().isOk());
-        assert sprintNode(ctx, planned).get("goal").asText().equals("Ship the beta")
-                : "the lifecycle UPDATE blanked a goal it should never have written";
+        assertThat(sprintNode(ctx, planned).get("goal").asText())
+                .as("the lifecycle UPDATE blanked a goal it should never have written")
+                .isEqualTo("Ship the beta");
 
         // …and it is still editable while the sprint runs.
         patchSprint(ctx, ctx.token(), planned, "{\"goal\":\"Ship the beta, minus billing\"}")
@@ -291,8 +302,9 @@ class SprintLifecycleTest extends SprintTestBase {
                 .andExpect(jsonPath("$.goal").value("Decided at planning"));
         // Read back through a fresh request: the response above is built after the flip
         // cleared the persistence context, so this is what actually landed in the row.
-        assert sprintNode(ctx, next).get("goal").asText().equals("Decided at planning")
-                : "the goal sent with the start did not persist";
+        assertThat(sprintNode(ctx, next).get("goal").asText())
+                .as("the goal sent with the start did not persist")
+                .isEqualTo("Decided at planning");
     }
 
     /**
@@ -319,7 +331,8 @@ class SprintLifecycleTest extends SprintTestBase {
 
         var rows = jdbcTemplate.queryForObject(
                 "SELECT count(*) FROM sprints WHERE id = ?", Integer.class, sprintId);
-        assert rows != null && rows == 0 : "sprints did not cascade with the project";
+        assertThat(rows).as("sprints did not cascade with the project").isNotNull();
+        assertThat(rows).as("sprints did not cascade with the project").isEqualTo(0);
     }
 
     // ===================================================== list ordering
@@ -337,15 +350,20 @@ class SprintLifecycleTest extends SprintTestBase {
         var page = listSprints(ctx, ctx.token(), null);
         var names = new java.util.ArrayList<String>();
         for (var s : page.get("content")) names.add(s.get("name").asText());
-        assert names.equals(java.util.List.of("Sprint two", "Sprint three", "Sprint one"))
-                : "ACTIVE, then FUTURE by sequence, then COMPLETED; got " + names;
+        assertThat(names)
+                .as("ACTIVE, then FUTURE by sequence, then COMPLETED; got " + names)
+                .isEqualTo(java.util.List.of("Sprint two", "Sprint three", "Sprint one"));
 
         // ?state= is a repeatable filter.
         var open = listSprints(ctx, ctx.token(), "?state=ACTIVE&state=FUTURE");
-        assert open.get("content").size() == 2 : open;
+        assertThat(open.get("content")).as("%s", open).hasSize(2);
         var completedOnly = listSprints(ctx, ctx.token(), "?state=COMPLETED");
-        assert completedOnly.get("content").size() == 1 : completedOnly;
-        assert completedOnly.get("content").get(0).get("id").asText().equals(one.toString());
-        assert three != null;
+        assertThat(completedOnly.get("content")).as("%s", completedOnly).hasSize(1);
+        assertThat(completedOnly.get("content").get(0).get("id").asText())
+                .as("the COMPLETED filter returns the sprint that was actually completed, not merely one row")
+                .isEqualTo(one.toString());
+        assertThat(three)
+                .as("the FUTURE sprint was created; the ordering assertion above is what proves where it lands")
+                .isNotNull();
     }
 }

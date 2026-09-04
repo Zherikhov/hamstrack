@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -39,16 +40,19 @@ class ComponentAutoAssignTest extends ComponentTestBase {
                 "{\"name\":\"billing\",\"autoAssign\":true,\"leadId\":\"" + lead.user().getId() + "\"}");
 
         var issue = createIssue(ctx, "auto", "\"componentId\":\"" + component + "\"");
-        assert issue.get("assignee").get("id").asText().equals(lead.user().getId().toString())
-                : "the component lead must have been auto-assigned, got " + issue.get("assignee");
+        assertThat(issue.get("assignee").get("id").asText())
+                .as(() -> "the component lead must have been auto-assigned, got " + issue.get("assignee"))
+                .isEqualTo(lead.user().getId().toString());
         // …and it is persisted, not just echoed back by the create response.
-        assert assigneeName(getIssue(ctx, issue.get("number").asLong()))
-                .equals(lead.user().getDisplayName());
+        assertThat(assigneeName(getIssue(ctx, issue.get("number").asLong())))
+                .as("the auto-assignment is persisted, not just echoed back by the create response")
+                .isEqualTo(lead.user().getDisplayName());
         // Create-time values write no history (consistent with every other create-time
         // field), so nobody sees a phantom "assignee changed" entry.
         for (var row : issueHistory(ctx, issue.get("number").asLong()).get("content")) {
-            assert !row.get("field").asText().equals("assignee")
-                    : "auto-assign must not write history on create";
+            assertThat(row.get("field").asText())
+                    .as("auto-assign must not write history on create")
+                    .isNotEqualTo("assignee");
         }
     }
 
@@ -63,8 +67,9 @@ class ComponentAutoAssignTest extends ComponentTestBase {
         var issue = createIssue(ctx, "explicit",
                 "\"componentId\":\"" + component + "\"",
                 "\"assigneeId\":\"" + chosen.user().getId() + "\"");
-        assert issue.get("assignee").get("id").asText().equals(chosen.user().getId().toString())
-                : "an explicit assigneeId must beat the component lead, got " + issue.get("assignee");
+        assertThat(issue.get("assignee").get("id").asText())
+                .as(() -> "an explicit assigneeId must beat the component lead, got " + issue.get("assignee"))
+                .isEqualTo(chosen.user().getId().toString());
     }
 
     @Test
@@ -75,12 +80,14 @@ class ComponentAutoAssignTest extends ComponentTestBase {
                 "{\"name\":\"billing\",\"leadId\":\"" + lead.user().getId() + "\"}");
 
         var issue = createIssue(ctx, "manual", "\"componentId\":\"" + component + "\"");
-        assert assigneeName(issue) == null : "a lead without the switch is metadata only";
+        assertThat(assigneeName(issue)).as("a lead without the switch is metadata only").isNull();
         // A component with neither lead nor switch is of course inert too.
         var plain = createComponent(ctx, "plain");
-        assert assigneeName(createIssue(ctx, "plain issue", "\"componentId\":\"" + plain + "\"")) == null;
+        assertThat(assigneeName(createIssue(ctx, "plain issue", "\"componentId\":\"" + plain + "\"")))
+                .as("a component with neither lead nor switch is inert too")
+                .isNull();
         // …and so is having no component at all.
-        assert assigneeName(createIssue(ctx, "no component")) == null;
+        assertThat(assigneeName(createIssue(ctx, "no component"))).as("…and so is having no component at all").isNull();
     }
 
     /**
@@ -97,9 +104,10 @@ class ComponentAutoAssignTest extends ComponentTestBase {
         removeFromWorkspace(ctx, lead.user());
 
         var issue = createIssue(ctx, "orphaned lead", "\"componentId\":\"" + component + "\"");
-        assert assigneeName(issue) == null
-                : "a departed lead must be skipped, not assigned: " + issue.get("assignee");
-        assert "billing".equals(componentName(issue)) : "the component itself still attaches";
+        assertThat(assigneeName(issue))
+                .as(() -> "a departed lead must be skipped, not assigned: " + issue.get("assignee"))
+                .isNull();
+        assertThat(componentName(issue)).as("the component itself still attaches").isEqualTo("billing");
     }
 
     @Test
@@ -114,17 +122,18 @@ class ComponentAutoAssignTest extends ComponentTestBase {
         var issue = createIssue(ctx, "later");
         patchIssue(ctx, ctx.token(), issue.get("number").asLong(),
                 "{\"componentId\":\"" + component + "\"}").andExpect(status().isOk());
-        assert assigneeName(getIssue(ctx, issue.get("number").asLong())) == null
-                : "attaching a component on update must not assign anyone";
+        assertThat(assigneeName(getIssue(ctx, issue.get("number").asLong())))
+                .as("attaching a component on update must not assign anyone")
+                .isNull();
 
         // (b) an issue that already has an assignee keeps THEM — the case that would be
         //     an actual data loss if auto-assign ever leaked into the update path.
         var assigned = createIssue(ctx, "assigned", "\"assigneeId\":\"" + other.user().getId() + "\"");
         patchIssue(ctx, ctx.token(), assigned.get("number").asLong(),
                 "{\"componentId\":\"" + component + "\"}").andExpect(status().isOk());
-        assert assigneeName(getIssue(ctx, assigned.get("number").asLong()))
-                .equals(other.user().getDisplayName())
-                : "changing a component must never silently reassign someone's work";
+        assertThat(assigneeName(getIssue(ctx, assigned.get("number").asLong())))
+                .as("changing a component must never silently reassign someone's work")
+                .isEqualTo(other.user().getDisplayName());
 
         // (c) not even when the switch is turned on afterwards on the component itself.
         var fresh = createIssue(ctx, "switch flipped later");
@@ -133,6 +142,8 @@ class ComponentAutoAssignTest extends ComponentTestBase {
         patchIssue(ctx, ctx.token(), fresh.get("number").asLong(),
                 "{\"componentId\":\"" + lazy + "\"}").andExpect(status().isOk());
         patchComponent(ctx, ctx.token(), lazy, "{\"autoAssign\":true}").andExpect(status().isOk());
-        assert assigneeName(getIssue(ctx, fresh.get("number").asLong())) == null;
+        assertThat(assigneeName(getIssue(ctx, fresh.get("number").asLong())))
+                .as("auto-assign fires on create only: attaching the component later, or flipping the switch after, assigns nobody")
+                .isNull();
     }
 }

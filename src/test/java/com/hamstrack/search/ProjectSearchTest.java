@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -63,18 +64,31 @@ class ProjectSearchTest extends VersionTestBase {
         createIssue(ops, "ops-work");
         createIssue(home, "home-work");
 
-        assert found(home, "project = \"HD\"").equals(Set.of("hd-work"));
+        assertThat(found(home, "project = \"HD\""))
+                .as("project = resolves by key to that project's issues only")
+                .isEqualTo(Set.of("hd-work"));
         // case-insensitive, and canonically folded, so a pasted operand still lands
-        assert found(home, "project = \"hd\"").equals(Set.of("hd-work"));
-        assert found(home, "project = \" HD \"").equals(Set.of("hd-work"));
+        assertThat(found(home, "project = \"hd\""))
+                .as("key resolution is case-insensitive, so a pasted operand still lands")
+                .isEqualTo(Set.of("hd-work"));
+        assertThat(found(home, "project = \" HD \""))
+                .as("the operand is canonically folded, so surrounding whitespace still lands")
+                .isEqualTo(Set.of("hd-work"));
         // IN unions the ids
-        assert found(home, "project IN (\"HD\", \"OPS\")").equals(Set.of("hd-work", "ops-work"));
+        assertThat(found(home, "project IN (\"HD\", \"OPS\")"))
+                .as("IN unions the projects it names")
+                .isEqualTo(Set.of("hd-work", "ops-work"));
         // a repeated key is idempotent, not a duplicate row
-        assert found(home, "project IN (\"HD\", \"hd\")").equals(Set.of("hd-work"));
+        assertThat(found(home, "project IN (\"HD\", \"hd\")"))
+                .as("a key repeated at two casings is idempotent, not a duplicated row")
+                .isEqualTo(Set.of("hd-work"));
         // composes with the rest of the language
-        assert found(home, "project = \"HD\" AND text ~ \"work\"").equals(Set.of("hd-work"));
-        assert found(home, "project = \"HD\" OR project = \"OPS\"")
-                .equals(Set.of("hd-work", "ops-work"));
+        assertThat(found(home, "project = \"HD\" AND text ~ \"work\""))
+                .as("project composes with the rest of the language instead of being a special case")
+                .isEqualTo(Set.of("hd-work"));
+        assertThat(found(home, "project = \"HD\" OR project = \"OPS\""))
+                .as("OR over two projects is the same result set as IN over both")
+                .isEqualTo(Set.of("hd-work", "ops-work"));
     }
 
     /**
@@ -98,18 +112,24 @@ class ProjectSearchTest extends VersionTestBase {
         archive(home, gone).andExpect(status().is2xxSuccessful());
 
         var negated = found(home, "project != \"HD\"");
-        assert negated.contains("ops-work") : negated;
-        assert !negated.contains("archived-work")
-                : "the complement is taken inside the scope predicate, so an invisible "
-                  + "project's issues must stay out of it — got " + negated;
-        assert !negated.contains("other-tenant-work") : negated;
+        assertThat(negated).as("%s", negated).contains("ops-work");
+        assertThat(negated)
+                .as("the complement is taken inside the scope predicate, so an invisible "
+                  + "project's issues must stay out of it — got " + negated)
+                .doesNotContain("archived-work");
+        assertThat(negated).as("%s", negated).doesNotContain("other-tenant-work");
         // Negated membership — spelled `NOT … IN (…)`, the grammar's only form for every field —
         // behaves the same way, and so does NOT over the comparison.
-        assert found(home, "NOT project IN (\"HD\")").equals(negated);
-        assert found(home, "NOT (project = \"HD\")").equals(negated);
+        assertThat(found(home, "NOT project IN (\"HD\")"))
+                .as("negated membership is complemented inside the scope predicate, never outside it")
+                .isEqualTo(negated);
+        assertThat(found(home, "NOT (project = \"HD\")"))
+                .as("NOT over the comparison complements exactly like NOT over the membership")
+                .isEqualTo(negated);
         // Sanity: without any project term the visible set is exactly these two.
-        assert found(home, "").equals(Set.of("hd-work", "ops-work"))
-                : "an archived project's issues leave every query, not just this one";
+        assertThat(found(home, ""))
+                .as("an archived project's issues leave every query, not just this one")
+                .isEqualTo(Set.of("hd-work", "ops-work"));
     }
 
     /**
@@ -129,10 +149,16 @@ class ProjectSearchTest extends VersionTestBase {
         createIssue(hd, "hd-unshipped");
 
         // The ambiguity this field exists to remove: one name, two projects, both match.
-        assert found(home, "fixVersion = \"2.4.0\"").equals(Set.of("hd-shipped", "ops-shipped"));
+        assertThat(found(home, "fixVersion = \"2.4.0\""))
+                .as("the ambiguity this field exists to remove: one version name, two projects, both match")
+                .isEqualTo(Set.of("hd-shipped", "ops-shipped"));
         // The reported query now says which project is meant.
-        assert found(home, "project = \"HD\" AND fixVersion = \"2.4.0\"").equals(Set.of("hd-shipped"));
-        assert found(home, "project = \"OPS\" AND fixVersion = \"2.4.0\"").equals(Set.of("ops-shipped"));
+        assertThat(found(home, "project = \"HD\" AND fixVersion = \"2.4.0\""))
+                .as("adding project says which project the version name meant")
+                .isEqualTo(Set.of("hd-shipped"));
+        assertThat(found(home, "project = \"OPS\" AND fixVersion = \"2.4.0\""))
+                .as("the same query against the other project disambiguates the other way")
+                .isEqualTo(Set.of("ops-shipped"));
     }
 
     /**
@@ -153,9 +179,12 @@ class ProjectSearchTest extends VersionTestBase {
         createIssue(impostor, "impostor-work");
 
         // The collision resolves to one project — the one that OWNS the key — with no union.
-        assert found(home, "project = \"OPS\"").equals(Set.of("ops-work"))
-                : "a key is an identity; the project merely NAMED 'OPS' must not join the result";
-        assert found(home, "project = \"IMP\"").equals(Set.of("impostor-work"));
+        assertThat(found(home, "project = \"OPS\""))
+                .as("a key is an identity; the project merely NAMED 'OPS' must not join the result")
+                .isEqualTo(Set.of("ops-work"));
+        assertThat(found(home, "project = \"IMP\""))
+                .as("a key is an identity: the impostor project owning the key IMP is what IMP resolves to")
+                .isEqualTo(Set.of("impostor-work"));
 
         // A name that no project's key spells resolves to nothing at all — but says what to type.
         refused(home, "project = \"Hamstrack\"", "project",
@@ -177,9 +206,15 @@ class ProjectSearchTest extends VersionTestBase {
         createIssue(two, "two-work");
 
         refused(home, "project = \"Platform\"", "project", "No project with key 'Platform'");
-        assert found(home, "project = \"AAA\"").equals(Set.of("one-work"));
-        assert found(home, "project = \"BBB\"").equals(Set.of("two-work"));
-        assert found(home, "project IN (\"AAA\", \"BBB\")").equals(Set.of("one-work", "two-work"));
+        assertThat(found(home, "project = \"AAA\""))
+                .as("two projects may share a name, and each is still reachable by its own key")
+                .isEqualTo(Set.of("one-work"));
+        assertThat(found(home, "project = \"BBB\""))
+                .as("the second name-sharing project is reachable by its own key too")
+                .isEqualTo(Set.of("two-work"));
+        assertThat(found(home, "project IN (\"AAA\", \"BBB\")"))
+                .as("IN over both keys unions them, even though the shared name reaches neither")
+                .isEqualTo(Set.of("one-work", "two-work"));
     }
 
     // ==================================================== refusals
@@ -231,11 +266,16 @@ class ProjectSearchTest extends VersionTestBase {
         createIssue(projectIn(home, "ZZZ", "Last"), "zzz-work");
         createIssue(projectIn(home, "AAA", "First"), "aaa-work");
 
-        assert ordered(home, "ORDER BY project ASC").equals(List.of("aaa-work", "mmm-work", "zzz-work"));
-        assert ordered(home, "ORDER BY project DESC").equals(List.of("zzz-work", "mmm-work", "aaa-work"));
+        assertThat(ordered(home, "ORDER BY project ASC"))
+                .as("ORDER BY project sorts by KEY and drops no rows")
+                .isEqualTo(List.of("aaa-work", "mmm-work", "zzz-work"));
+        assertThat(ordered(home, "ORDER BY project DESC"))
+                .as("DESC is the same ordering read the other way, still dropping no rows")
+                .isEqualTo(List.of("zzz-work", "mmm-work", "aaa-work"));
         // sorting composes with a filter and still returns every row the filter keeps
-        assert ordered(home, "project != \"ZZZ\" ORDER BY project ASC")
-                .equals(List.of("aaa-work", "mmm-work"));
+        assertThat(ordered(home, "project != \"ZZZ\" ORDER BY project ASC"))
+                .as("sorting composes with a filter and still drops no surviving row")
+                .isEqualTo(List.of("aaa-work", "mmm-work"));
     }
 
     // ==================================================== saved filters
@@ -263,7 +303,9 @@ class ProjectSearchTest extends VersionTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.hql", containsString("project")));
 
-        assert found(home, created.get("hql").asText()).equals(Set.of("hd-shipped"));
+        assertThat(found(home, created.get("hql").asText()))
+                .as("a saved filter round-trips: the stored HQL runs and finds what it found when it was saved")
+                .isEqualTo(Set.of("hd-shipped"));
 
         // Archiving the project makes the RUN fail — save-time validation is structural only —
         // while the stored text is untouched, exactly as for a later-archived label.
@@ -296,13 +338,13 @@ class ProjectSearchTest extends VersionTestBase {
                 .andReturn().getResponse().getContentAsString());
 
         var project = fieldNamed(schema, "project");
-        assert project.get("type").asText().equals("ENUM_REF") : project;
-        assert project.get("valueSuggest").asText().equals("PROJECT") : project;
-        assert project.get("sortable").asBoolean() : "project sorts by key";
-        assert !project.get("nullable").asBoolean() : "every issue has a project";
+        assertThat(project.get("type").asText()).as("%s", project).isEqualTo("ENUM_REF");
+        assertThat(project.get("valueSuggest").asText()).as("%s", project).isEqualTo("PROJECT");
+        assertThat(project.get("sortable").asBoolean()).withFailMessage("project sorts by key").isTrue();
+        assertThat(project.get("nullable").asBoolean()).withFailMessage("every issue has a project").isFalse();
         var ops = new java.util.ArrayList<String>();
         for (var o : project.get("operators")) ops.add(o.asText());
-        assert ops.equals(List.of("=", "!=", "IN")) : "no IS [NOT] EMPTY on project, got " + ops;
+        assertThat(ops).as("no IS [NOT] EMPTY on project, got " + ops).isEqualTo(List.of("=", "!=", "IN"));
 
         // The picklist is the caller's visible set — the same set every search is scoped to —
         // and it offers the KEY as the value so what a client pastes back is what resolves.
@@ -310,11 +352,13 @@ class ProjectSearchTest extends VersionTestBase {
         for (var v : schema.get("values").get("PROJECT")) {
             values.put(v.get("value").asText(), v.get("label").asText());
         }
-        assert values.keySet().equals(Set.of("HD", "OPS", keyOf(home)))
-                : "the PROJECT picklist is the visible project set, got " + values;
-        assert values.get("HD").equals("Hamstrack (HD)")
-                : "the label carries the human name, which is how a user finds the key: " + values;
-        assert !values.containsKey("SEC") : "a picklist must never cross the workspace boundary";
+        assertThat(values.keySet())
+                .as("the PROJECT picklist is the visible project set, got " + values)
+                .isEqualTo(Set.of("HD", "OPS", keyOf(home)));
+        assertThat(values.get("HD"))
+                .as("the label carries the human name, which is how a user finds the key: " + values)
+                .isEqualTo("Hamstrack (HD)");
+        assertThat(values).as("a picklist must never cross the workspace boundary").doesNotContainKey("SEC");
     }
 
     // ==================================================== /suggest
@@ -328,18 +372,25 @@ class ProjectSearchTest extends VersionTestBase {
         projectIn(elsewhere, "SEC", "Secret Project");
 
         // by key …
-        assert suggestValues(home, "hd").equals(List.of("HD"));
+        assertThat(suggestValues(home, "hd")).as("suggest matches a key prefix").isEqualTo(List.of("HD"));
         // … and by name, both case-insensitively; the value is the key either way
-        assert suggestValues(home, "hamstr").equals(List.of("HD"));
-        assert suggestValues(home, "OPERAT").equals(List.of("OPS"));
-        assert suggestLabels(home, "hd").equals(List.of("Hamstrack (HD)"));
+        assertThat(suggestValues(home, "hamstr"))
+                .as("suggest matches a name prefix and still offers the KEY as the value")
+                .isEqualTo(List.of("HD"));
+        assertThat(suggestValues(home, "OPERAT"))
+                .as("name matching is case-insensitive, and the value is the key either way")
+                .isEqualTo(List.of("OPS"));
+        assertThat(suggestLabels(home, "hd"))
+                .as("the label carries the human name alongside the key the value uses")
+                .isEqualTo(List.of("Hamstrack (HD)"));
         // prefix, not substring — "amstrack" is inside the name but does not start it
-        assert suggestValues(home, "amstrack").isEmpty();
+        assertThat(suggestValues(home, "amstrack")).as("suggest is a prefix match, not a substring one").isEmpty();
         // an empty q lists the visible projects, ordered by key, and never another tenant's
         var all = suggestValues(home, "");
-        assert all.contains("HD") && all.contains("OPS") : all;
-        assert !all.contains("SEC") : "suggest must never cross the workspace boundary";
-        assert all.equals(all.stream().sorted(String.CASE_INSENSITIVE_ORDER).toList()) : all;
+        assertThat(all).as("%s", all).contains("HD");
+        assertThat(all).as("%s", all).contains("OPS");
+        assertThat(all).as("suggest must never cross the workspace boundary").doesNotContain("SEC");
+        assertThat(all).as("%s", all).isEqualTo(all.stream().sorted(String.CASE_INSENSITIVE_ORDER).toList());
         // a non-member gets 404, never a peek at the vocabulary
         var outsider = login(user());
         mockMvc.perform(get("/api/workspaces/" + home.wsId() + "/search/suggest")

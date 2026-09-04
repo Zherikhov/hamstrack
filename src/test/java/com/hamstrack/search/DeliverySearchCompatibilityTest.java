@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -101,11 +102,12 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
                 Set.of("one", "five", "thirteen"));
 
         // ORDER BY — the second entry point (see orderByResolvesTheRetiredKeyAtBothEntryPoints)
-        assert titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points DESC")
-                .equals(titles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC"))
-                : "the alias sorts differently from the field it aliases";
-        assert titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points DESC")
-                .equals(List.of("thirteen", "five", "one"));
+        assertThat(titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points DESC"))
+                .as("the alias sorts differently from the field it aliases")
+                .isEqualTo(titles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC"));
+        assertThat(titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points DESC"))
+                .as("the retired key sorts by the native column itself, not by some coincidentally equal order")
+                .isEqualTo(List.of("thirteen", "five", "one"));
 
         // Case-insensitive, like every other HQL name lookup — a saved filter may carry
         // any casing its author typed.
@@ -131,12 +133,14 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         var names = schemaFieldNames(ctx);
         for (var pair : List.of(List.of("story_points", "storyPoints"),
                                 List.of("fix_version", "fixVersion"))) {
-            assert names.contains(pair.get(1))
-                    : "every capability is on, so the canonical name " + pair.get(1)
-                      + " is offered: " + names;
-            assert !names.contains(pair.get(0))
-                    : "the retired key " + pair.get(0) + " is compatibility, not vocabulary — it "
-                      + "must not be suggested: " + names;
+            assertThat(names)
+                    .as(() -> "every capability is on, so the canonical name " + pair.get(1)
+                      + " is offered: " + names)
+                    .contains(pair.get(1));
+            assertThat(names)
+                    .as(() -> "the retired key " + pair.get(0) + " is compatibility, not vocabulary — it "
+                      + "must not be suggested: " + names)
+                    .doesNotContain(pair.get(0));
         }
     }
 
@@ -166,13 +170,19 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         createIssue(ctx, "native-8", "\"storyPoints\":8");
         createIssue(ctx, "custom-8", "\"fields\":{\"" + ownKey + "\":8}");
 
-        assert found(ctx, "story_points >= 5").equals(Set.of("custom-8"))
-                : "the tenant's own `story_points` custom field was shadowed by the retired-key alias";
-        assert found(ctx, "storyPoints >= 5").equals(Set.of("native-8"))
-                : "the canonical name must still reach the native column in the same workspace";
-        assert found(ctx, "story_points = 8").equals(Set.of("custom-8"));
+        assertThat(found(ctx, "story_points >= 5"))
+                .as("the tenant's own `story_points` custom field was shadowed by the retired-key alias")
+                .isEqualTo(Set.of("custom-8"));
+        assertThat(found(ctx, "storyPoints >= 5"))
+                .as("the canonical name must still reach the native column in the same workspace")
+                .isEqualTo(Set.of("native-8"));
+        assertThat(found(ctx, "story_points = 8"))
+                .as("a tenant's own custom field wins the retired key inside its own workspace")
+                .isEqualTo(Set.of("custom-8"));
         // IS EMPTY follows the same resolution: "carries no value for the tenant's field".
-        assert found(ctx, "story_points IS EMPTY").equals(Set.of("native-8"));
+        assertThat(found(ctx, "story_points IS EMPTY"))
+                .as("IS EMPTY follows the same resolution: it means 'carries no value for the tenant's field'")
+                .isEqualTo(Set.of("native-8"));
 
         // ORDER BY resolves through the same precedence: a custom field is not sortable in
         // MVP, so the sort key is a 422 naming the TENANT's field — never a silent fall
@@ -185,16 +195,18 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
 
         // …and the /schema entry for that name is the tenant's field, not the native one.
         var names = schemaFieldNames(ctx);
-        assert names.contains("story_points")
-                : "a tenant's own custom field is ordinary vocabulary and must be suggested: " + names;
+        assertThat(names)
+                .as("a tenant's own custom field is ordinary vocabulary and must be suggested: " + names)
+                .contains("story_points");
 
         // A DIFFERENT workspace, which defined no such field, still gets the alias — the
         // shadowing is scoped to the tenant that owns the field, exactly like every other
         // custom-field name (HD-52).
         var other = newProject();
         createIssue(other, "elsewhere-8", "\"storyPoints\":8");
-        assert found(other, "story_points >= 5").equals(Set.of("elsewhere-8"))
-                : "one tenant's custom field must not disable the retired-key alias for everybody else";
+        assertThat(found(other, "story_points >= 5"))
+                .as("one tenant's custom field must not disable the retired-key alias for everybody else")
+                .isEqualTo(Set.of("elsewhere-8"));
     }
 
     /**
@@ -249,8 +261,9 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         // Saved-filter CRUD validates the stored text through the same resolver, so until
         // HD-161 a filter carrying this key could not even be re-saved after being loaded.
         var filterId = createFilter(ctx, "this release's work", "fix_version = \"2.4.0\"");
-        assert found(ctx, storedHql(ctx, filterId)).equals(Set.of("shipped-240"))
-                : "a saved filter written against the retired key does not run";
+        assertThat(found(ctx, storedHql(ctx, filterId)))
+                .as("a saved filter written against the retired key does not run")
+                .isEqualTo(Set.of("shipped-240"));
     }
 
     /**
@@ -282,12 +295,16 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         createIssue(ctx, "native-2.4.0", fixVersionIdsJson(version));
         createIssue(ctx, "custom-2.4.0", "\"fields\":{\"" + ownKey + "\":\"2.4.0\"}");
 
-        assert found(ctx, "fix_version = \"2.4.0\"").equals(Set.of("custom-2.4.0"))
-                : "the tenant's own `fix_version` custom field was shadowed by the retired-key alias";
-        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("native-2.4.0"))
-                : "the canonical name must still reach the version links in the same workspace";
+        assertThat(found(ctx, "fix_version = \"2.4.0\""))
+                .as("the tenant's own `fix_version` custom field was shadowed by the retired-key alias")
+                .isEqualTo(Set.of("custom-2.4.0"));
+        assertThat(found(ctx, "fixVersion = \"2.4.0\""))
+                .as("the canonical name must still reach the version links in the same workspace")
+                .isEqualTo(Set.of("native-2.4.0"));
         // IS EMPTY follows the same resolution: "carries no value for the tenant's field".
-        assert found(ctx, "fix_version IS EMPTY").equals(Set.of("native-2.4.0"));
+        assertThat(found(ctx, "fix_version IS EMPTY"))
+                .as("IS EMPTY follows the same resolution: it means 'carries no value for the tenant's field'")
+                .isEqualTo(Set.of("native-2.4.0"));
 
         // The status probe: only the alias path can refuse an unresolvable version name.
         search(ctx, "fix_version = \"9.9.9\"")
@@ -306,15 +323,17 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         // …and the /schema entry for that name is the tenant's field: a custom field is
         // ordinary vocabulary, which is exactly what an alias is not.
         var names = schemaFieldNames(ctx);
-        assert names.contains("fix_version")
-                : "a tenant's own custom field is ordinary vocabulary and must be suggested: " + names;
+        assertThat(names)
+                .as("a tenant's own custom field is ordinary vocabulary and must be suggested: " + names)
+                .contains("fix_version");
 
         // A DIFFERENT workspace, which defined no such field, still gets the alias.
         var other = newProject();
         var otherVersion = createVersion(other, "2.4.0");
         createIssue(other, "elsewhere-2.4.0", fixVersionIdsJson(otherVersion));
-        assert found(other, "fix_version = \"2.4.0\"").equals(Set.of("elsewhere-2.4.0"))
-                : "one tenant's custom field must not disable the retired-key alias for everybody else";
+        assertThat(found(other, "fix_version = \"2.4.0\""))
+                .as("one tenant's custom field must not disable the retired-key alias for everybody else")
+                .isEqualTo(Set.of("elsewhere-2.4.0"));
     }
 
     /**
@@ -342,10 +361,12 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
 
         // Entry point 2 — HqlValidator + HqlCompiler: running the very query the validator
         // approved must not throw "unknown field" from the ORDER BY branch.
-        assert titles(ctx, storedHql(ctx, filterId)).equals(List.of("thirteen", "one"))
-                : "the ORDER BY compiler branch does not resolve the retired key";
-        assert titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points ASC")
-                .equals(List.of("one", "thirteen"));
+        assertThat(titles(ctx, storedHql(ctx, filterId)))
+                .as("the ORDER BY compiler branch does not resolve the retired key")
+                .isEqualTo(List.of("thirteen", "one"));
+        assertThat(titles(ctx, "story_points IS NOT EMPTY ORDER BY story_points ASC"))
+                .as("the direct entry point resolves the retired key in the ORDER BY branch too, not only the stored one")
+                .isEqualTo(List.of("one", "thirteen"));
 
         // The alias inherits the target's sortability rather than loosening it: `sprint` is
         // deliberately not sortable and stays a 422 under either name.
@@ -388,19 +409,30 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         createIssue(ctx, "loose");
         disableEveryCapability(ctx);
 
-        assert found(ctx, "sprint = \"Sprint 7\"").equals(Set.of("committed"));
-        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("committed"));
-        assert found(ctx, "affectsVersion = \"2.3.0\"").equals(Set.of("committed"));
-        assert found(ctx, "storyPoints >= 5").equals(Set.of("committed"));
-        assert found(ctx, "story_points >= 5").equals(Set.of("committed"))
-                : "the retired-key alias must work on a capability-off project too";
+        assertThat(found(ctx, "sprint = \"Sprint 7\""))
+                .as("a capability narrows what the UI offers and never what the server resolves: sprint still answers")
+                .isEqualTo(Set.of("committed"));
+        assertThat(found(ctx, "fixVersion = \"2.4.0\""))
+                .as("…and so does fixVersion with releases off")
+                .isEqualTo(Set.of("committed"));
+        assertThat(found(ctx, "affectsVersion = \"2.3.0\""))
+                .as("…and affectsVersion, the second field over the same join table")
+                .isEqualTo(Set.of("committed"));
+        assertThat(found(ctx, "storyPoints >= 5")).as("…and storyPoints with estimation off").isEqualTo(Set.of("committed"));
+        assertThat(found(ctx, "story_points >= 5"))
+                .as("the retired-key alias must work on a capability-off project too")
+                .isEqualTo(Set.of("committed"));
         // …composed, sorted, and through the null-shaped operators — a real saved filter is
         // rarely one term.
-        assert found(ctx, "sprint = \"Sprint 7\" AND fixVersion = \"2.4.0\" AND storyPoints > 5")
-                .equals(Set.of("committed"));
-        assert found(ctx, "sprint IS EMPTY").equals(Set.of("loose"));
-        assert titles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC")
-                .equals(List.of("committed"));
+        assertThat(found(ctx, "sprint = \"Sprint 7\" AND fixVersion = \"2.4.0\" AND storyPoints > 5"))
+                .as("the hidden fields still compose: a real saved filter is rarely one term")
+                .isEqualTo(Set.of("committed"));
+        assertThat(found(ctx, "sprint IS EMPTY"))
+                .as("the null-shaped operators keep working on a hidden field too")
+                .isEqualTo(Set.of("loose"));
+        assertThat(titles(ctx, "storyPoints IS NOT EMPTY ORDER BY storyPoints DESC"))
+                .as("…and so does ORDER BY over one")
+                .isEqualTo(List.of("committed"));
 
         // An unknown VALUE is still a field-anchored 422 — never a 404, never a quiet 200
         // with no rows (which would read as "nothing matches" instead of "no such sprint").
@@ -441,19 +473,25 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
 
         var hql = "sprint = \"Sprint 7\" AND fixVersion = \"2.4.0\" AND storyPoints >= 5";
         var filterId = createFilter(ctx, "this sprint's release work", hql);
-        assert found(ctx, storedHql(ctx, filterId)).equals(Set.of("committed"));
+        assertThat(found(ctx, storedHql(ctx, filterId)))
+                .as("a saved filter survives its project's capabilities being turned off — a hidden control is not a permission")
+                .isEqualTo(Set.of("committed"));
 
         // …a colleague flips every toggle off.
         disableEveryCapability(ctx);
 
-        assert storedHql(ctx, filterId).equals(hql)
-                : "the stored filter text was rewritten — §9.2 forbids editing a user's query";
-        assert found(ctx, storedHql(ctx, filterId)).equals(Set.of("committed"))
-                : "a saved filter stopped returning its rows because a capability was turned off";
+        assertThat(storedHql(ctx, filterId))
+                .as("the stored filter text was rewritten — §9.2 forbids editing a user's query")
+                .isEqualTo(hql);
+        assertThat(found(ctx, storedHql(ctx, filterId)))
+                .as("a saved filter stopped returning its rows because a capability was turned off")
+                .isEqualTo(Set.of("committed"));
 
         // …and a NEW filter naming the hidden fields still saves and still runs.
         var second = createFilter(ctx, "written while hidden", "sprint = \"Sprint 7\"");
-        assert found(ctx, storedHql(ctx, second)).equals(Set.of("committed"));
+        assertThat(found(ctx, storedHql(ctx, second)))
+                .as("a NEW filter naming the hidden fields still saves and still runs")
+                .isEqualTo(Set.of("committed"));
         createFilter(ctx, "retired key, hidden field", "story_points >= 5");
     }
 
@@ -482,47 +520,63 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         var off = schema(ctx);
         var offNames = fieldNames(off);
         for (String hidden : List.of("sprint", "fixVersion", "affectsVersion", "storyPoints")) {
-            assert !offNames.contains(hidden)
-                    : "no visible project declares the capability, so " + hidden
-                      + " must not be suggested: " + offNames;
+            assertThat(offNames)
+                    .as("no visible project declares the capability, so " + hidden
+                      + " must not be suggested: " + offNames)
+                    .doesNotContain(hidden);
         }
-        assert picklist(off, "SPRINT").isEmpty()
-                : "the SPRINT picklist must be empty when no visible project plans in sprints";
-        assert picklist(off, "VERSION").isEmpty()
-                : "the VERSION picklist must be empty when no visible project uses releases";
+        assertThat(picklist(off, "SPRINT"))
+                .as("the SPRINT picklist must be empty when no visible project plans in sprints")
+                .isEmpty();
+        assertThat(picklist(off, "VERSION"))
+                .as("the VERSION picklist must be empty when no visible project uses releases")
+                .isEmpty();
         // The ordinary vocabulary is untouched — this narrows four fields, not the language.
-        assert offNames.containsAll(List.of("status", "type", "priority", "assignee", "label",
-                "component", "text", "created", "due")) : offNames;
+        assertThat(offNames)
+                .as("%s", offNames)
+                .containsAll(List.of("status", "type", "priority", "assignee", "label",
+                "component", "text", "created", "due"));
 
         // ---- one capability at a time: the three are independent ----
         setDelivery(ctx, "\"releases\":true");
         var releasesOnly = schema(ctx);
         var releasesNames = fieldNames(releasesOnly);
-        assert releasesNames.containsAll(List.of("fixVersion", "affectsVersion")) : releasesNames;
-        assert !releasesNames.contains("sprint") && !releasesNames.contains("storyPoints")
-                : "turning releases on must not conjure the iteration/estimation fields: " + releasesNames;
-        assert picklist(releasesOnly, "VERSION").equals(Set.of("2.4.0")) : picklist(releasesOnly, "VERSION");
-        assert picklist(releasesOnly, "SPRINT").isEmpty();
+        assertThat(releasesNames).as("%s", releasesNames).containsAll(List.of("fixVersion", "affectsVersion"));
+        assertThat(releasesNames)
+                .as("turning releases on must not conjure the iteration/estimation fields: " + releasesNames)
+                .doesNotContain("sprint");
+        assertThat(releasesNames)
+                .as("turning releases on must not conjure the iteration/estimation fields: " + releasesNames)
+                .doesNotContain("storyPoints");
+        assertThat(picklist(releasesOnly, "VERSION"))
+                .as(() -> String.valueOf(picklist(releasesOnly, "VERSION")))
+                .isEqualTo(Set.of("2.4.0"));
+        assertThat(picklist(releasesOnly, "SPRINT"))
+                .as("turning releases on must not conjure a picklist for the iteration field it does not enable")
+                .isEmpty();
 
         setDelivery(ctx, "\"estimation\":true");
         var estimationNames = fieldNames(schema(ctx));
-        assert estimationNames.contains("storyPoints") : estimationNames;
-        assert !estimationNames.contains("sprint") : estimationNames;
+        assertThat(estimationNames).as("%s", estimationNames).contains("storyPoints");
+        assertThat(estimationNames).as("%s", estimationNames).doesNotContain("sprint");
 
         // ---- "at least one VISIBLE project" — a sibling is enough ----
         var sibling = siblingProject(ctx);
         setDelivery(sibling, "\"board\":\"SCRUM\"");
         createSprint(sibling, "Sibling sprint");
         var withSibling = schema(ctx);
-        assert fieldNames(withSibling).contains("sprint")
-                : "one Scrum project among Kanban ones is enough to offer `sprint` (§9.1)";
+        assertThat(fieldNames(withSibling))
+                .as("one Scrum project among Kanban ones is enough to offer `sprint` (§9.1)")
+                .contains("sprint");
         // …and the picklist carries the SCRUM project's sprint only: ctx is still Kanban, so
         // its own "Sprint 7" is not suggested — while still fully resolvable (below).
-        assert picklist(withSibling, "SPRINT").equals(Set.of("Sibling sprint"))
-                : "the SPRINT picklist must draw from capability-ON projects only, got "
-                  + picklist(withSibling, "SPRINT");
-        assert found(ctx, "sprint = \"Sprint 7\"").equals(Set.of("committed"))
-                : "a value absent from the picklist must still RESOLVE — suggestions are not a contract";
+        assertThat(picklist(withSibling, "SPRINT"))
+                .as(() -> "the SPRINT picklist must draw from capability-ON projects only, got "
+                  + picklist(withSibling, "SPRINT"))
+                .isEqualTo(Set.of("Sibling sprint"));
+        assertThat(found(ctx, "sprint = \"Sprint 7\""))
+                .as("a value absent from the picklist must still RESOLVE — suggestions are not a contract")
+                .isEqualTo(Set.of("committed"));
     }
 
     /**
@@ -559,8 +613,12 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.suggestions", org.hamcrest.Matchers.empty()));
         var issue = createIssue(ctx, "shipped", fixVersionIdsJson(versionId));
-        assert issue.get("fixVersions").size() == 1;
-        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("shipped"));
+        assertThat(issue.get("fixVersions"))
+                .as("the fixture actually carries the version link the next assertion searches for")
+                .hasSize(1);
+        assertThat(found(ctx, "fixVersion = \"2.4.0\""))
+                .as("the field resolves and finds the issue even where suggest offers nothing to pick")
+                .isEqualTo(Set.of("shipped"));
     }
 
     // ============================================================ narrowing only
@@ -606,14 +664,16 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         disableEveryCapability(ctx);
 
         for (var q : queries) {
-            assert titles(ctx, q).equals(before.get(q))
-                    : "turning capabilities off changed the rows `" + q + "` returns: "
-                      + before.get(q) + " → " + titles(ctx, q);
+            assertThat(titles(ctx, q))
+                    .as("turning capabilities off changed the rows `" + q + "` returns: "
+                      + before.get(q) + " → " + titles(ctx, q))
+                    .isEqualTo(before.get(q));
         }
         // Sanity: the fixture actually discriminates, so "identical" is not "empty == empty".
-        assert before.get("sprint = \"Sprint 7\"").equals(List.of("committed")) : before;
-        assert new java.util.HashSet<>(before.get("sprint IS EMPTY")).equals(Set.of("small", "loose"))
-                : before;
+        assertThat(before.get("sprint = \"Sprint 7\"")).as("%s", before).isEqualTo(List.of("committed"));
+        assertThat(new java.util.HashSet<>(before.get("sprint IS EMPTY")))
+                .as("%s", before)
+                .isEqualTo(Set.of("small", "loose"));
 
         // …and NAME resolution still spans projects whose capability is off: the same
         // version name in a lean sibling resolves to both projects' issues.
@@ -621,8 +681,9 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         disableEveryCapability(sibling);
         var siblingVersion = createVersion(sibling, "2.4.0");
         createIssue(sibling, "sibling-shipped", fixVersionIdsJson(siblingVersion));
-        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("committed", "sibling-shipped"))
-                : "a capability-off project dropped out of NAME resolution — §9.1 is absolute";
+        assertThat(found(ctx, "fixVersion = \"2.4.0\""))
+                .as("a capability-off project dropped out of NAME resolution — §9.1 is absolute")
+                .isEqualTo(Set.of("committed", "sibling-shipped"));
     }
 
     // ================================================================== helpers
@@ -647,10 +708,11 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
             throws Exception {
         var viaCanonical = found(ctx, canonical);
         var viaAlias = found(ctx, alias);
-        assert viaCanonical.equals(expected) : canonical + " → " + viaCanonical;
-        assert viaAlias.equals(expected)
-                : "`" + alias + "` did not return the same rows as `" + canonical + "`: "
-                  + viaAlias + " vs " + viaCanonical;
+        assertThat(viaCanonical).as("%s", canonical + " → " + viaCanonical).isEqualTo(expected);
+        assertThat(viaAlias)
+                .as("`" + alias + "` did not return the same rows as `" + canonical + "`: "
+                  + viaAlias + " vs " + viaCanonical)
+                .isEqualTo(expected);
     }
 
     private ResultActions search(Ctx ctx, String hql) throws Exception {

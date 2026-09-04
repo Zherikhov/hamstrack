@@ -11,6 +11,8 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * {@code V12__delivery_capabilities.sql} — the upgrade policy of
  * {@code docs/design/delivery-paths-proposal.md} §7, replayed against a REAL pre-V12
@@ -85,8 +87,9 @@ class V12DeliveryCapabilitiesMigrationTest {
 
                 // Sanity: the fixture really is pre-V12 (otherwise every assertion below
                 // would be vacuously true against an already-migrated schema).
-                assert !hasColumn(conn, "releases_enabled")
-                        : "the fixture schema already has the V12 columns — nothing was migrated";
+                assertThat(hasColumn(conn, "releases_enabled"))
+                        .withFailMessage("the fixture schema already has the V12 columns — nothing was migrated")
+                        .isFalse();
 
                 // ---- the migration under test ----
                 flyway("12").migrate();
@@ -96,46 +99,55 @@ class V12DeliveryCapabilitiesMigrationTest {
                 // that a data-driven rule ("only projects that already have versions")
                 // would have quietly stripped of a nav item on upgrade.
                 for (var project : ids.all()) {
-                    assert flag(conn, project, "releases_enabled")
-                            : "project " + project + " lost the Releases page on upgrade";
-                    assert flag(conn, project, "estimation_enabled")
-                            : "project " + project + " lost the story-points input on upgrade";
+                    assertThat(flag(conn, project, "releases_enabled"))
+                            .withFailMessage("project " + project + " lost the Releases page on upgrade")
+                            .isTrue();
+                    assertThat(flag(conn, project, "estimation_enabled"))
+                            .withFailMessage("project " + project + " lost the story-points input on upgrade")
+                            .isTrue();
                 }
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
-                        + " WHERE NOT releases_enabled OR NOT estimation_enabled") == 0
-                        : "the backfill is not blanket — some pre-existing project came out lean";
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
+                        + " WHERE NOT releases_enabled OR NOT estimation_enabled"))
+                        .as("the backfill is not blanket — some pre-existing project came out lean")
+                        .isEqualTo(0);
 
                 // === 2) §7: the mid-adoption rescue, per PROJECT ========================
                 // Owning a sprint is the evidence; board_mode is not.
-                assert boardMode(conn, ids.kanbanWithSprint()).equals("SCRUM")
-                        : "a KANBAN project that already owns a sprint was left on a Backlog whose "
-                          + "sprint sections are hidden — the production dead end V12 exists to fix";
+                assertThat(boardMode(conn, ids.kanbanWithSprint()))
+                        .as("a KANBAN project that already owns a sprint was left on a Backlog whose "
+                          + "sprint sections are hidden — the production dead end V12 exists to fix")
+                        .isEqualTo("SCRUM");
 
                 // …and nothing else moves. This is the assertion that catches an
                 // uncorrelated EXISTS: kanbanNoSprint shares a workspace with
                 // kanbanWithSprint, so a subquery that forgot `s.project_id = p.id` would
                 // flip it too.
-                assert boardMode(conn, ids.kanbanNoSprint()).equals("KANBAN")
-                        : "a project with no sprint had its board_mode changed — the rescue is "
-                          + "supposed to be evidence-driven, not a blanket flip";
-                assert boardMode(conn, ids.scrumNoSprint()).equals("SCRUM")
-                        : "an existing SCRUM project was demoted";
-                assert boardMode(conn, ids.scrumWithSprint()).equals("SCRUM")
-                        : "a SCRUM project that owns a sprint was disturbed";
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
-                        + " WHERE board_mode = 'SCRUM'") == 3
-                        : "exactly the two pre-existing SCRUM projects plus the one rescued Kanban "
-                          + "project should be SCRUM";
+                assertThat(boardMode(conn, ids.kanbanNoSprint()))
+                        .as("a project with no sprint had its board_mode changed — the rescue is "
+                          + "supposed to be evidence-driven, not a blanket flip")
+                        .isEqualTo("KANBAN");
+                assertThat(boardMode(conn, ids.scrumNoSprint()))
+                        .as("an existing SCRUM project was demoted")
+                        .isEqualTo("SCRUM");
+                assertThat(boardMode(conn, ids.scrumWithSprint()))
+                        .as("a SCRUM project that owns a sprint was disturbed")
+                        .isEqualTo("SCRUM");
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".projects"
+                        + " WHERE board_mode = 'SCRUM'"))
+                        .as("exactly the two pre-existing SCRUM projects plus the one rescued Kanban "
+                          + "project should be SCRUM")
+                        .isEqualTo(3);
 
                 // === 3) §14.2: the migration changes no projects.updated_at ============
                 // Two blanket UPDATEs over a table with an updated_at trigger; only
                 // V11's `SET LOCAL hamstrack.skip_updated_at` keeps the whole install from
                 // looking freshly edited on the morning after a release.
                 for (var project : ids.all()) {
-                    assert updatedAt(conn, project).equals(Timestamp.valueOf("2020-01-02 03:04:05"))
-                            : "V12 stamped projects.updated_at on " + project + " — the "
+                    assertThat(updatedAt(conn, project))
+                            .as("V12 stamped projects.updated_at on " + project + " — the "
                               + "hamstrack.skip_updated_at guard is not in effect (it only works "
-                              + "inside a transaction; check Flyway's transaction settings)";
+                              + "inside a transaction; check Flyway's transaction settings)")
+                            .isEqualTo(Timestamp.valueOf("2020-01-02 03:04:05"));
                 }
 
                 // === 4) the column defaults carry the NEW-project policy ===============
@@ -148,14 +160,19 @@ class V12DeliveryCapabilitiesMigrationTest {
                         INSERT INTO %s.projects (id, workspace_id, name, key, created_by)
                         VALUES ('%s', '%s', 'Created after the upgrade', 'NEW', '%s')
                         """.formatted(SCHEMA, afterUpgrade, ids.workspace(), ids.user()));
-                assert !flag(conn, afterUpgrade, "releases_enabled")
-                        && !flag(conn, afterUpgrade, "estimation_enabled")
-                        : "a project created AFTER the upgrade inherited the existing-project "
-                          + "policy from the column default instead of the lean new-project one";
+                assertThat(flag(conn, afterUpgrade, "releases_enabled"))
+                        .withFailMessage("a project created AFTER the upgrade inherited the existing-project "
+                          + "policy from the column default instead of the lean new-project one")
+                        .isFalse();
+                assertThat(flag(conn, afterUpgrade, "estimation_enabled"))
+                        .withFailMessage("a project created AFTER the upgrade inherited the existing-project "
+                          + "policy from the column default instead of the lean new-project one")
+                        .isFalse();
 
                 // === 5) additive only — no data was destroyed on the way ===============
-                assert rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".sprints") == 2
-                        : "V12 touched the sprints it only reads";
+                assertThat(rowsOf(conn, "SELECT count(*) FROM " + SCHEMA + ".sprints"))
+                        .as("V12 touched the sprints it only reads")
+                        .isEqualTo(2);
             } finally {
                 dropSchema(conn);
             }
@@ -234,7 +251,7 @@ class V12DeliveryCapabilitiesMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT " + column + " FROM " + SCHEMA + ".projects"
                      + " WHERE id = '" + project + "'")) {
-            assert rs.next() : "project row vanished: " + project;
+            assertThat(rs.next()).withFailMessage("project row vanished: " + project).isTrue();
             return rs.getBoolean(1);
         }
     }
@@ -243,7 +260,7 @@ class V12DeliveryCapabilitiesMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT board_mode FROM " + SCHEMA + ".projects"
                      + " WHERE id = '" + project + "'")) {
-            assert rs.next() : "project row vanished: " + project;
+            assertThat(rs.next()).withFailMessage("project row vanished: " + project).isTrue();
             return rs.getString(1);
         }
     }
@@ -252,7 +269,7 @@ class V12DeliveryCapabilitiesMigrationTest {
         try (var st = conn.createStatement();
              var rs = st.executeQuery("SELECT updated_at AT TIME ZONE 'UTC' FROM " + SCHEMA
                      + ".projects WHERE id = '" + project + "'")) {
-            assert rs.next() : "project row vanished: " + project;
+            assertThat(rs.next()).withFailMessage("project row vanished: " + project).isTrue();
             return rs.getTimestamp(1);
         }
     }
@@ -287,7 +304,7 @@ class V12DeliveryCapabilitiesMigrationTest {
 
     private static long rowsOf(Connection conn, String sql) throws SQLException {
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            assert rs.next() : "expected a row from: " + sql;
+            assertThat(rs.next()).withFailMessage("expected a row from: " + sql).isTrue();
             return rs.getLong(1);
         }
     }

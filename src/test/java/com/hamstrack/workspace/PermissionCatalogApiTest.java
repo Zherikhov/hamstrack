@@ -10,6 +10,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.HashSet;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -46,30 +47,43 @@ class PermissionCatalogApiTest extends LabelTestBase {
                 .andReturn().getResponse().getContentAsString();
         var node = mapper.readTree(body);
 
-        assert node.size() == 29
-                : "the catalog returned " + node.size() + " entries, not the 29 of §6. The count is "
-                  + "defended one entry at a time there; changing it is a product decision.";
+        assertThat(node)
+                .as(() -> "the catalog returned " + node.size() + " entries, not the 29 of §6. The count is "
+                  + "defended one entry at a time there; changing it is a product decision.")
+                .hasSize(29);
 
         var seen = new HashSet<String>();
         int workspaceScoped = 0;
         for (var entry : node) {
             var key = entry.get("key").asText();
-            assert seen.add(key) : "duplicate permission key in the catalog: " + key;
-            assert Permission.byKey(key).isPresent()
-                    : "the catalog served a key the enum does not know: " + key;
+            assertThat(seen.add(key)).withFailMessage("duplicate permission key in the catalog: " + key).isTrue();
+            assertThat(Permission.byKey(key)).as("the catalog served a key the enum does not know: " + key).isPresent();
             var p = Permission.byKey(key).orElseThrow();
-            assert entry.get("scope").asText().equals(p.scope().name());
-            assert entry.get("supportsOwn").asBoolean() == p.supportsOwn();
-            assert entry.get("ownRequired").asBoolean() == p.ownRequired();
+            assertThat(entry.get("scope").asText())
+                    .as("the catalog serves the enum's own scope, not a second copy of it that can drift")
+                    .isEqualTo(p.scope().name());
+            assertThat(entry.get("supportsOwn").asBoolean())
+                    .as("…the enum's own supportsOwn flag")
+                    .isEqualTo(p.supportsOwn());
+            assertThat(entry.get("ownRequired").asBoolean())
+                    .as("…and the enum's own ownRequired flag")
+                    .isEqualTo(p.ownRequired());
             if (p.scope() == RoleScope.WORKSPACE) workspaceScoped++;
         }
-        assert workspaceScoped == 9 : "§6.1 defines 9 workspace-scoped permissions, got " + workspaceScoped;
+        assertThat(workspaceScoped).as("§6.1 defines 9 workspace-scoped permissions, got " + workspaceScoped).isEqualTo(9);
 
         // comment.edit is the one entry that can only ever be granted own-only (§17.3).
-        assert Permission.COMMENT_EDIT.ownRequired() && Permission.COMMENT_EDIT.supportsOwn();
+        assertThat(Permission.COMMENT_EDIT.ownRequired())
+                .withFailMessage("comment.edit is the one entry that can only ever be granted own-only")
+                .isTrue();
+        assertThat(Permission.COMMENT_EDIT.supportsOwn())
+                .withFailMessage("comment.edit is the one entry that can only ever be granted own-only")
+                .isTrue();
         // The capability hints are hints: sprint.manage carries one and is still a normal
         // permission with a normal check (Rule P3, §5.3).
-        assert Permission.SPRINT_MANAGE.capability() != null;
+        assertThat(Permission.SPRINT_MANAGE.capability())
+                .as("the capability hints are hints: sprint.manage carries one and is still a normal permission with a normal check")
+                .isNotNull();
     }
 
     @Test
@@ -89,21 +103,36 @@ class PermissionCatalogApiTest extends LabelTestBase {
                     .andReturn().getResponse().getContentAsString();
             var node = mapper.readTree(body);
             var ws = node.isArray() ? first(node, ctx.wsId().toString()) : node;
-            assert ws.has("myPermissions") && ws.get("myPermissions").isArray()
-                    : "myPermissions is missing from " + url + " — §12 requires it on every "
+            assertThat(ws.has("myPermissions"))
+                    .withFailMessage("myPermissions is missing from " + url + " — §12 requires it on every "
                       + "workspace response, list ones included; an absent field makes a client "
-                      + "render permissively.";
+                      + "render permissively.")
+                    .isTrue();
+            assertThat(ws.get("myPermissions").isArray())
+                    .withFailMessage("myPermissions is missing from " + url + " — §12 requires it on every "
+                      + "workspace response, list ones included; an absent field makes a client "
+                      + "render permissively.")
+                    .isTrue();
             var keys = keys(ws.get("myPermissions"));
             // The ctx owner is a workspace OWNER: 8 of the 9 workspace permissions (§7.1).
-            assert keys.size() == 8 : url + " gave an OWNER " + keys.size() + " workspace permissions, not 8";
-            assert keys.contains("workspace.member.manage") && keys.contains("project.curate.all");
-            assert !keys.contains("project.administer.all")
-                    : "an Owner must NOT hold project.administer.all (§7.1). Today's workspace-admin "
+            assertThat(keys)
+                    .as(() -> String.valueOf(url + " gave an OWNER " + keys.size() + " workspace permissions, not 8"))
+                    .hasSize(8);
+            assertThat(keys)
+                    .as("an OWNER's wire permissions are the real ones, not a placeholder list: the two that name the role's reach are in it")
+                    .contains("workspace.member.manage");
+            assertThat(keys)
+                    .as("an OWNER's wire permissions are the real ones, not a placeholder list: the two that name the role's reach are in it")
+                    .contains("project.curate.all");
+            assertThat(keys)
+                    .as("an Owner must NOT hold project.administer.all (§7.1). Today's workspace-admin "
                       + "bypass is requireProjectCurator only — four permissions, not all twenty; "
                       + "the wide one exists for custom roles (§17.2) and is seeded on nothing. Got "
-                      + keys;
-            assert ws.get("myRole").asText().equals("OWNER")
-                    : "myRole changed shape on " + url + " — S1 must be invisible to the SPA";
+                      + keys)
+                    .doesNotContain("project.administer.all");
+            assertThat(ws.get("myRole").asText())
+                    .as("myRole changed shape on " + url + " — S1 must be invisible to the SPA")
+                    .isEqualTo("OWNER");
         }
 
         // --- project detail + list ---
@@ -115,20 +144,26 @@ class PermissionCatalogApiTest extends LabelTestBase {
                     .andReturn().getResponse().getContentAsString();
             var node = mapper.readTree(body);
             var p = node.isArray() ? first(node, ctx.projectId().toString()) : node;
-            assert p.has("myPermissions") && p.get("myPermissions").isArray()
-                    : "myPermissions is missing from " + url;
+            assertThat(p.has("myPermissions")).withFailMessage("myPermissions is missing from " + url).isTrue();
+            assertThat(p.get("myPermissions").isArray()).withFailMessage("myPermissions is missing from " + url).isTrue();
             var keys = keys(p.get("myPermissions"));
             // A project MANAGER who is also a workspace OWNER: all 20 project permissions.
-            assert keys.size() == 20 : url + " gave a MANAGER " + keys.size() + " project permissions, not 20";
-            assert keys.contains("comment.edit:own")
-                    : "comment.edit must arrive own-qualified even for a Project admin (§17.3); got " + keys;
-            assert !keys.contains("comment.edit")
-                    : "comment.edit is never grantable unrestricted (§17.3); got " + keys;
-            assert keys.contains("comment.delete")
-                    : "comment.delete IS unrestricted for a Project admin — the intended moderation "
-                      + "widening (§10.3.5)";
-            assert p.get("myRole").asText().equals("MANAGER")
-                    : "myRole changed shape on " + url + " — S1 must be invisible to the SPA";
+            assertThat(keys)
+                    .as(() -> String.valueOf(url + " gave a MANAGER " + keys.size() + " project permissions, not 20"))
+                    .hasSize(20);
+            assertThat(keys)
+                    .as("comment.edit must arrive own-qualified even for a Project admin (§17.3); got " + keys)
+                    .contains("comment.edit:own");
+            assertThat(keys)
+                    .as("comment.edit is never grantable unrestricted (§17.3); got " + keys)
+                    .doesNotContain("comment.edit");
+            assertThat(keys)
+                    .as("comment.delete IS unrestricted for a Project admin — the intended moderation "
+                      + "widening (§10.3.5)")
+                    .contains("comment.delete");
+            assertThat(p.get("myRole").asText())
+                    .as("myRole changed shape on " + url + " — S1 must be invisible to the SPA")
+                    .isEqualTo("MANAGER");
         }
     }
 
@@ -147,18 +182,36 @@ class PermissionCatalogApiTest extends LabelTestBase {
         // §5.2 + §7.2: the default chain lands on Contributor, whose 12 grants are verbatim
         // what a workspace member can do in a project today. This is the no-op promise,
         // observable through the API.
-        assert keys.contains("issue.create") && keys.contains("issue.transition")
-                && keys.contains("issue.rank") && keys.contains("sprint.assign")
-                : "a workspace member with no project row must inherit Contributor in an OPEN "
-                  + "workspace — that inheritance IS what makes the upgrade a no-op (§8.4). Got " + keys;
-        assert !keys.contains("sprint.manage") && !keys.contains("project.edit")
-                : "Contributor must not curate: sprint lifecycle and project settings are "
-                  + "curator-gated today and must stay so. Got " + keys;
+        assertThat(keys)
+                .as("a workspace member with no project row must inherit Contributor in an OPEN "
+                  + "workspace — that inheritance IS what makes the upgrade a no-op (§8.4). Got " + keys)
+                .contains("issue.create");
+        assertThat(keys)
+                .as("a workspace member with no project row must inherit Contributor in an OPEN "
+                  + "workspace — that inheritance IS what makes the upgrade a no-op (§8.4). Got " + keys)
+                .contains("issue.transition");
+        assertThat(keys)
+                .as("a workspace member with no project row must inherit Contributor in an OPEN "
+                  + "workspace — that inheritance IS what makes the upgrade a no-op (§8.4). Got " + keys)
+                .contains("issue.rank");
+        assertThat(keys)
+                .as("a workspace member with no project row must inherit Contributor in an OPEN "
+                  + "workspace — that inheritance IS what makes the upgrade a no-op (§8.4). Got " + keys)
+                .contains("sprint.assign");
+        assertThat(keys)
+                .as("Contributor must not curate: sprint lifecycle and project settings are "
+                  + "curator-gated today and must stay so. Got " + keys)
+                .doesNotContain("sprint.manage");
+        assertThat(keys)
+                .as("Contributor must not curate: sprint lifecycle and project settings are "
+                  + "curator-gated today and must stay so. Got " + keys)
+                .doesNotContain("project.edit");
 
         // …and myRole stays VIEWER, exactly as before HD-123. S1 changes no wire value.
-        assert p.get("myRole").asText().equals("VIEWER")
-                : "myRole flipped for a member with no project row. S1 is a dark slice: the effective "
-                  + "role lives in myPermissions, and myRole keeps its pre-HD-123 meaning until S5.";
+        assertThat(p.get("myRole").asText())
+                .as("myRole flipped for a member with no project row. S1 is a dark slice: the effective "
+                  + "role lives in myPermissions, and myRole keeps its pre-HD-123 meaning until S5.")
+                .isEqualTo("VIEWER");
     }
 
     // ------------------------------------------------------------------ helpers

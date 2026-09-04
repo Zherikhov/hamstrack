@@ -9,6 +9,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -83,7 +84,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
 
         // Nothing leaked through any of the refusals.
         var after = getIssue(ctx, number);
-        assert after.get("title").asText().equals("Filed by the owner") : after;
+        assertThat(after.get("title").asText()).as("%s", after).isEqualTo("Filed by the owner");
     }
 
     // ============================= criteria 5 & 7 — per-field PATCH (§10.3.3)
@@ -123,7 +124,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("issue.edit")));
 
         var after = getIssue(ctx, number);
-        assert after.get("title").asText().equals("Original") : after;
+        assertThat(after.get("title").asText()).as("%s", after).isEqualTo("Original");
     }
 
     // ==================================== criterion 6 — sprint.assign, every door
@@ -172,7 +173,8 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
 
         // The issue is still where the curator put it.
         var after = getIssue(ctx, number);
-        assert after.get("sprint") != null && !after.get("sprint").isNull() : after;
+        assertThat(after.get("sprint")).as("%s", after).isNotNull();
+        assertThat(after.get("sprint").isNull()).withFailMessage("%s", after).isFalse();
     }
 
     /**
@@ -210,7 +212,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
 
         // The refusals filed nothing: only the first, permitted create exists.
         var backlog = backlog(ctx, null);
-        assert pageTitles(backlog).equals(java.util.Set.of("Just filing this")) : backlog;
+        assertThat(pageTitles(backlog)).as("%s", backlog).isEqualTo(java.util.Set.of("Just filing this"));
     }
 
     /**
@@ -243,17 +245,21 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
 
         // The membership round trip happened (that is sprint.assign's job) and the order
         // did not move (that is issue.rank's).
-        assert getIssue(ctx, bottomNumber).get("sprint").isNull() : "the issue is still in the sprint";
-        assert backlogOrder(ctx).equals(before)
-                : "the backlog was re-ranked through the sprint door: " + before
-                  + " became " + backlogOrder(ctx);
+        assertThat(getIssue(ctx, bottomNumber).get("sprint").isNull())
+                .withFailMessage("the issue is still in the sprint")
+                .isTrue();
+        assertThat(backlogOrder(ctx))
+                .as("the backlog was re-ranked through the sprint door: " + before
+                  + " became " + backlogOrder(ctx))
+                .isEqualTo(before);
 
         // The same round trip by someone who DOES hold issue.rank still re-ranks.
         addIssuesToSprint(ctx, ctx.token(), sprintId, "{\"issueIds\":[\"" + bottomId + "\"],"
                 + "\"position\":\"TOP\"}").andExpect(status().isOk());
         removeIssueFromSprint(ctx, ctx.token(), sprintId, bottomId).andExpect(status().isNoContent());
-        assert !backlogOrder(ctx).equals(before)
-                : "issue.rank stopped re-ranking on the sprint door — the fix over-corrected";
+        assertThat(backlogOrder(ctx))
+                .as("issue.rank stopped re-ranking on the sprint door — the fix over-corrected")
+                .isNotEqualTo(before);
     }
 
     /** Issue titles in backlog (rank) order. */
@@ -352,7 +358,7 @@ class IssuePermissionEnforcementTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail").value("Unknown assignee"));
 
         var after = getIssue(ctx, number);
-        assert after.get("assignee").isNull() : after;
+        assertThat(after.get("assignee").isNull()).withFailMessage("%s", after).isTrue();
     }
 
     /**

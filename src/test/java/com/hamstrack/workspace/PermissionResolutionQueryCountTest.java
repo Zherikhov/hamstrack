@@ -24,6 +24,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 /**
  * <strong>The measurement behind roles-permissions-proposal §9.2</strong> — that adding a
  * whole permission model costs a bounded, tiny, <em>constant</em> number of statements per
@@ -76,17 +78,19 @@ class PermissionResolutionQueryCountTest {
         workspaceAccess.resolveProject(actor, ws.getId(), project.getId());
 
         long workspaceScoped = count(() -> workspaceAccess.requireMember(actor, ws.getId()));
-        assert workspaceScoped == 2
-                : "a workspace-scoped resolution took " + workspaceScoped + " statements, not 2 "
+        assertThat(workspaceScoped)
+                .as("a workspace-scoped resolution took " + workspaceScoped + " statements, not 2 "
                   + "(workspace + membership). §9.2 promises the permission model adds ZERO: if this "
                   + "is 3, the membership finder lost its JOIN FETCH on m.role, or the role -> "
                   + "permissions cache is being bypassed (@Cacheable does not apply to a "
-                  + "self-invocation — that is why RolePermissionCache is a separate bean).";
+                  + "self-invocation — that is why RolePermissionCache is a separate bean).")
+                .isEqualTo(2);
 
         long projectScoped = count(() -> workspaceAccess.resolveProject(actor, ws.getId(), project.getId()));
-        assert projectScoped == 4
-                : "a project-scoped resolution took " + projectScoped + " statements, not 4 "
-                  + "(workspace + membership + project + explicit project membership). See above.";
+        assertThat(projectScoped)
+                .as("a project-scoped resolution took " + projectScoped + " statements, not 4 "
+                  + "(workspace + membership + project + explicit project membership). See above.")
+                .isEqualTo(4);
 
         // A member with NO explicit project row is the common case (§2.3) and takes the
         // default-role branch. It must not cost more: the default chain reads ids off rows
@@ -95,12 +99,13 @@ class PermissionResolutionQueryCountTest {
         member(ws, noRow, "MEMBER");
         workspaceAccess.resolveProject(noRow, ws.getId(), project.getId()); // warm
         long inherited = count(() -> workspaceAccess.resolveProject(noRow, ws.getId(), project.getId()));
-        assert inherited == 4
-                : "resolving the INHERITED project role took " + inherited + " statements, not 4. "
+        assertThat(inherited)
+                .as("resolving the INHERITED project role took " + inherited + " statements, not 4. "
                   + "The default chain (project -> workspace -> built-in Contributor) must read ids "
                   + "off entities already loaded and resolve them from the cache — never navigate "
                   + "the defaultProjectRole @ManyToOne, which is mapped read-only for exactly this "
-                  + "reason.";
+                  + "reason.")
+                .isEqualTo(4);
     }
 
     @Test
@@ -118,10 +123,11 @@ class PermissionResolutionQueryCountTest {
             }
             ctx.permissions().asWireStrings();
         });
-        assert checks == 0
-                : "checking all 29 permissions cost " + checks + " statements. Rule P1 (§5.1) is that "
+        assertThat(checks)
+                .as("checking all 29 permissions cost " + checks + " statements. Rule P1 (§5.1) is that "
                   + "a handler checking six permissions costs exactly what one checking none costs; "
-                  + "a PermissionSet is an in-memory value and must never touch the database.";
+                  + "a PermissionSet is an in-memory value and must never touch the database.")
+                .isEqualTo(0);
     }
 
     // ------------------------------------------------------------------ plumbing

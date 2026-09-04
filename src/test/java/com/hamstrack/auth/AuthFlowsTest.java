@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -86,10 +87,11 @@ class AuthFlowsTest {
                 .andExpect(jsonPath("$.message").exists());
 
         var user = userRepository.findByEmail(email).orElseThrow();
-        assert user.getStatus() == UserStatus.PENDING : "a fresh registration must be PENDING until verified";
-        assert emailVerificationRepository.findAll().stream()
-                .anyMatch(v -> v.getUser().getId().equals(user.getId()))
-                : "registration must create an email-verification token row";
+        assertThat(user.getStatus()).as("a fresh registration must be PENDING until verified").isEqualTo(UserStatus.PENDING);
+        assertThat(emailVerificationRepository.findAll().stream()
+                .anyMatch(v -> v.getUser().getId().equals(user.getId())))
+                .withFailMessage("registration must create an email-verification token row")
+                .isTrue();
     }
 
     @Test
@@ -117,8 +119,9 @@ class AuthFlowsTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.accessToken").exists());
 
-        assert userRepository.findById(user.getId()).orElseThrow().getStatus() == UserStatus.ACTIVE
-                : "a valid verification token must activate the user";
+        assertThat(userRepository.findById(user.getId()).orElseThrow().getStatus())
+                .as("a valid verification token must activate the user")
+                .isEqualTo(UserStatus.ACTIVE);
     }
 
     @Test
@@ -130,8 +133,9 @@ class AuthFlowsTest {
                         .contentType(APPLICATION_JSON)
                         .content("{\"token\":\"" + raw + "\"}"))
                 .andExpect(status().isBadRequest());
-        assert userRepository.findById(user.getId()).orElseThrow().getStatus() == UserStatus.PENDING
-                : "an expired token must not activate the user";
+        assertThat(userRepository.findById(user.getId()).orElseThrow().getStatus())
+                .as("an expired token must not activate the user")
+                .isEqualTo(UserStatus.PENDING);
     }
 
     @Test
@@ -313,12 +317,14 @@ class AuthFlowsTest {
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
 
-        assert knownBody.equals(unknownBody)
-                : "forgot-password must return an identical, enumeration-safe message for known and unknown emails";
+        assertThat(knownBody)
+                .as("forgot-password must return an identical, enumeration-safe message for known and unknown emails")
+                .isEqualTo(unknownBody);
         // and a reset token was actually issued for the known user
         var user = userRepository.findByEmail(known).orElseThrow();
-        assert passwordResetRepository.findAll().stream().anyMatch(r -> r.getUser().getId().equals(user.getId()))
-                : "forgot-password must issue a reset token for a known email";
+        assertThat(passwordResetRepository.findAll().stream().anyMatch(r -> r.getUser().getId().equals(user.getId())))
+                .withFailMessage("forgot-password must issue a reset token for a known email")
+                .isTrue();
     }
 
     // ============================================================ refresh / logout
@@ -329,7 +335,7 @@ class AuthFlowsTest {
         var user = activeUser(email, "password123");
         var loginRes = login(email, "password123");
         var cookie = refreshCookie(loginRes);
-        assert cookie != null : "login must set the refresh_token cookie";
+        assertThat(cookie).as("login must set the refresh_token cookie").isNotNull();
         var originalHash = TokenUtils.sha256(cookie.getValue());
 
         mockMvc.perform(post("/api/auth/refresh").cookie(cookie))
@@ -337,10 +343,12 @@ class AuthFlowsTest {
                 .andExpect(jsonPath("$.accessToken").exists());
 
         // rotation: the old refresh token row is deleted, a new one exists for the user
-        assert refreshTokenRepository.findByTokenHash(originalHash).isEmpty()
-                : "refresh must rotate — the presented token must be deleted";
-        assert refreshTokenRepository.findAll().stream().anyMatch(t -> t.getUser().getId().equals(user.getId()))
-                : "refresh must issue a fresh refresh token for the user";
+        assertThat(refreshTokenRepository.findByTokenHash(originalHash))
+                .as("refresh must rotate — the presented token must be deleted")
+                .isEmpty();
+        assertThat(refreshTokenRepository.findAll().stream().anyMatch(t -> t.getUser().getId().equals(user.getId())))
+                .withFailMessage("refresh must issue a fresh refresh token for the user")
+                .isTrue();
     }
 
     @Test
@@ -368,8 +376,9 @@ class AuthFlowsTest {
                 .andExpect(status().isNoContent());
 
         // the token row is gone
-        assert refreshTokenRepository.findByTokenHash(TokenUtils.sha256(cookie.getValue())).isEmpty()
-                : "logout must delete the refresh token";
+        assertThat(refreshTokenRepository.findByTokenHash(TokenUtils.sha256(cookie.getValue())))
+                .as("logout must delete the refresh token")
+                .isEmpty();
         // and replaying the cookie no longer refreshes
         mockMvc.perform(post("/api/auth/refresh").cookie(cookie))
                 .andExpect(status().isBadRequest());

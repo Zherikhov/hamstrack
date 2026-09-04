@@ -6,6 +6,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -65,7 +66,9 @@ class ComponentProjectCapTest extends ComponentTestBase {
                 .andExpect(status().isUnprocessableContent())
                 .andExpect(jsonPath("$.detail", containsString("maximum of 2 components")));
         // The archived row is still there (nothing was silently reclaimed)…
-        assert names(listComponents(ctx, ctx.token(), "?includeArchived=true")).equals(List.of("one", "two"));
+        assertThat(names(listComponents(ctx, ctx.token(), "?includeArchived=true")))
+                .as("the archived row is still there — nothing was silently reclaimed to make room")
+                .isEqualTo(List.of("one", "two"));
 
         // …and deleting it — not archiving it — is what frees the slot.
         deleteComponent(ctx, ctx.token(), one, true).andExpect(status().isNoContent());

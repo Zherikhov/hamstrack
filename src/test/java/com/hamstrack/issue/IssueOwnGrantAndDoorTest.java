@@ -24,6 +24,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -117,7 +118,9 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
         deleteIssue(ctx, reporter.token(), mine).andExpect(status().isNoContent());
 
         // The refusal refused: the other issue is still there, and still readable.
-        assert getIssue(ctx, theirs).get("title").asText().equals("The owner filed this");
+        assertThat(getIssue(ctx, theirs).get("title").asText())
+                .as("the refusal refused: the other reporter's issue is still there, and still readable")
+                .isEqualTo("The owner filed this");
     }
 
     /**
@@ -140,8 +143,12 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
         patchIssue(ctx, reporter.token(), mine, "{\"title\":\"Renamed by its reporter\"}")
                 .andExpect(status().isOk());
 
-        assert getIssue(ctx, theirs).get("title").asText().equals("Not mine");
-        assert getIssue(ctx, mine).get("title").asText().equals("Renamed by its reporter");
+        assertThat(getIssue(ctx, theirs).get("title").asText())
+                .as("the refused edit did not land on the other reporter's issue")
+                .isEqualTo("Not mine");
+        assertThat(getIssue(ctx, mine).get("title").asText())
+                .as("…and the permitted edit on the reporter's own issue did land")
+                .isEqualTo("Renamed by its reporter");
     }
 
     /**
@@ -167,8 +174,9 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
                         .header("Authorization", "Bearer " + uploader.token()))
                 .andExpect(status().isNoContent());
 
-        assert attachmentIds(ctx, number).equals(List.of(theirs))
-                : "the other person's file should have survived: " + attachmentIds(ctx, number);
+        assertThat(attachmentIds(ctx, number))
+                .as("the other person's file should have survived: " + attachmentIds(ctx, number))
+                .isEqualTo(List.of(theirs));
     }
 
     /**
@@ -229,7 +237,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
                 .andExpect(jsonPath("$.detail", containsString("issue.assign")));
 
         var after = getIssue(ctx, number);
-        assert after.get("assignee").get("id").asText().equals(assignee.user().getId().toString()) : after;
+        assertThat(after.get("assignee").get("id").asText()).as("%s", after).isEqualTo(assignee.user().getId().toString());
     }
 
     /**
@@ -261,8 +269,9 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.detail", containsString("issue.edit")));
 
-        assert getIssue(ctx, number).get("dueDate").asText().equals("2026-12-01")
-                : "the refused patch cleared the date anyway: " + getIssue(ctx, number);
+        assertThat(getIssue(ctx, number).get("dueDate").asText())
+                .as("the refused patch cleared the date anyway: " + getIssue(ctx, number))
+                .isEqualTo("2026-12-01");
 
         // And the permitted actor really does clear it through that same body — the
         // assertion above must be refusing a mutation that exists.
@@ -270,7 +279,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
         patchIssue(ctx, editor.token(), number,
                 "{\"dueDate\":\"2026-12-01\",\"clearDueDate\":true}")
                 .andExpect(status().isOk());
-        assert getIssue(ctx, number).get("dueDate").isNull() : getIssue(ctx, number);
+        assertThat(getIssue(ctx, number).get("dueDate").isNull()).withFailMessage("%s", getIssue(ctx, number)).isTrue();
     }
 
     // ============================================== 3. every door, independently (§6.5)
@@ -339,7 +348,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
 
         // Nothing moved: the issue is where the curator left it, and no sprint issue
         // was filed behind the refusals.
-        assert sprintId(getIssue(ctx, number)).equals(sprintId.toString()) : getIssue(ctx, number);
+        assertThat(sprintId(getIssue(ctx, number))).as("%s", getIssue(ctx, number)).isEqualTo(sprintId.toString());
     }
 
     /**
@@ -369,7 +378,7 @@ class IssueOwnGrantAndDoorTest extends SprintTestBase {
         patchIssue(ctx, editor.token(), number, "{\"title\":\"Renamed\"}").andExpect(status().isOk());
         postIssue(ctx, editor.token(), "Filed unassigned").andExpect(status().isCreated());
 
-        assert getIssue(ctx, number).get("assignee").isNull() : getIssue(ctx, number);
+        assertThat(getIssue(ctx, number).get("assignee").isNull()).withFailMessage("%s", getIssue(ctx, number)).isTrue();
     }
 
     // ============================== 4. the actor's refusal precedes the value's (§10.3.4)

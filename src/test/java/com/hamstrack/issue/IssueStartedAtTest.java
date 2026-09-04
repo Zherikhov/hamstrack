@@ -8,6 +8,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -49,8 +50,9 @@ class IssueStartedAtTest extends SprintTestBase {
         var ctx = newProject();
         var issue = createIssue(ctx, "not picked up yet");
 
-        assert startedAt(idOf(issue)) == null
-                : "an unstarted issue must have no start date — createdAt is NOT a fallback";
+        assertThat(startedAt(idOf(issue)))
+                .as("an unstarted issue must have no start date — createdAt is NOT a fallback")
+                .isNull();
     }
 
     @Test
@@ -59,8 +61,9 @@ class IssueStartedAtTest extends SprintTestBase {
         var issue = createIssue(ctx, "filed while already being worked on",
                 "\"statusId\":\"" + statusOf(ctx, "IN_PROGRESS") + "\"");
 
-        assert startedAt(idOf(issue)) != null
-                : "creating an issue directly in an in-progress status must stamp started_at";
+        assertThat(startedAt(idOf(issue)))
+                .as("creating an issue directly in an in-progress status must stamp started_at")
+                .isNotNull();
     }
 
     /** The "dragged straight to Done" case — started and finished in one move. */
@@ -70,20 +73,21 @@ class IssueStartedAtTest extends SprintTestBase {
         var issue = createIssue(ctx, "already done when filed",
                 "\"statusId\":\"" + doneStatusId(ctx) + "\"");
 
-        assert startedAt(idOf(issue)) != null
-                : "DONE implies started: excluding these would drop the fastest work from "
-                  + "every cycle-time percentile";
+        assertThat(startedAt(idOf(issue)))
+                .as("DONE implies started: excluding these would drop the fastest work from "
+                  + "every cycle-time percentile")
+                .isNotNull();
     }
 
     @Test
     void movingIntoInProgressStampsIt() throws Exception {
         var ctx = newProject();
         var issue = createIssue(ctx, "picked up later");
-        assert startedAt(idOf(issue)) == null : "precondition: not started";
+        assertThat(startedAt(idOf(issue))).as("precondition: not started").isNull();
 
         moveTo(ctx, numberOf(issue), statusOf(ctx, "IN_PROGRESS"));
 
-        assert startedAt(idOf(issue)) != null : "entering an in-progress status must stamp it";
+        assertThat(startedAt(idOf(issue))).as("entering an in-progress status must stamp it").isNotNull();
     }
 
     /** Straight from To Do to Done, never passing through an in-progress column. */
@@ -94,8 +98,7 @@ class IssueStartedAtTest extends SprintTestBase {
 
         markDone(ctx, numberOf(issue));
 
-        assert startedAt(idOf(issue)) != null
-                : "an issue dragged straight to Done was started, then finished";
+        assertThat(startedAt(idOf(issue))).as("an issue dragged straight to Done was started, then finished").isNotNull();
     }
 
     /**
@@ -108,17 +111,19 @@ class IssueStartedAtTest extends SprintTestBase {
         var issue = createIssue(ctx, "done, reopened, done again");
         moveTo(ctx, numberOf(issue), statusOf(ctx, "IN_PROGRESS"));
         var firstStart = startedAt(idOf(issue));
-        assert firstStart != null : "precondition: started";
+        assertThat(firstStart).as("precondition: started").isNotNull();
 
         markDone(ctx, numberOf(issue));
         moveTo(ctx, numberOf(issue), ctx.todoStatusId());
         moveTo(ctx, numberOf(issue), statusOf(ctx, "IN_PROGRESS"));
 
-        assert firstStart.equals(startedAt(idOf(issue))) : """
+        assertThat(firstStart)
+                .as("""
                 started_at moved on a re-start. It must record the FIRST time work began: \
                 re-stamping it makes the cycle time of exactly the work that went badly \
                 shrink retroactively, and a number that improves when reality worsens is \
-                how a report loses its readers.""";
+                how a report loses its readers.""")
+                .isEqualTo(startedAt(idOf(issue)));
     }
 
     @Test
@@ -129,8 +134,7 @@ class IssueStartedAtTest extends SprintTestBase {
         patchIssue(ctx, ctx.token(), numberOf(issue), "{\"title\":\"renamed\"}")
                 .andExpect(status().isOk());
 
-        assert startedAt(idOf(issue)) == null
-                : "only a status change into IN_PROGRESS/DONE may stamp started_at";
+        assertThat(startedAt(idOf(issue))).as("only a status change into IN_PROGRESS/DONE may stamp started_at").isNull();
     }
 
     // ============================================================ helpers

@@ -26,6 +26,7 @@ import org.springframework.test.web.servlet.ResultActions;
 
 import java.util.UUID;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -66,28 +67,31 @@ class IssueClosedAtTest {
     void createInTodoLeavesClosedAtNull() throws Exception {
         var ctx = newProject();
         var issue = createIssue(ctx, ctx.todoStatusId());
-        assert !getNode(ctx, issue).hasNonNull("closedAt")
-                : "a To Do issue must have no close date";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt"))
+                .withFailMessage("a To Do issue must have no close date")
+                .isFalse();
     }
 
     @Test
     void createDirectlyInDoneStampsClosedAt() throws Exception {
         var ctx = newProject();
         var issue = createIssue(ctx, ctx.doneStatusId());
-        assert getNode(ctx, issue).hasNonNull("closedAt")
-                : "creating an issue directly in a DONE status must stamp closed_at";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt"))
+                .withFailMessage("creating an issue directly in a DONE status must stamp closed_at")
+                .isTrue();
     }
 
     @Test
     void enteringDoneStampsClosedAt() throws Exception {
         var ctx = newProject();
         var issue = createIssue(ctx, ctx.todoStatusId());
-        assert !getNode(ctx, issue).hasNonNull("closedAt") : "precondition: not closed yet";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt")).withFailMessage("precondition: not closed yet").isFalse();
 
         moveTo(ctx, issue, ctx.doneStatusId()).andExpect(status().isOk());
 
-        assert getNode(ctx, issue).hasNonNull("closedAt")
-                : "entering a DONE status must stamp closed_at";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt"))
+                .withFailMessage("entering a DONE status must stamp closed_at")
+                .isTrue();
     }
 
     @Test
@@ -95,12 +99,13 @@ class IssueClosedAtTest {
         var ctx = newProject();
         var issue = createIssue(ctx, ctx.todoStatusId());
         moveTo(ctx, issue, ctx.doneStatusId()).andExpect(status().isOk());
-        assert getNode(ctx, issue).hasNonNull("closedAt") : "precondition: closed";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt")).withFailMessage("precondition: closed").isTrue();
 
         moveTo(ctx, issue, ctx.todoStatusId()).andExpect(status().isOk());
 
-        assert !getNode(ctx, issue).hasNonNull("closedAt")
-                : "leaving a DONE status must clear closed_at";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt"))
+                .withFailMessage("leaving a DONE status must clear closed_at")
+                .isFalse();
     }
 
     @Test
@@ -110,8 +115,9 @@ class IssueClosedAtTest {
 
         moveTo(ctx, issue, ctx.inProgressStatusId()).andExpect(status().isOk());
 
-        assert !getNode(ctx, issue).hasNonNull("closedAt")
-                : "a non-DONE → non-DONE transition must not stamp closed_at";
+        assertThat(getNode(ctx, issue).hasNonNull("closedAt"))
+                .withFailMessage("a non-DONE → non-DONE transition must not stamp closed_at")
+                .isFalse();
     }
 
     @Test
@@ -125,9 +131,10 @@ class IssueClosedAtTest {
         patch(ctx, issue, "{\"title\":\"renamed while done\"}").andExpect(status().isOk());
 
         var after = getNode(ctx, issue);
-        assert after.hasNonNull("closedAt") : "closed_at must survive an unrelated update";
-        assert after.get("closedAt").asText().equals(stamped)
-                : "closed_at must not be re-stamped by a non-status update";
+        assertThat(after.hasNonNull("closedAt")).withFailMessage("closed_at must survive an unrelated update").isTrue();
+        assertThat(after.get("closedAt").asText())
+                .as("closed_at must not be re-stamped by a non-status update")
+                .isEqualTo(stamped);
     }
 
     // ============================================================ helpers
