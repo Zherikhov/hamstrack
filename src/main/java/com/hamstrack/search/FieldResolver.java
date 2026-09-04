@@ -36,11 +36,15 @@ import org.springframework.stereotype.Component;
  *   <li><strong>A tenant's own custom field before a retired alias.</strong> This is why a
  *       retired key must NOT be registered in {@link FieldRegistry}: registering
  *       {@code story_points} there would permanently shadow the {@code story_points} custom
- *       field of every workspace that has one, in every tenant, forever. Consulted last, the
+ *       field of every workspace that has one, in every tenant, forever. Consulted last, an
  *       alias can only ever fill a name nobody else claimed — a tenant that keys its own field
- *       {@code story_points} resolves to <em>its own field</em>, and a workspace with no such
- *       field resolves the retired key to the native {@code storyPoints} so its saved filters
- *       keep working. See {@link RetiredFieldAliases} for what the alias is and the one way that
+ *       with a retired key resolves to <em>its own field</em>, and a workspace with no such
+ *       field resolves the retired key to the native replacement so its saved filters keep
+ *       working. That holds per alias, not once for the table: every key
+ *       {@link RetiredFieldAliases} carries adds one more name this rule has to be true of, so
+ *       the tenant-owns-the-key case is pinned per entry
+ *       ({@code DeliverySearchCompatibilityTest}). See {@link RetiredFieldAliases} for which
+ *       keys are aliased, which are answered by a live registry name instead, and the way this
  *       decision stops being per-tenant.</li>
  * </ul>
  *

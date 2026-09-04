@@ -404,6 +404,16 @@ sort path had its own copy of the order and never learned the alias step).
 `story_points` → `storyPoints` is the only entry today. (V11 also archived the `sprint` placeholder
 field, but `sprint` is already a live registry name, so it resolves natively with no alias needed.)
 
+> **Correction, 2026-09-04 (HD-161).** The sentence above was true when written and is not now. It is
+> left standing because this is a record of what was proposed, not a description of the code. `V10`
+> archived `fix_version` and it got no alias at all, so every pre-V10 saved filter using that key
+> answered `422` — and could not even be re-saved — until HD-161. `labels` and `components` resolved
+> only because `FieldRegistry` happened to carry them as ergonomic plurals, which is a guarantee
+> nobody wrote down and nobody could have seen break. All four are explicit entries now.
+> **The code is the answer and `RetiredFieldSweepTest` is what keeps it one:** it reads the archival
+> statements out of the migrations and fails when a retired key has no recorded verdict, so the next
+> retirement cannot repeat this by omission.
+
 Deliberately **not** done: rewriting the stored text of saved filters in a migration. Editing a
 user's saved query is worse than resolving it — it is unreviewable, irreversible, and wrong the
 moment the user's intent differed from our guess. Aliases are also **not** offered in `/schema`

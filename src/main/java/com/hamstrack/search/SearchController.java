@@ -48,13 +48,13 @@ import java.util.UUID;
  *       again: a version whose project has releases off still resolves by name.</li>
  * </ul>
  *
- * <p>Retired HQL keys stay resolvable at every entry point that reads a field name, a
- * query being only one of them: {@code story_points} falls back to the native
- * {@code storyPoints} ({@link RetiredFieldAliases}, HD-107 §9.2) <em>after</em> the
- * caller's own custom fields have been tried, so a tenant field keyed
- * {@code story_points} always wins. The precedence is defined once, in
- * {@link FieldResolver} (HD-114), so it cannot hold on one endpoint and not another.
- * Aliases are compatibility, not vocabulary — {@code /schema} never advertises them.
+ * <p>A key a release retired stays resolvable at every entry point that reads a field name,
+ * a query being only one of them: it falls back to the field that replaced it
+ * ({@link RetiredFieldAliases}, HD-107 §9.2, HD-161) <em>after</em> the caller's own custom
+ * fields have been tried, so a tenant field keyed with a retired name always wins. The
+ * precedence is defined once, in {@link FieldResolver} (HD-114), so it cannot hold on one
+ * endpoint and not another. Aliases are compatibility, not vocabulary — {@code /schema}
+ * never advertises them.
  *
  * <p><strong>No {@code @Validated} on this class — and none on any bean Spring MVC
  * dispatches to</strong> (ADR-0018, HD-214). It reads as "turn on validation" and does

@@ -186,10 +186,29 @@ public class FieldRegistry {
         // EXISTS over IssueLabel instead (§3.5). Nullable (IS [NOT] EMPTY = "has no
         // labels"), never sortable — an issue has a *set* of labels, so there is no
         // meaningful ORDER BY key; `ORDER BY label` is a 422 from HqlValidator.
+        //
+        // The plural `labels` below was registered for ERGONOMICS — and it is also the key
+        // of the V3 placeholder custom field that V8 archived when this field took over, so
+        // it is load-bearing for every saved filter written before V8. Those are two
+        // different reasons for one line, and only the first one was written down until
+        // HD-161. The compatibility half is now stated where retirements live
+        // (RetiredFieldAliases), so deleting this plural would change the PRECEDENCE of the
+        // name (a tenant's own `labels` custom field would start winning) rather than break
+        // filters — except for a tenant that already owns a field keyed `labels`, for whom it
+        // is a silent change of MEANING: they are shadowed today, so their filters answer 200
+        // from label links they never set on that field, and after the deletion the same
+        // filters answer 200 from their own field instead. Nothing 4xxs either way. Note the
+        // side effect of registering it at all: `labels` is a reserved name, so
+        // AdminFieldService refuses a NEW custom field keyed that way — which
+        // `story_points`/`fix_version`, aliased but unregistered, deliberately are not. That
+        // check is create-time only, so a field keyed this way before V8 still exists and is
+        // the shadowed case above; the shadowing, its blast radius and the SQL that detects it
+        // are recorded in docs/release-checklist.md → "Releases that register a new HQL field
+        // name" and in RetiredFieldAliases.
         var label = new FieldDescriptor("label", FieldDataType.LABEL_REF, EQ_ONLY,
                 true, true, false, null, "LABEL", List.of(), true);
         register(label);
-        register("labels", label);   // plural alias, same descriptor
+        register("labels", label);   // plural alias — and the retired V8 key; see above
 
         // ---- component (HD-31) ----
         // Single-valued ToOne, so it reuses the plain ENUM_REF id-set path — no new
@@ -198,10 +217,15 @@ public class FieldRegistry {
         // component per issue means `component.name` is a meaningful ORDER BY key
         // (§3.5). Names resolve across the caller's VISIBLE PROJECTS only, so two
         // projects may each own a "Billing" and both match.
+        //
+        // `components` is the same doubled line as `labels` above — an ergonomic plural that
+        // is simultaneously the retired V9 placeholder key. Same treatment, same reason, and
+        // the same caveat: for a tenant that already owns a field keyed `components`, removing
+        // this plural is a silent change of meaning, not merely of precedence.
         var component = new FieldDescriptor("component", FieldDataType.ENUM_REF, EQ_ONLY,
                 true, true, true, "component.id", "COMPONENT", List.of(), true);
         register(component);
-        register("components", component);   // plural alias, same descriptor
+        register("components", component);   // plural alias — and the retired V9 key; see above
 
         // ---- VERSION_REF (HD-32) ----
         // Two fields over ONE join table, told apart by link_type. Many-valued like
@@ -217,6 +241,12 @@ public class FieldRegistry {
         // The canonical names are camelCase for display (/schema, error messages);
         // the registry KEY is lowercased below, which is also what makes the spec's
         // `fixversion`/`affectsversion` aliases work without a second entry.
+        //
+        // The RETIRED key this field replaced is `fix_version` (the V3 placeholder custom
+        // field V10 archived), and it is NOT registered here — it lives in
+        // RetiredFieldAliases, consulted after the caller's own custom fields, so a tenant
+        // that keys a custom field `fix_version` still reaches its own field. Registering it
+        // here instead would shadow that tenant's field in every workspace forever (HD-161).
         register(new FieldDescriptor("fixVersion", FieldDataType.VERSION_REF, EQ_ONLY,
                 true, true, false, null, "VERSION", List.of(), true));
         register(new FieldDescriptor("affectsVersion", FieldDataType.VERSION_REF, EQ_ONLY,

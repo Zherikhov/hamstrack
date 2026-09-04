@@ -43,17 +43,19 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *       only capability-awareness allowed anywhere in search is
  *       <em>suggestion-only</em>: which fields {@code /schema} offers, and which values
  *       the SPRINT/VERSION picklists and {@code /suggest} draw from.</li>
- *   <li><strong>§9.2 — retired keys become permanent aliases.</strong> V11 archived the
- *       global {@code story_points} custom field and promoted the value to the native
- *       column under the name {@code storyPoints}, which silently broke every saved
- *       filter written as {@code story_points = 5}. The alias restores those — but as a
- *       <em>last-resort fallback</em>, never a {@link FieldRegistry} entry, because the
- *       registry always beats a custom field: registering it would permanently shadow
- *       any tenant's own field keyed {@code story_points}, in every workspace, forever.
- *       {@link #aTenantsOwnCustomFieldKeyedStoryPointsBeatsTheAlias()} is the test that
- *       fails if that precedence is ever inverted, and its failure mode is silent
- *       corruption of somebody else's data — the query still returns rows, just the
- *       wrong ones.</li>
+ *   <li><strong>§9.2 — retired keys become permanent aliases.</strong> V8/V9/V10/V11 each
+ *       archived a global placeholder custom field and promoted its meaning to a native
+ *       field, which silently broke every saved filter written against the old key. An
+ *       alias restores those — but as a <em>last-resort fallback</em>, never a
+ *       {@link FieldRegistry} entry, because the registry always beats a custom field:
+ *       registering a retired key would permanently shadow any tenant's own field of that
+ *       key, in every workspace, forever. That precedence is pinned <em>per alias</em>
+ *       here, because each entry is one more name it has to be true of and the twins do
+ *       not cover each other — its failure mode is silent corruption of somebody else's
+ *       data, the query still returning rows, just the wrong ones. Which keys were retired
+ *       and what keeps each one working is swept mechanically out of the migrations by
+ *       {@code RetiredFieldSweepTest}; HD-161 exists because {@code fix_version} was left
+ *       out of the {@code story_points} treatment and nothing noticed for two releases.</li>
  * </ul>
  *
  * <p>{@code newProject()} bootstraps through the repository, so every fixture here starts
@@ -127,9 +129,15 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         enableEveryCapability(ctx);
 
         var names = schemaFieldNames(ctx);
-        assert names.contains("storyPoints") : "estimation is on, so the canonical name is offered";
-        assert !names.contains("story_points")
-                : "the retired key is compatibility, not vocabulary — it must not be suggested: " + names;
+        for (var pair : List.of(List.of("story_points", "storyPoints"),
+                                List.of("fix_version", "fixVersion"))) {
+            assert names.contains(pair.get(1))
+                    : "every capability is on, so the canonical name " + pair.get(1)
+                      + " is offered: " + names;
+            assert !names.contains(pair.get(0))
+                    : "the retired key " + pair.get(0) + " is compatibility, not vocabulary — it "
+                      + "must not be suggested: " + names;
+        }
     }
 
     /**
@@ -186,6 +194,126 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
         var other = newProject();
         createIssue(other, "elsewhere-8", "\"storyPoints\":8");
         assert found(other, "story_points >= 5").equals(Set.of("elsewhere-8"))
+                : "one tenant's custom field must not disable the retired-key alias for everybody else";
+    }
+
+    /**
+     * §9.2 / HD-161 — the <em>same</em> guarantee for the retirement that shipped without it.
+     * V10 archived the {@code fix_version} placeholder exactly as V11 archived
+     * {@code story_points}, and gave it no alias, so a filter written before V10 answered
+     * "unknown field" while its identically-shaped sibling kept working.
+     *
+     * <p>The assertions are the ones {@link #theRetiredStoryPointsKeyResolvesToTheNativeColumn()}
+     * makes, over this field's own operators, plus the two that show the alias is a shim rather
+     * than a second implementation: an unresolvable operand still 422s <em>anchored on the
+     * canonical name</em>, and the field's non-sortability is not relaxed by spelling it the old
+     * way. {@code affectsVersion} needs no counterpart — {@code fix_version} was the only
+     * version-shaped V3 placeholder, and V10 introduced both names at once.
+     */
+    @Test
+    void theRetiredFixVersionKeyResolvesToTheFieldThatReplacedIt() throws Exception {
+        var ctx = newProject();
+        var v240 = createVersion(ctx, "2.4.0");
+        var v230 = createVersion(ctx, "2.3.0");
+        createIssue(ctx, "shipped-240", fixVersionIdsJson(v240));
+        createIssue(ctx, "shipped-230", fixVersionIdsJson(v230));
+        createIssue(ctx, "unscheduled");
+
+        assertSameRows(ctx, "fixVersion = \"2.4.0\"", "fix_version = \"2.4.0\"",
+                Set.of("shipped-240"));
+        assertSameRows(ctx, "fixVersion IS EMPTY", "fix_version IS EMPTY", Set.of("unscheduled"));
+        assertSameRows(ctx, "fixVersion IS NOT EMPTY", "fix_version IS NOT EMPTY",
+                Set.of("shipped-240", "shipped-230"));
+        // Composed with another term, because a saved filter is rarely one.
+        assertSameRows(ctx, "fixVersion = \"2.4.0\" OR fixVersion = \"2.3.0\"",
+                "fix_version = \"2.4.0\" OR fix_version = \"2.3.0\"",
+                Set.of("shipped-240", "shipped-230"));
+
+        // Case-insensitive, like every other HQL name lookup — a saved filter carries
+        // whatever casing its author typed.
+        assertSameRows(ctx, "fixVersion = \"2.4.0\"", "FIX_VERSION = \"2.4.0\"", Set.of("shipped-240"));
+        assertSameRows(ctx, "fixVersion = \"2.4.0\"", "Fix_Version = \"2.4.0\"", Set.of("shipped-240"));
+
+        // Once the alias has been applied the field is the field: an unknown version is the
+        // same 422, anchored on the CANONICAL name so the error names what the product knows.
+        search(ctx, "fix_version = \"9.9.9\"")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
+                .andExpect(jsonPath("$.field").value("fixVersion"));
+        // …and an issue has a SET of fix versions, so neither spelling is sortable.
+        search(ctx, "ORDER BY fix_version ASC")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.field").value("fixVersion"))
+                .andExpect(jsonPath("$.detail", org.hamcrest.Matchers.containsString("not sortable")));
+
+        // Saved-filter CRUD validates the stored text through the same resolver, so until
+        // HD-161 a filter carrying this key could not even be re-saved after being loaded.
+        var filterId = createFilter(ctx, "this release's work", "fix_version = \"2.4.0\"");
+        assert found(ctx, storedHql(ctx, filterId)).equals(Set.of("shipped-240"))
+                : "a saved filter written against the retired key does not run";
+    }
+
+    /**
+     * <strong>The load-bearing precedence test, for the second alias (HD-161).</strong> Each
+     * entry in the alias table widens the surface of the "a tenant's own field wins" rule by
+     * one name, so it is pinned per key rather than once for the table —
+     * {@link #aTenantsOwnCustomFieldKeyedStoryPointsBeatsTheAlias()} is this test's twin and
+     * neither covers the other.
+     *
+     * <p>{@code fix_version} is <em>creatable</em> as a custom field key today
+     * ({@code AdminFieldService.requireUnreservedKey} consults only the registry, and an alias
+     * deliberately reserves nothing), so this is a state a real workspace can be in — and the
+     * failure mode of getting it wrong is silent: the query keeps returning 200 and rows, read
+     * out of version links the tenant never made.
+     *
+     * <p>The sharpest probe here is a <em>status</em> rather than a row set: a version name
+     * nothing carries is a 422 when the alias fires and an ordinary empty 200 when the tenant's
+     * TEXT field answers, so the two paths cannot be confused for one another.
+     */
+    @Test
+    void aTenantsOwnCustomFieldKeyedFixVersionBeatsTheAlias() throws Exception {
+        var ctx = newProject();
+        var ownKey = bindCustomField(ctx, "fix_version", "Fix version (tenant)", FieldType.TEXT);
+
+        // Crossed values, as in the story-points twin: the issue carrying the NATIVE version
+        // link carries nothing in the custom field, and vice versa. If the precedence inverts,
+        // the two queries swap answers rather than both going empty.
+        var version = createVersion(ctx, "2.4.0");
+        createIssue(ctx, "native-2.4.0", fixVersionIdsJson(version));
+        createIssue(ctx, "custom-2.4.0", "\"fields\":{\"" + ownKey + "\":\"2.4.0\"}");
+
+        assert found(ctx, "fix_version = \"2.4.0\"").equals(Set.of("custom-2.4.0"))
+                : "the tenant's own `fix_version` custom field was shadowed by the retired-key alias";
+        assert found(ctx, "fixVersion = \"2.4.0\"").equals(Set.of("native-2.4.0"))
+                : "the canonical name must still reach the version links in the same workspace";
+        // IS EMPTY follows the same resolution: "carries no value for the tenant's field".
+        assert found(ctx, "fix_version IS EMPTY").equals(Set.of("native-2.4.0"));
+
+        // The status probe: only the alias path can refuse an unresolvable version name.
+        search(ctx, "fix_version = \"9.9.9\"")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content", org.hamcrest.Matchers.empty()));
+        search(ctx, "fixVersion = \"9.9.9\"").andExpect(status().isUnprocessableContent());
+
+        // ORDER BY resolves through the same precedence, and both fields are unsortable — so
+        // the anchored field name is what tells the two refusals apart.
+        search(ctx, "ORDER BY fix_version ASC")
+                .andExpect(status().isUnprocessableContent())
+                .andExpect(jsonPath("$.errorType").value("SEMANTIC_ERROR"))
+                .andExpect(jsonPath("$.field").value("fix_version"))
+                .andExpect(jsonPath("$.detail", org.hamcrest.Matchers.containsString("not sortable")));
+
+        // …and the /schema entry for that name is the tenant's field: a custom field is
+        // ordinary vocabulary, which is exactly what an alias is not.
+        var names = schemaFieldNames(ctx);
+        assert names.contains("fix_version")
+                : "a tenant's own custom field is ordinary vocabulary and must be suggested: " + names;
+
+        // A DIFFERENT workspace, which defined no such field, still gets the alias.
+        var other = newProject();
+        var otherVersion = createVersion(other, "2.4.0");
+        createIssue(other, "elsewhere-2.4.0", fixVersionIdsJson(otherVersion));
+        assert found(other, "fix_version = \"2.4.0\"").equals(Set.of("elsewhere-2.4.0"))
                 : "one tenant's custom field must not disable the retired-key alias for everybody else";
     }
 
@@ -598,11 +726,16 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
      * {@code fields} payload is keyed by).
      */
     private UUID bindCustomField(Ctx ctx, String key, String name) throws Exception {
+        return bindCustomField(ctx, key, name, FieldType.NUMBER);
+    }
+
+    /** As above, for a retired key whose replacement is not numeric ({@code fix_version}). */
+    private UUID bindCustomField(Ctx ctx, String key, String name, FieldType type) throws Exception {
         var def = new FieldDef();
         def.setScopeWorkspaceId(ctx.wsId());
         def.setKey(key);
         def.setName(name + " " + Math.abs(UUID.randomUUID().hashCode()));
-        def.setType(FieldType.NUMBER);
+        def.setType(type);
         def = fieldDefRepository.save(def);
 
         var set = new FieldSet();

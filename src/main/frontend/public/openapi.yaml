@@ -3163,10 +3163,16 @@ paths:
         `/{id}` updates name/config/description, POST `/{id}/archive` and
         `/{id}/unarchive` hide a field from forms without touching values.
         POST also refuses (409) a `key` that the HQL search vocabulary has
-        claimed — any name a query resolves to a built-in field, its aliases
+        claimed — a name the vocabulary itself registers, its spelling aliases
         (`labels`, `points`, …) included, so the reserved set is slightly wider
         than what `GET …/search/schema` advertises (that endpoint lists each
-        field once, under its canonical name, and is capability-narrowed).
+        field once, under its canonical name, and is capability-narrowed). It is
+        **not** as wide as the set of names a query resolves: a key a release
+        retired resolves to the field that replaced it without being claimed
+        here, so a custom field can be created under one and then outranks that
+        compatibility fallback (see the retired-key rule on
+        `POST /workspaces/{workspaceId}/search`) — unless the retired key is
+        also a registered spelling, which is then reserved like any other.
         A registered search name always outranks a custom field of the same key: such a
         field would work everywhere in the product except search, where it
         would be silently omitted from the vocabulary. The check runs **after**
@@ -7470,19 +7476,44 @@ paths:
           by option **label or id**, USER values by email / display name /
           `currentUser()` / UUID, DATE as `YYYY-MM-DD`. Example:
           `severity = "High" AND environment = prod`.
-        - **Retired field keys** — `story_points`, the custom-field key release
-          0.13.0 archived when story points became a native field, still
-          resolves: it is a permanent alias for `storyPoints`, so a saved filter
-          written against the old key keeps running (no migration ever rewrites
-          a stored filter's text). The alias is a **last-resort** fallback,
-          consulted only after system fields and the caller's visible custom
-          fields — so a workspace that owns its own custom field keyed
-          `story_points` still resolves to **its own field**, never to the
-          native column. Once the alias has applied, errors name the
-          **canonical** field: `story_points IN (5)` answers `422 "The IN
-          operator is not allowed on field 'storyPoints'"`. Aliases are
-          compatibility, not vocabulary — `GET /search/schema` never advertises
-          them.
+        - **Retired field keys** — **a key that a release retired resolves to
+          the field that replaced it.** When a custom-field placeholder is
+          promoted to a native field, the migration archives the old key and the
+          replacement ships under a new name; the old key keeps resolving to
+          that replacement, permanently, so a saved filter written against it
+          keeps running — and keeps *saving* — unchanged (nothing ever rewrites
+          the stored text of a filter, and `POST`/`PATCH …/filters` re-validate
+          whatever text they are sent). The rule is what to rely on; the
+          membership grows with every promotion, and as of this release it is
+          `story_points` → `storyPoints`, `fix_version` → `fixVersion`,
+          `labels` → `label`, `components` → `component`. Three consequences are
+          caller-visible. **The caller's own field wins** — a retired key is a
+          **last-resort** fallback, consulted only after system fields and after
+          the caller's visible custom fields, so a workspace that owns a custom
+          field keyed `fix_version` reaches **its own field** and the same query
+          text legitimately means different things in two workspaces; that is
+          the design, since the alternative is the product taking a key away
+          from every tenant already using it. **Errors name the canonical
+          field** — once the fallback has applied, `story_points IN (5)` answers
+          `422 "The IN operator is not allowed on field 'storyPoints'"`.
+          **Not advertised is not the same as not accepted** — a retired key is
+          absent from `GET /search/schema`'s field list and from every surface
+          that enumerates the vocabulary, so a name that resolves perfectly well
+          can be missing from the suggestion list; that is deliberate, not a
+          defect. It is nevertheless **accepted** wherever a field name is
+          accepted, `GET /search/suggest` included: `?field=fix_version` answers
+          with the same values `?field=fixVersion` does — the suggester is
+          chosen from the field the name resolved to, and the response echoes
+          the name as the caller wrote it — and a retired key whose replacement
+          has no value list of its own declines in exactly the words the
+          replacement would. So a client holding a retired key can keep using it
+          for typeahead as well as for filtering. It also means a retired key is
+          normally **not** a reserved key: `POST …/admin/fields` will create a
+          custom field under one, which is exactly how a workspace comes to own
+          it. The exception is a retired key that is *also* a live built-in
+          spelling — `labels` and `components` are the plural aliases of
+          `label`/`component` — which is reserved like any other search name and
+          refused with `409`.
 
         **Delivery capabilities never gate this endpoint.** `sprint`,
         `fixVersion`, `affectsVersion` and `storyPoints` parse, compile and run
@@ -7575,9 +7606,11 @@ paths:
         numeric). Field names are matched
         case-insensitively internally, but each field is advertised here exactly
         **once**, under its canonical camelCase name (aliases such as `sprints`
-        and `points` de-duplicate onto their descriptor). Retired keys
-        (`story_points`) are compatibility, not vocabulary, and are never
-        advertised here even though they still resolve. Workspace members
+        and `points` de-duplicate onto their descriptor). A key that a release
+        retired still resolves but is compatibility, not vocabulary, so it is
+        never advertised here — one more reason a name missing from this list
+        may be perfectly queryable; see the retired-key rule on
+        `POST /workspaces/{workspaceId}/search`. Workspace members
         only.
 
 
@@ -7646,6 +7679,16 @@ paths:
         `affectsVersion` return identical suggestions (names de-duplicated
         case-insensitively, so a "2.4.0" shipped by two projects is offered
         once). Workspace members only.
+
+
+        A field name is resolved here exactly as a query resolves it, so a key a
+        release retired is **accepted** and answers as the field that replaced
+        it — with the same values, the same scoping and the caller's own
+        spelling echoed back (see the retired-key rule on
+        `POST /workspaces/{workspaceId}/search`). Such a key is not *listed*
+        above, and is never advertised by `GET /search/schema`, because it is
+        compatibility rather than vocabulary; that is not a statement about what
+        this endpoint accepts.
 
 
         Version suggestions are **capability-aware**, exactly like the
@@ -13090,6 +13133,9 @@ components:
           description: >-
             The HQL to store (may be empty = all issues). Validated at save time
             (parse + structural) — a bad query → `422`. Over 2000 chars → `400`.
+            Save-time validation resolves field names exactly as a query does,
+            retired keys included, so a filter written against a key an old
+            release retired both saves and runs.
           example: type = Bug AND assignee = currentUser()
         shared:
           type: boolean
