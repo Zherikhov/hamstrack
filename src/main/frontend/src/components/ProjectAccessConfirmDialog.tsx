@@ -120,7 +120,7 @@ export default function ProjectAccessConfirmDialog({ wsId, payload, onClose, onA
             {noWriters > 0 && (
               <Notice tone="warning">
                 <span className="flex gap-2 text-sm">
-                  <ShieldAlert size={16} style={{ flexShrink: 0, marginTop: 1, color: 'var(--color-warning)' }} />
+                  <ShieldAlert size={16} style={{ flexShrink: 0, marginTop: 1, color: 'var(--color-warning-ink)' }} />
                   <span>
                     In <b>{noWriters}</b> of your <b>{impact.projects}</b>{' '}
                     project{impact.projects !== 1 ? 's' : ''} nobody has been added explicitly. After
@@ -213,7 +213,7 @@ function ImpactTable({ impact }: { impact: ProjectAccessImpact }) {
                   </span>
                   <bdi className="truncate">{row.name}</bdi>
                   {row.noWritersAfter && (
-                    <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-warning)' }}>
+                    <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-warning-ink)' }}>
                       nobody could file an issue
                     </span>
                   )}

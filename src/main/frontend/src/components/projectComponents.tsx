@@ -94,7 +94,7 @@ export function ComponentFilter({ wsId, projectId, value, onChange }: {
         ? {
             background: 'color-mix(in srgb, var(--color-brand) 12%, white)',
             borderColor: 'var(--color-brand)',
-            color: 'var(--color-brand)',
+            color: 'var(--color-brand-ink)',
           }
         : undefined}
     >

@@ -102,7 +102,7 @@ export default function ProjectSettingsArea() {
                        padding: '8px 14px',
                        marginBottom: -1,
                        borderBottom: `2px solid ${isActive ? 'var(--color-brand)' : 'transparent'}`,
-                       color: isActive ? 'var(--color-brand)' : 'var(--color-text-secondary)',
+                       color: isActive ? 'var(--color-brand-ink)' : 'var(--color-text-secondary)',
                        fontWeight: isActive ? 600 : 400,
                      })}>
               {t.label}

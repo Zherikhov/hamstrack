@@ -71,12 +71,12 @@ export default function AboutModal({ onClose }: Props) {
           <div className="flex flex-col border-t pt-3" style={{ borderColor: 'var(--color-border)' }}>
             {/* In-app docs hub (/docs) — new tab so the user keeps their board context */}
             <a href="/docs" target="_blank" rel="noreferrer" className={linkRowClass} style={linkRowStyle}>
-              <BookOpen size={15} style={{ color: 'var(--color-brand)' }} />
+              <BookOpen size={15} style={{ color: 'var(--color-brand-ink)' }} />
               <span className="flex-1">Documentation</span>
               <ExternalLink size={12} style={{ color: 'var(--color-text-muted)' }} />
             </a>
             <a href={REPO_URL} target="_blank" rel="noreferrer" className={linkRowClass} style={linkRowStyle}>
-              <Github size={15} style={{ color: 'var(--color-brand)' }} />
+              <Github size={15} style={{ color: 'var(--color-brand-ink)' }} />
               <span className="flex-1">Source code</span>
               <ExternalLink size={12} style={{ color: 'var(--color-text-muted)' }} />
             </a>
@@ -94,7 +94,7 @@ export default function AboutModal({ onClose }: Props) {
                 target="_blank"
                 rel="noreferrer"
                 className="font-semibold hover:underline"
-                style={{ color: 'var(--color-brand)' }}
+                style={{ color: 'var(--color-brand-ink)' }}
               >
                 Elastic License 2.0
               </a>

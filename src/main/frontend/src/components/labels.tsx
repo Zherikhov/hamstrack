@@ -352,7 +352,7 @@ export function LabelPicker({
               style={{
                 padding: '6px 8px', borderRadius: 'var(--radius-sm)',
                 background: highlight === matches.length ? 'var(--color-surface)' : 'transparent',
-                color: 'var(--color-brand)',
+                color: 'var(--color-brand-ink)',
               }}
             >
               <Plus size={13} className="flex-shrink-0" />
@@ -369,7 +369,7 @@ export function LabelPicker({
         </div>
       )}
 
-      {error && <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>}
+      {error && <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</span>}
     </div>
   )
 }
@@ -448,7 +448,7 @@ export function LabelFilter({ wsId, value, onChange, match, onMatchChange }: {
           style={{
             background: active ? 'color-mix(in srgb, var(--color-brand) 12%, white)' : 'var(--color-card)',
             borderColor: active || open ? 'var(--color-brand)' : 'var(--color-border-2)',
-            color: active ? 'var(--color-brand)' : 'var(--color-text)',
+            color: active ? 'var(--color-brand-ink)' : 'var(--color-text)',
             maxWidth: 190,
           }}
         >
@@ -490,7 +490,7 @@ export function LabelFilter({ wsId, value, onChange, match, onMatchChange }: {
                   <span className="rounded-full flex-shrink-0"
                         style={{ width: 8, height: 8, background: fillOf(l.color), boxShadow: `inset 0 0 0 1px ${ringOn(l.color, SURFACE.card)}` }} />
                   <span className="text-sm truncate flex-1">{l.name}</span>
-                  {on && <Check size={13} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />}
+                  {on && <Check size={13} style={{ color: 'var(--color-brand-ink)', flexShrink: 0 }} />}
                 </button>
               )
             })}
@@ -531,7 +531,7 @@ export function LabelFilter({ wsId, value, onChange, match, onMatchChange }: {
               className="text-xs px-2 py-0.5 rounded cursor-pointer transition-colors"
               style={{
                 background: match === m ? 'white' : 'transparent',
-                color: match === m ? 'var(--color-brand)' : 'var(--color-text-muted)',
+                color: match === m ? 'var(--color-brand-ink)' : 'var(--color-text-muted)',
                 fontWeight: match === m ? 600 : 400,
                 boxShadow: match === m ? 'var(--shadow-card)' : 'none',
               }}

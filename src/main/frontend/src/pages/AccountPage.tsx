@@ -154,7 +154,7 @@ function DeleteAccountCard({ email, userId, contactEmail }: {
         </p>
         <p style={{ color: 'var(--color-text)', fontWeight: 600 }}>This cannot be undone.</p>
         <p>
-          The <Link to="/privacy" style={{ color: 'var(--color-brand)', fontWeight: 600 }}>Privacy
+          The <Link to="/privacy" style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}>Privacy
           Policy</Link> covers the rest.
         </p>
       </div>

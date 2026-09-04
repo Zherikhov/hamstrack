@@ -484,6 +484,26 @@ export function sprintTint(state: SprintState): string {
   return 'var(--color-info)'
 }
 
+/**
+ * The same three hues as {@link sprintTint}, as **ink** (HD-175).
+ *
+ * A state badge paints its hue at 14% over white and then writes the label in the
+ * hue itself, so the ink is read against a surface *darker* than the raised one:
+ * `#DDF2F2` for brand, `#DEF5ED` for success. The fill hue measures 2.60 there —
+ * the chip's own tint is what made it illegal, which is why the fill and the ink
+ * cannot be the same token even though they are the same colour.
+ *
+ * `--color-info` has no `-ink` sibling on purpose: its ink form is a 1.06:1 move
+ * from its fill form, i.e. invisible, so the token was nudged in place rather than
+ * split in two. A sibling is worth declaring only when the two are visibly
+ * different.
+ */
+export function sprintInk(state: SprintState): string {
+  if (state === 'ACTIVE') return 'var(--color-brand-ink)'
+  if (state === 'COMPLETED') return 'var(--color-success-ink)'
+  return 'var(--color-info)'
+}
+
 const STATE_LABEL: Record<SprintState, string> = {
   ACTIVE: 'Active',
   FUTURE: 'Planned',
@@ -502,7 +522,9 @@ export function SprintStateBadge({ state, compact }: { state: SprintState; compa
         fontWeight: 600,
         background: `color-mix(in srgb, ${c} 14%, white)`,
         border: `1px solid color-mix(in srgb, ${c} 38%, white)`,
-        color: c,
+        // The label is ink; the tint, the border and the dot below are fills and
+        // keep the hue at full strength (HD-175 / DESIGN.md).
+        color: sprintInk(state),
       }}
     >
       <span className="rounded-full" style={{ width: 6, height: 6, background: c }} />
@@ -672,7 +694,7 @@ export function SprintHeader({ sprint, canCurate, showPoints, onComplete }: {
       style={{ background: 'white', borderColor: 'var(--color-border)' }}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <Flag size={14} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />
+        <Flag size={14} style={{ color: 'var(--color-brand-ink)', flexShrink: 0 }} />
         <span className="font-bold truncate" style={{ fontSize: 14 }}>{sprint.name}</span>
         <SprintStateBadge state={sprint.state} compact />
       </div>
@@ -695,7 +717,7 @@ export function SprintHeader({ sprint, canCurate, showPoints, onComplete }: {
         {countdown && (
           <span
             className="mono text-xs font-semibold"
-            style={{ color: overdue ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}
+            style={{ color: overdue ? 'var(--color-warning-ink)' : 'var(--color-text-secondary)' }}
           >
             {countdown}
           </span>
@@ -849,7 +871,7 @@ export function SprintFormDialog({
             : 'Dates are a plan only — the sprint does not begin until you start it.'}
         </span>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={saving} onClick={submit}>
@@ -930,7 +952,7 @@ export function StartSprintDialog({ wsId, projectId, sprint, issueCount, onClose
                   placeholder="What does this sprint deliver?"
                   onChange={e => setGoal(e.target.value)} />
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={start.isPending} onClick={submit}>Start sprint</Button>
@@ -1000,7 +1022,7 @@ export function CompleteSprintDialog({ wsId, projectId, sprint, onClose, onCompl
             loading the sprint summary…
           </span>
         ) : isError || !preview ? (
-          <p className="text-sm" style={{ color: 'var(--color-error)' }}>
+          <p className="text-sm" style={{ color: 'var(--color-error-ink)' }}>
             The sprint summary could not be loaded. Completing now would report numbers we can’t
             verify — close this and try again.
           </p>
@@ -1088,7 +1110,7 @@ export function CompleteSprintDialog({ wsId, projectId, sprint, onClose, onCompl
                         type="button"
                         onClick={onCreateSprint}
                         className="text-xs cursor-pointer hover:underline"
-                        style={{ color: 'var(--color-brand)' }}
+                        style={{ color: 'var(--color-brand-ink)' }}
                       >
                         Create sprint
                       </button>
@@ -1100,7 +1122,7 @@ export function CompleteSprintDialog({ wsId, projectId, sprint, onClose, onCompl
           </>
         )}
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button
@@ -1154,7 +1176,7 @@ export function DeleteSprintDialog({ wsId, projectId, sprint, issueCount, onClos
             : <>It holds no issues — safe to delete.</>}
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button

@@ -92,7 +92,7 @@ export default function ProjectComponentsPage() {
       <p className="text-xs mb-3" style={{ color: 'var(--color-text-muted)' }}>
         Release versions live on the{' '}
         <Link to={`/w/${wsId}/p/${projectId}/releases`} className="hover:underline"
-              style={{ color: 'var(--color-brand)' }}>
+              style={{ color: 'var(--color-brand-ink)' }}>
           Releases page
         </Link>
         , not here — they carry a lifecycle (unreleased → released) rather than being configuration.
@@ -101,7 +101,7 @@ export default function ProjectComponentsPage() {
       <ArchivedToggle archivedCount={archivedCount} value={showArchived} onChange={setShowArchived} />
 
       {error && !editing && !deleting && (
-        <p className="text-xs mb-2" style={{ color: 'var(--color-error)' }}>{error}</p>
+        <p className="text-xs mb-2" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
       )}
 
       <AdminTable headers={['Component', 'Description', 'Lead', 'Auto-assign', 'Used on', '']}>
@@ -124,7 +124,7 @@ export default function ProjectComponentsPage() {
                   <Avatar name={c.leadName ?? '?'} avatarUrl={c.leadAvatarUrl} size={20} />
                   <span className="text-sm truncate" style={{ maxWidth: 140 }}>{c.leadName}</span>
                   {!memberIds.has(c.leadId) && members.length > 0 && (
-                    <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-warning)' }}
+                    <span className="text-xs whitespace-nowrap" style={{ color: 'var(--color-warning-ink)' }}
                           title="Auto-assign skips a lead who is no longer a workspace member">
                       no longer a member
                     </span>
@@ -147,7 +147,7 @@ export default function ProjectComponentsPage() {
                 className="text-xs px-2.5 py-0.5 rounded-full transition-colors"
                 style={{
                   cursor: c.leadId ? 'pointer' : 'not-allowed',
-                  color: c.autoAssign ? 'var(--color-brand)' : 'var(--color-text-muted)',
+                  color: c.autoAssign ? 'var(--color-brand-ink)' : 'var(--color-text-muted)',
                   background: c.autoAssign ? '#E7F0EE' : 'var(--color-surface-2)',
                   opacity: c.leadId ? 1 : 0.6,
                 }}
@@ -164,7 +164,7 @@ export default function ProjectComponentsPage() {
                       onClick={() => archive.mutate({ id: c.id, archived: c.archived })}>
                 {c.archived ? 'Unarchive' : 'Archive'}
               </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                       onClick={() => { setError(''); setDeleting(c) }}>
                 Delete
               </Button>
@@ -206,7 +206,7 @@ export default function ProjectComponentsPage() {
                 <>Not used on any issue — safe to delete.</>
               )}
             </div>
-            {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+            {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setDeleting(null)}>Cancel</Button>
               {!deleting.archived && (
@@ -303,7 +303,7 @@ function ComponentForm({ wsId, projectId, component, members, onClose, onSaved }
           }
         />
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>

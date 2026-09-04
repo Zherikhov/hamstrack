@@ -176,7 +176,7 @@ export default function WorkspacePeoplePage() {
                 </div>
               </div>
               {rowError[member.userId] && (
-                <p className="text-xs" style={{ color: 'var(--color-error)' }}>{rowError[member.userId]}</p>
+                <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{rowError[member.userId]}</p>
               )}
             </div>
           )
@@ -301,9 +301,9 @@ function InviteRow({ wsId, roles, onInvited }: {
           Send invite
         </Button>
       </div>
-      {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
       {sentTo && (
-        <p className="text-xs inline-flex items-center gap-1" style={{ color: 'var(--color-brand)' }}>
+        <p className="text-xs inline-flex items-center gap-1" style={{ color: 'var(--color-brand-ink)' }}>
           <Check size={13} /> Invite sent to {sentTo}
         </p>
       )}
@@ -379,7 +379,7 @@ function PendingInvitations({ wsId, roles }: {
           <div className="px-4 py-6 mono text-sm" style={{ color: 'var(--color-text-muted)' }}>loading…</div>
         )}
         {!isLoading && error && (
-          <div className="px-4 py-3 text-xs" style={{ color: 'var(--color-error)' }}>
+          <div className="px-4 py-3 text-xs" style={{ color: 'var(--color-error-ink)' }}>
             {classifyConflict(error).detail}
           </div>
         )}
@@ -522,7 +522,7 @@ function InvitationRow({ wsId, invite, roles, onChanged }: {
         </div>
       )}
 
-      {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
     </div>
   )
 }

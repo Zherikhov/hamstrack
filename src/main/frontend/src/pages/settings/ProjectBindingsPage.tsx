@@ -115,7 +115,7 @@ export default function ProjectBindingsPage() {
         ))}
       </div>
 
-      {error && <p className="text-sm mt-3" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-sm mt-3" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
 
       <div className="flex items-center gap-3 mt-4">
         <Button variant="primary" disabled={!dirty} loading={save.isPending} onClick={() => save.mutate()}>
@@ -127,7 +127,7 @@ export default function ProjectBindingsPage() {
           </Button>
         )}
         {save.isSuccess && !dirty && (
-          <span className="text-xs" style={{ color: 'var(--color-brand)' }}>Saved</span>
+          <span className="text-xs" style={{ color: 'var(--color-brand-ink)' }}>Saved</span>
         )}
       </div>
     </div>

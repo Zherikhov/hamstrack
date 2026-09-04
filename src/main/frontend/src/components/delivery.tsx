@@ -503,7 +503,7 @@ export function CapabilityOffState({
       <span className="text-xs" style={{ color: 'var(--color-text-muted)', maxWidth: 620 }}>
         {copy.reversible}
       </span>
-      {error && <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>}
+      {error && <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</span>}
       <div className="flex">
         <Button variant="secondary" size="sm" loading={pending} disabled={disabled} onClick={onEnable}>
           {copy.enable}

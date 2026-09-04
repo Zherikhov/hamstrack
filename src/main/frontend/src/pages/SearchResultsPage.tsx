@@ -224,14 +224,14 @@ export default function SearchResultsPage() {
                 border: '1px solid var(--color-brand)',
               }}
             >
-              <span className="text-xs" style={{ color: 'var(--color-brand)' }}>
+              <span className="text-xs" style={{ color: 'var(--color-brand-ink)' }}>
                 Editing: <b>{editingFilter.name}</b>
               </span>
               <button
                 onClick={() => setEditingFilter(null)}
                 className="cursor-pointer flex-shrink-0"
                 title="Stop editing this filter"
-                style={{ color: 'var(--color-brand)' }}
+                style={{ color: 'var(--color-brand-ink)' }}
               >
                 <X size={13} />
               </button>
@@ -304,8 +304,8 @@ export default function SearchResultsPage() {
             className="flex items-start gap-2 px-5 py-2 border-b flex-shrink-0"
             style={{ background: 'color-mix(in srgb, var(--color-error) 8%, white)', borderColor: 'var(--color-border)' }}
           >
-            <X size={14} style={{ color: 'var(--color-error)', marginTop: 2, flexShrink: 0 }} />
-            <span className="text-xs" style={{ color: 'var(--color-error)' }}>{errorMsg}</span>
+            <X size={14} style={{ color: 'var(--color-error-ink)', marginTop: 2, flexShrink: 0 }} />
+            <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{errorMsg}</span>
           </div>
         )}
 
@@ -375,8 +375,8 @@ export default function SearchResultsPage() {
                         <span className="inline-flex items-center gap-1">
                           {c.label}
                           {active && (order.dir === 'DESC'
-                            ? <ArrowDown size={12} style={{ color: 'var(--color-brand)' }} />
-                            : <ArrowUp size={12} style={{ color: 'var(--color-brand)' }} />)}
+                            ? <ArrowDown size={12} style={{ color: 'var(--color-brand-ink)' }} />
+                            : <ArrowUp size={12} style={{ color: 'var(--color-brand-ink)' }} />)}
                         </span>
                       </th>
                     )

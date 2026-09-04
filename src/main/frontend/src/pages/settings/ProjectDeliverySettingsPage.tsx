@@ -474,7 +474,7 @@ function TurnOffDialog({ capability, impact, pending, error, onCancel, onConfirm
           </span>
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onCancel}>Cancel</Button>
           {/* Primary, not danger: a danger button would contradict every sentence
@@ -674,7 +674,7 @@ function KeptNotice({ children, to, linkLabel }: {
           {' '}
           {/* Absolute: relative links inside the /settings/* splat resolve after
               the splat segment. */}
-          <Link to={to} style={{ color: 'var(--color-brand)' }}>{linkLabel}</Link>
+          <Link to={to} style={{ color: 'var(--color-brand-ink)' }}>{linkLabel}</Link>
         </>
       )}
     </div>
@@ -683,7 +683,7 @@ function KeptNotice({ children, to, linkLabel }: {
 
 function SavedNote() {
   return (
-    <p className="text-xs" style={{ color: 'var(--color-success)' }}>
+    <p className="text-xs" style={{ color: 'var(--color-success-ink)' }}>
       Saved — every surface of this project follows the new setting already.
     </p>
   )
@@ -691,5 +691,5 @@ function SavedNote() {
 
 function ErrorNote({ text }: { text: string }) {
   if (!text) return null
-  return <p className="text-xs" style={{ color: 'var(--color-error)' }}>{text}</p>
+  return <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{text}</p>
 }

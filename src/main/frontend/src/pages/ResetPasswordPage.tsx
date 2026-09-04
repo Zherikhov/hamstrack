@@ -115,14 +115,14 @@ export default function ResetPasswordPage() {
   // they arrived on and then end in this clause, so the two refusals differ only
   // in the diagnosis and never in the action.
   const requestNewLink = (
-    <Link to="/forgot-password" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+    <Link to="/forgot-password" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
       request a new one
     </Link>
   )
 
   if (!token) {
     return shell(
-      <p className="text-sm text-center" style={{ color: 'var(--color-error)' }}>
+      <p className="text-sm text-center" style={{ color: 'var(--color-error-ink)' }}>
         This link is incomplete — the token is missing, so {requestNewLink}.
       </p>,
     )
@@ -182,11 +182,11 @@ export default function ResetPasswordPage() {
             construction (`submit` clears both, then sets exactly one), so there is
             never a second alert competing to be announced. */}
         {linkRefused && (
-          <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error)' }}>
+          <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error-ink)' }}>
             This link is invalid or has expired — {requestNewLink}.
           </p>
         )}
-        {error && <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <Button
           type="submit"
           variant="primary"
@@ -198,7 +198,7 @@ export default function ResetPasswordPage() {
         </Button>
       </form>
       <p className="text-center text-sm" style={{ color: 'var(--color-text-muted)' }}>
-        <Link to="/login" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+        <Link to="/login" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
           Back to sign in
         </Link>
       </p>

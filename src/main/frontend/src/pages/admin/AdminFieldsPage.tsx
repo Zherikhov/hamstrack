@@ -85,7 +85,7 @@ export default function AdminFieldsPage() {
                   <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: f.id, archived: f.archived })}>
                     {f.archived ? 'Unarchive' : 'Archive'}
                   </Button>
-                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                           onClick={() => setDeleting(f)}>
                     Delete
                   </Button>
@@ -122,20 +122,20 @@ export default function AdminFieldsPage() {
                       style={{ borderColor: 'var(--color-border-2)', background: 'white' }}
                       title={`${FIELD_TYPE_LABELS[i.field.type]}${i.required ? ' · required' : ''}${i.showOnCreate ? '' : ' · hidden on create'}`}>
                   {i.field.name}
-                  {i.required && <span style={{ color: 'var(--color-error)' }}>*</span>}
+                  {i.required && <span style={{ color: 'var(--color-error-ink)' }}>*</span>}
                   {!i.showOnCreate && <EyeOff size={10} style={{ color: 'var(--color-text-muted)' }} />}
                 </span>
               ))}
             </span>
             <span className="text-xs px-2.5 py-0.5 rounded-full whitespace-nowrap"
-                  style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
+                  style={{ color: 'var(--color-brand-ink)', background: '#E7F0EE' }}>
               {set.projectsUsing} project{set.projectsUsing !== 1 ? 's' : ''}
             </span>
             {set.scope === ownTag ? (
               <>
                 <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
                 {!set.systemDefault && (
-                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                           onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
                     Delete
                   </Button>
@@ -202,7 +202,7 @@ function FieldDeleteDialog({ field, onArchive, onClose, onDeleted }: {
           <Checkbox checked={confirmed} onChange={e => setConfirmed(e.target.checked)}
                     label={`Delete the values on ${issues} issue(s)`} />
         )}
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="secondary" onClick={onArchive}>Archive instead</Button>
@@ -292,7 +292,7 @@ function FieldForm({ field, onClose, onSaved }: {
           <div className="flex flex-col gap-1.5">
             <span className="text-xs font-medium" style={{ color: 'var(--color-text-secondary)' }}>Options</span>
             {hasValues && (
-              <p className="text-xs" style={{ color: 'var(--color-warning)' }}>
+              <p className="text-xs" style={{ color: 'var(--color-warning-ink)' }}>
                 Issues store option ids — removing an option leaves old values showing the raw id.
               </p>
             )}
@@ -329,7 +329,7 @@ function FieldForm({ field, onClose, onSaved }: {
           </div>
         )}
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!valid} loading={save.isPending} onClick={() => save.mutate()}>
@@ -426,7 +426,7 @@ function FieldSetForm({ set, fields, onClose, onSaved }: {
             )
           })}
         </div>
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>

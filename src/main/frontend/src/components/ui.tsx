@@ -20,7 +20,9 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 const buttonBase = 'inline-flex items-center gap-1.5 font-semibold rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed select-none'
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: 'text-white',
+  // `primary` no longer carries `text-white` (HD-175): white on `--color-brand`
+  // measures 3.03:1. The ink is set from a token below, with the fill.
+  primary: '',
   secondary: 'border',
   ghost: '',
   danger: 'text-white',
@@ -50,6 +52,13 @@ export function Button({ variant = 'secondary', size = 'md', loading, children, 
   if (variant === 'primary') {
     styles.background = 'var(--color-brand)'
     styles.border = '1px solid var(--color-brand)'
+    // Text over a solid fill is black or white, whichever measures higher — the
+    // rule DESIGN.md already declares for a colour that comes from data, applied
+    // here to a colour that comes from the palette. On --color-brand that is the
+    // brand's own near-black: 5.58:1, where white measured 3.03:1. The landing
+    // page and the rail's New issue button made this call already; this is the
+    // same literal, now declared once as a token.
+    styles.color = 'var(--color-on-brand)'
   } else if (variant === 'secondary') {
     styles.background = 'white'
     styles.borderColor = 'var(--color-border-2)'
@@ -59,8 +68,16 @@ export function Button({ variant = 'secondary', size = 'md', loading, children, 
     styles.color = 'var(--color-text-secondary)'
     styles.border = '1px solid transparent'
   } else if (variant === 'danger') {
-    styles.background = 'var(--color-error)'
-    styles.border = '1px solid var(--color-error)'
+    // **The one deliberate override of the black-or-white rule** (HD-175 §5.2,
+    // OQ4). On `--color-error` black measures 5.59 and white 3.76, so the letter
+    // of the rule is black ink on the bright red — which reads as a hazard sign,
+    // not as a destructive action. `--color-on-brand` misses by 0.003 here and
+    // is not an option either. So the fill darkens to the hue's ink value and the text
+    // stays white: 5.41:1, same hue, and a button that still reads as "danger".
+    // The fill is the only thing that moves; nothing else uses `--color-error-ink`
+    // as a background.
+    styles.background = 'var(--color-error-ink)'
+    styles.border = '1px solid var(--color-error-ink)'
   }
 
   return (
@@ -107,7 +124,7 @@ export function Input({ label, error, className, id, ...props }: InputProps) {
         }}
         {...props}
       />
-      {error && <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>}
+      {error && <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</span>}
     </div>
   )
 }
@@ -336,7 +353,7 @@ export function Select({
                 }}
               >
                 <span className="flex-1 min-w-0 truncate">{o.label}</span>
-                {selected && <Check size={14} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />}
+                {selected && <Check size={14} style={{ color: 'var(--color-brand-ink)', flexShrink: 0 }} />}
               </div>
             )
           })}
@@ -364,7 +381,18 @@ interface BadgeProps {
 
 /**
  * The tinted badge `DESIGN.md` mandates, with two things now computed rather
- * than layered (HD-176):
+ * than layered (HD-176).
+ *
+ * **`color` means "a hue that came from the database"** — a status, a priority,
+ * an issue type, a label, a select option. It is parsed and measured, so a value
+ * that is not a colour (a `var(--color-*)` token, a `url(…)`, a typo) is not
+ * dimmed but **rejected**, and the badge falls back to neutral. That is the right
+ * answer for a stored hue and the wrong one for a semantic state, whose colour
+ * came from the stylesheet and was decided at design time: ADR-0029 draws that
+ * line, and {@link ToneBadge} is this component's other side of it. Teaching
+ * this one to parse tokens would erase the line.
+ *
+ * The two computed things:
  *
  * - **the tint is opaque.** An 8-digit overlay composites over whatever happens
  *   to be behind the element, so the badge's background over a hovered row was
@@ -393,6 +421,101 @@ export function Badge({ label, color, className, surface = SURFACE.card }: Badge
   )
 }
 
+/**
+ * **The tones are the pairs the palette declares**, so a semantic state has a
+ * mechanism and nobody has to reach for a hex to get one. Each is a fill token
+ * plus its `-ink` sibling — the same hue with less light — exactly as
+ * `DESIGN.md` and `palette.contrast.test.ts` define them; `neutral` is the
+ * absence of a hue and reuses what {@link Badge} already paints for a colourless
+ * entity.
+ */
+const BADGE_TONE_PAIRS = {
+  brand:   { fill: '--color-brand',   ink: 'var(--color-brand-ink)' },
+  success: { fill: '--color-success', ink: 'var(--color-success-ink)' },
+  warning: { fill: '--color-warning', ink: 'var(--color-warning-ink)' },
+  danger:  { fill: '--color-error',   ink: 'var(--color-error-ink)' },
+} as const
+
+export type BadgeTone = keyof typeof BADGE_TONE_PAIRS | 'neutral'
+
+/**
+ * **The same four pairs as a `Map`, because the lookup has to be able to answer
+ * "no".** An index into the object literal answers *truthily* for every key on
+ * `Object.prototype` — `__proto__`, `constructor`, `toString`, `hasOwnProperty`,
+ * `valueOf` — so the neutral fallback never fired for them and the badge painted
+ * `color-mix(in srgb, var(undefined) 14%, white)` with **no `color` property at
+ * all**: the tint vanished and the label inherited whatever colour was around it. A
+ * contrast regression manufactured by the safety net that exists to prevent one, in
+ * the component this ticket exists for. A `Map` consults no prototype chain, so the
+ * fallback is total for any string a caller can produce — and `neutral` needs no
+ * branch of its own, because "absent from the table" is precisely what it means.
+ *
+ * Derived from the object rather than written out twice, so {@link BadgeTone} stays
+ * the table's own keys and a fifth tone cannot enter the type without entering here.
+ */
+const BADGE_TONES = new Map(Object.entries(BADGE_TONE_PAIRS))
+
+/**
+ * The tint a semantic hue is painted at, as a percentage. **14, because that is
+ * the surface the `-ink` values were measured against**: `DESIGN.md` states the
+ * binding surface for a semantic ink is "its own 14% tint, not the raised
+ * surface", and `palette.contrast.test.ts` asserts each pair there. Painting the
+ * badge at any darker tint would move the glyph off the surface its contrast was
+ * proved on.
+ */
+const TONE_TINT_PCT = 14
+
+/**
+ * **{@link Badge}'s sibling for a colour that came from the stylesheet.**
+ *
+ * ADR-0029: a colour from the database is derived at render time because nobody
+ * can look at it beforehand; a colour from the stylesheet is decided at design
+ * time and proved on the build, because everybody can. The two need different
+ * mechanisms and this is the second one — a declared fill/ink pair, resolved by
+ * CSS, re-skinned by `index.css` like everything else.
+ *
+ * It exists because the seam was crossed in the other direction and nobody saw
+ * it. `AdminUsersPage` passed `'var(--color-success)'` to `Badge` as though it
+ * were a stored hue; before HD-176 that produced `var(--color-success)20` for the
+ * tint and `…40` for the border — neither a colour any browser parses, both
+ * silently dropped — while `color: var(--color-success)` still worked, so the
+ * badge was two-thirds broken and read as fine. HD-176 made the label derived
+ * too, the token failed to parse, and the last third went grey. **A wrong
+ * mechanism that still looks right is the failure this component removes**, so
+ * the same call site cannot be written again by passing a token to `Badge`.
+ *
+ * Same box as `Badge`, to the pixel: same padding, radius, size and weight, and
+ * a hairline at the same {@link EDGE_WEIGHT} — they sit in the same table rows
+ * and must not read as two different components.
+ *
+ * **No `surface` argument, deliberately.** `Badge` takes one because a stored hue
+ * is *derived* and the derivation needs to know what it lands on. These four are
+ * not derived: they are four values a person chose and a test asserts, against
+ * white and against their own tint. A semantic badge on the dark rail would need
+ * its own declared pair rather than a second argument here, and there is none —
+ * the rail carries no badge today.
+ */
+export function ToneBadge({ label, tone, className }: {
+  label: string
+  tone: BadgeTone
+  className?: string
+}) {
+  const pair = BADGE_TONES.get(tone) ?? null
+  const mix = (pct: number) => (pair ? `color-mix(in srgb, var(${pair.fill}) ${pct}%, white)` : null)
+  return (
+    <span
+      className={clsx('inline-flex items-center px-2 py-0.5 rounded text-xs font-medium', className)}
+      style={{
+        background: mix(TONE_TINT_PCT) ?? NEUTRAL_FILL,
+        color: pair ? pair.ink : NEUTRAL_INK,
+        border: `1px solid ${mix(Math.round(EDGE_WEIGHT * 100)) ?? NEUTRAL_EDGE}`,
+      }}
+    >
+      {label}
+    </span>
+  )
+}
+
 // ── Avatar ────────────────────────────────────────────────────────────────────
 
 export function Avatar({ name, avatarUrl, size = 24 }: { name: string; avatarUrl?: string; size?: number }) {
@@ -402,8 +525,15 @@ export function Avatar({ name, avatarUrl, size = 24 }: { name: string; avatarUrl
   const initials = name.split(' ').map(w => w[0]).join('').toUpperCase().slice(0, 2)
   return (
     <span
-      className="rounded-full flex items-center justify-center text-white font-medium flex-shrink-0"
-      style={{ width: size, height: size, fontSize: size * 0.4, background: 'var(--color-brand)' }}
+      // Initials are text on a solid brand fill, and the smallest text in the
+      // product (fontSize is 40% of a 18–30px circle, so 7.2–12px). `text-white`
+      // measured 3.03:1 there — 29 of the 194 failures in HD-175's re-run were
+      // this one component. Same fill, the fill's own ink: 5.58:1.
+      className="rounded-full flex items-center justify-center font-medium flex-shrink-0"
+      style={{
+        width: size, height: size, fontSize: size * 0.4,
+        background: 'var(--color-brand)', color: 'var(--color-on-brand)',
+      }}
     >
       {initials}
     </span>

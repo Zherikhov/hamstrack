@@ -65,7 +65,7 @@ export default function DocsPage() {
           <Link
             to={accessToken ? '/' : '/login'}
             className="text-sm font-medium hover:underline"
-            style={{ color: 'var(--color-brand)' }}
+            style={{ color: 'var(--color-brand-ink)' }}
           >
             {accessToken ? 'Open app' : 'Sign in'}
           </Link>
@@ -94,7 +94,7 @@ export default function DocsPage() {
                 className="text-sm font-medium cursor-pointer transition-colors"
                 style={{
                   padding: '8px 16px 10px',
-                  color: active ? 'var(--color-brand)' : 'var(--color-text-secondary)',
+                  color: active ? 'var(--color-brand-ink)' : 'var(--color-text-secondary)',
                   borderBottom: active ? '2px solid var(--color-brand)' : '2px solid transparent',
                   marginBottom: -1,
                   background: 'none',

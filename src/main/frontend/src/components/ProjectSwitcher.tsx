@@ -171,7 +171,7 @@ export default function ProjectSwitcher({ wsId, projectId, tone = 'dark' }: Prop
                     </span>
                     <span className="flex-1 truncate">{e.name}</span>
                     <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>{e.key}</span>
-                    {e.projectId === projectId && <Check size={13} style={{ color: 'var(--color-brand)', flexShrink: 0 }} />}
+                    {e.projectId === projectId && <Check size={13} style={{ color: 'var(--color-brand-ink)', flexShrink: 0 }} />}
                   </button>
                 ))}
               </div>
@@ -207,7 +207,7 @@ export default function ProjectSwitcher({ wsId, projectId, tone = 'dark' }: Prop
               <button
                 onClick={() => { setOpen(false); setShowCreate(true) }}
                 className={footerBtnClass}
-                style={{ color: 'var(--color-brand)' }}
+                style={{ color: 'var(--color-brand-ink)' }}
                 onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface)')}
                 onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
               >

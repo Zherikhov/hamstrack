@@ -82,7 +82,7 @@ export default function AdminProjectsPage() {
           </Select>
         }
       />
-      {error && <p className="text-xs mb-3" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-xs mb-3" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
 
       {selected.size > 0 && (
         <BulkBar
@@ -171,7 +171,7 @@ function BulkBar({ count, dimensions, onApply, onClear }: {
   return (
     <div className="flex items-center gap-2 flex-wrap rounded-lg border px-4 py-3 mb-3"
          style={{ background: '#F3F7F6', borderColor: 'var(--color-brand)' }}>
-      <span className="text-sm font-medium whitespace-nowrap" style={{ color: 'var(--color-brand)' }}>
+      <span className="text-sm font-medium whitespace-nowrap" style={{ color: 'var(--color-brand-ink)' }}>
         {count} project{count !== 1 ? 's' : ''} selected
       </span>
       {dimensions.map(d => (

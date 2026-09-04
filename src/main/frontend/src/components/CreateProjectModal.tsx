@@ -65,7 +65,7 @@ function DeliveryCard({
           {note && (
             <span
               className="ml-2 font-medium"
-              style={{ fontSize: 11, color: 'var(--color-brand)' }}
+              style={{ fontSize: 11, color: 'var(--color-brand-ink)' }}
             >
               {note}
             </span>
@@ -268,7 +268,7 @@ export default function CreateProjectModal({ wsId, onClose }: Props) {
           <DeliveryPicker choice={delivery} disabled={saving} onChange={setDelivery} />
 
           {error && (
-            <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>
+            <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
           )}
           <div className="flex justify-end gap-2 pt-1">
             <Button variant="ghost" type="button" onClick={onClose}>Cancel</Button>

@@ -346,9 +346,9 @@ export function Chip({ children, tone = 'neutral', title }: {
 }) {
   const tones: Record<string, { color: string; background: string }> = {
     neutral: { color: 'var(--color-text-muted)', background: 'var(--color-surface-2)' },
-    brand: { color: 'var(--color-brand)', background: tint('--color-brand', 12) },
-    warning: { color: 'var(--color-warning)', background: tint('--color-warning', 14) },
-    danger: { color: 'var(--color-error)', background: tint('--color-error', 12) },
+    brand: { color: 'var(--color-brand-ink)', background: tint('--color-brand', 12) },
+    warning: { color: 'var(--color-warning-ink)', background: tint('--color-warning', 14) },
+    danger: { color: 'var(--color-error-ink)', background: tint('--color-error', 12) },
   }
   return (
     <span className="text-xs px-2 py-0.5 rounded-full whitespace-nowrap" title={title} style={tones[tone]}>

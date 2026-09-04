@@ -131,7 +131,7 @@ export default function LoginPage() {
               required
             />
             {error && (
-              <p className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>
+              <p className="text-xs px-1" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
             )}
             {needsVerification && (
               resendState === 'sent' ? (
@@ -144,7 +144,7 @@ export default function LoginPage() {
                   onClick={resend}
                   disabled={resendState === 'sending'}
                   className="text-xs px-1 text-left font-medium cursor-pointer hover:underline"
-                  style={{ color: 'var(--color-brand)', background: 'transparent' }}
+                  style={{ color: 'var(--color-brand-ink)', background: 'transparent' }}
                 >
                   {resendState === 'sending' ? 'Sending…' : 'Resend verification email'}
                 </button>
@@ -165,7 +165,7 @@ export default function LoginPage() {
               `publicSignupEnabled`, because an account an administrator created
               can be locked out exactly like a self-registered one. */}
           <p className="text-xs text-center">
-            <Link to="/forgot-password" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+            <Link to="/forgot-password" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
               Forgot your password?
             </Link>
           </p>
@@ -174,7 +174,7 @@ export default function LoginPage() {
         {publicSignupEnabled && (
           <p className="text-center text-sm mt-4" style={{ color: 'var(--color-text-muted)' }}>
             No account?{' '}
-            <Link to="/register" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+            <Link to="/register" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
               Create one
             </Link>
           </p>

@@ -7,14 +7,38 @@
      without edits; only the VALUES changed from the old warm-neutral/navy scheme.
      ───────────────────────────────────────────────────────────────────────── */
 
+  /* ─── Fills and inks ──────────────────────────────────────────────────────
+     Every product hue below is declared TWICE: the hue itself is the FILL (a dot,
+     a bar, a tile, a solid button, a badge tint) and its `-ink` sibling is the
+     same hue with less light, dark enough to be READ (HD-175, ADR-0029).
+
+     The ink is not a second colour. It is the fill's own linear RGB scaled by one
+     factor until it clears 4.5:1, exactly the transform `colour.ts` applies to a
+     colour that comes from the database — so the palette's identity is untouched
+     and only the glyph moves. `palette.contrast.test.ts` asserts both halves: the
+     ratio, and that the ink is still the fill's hue.
+
+     **The surface an ink is bound by is the darkest one it lands on**, and for a
+     semantic hue that is NOT `--color-surface-2`: a badge paints its own hue at
+     14% over white (`#DDF2F2` for brand, `#FDE5E3` for error), which is darker
+     than the raised surface. Measuring these against `--color-surface-2` alone
+     passes values that fail inside the badges they were introduced for; the four
+     values below are measured against both. */
+
   /* Brand / accent (teal) */
   --color-brand: #0EA5A4;
   --color-brand-hover: #0C9188;
+  --color-brand-ink: #077877;      /* brand as TEXT — 5.30 card / 4.68 raised / 4.56 on its own 14% tint */
   --color-accent-2: #14B8A6;
+  /* Ink for text drawn ON a solid brand fill. The landing page and the rail's
+     "New issue" button already used this literal in five places; it is declared
+     once here so one decision covers both surfaces. 5.58:1 on --color-brand,
+     6.79:1 on --color-accent-2 — white measures 3.03 and never did. */
+  --color-on-brand: #04211F;
 
   /* Safety-state accents (product trust machine — see DESIGN.md) */
   --color-pending: #F79009;   /* amber — pending approval / in progress */
-  --color-sandbox: #667085;   /* slate — sandbox / draft */
+  --color-sandbox: #606A7E;   /* slate — sandbox / draft (was #667085: 4.39 on a hovered row) */
 
   /* Slate neutrals (cool) */
   --color-surface: #F3F5F9;   /* app background */
@@ -22,7 +46,17 @@
   --color-card: #FFFFFF;      /* card / panel surface */
   --color-border: #E8EBF1;
   --color-border-2: #DDE1EA;
-  --color-text-muted: #98A2B3;
+  /* **Two ink levels below primary, not three** (HD-175, ADR-0028). `--color-text-muted`
+     was #98A2B3 and measured 2.58 / 2.36 / 2.27 on card / canvas / raised — under
+     half the required ratio, and under even the 3:1 large-text floor, so no size or
+     weight rescued it. It now holds the SAME value as `--color-text-secondary`, on
+     purpose: on the raised surface every colour that clears 4.5:1 has luminance
+     ≤ 0.1561, secondary already sits at 0.1304, and the lightest legal third level
+     (#676E79) measures 1.13:1 against it — a step no reader can see and every future
+     contributor would try to preserve. The name stays because it documents where the
+     design intended de-emphasis; the de-emphasis itself is carried by size, weight,
+     case and position, which the components already use. */
+  --color-text-muted: #5B6676;
   --color-text-secondary: #5B6676;
   --color-text: #16202E;
 
@@ -33,13 +67,28 @@
   --color-ink-menu: #1C2536;       /* menus/dropdowns anchored on the dark rail */
   --color-rail-text: #9AA5B5;      /* rail item label */
   --color-rail-active: #5EEAD4;    /* rail active label (bright teal) */
-  --color-rail-muted: #6B7688;     /* rail section labels / meta */
+  /* Was #6B7688. **A rail token is bound by `--color-ink-menu`, not `--color-ink`** —
+     the mirror of the light-surface rule, because the menu is the LIGHTER of the two
+     dark surfaces and the user menu's email line lives there. #6B7688 measures 3.86
+     on the rail and 3.34 in the menu, and only the first number was ever quoted,
+     which is how it shipped. Collapsed into `--color-rail-text` for the same reason
+     muted collapsed into secondary: the distinct legal alternative (#7F8CA1) lands
+     1.37:1 away and 0.01 above the cliff. The rail's eyebrows keep their identity
+     from 10.5px / 700 / uppercase / 0.1em tracking. */
+  --color-rail-muted: #9AA5B5;     /* rail section labels / meta */
 
-  /* Semantic */
+  /* Semantic — each hue is a FILL; its `-ink` sibling is the same hue, readable. */
   --color-success: #12B981;
+  --color-success-ink: #087D56;    /* 5.15 card / 4.55 raised / 4.51 on its own 14% tint */
   --color-warning: #F79009;
+  /* Amber darkened to 4.5:1 is brown. That is the hue, not a mistake: this is what
+     `--color-warning` looks like when it has to be read rather than seen. Sites that
+     would rather show the bright amber can carry it as a dot or a chip beside neutral
+     text — that is a UI refinement and needs no token change. */
+  --color-warning-ink: #A15C03;    /* 5.19 card / 4.58 raised / 4.60 on its own 14% tint */
   --color-error: #F04438;
-  --color-info: #667085;
+  --color-error-ink: #C3362C;      /* 5.41 card / 4.78 raised / 4.50 on its own 14% tint */
+  --color-info: #606A7E;           /* was #667085: 4.39 on a hovered row. A 1.06:1 move. */
 
   /* Data visualisation (DESIGN.md → Data Visualisation, HD-28).
      A colour-blind-safe categorical ramp derived from Okabe–Ito, used ONLY for
@@ -58,7 +107,15 @@
   --color-chart-5: #56B4E9;        /* sky       — fifth series */
   --color-chart-context: #8B97A8;  /* derived/reference series, always secondary (dashed) */
   --color-chart-grid: #E8EBF1;     /* grid lines (= --color-border) */
-  --color-chart-axis: #98A2B3;     /* axis lines, ticks, labels (= --color-text-muted) */
+  /* The ramp above does NOT move (HD-175 §5.4): a series hue appears only inside an
+     `aria-hidden` chart and on its `aria-hidden` legend swatch, over a real <table>
+     carrying the same numbers, so it is never text and never the sole carrier of a
+     meaning. `--color-chart-5` (2.31 on white) and `--color-chart-context` (2.96)
+     would not clear 3:1 if they were load-bearing, and darkening them would spend
+     the colour-blind separability the ramp exists for. The axis DOES move: it is a
+     neutral, not an Okabe–Ito hue, so there is no separability to spend — and the
+     exported PNG, which travels away from its table, gets a readable axis for free. */
+  --color-chart-axis: #5B6676;     /* axis lines, ticks, labels (= --color-text-muted) */
 
   /* Typography — Inter everywhere; IBM Plex Mono kept for keys/tables/audit
      ("inspectable, not magic"), JetBrains Mono for script/validator source. */
@@ -159,7 +216,7 @@ body {
 .lp-wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
 .lp-btn { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; border-radius: var(--radius-md); padding: 9px 16px; cursor: pointer; border: 1px solid transparent; transition: .12s; text-decoration: none; }
 .lp-btn-lg { padding: 13px 24px; font-size: 15px; border-radius: 11px; }
-.lp-btn-primary { background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: #04211f; font-weight: 700; }
+.lp-btn-primary { background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: var(--color-on-brand); font-weight: 700; }
 .lp-btn-primary:hover { filter: brightness(1.05); }
 .lp-btn-ghost-dark { border-color: rgba(255,255,255,.18); color: #fff; background: rgba(255,255,255,.04); }
 .lp-btn-ghost { border-color: var(--color-border-2); color: var(--color-text); background: var(--color-card); }
@@ -173,7 +230,7 @@ body {
 
 .lp-nav { display: flex; align-items: center; justify-content: space-between; height: 66px; }
 .lp-brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 17px; color: #fff; }
-.lp-logo { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; color: #04211f; font-weight: 800; font-size: 15px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
+.lp-logo { width: 28px; height: 28px; border-radius: 9px; display: grid; place-items: center; color: var(--color-on-brand); font-weight: 800; font-size: 15px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
 .lp-navlinks { display: flex; align-items: center; gap: 22px; font-size: 14px; font-weight: 500; color: var(--color-rail-text); }
 .lp-navlinks a { text-decoration: none; }
 /* :not(.lp-btn) so a button's own colour (e.g. Sign up = dark ink on teal) is
@@ -193,7 +250,11 @@ body {
 .lp-state { flex: 1; text-align: center; padding: 0 12px; position: relative; }
 .lp-chip { font-family: var(--font-mono); font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; }
 .lp-state .lp-statelbl { display: block; font-size: 12px; color: #8592A3; margin-top: 8px; }
-.lp-state:not(:last-child)::after { content: "→"; position: absolute; right: -8px; top: 5px; color: #3A465A; }
+/* The arrow between the three safety states carries the sequence, so it is a glyph and
+   not an ornament. It was #3A465A — 1.86:1 on the ink hero, and invisible to the DOM
+   audit because a ::after's content is not an element: a pseudo-element is one of the
+   few things only a grep finds, which is why the seam is drawn where it is. */
+.lp-state:not(:last-child)::after { content: "→"; position: absolute; right: -8px; top: 5px; color: var(--color-rail-muted); }
 .lp-cdot { width: 8px; height: 8px; border-radius: 50%; }
 
 /* Home-dashboard window peeking from behind the panel below */
@@ -206,8 +267,8 @@ body {
 
 .lp-rail { width: 158px; background: var(--color-ink); padding: 13px 10px; flex-shrink: 0; }
 .lp-rbrand { display: flex; align-items: center; gap: 8px; color: #fff; font-weight: 800; font-size: 13px; padding: 2px 6px 12px; }
-.lp-rlogo { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: #04211f; font-weight: 800; font-size: 11px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
-.lp-rnew { display: flex; align-items: center; justify-content: center; gap: 6px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: #04211f; font-weight: 800; font-size: 11px; border-radius: 9px; padding: 8px; margin-bottom: 12px; }
+.lp-rlogo { width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center; color: var(--color-on-brand); font-weight: 800; font-size: 11px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); }
+.lp-rnew { display: flex; align-items: center; justify-content: center; gap: 6px; background: linear-gradient(135deg, var(--color-brand), var(--color-accent-2)); color: var(--color-on-brand); font-weight: 800; font-size: 11px; border-radius: 9px; padding: 8px; margin-bottom: 12px; }
 .lp-ritem { display: flex; align-items: center; gap: 9px; font-size: 11.5px; color: var(--color-rail-text); padding: 7px 8px; border-radius: 8px; margin-bottom: 2px; }
 .lp-ritem.on { background: rgba(14,165,164,.18); color: var(--color-rail-active); }
 .lp-ric { width: 12px; height: 12px; border-radius: 3px; background: currentColor; opacity: .7; }
@@ -228,14 +289,14 @@ body {
 .lp-wid h4 .lp-hint { margin-left: auto; font-size: 10.5px; color: var(--color-text-muted); font-weight: 600; }
 .lp-trow { display: flex; align-items: center; gap: 11px; padding: 9px 0; border-top: 1px solid var(--color-border); }
 .lp-trow:first-of-type { border-top: none; padding-top: 0; }
-.lp-tbadge { width: 19px; height: 19px; border-radius: 5px; display: grid; place-items: center; font-size: 9.5px; color: #fff; font-weight: 800; flex: 0 0 19px; }
+.lp-tbadge { width: 19px; height: 19px; border-radius: 5px; display: grid; place-items: center; font-size: 9.5px; font-weight: 800; flex: 0 0 19px; }
 .lp-tmain { flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .lp-ttitle { display: block; font-size: 12.5px; font-weight: 600; line-height: 1.35; color: var(--color-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lp-tmeta { display: block; font-family: var(--font-mono); font-size: 10px; color: var(--color-text-muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .lp-pri { width: 13px; height: 13px; border-radius: 4px; flex: 0 0 13px; }
 .lp-av { width: 20px; height: 20px; border-radius: 50%; background: linear-gradient(135deg, #7C6CF5, #3B5BFD); flex: 0 0 20px; }
 .lp-due { font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 8px; flex: 0 0 auto; white-space: nowrap; }
-.lp-due.now { color: var(--color-error); background: color-mix(in srgb, var(--color-error) 12%, white); }
+.lp-due.now { color: var(--color-error-ink); background: color-mix(in srgb, var(--color-error) 12%, white); }
 .lp-due.soon { color: var(--color-text-secondary); background: var(--color-surface); }
 .lp-pbar { height: 11px; border-radius: 6px; overflow: hidden; display: flex; margin: 2px 0 14px; }
 .lp-prow { display: flex; align-items: center; gap: 9px; font-size: 12.5px; margin-top: 9px; color: var(--color-text); }
@@ -254,7 +315,7 @@ body {
 .lp-fcard { display: flex; gap: 16px; background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 22px 24px; box-shadow: var(--shadow-card); transition: .15s; }
 .lp-fcard:hover { box-shadow: var(--shadow-pop); }
 .lp-fic { width: 42px; height: 42px; flex-shrink: 0; border-radius: 12px; display: grid; place-items: center; background: rgba(14,165,164,.10); }
-.lp-fic svg { width: 21px; height: 21px; color: var(--color-brand); }
+.lp-fic svg { width: 21px; height: 21px; color: var(--color-brand-ink); }
 .lp-fcard h3 { font-size: 16px; font-weight: 700; margin: 2px 0 6px; color: var(--color-text); }
 .lp-fcard p { font-size: 14px; line-height: 1.55; color: var(--color-text-secondary); margin: 0; }
 
@@ -266,11 +327,11 @@ body {
 .lp-dcard p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.6; margin: 0 0 16px; }
 .lp-dcard ul { margin: 0; padding: 0; list-style: none; }
 .lp-dcard li { font-size: 13.5px; color: var(--color-text-secondary); padding: 6px 0 6px 24px; position: relative; }
-.lp-dcard li::before { content: "✓"; position: absolute; left: 0; color: var(--color-brand); font-weight: 700; }
+.lp-dcard li::before { content: "✓"; position: absolute; left: 0; color: var(--color-brand-ink); font-weight: 700; }
 /* Licence note under the deploy cards (HD-194) — meta weight, deliberately not a ✓ bullet:
    it carries a "may not" and the card lists are all permissions. */
 .lp-licence { max-width: 720px; margin: 24px auto 0; text-align: center; font-size: 13.5px; line-height: 1.6; color: var(--color-text-muted); }
-.lp-licence a { color: var(--color-brand); font-weight: 600; }
+.lp-licence a { color: var(--color-brand-ink); font-weight: 600; }
 .lp-licence a:hover { text-decoration: underline; }
 /* HD-195: the Cloud durability note under the deploy cards. Same scale and muted token as
    .lp-licence above it — a policy-meta line, not a feature claim. Tokens only, no hex. */
@@ -321,7 +382,7 @@ body {
 .legal-prose p { margin: 0 0 12px; }
 .legal-prose ul { margin: 0 0 12px; padding-left: 22px; }
 .legal-prose li { margin-bottom: 4px; }
-.legal-prose a { color: var(--color-brand); }
+.legal-prose a { color: var(--color-brand-ink); }
 .legal-prose table {
   width: 100%;
   border-collapse: collapse;
@@ -360,7 +421,7 @@ body {
 .markdown-body h2 { font-size: 16px; }
 .markdown-body h3 { font-size: 15px; }
 .markdown-body h4 { font-size: 14px; }
-.markdown-body a { color: var(--color-brand); text-decoration: underline; }
+.markdown-body a { color: var(--color-brand-ink); text-decoration: underline; }
 .markdown-body ul, .markdown-body ol { margin: 0 0 8px; padding-left: 20px; }
 .markdown-body li { margin: 2px 0; }
 .markdown-body li > ul, .markdown-body li > ol { margin: 2px 0; }

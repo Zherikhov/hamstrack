@@ -35,7 +35,12 @@ const SECTIONS: { path: string; label: string; icon: LucideIcon }[] = [
    noticeable shift, not a jarring one. */
 const BG = '#241A33'
 const ITEM = '#ADA3BE'
-const MUTED = '#877C9C'
+// Collapsed into ITEM (HD-175). #877C9C measured 4.24 on this background — the
+// admin rail's own version of the `--color-rail-muted` problem, on a third dark
+// surface. The name stays because it documents where the design meant
+// de-emphasis; the de-emphasis is carried by size, weight and case, exactly as on
+// the main rail.
+const MUTED = ITEM
 const ACCENT = '#F59E0B'
 const ACTIVE_TX = '#FCD34D'
 const ACTIVE_BG = 'rgba(245,158,11,0.16)'

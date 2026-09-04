@@ -155,7 +155,7 @@ export default function HomePage() {
             {/* Recent activity — no feed endpoint yet */}
             <Widget title="Recent activity">
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '18px 8px', textAlign: 'center' }}>
-                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-brand)', background: 'color-mix(in srgb, var(--color-brand) 12%, white)', borderRadius: 999, padding: '5px 12px' }}>✦ Coming soon</span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-brand-ink)', background: 'color-mix(in srgb, var(--color-brand) 12%, white)', borderRadius: 999, padding: '5px 12px' }}>✦ Coming soon</span>
                 <p style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5, maxWidth: 240 }}>
                   A live feed of comments, moves and completions across your projects will appear here.
                 </p>

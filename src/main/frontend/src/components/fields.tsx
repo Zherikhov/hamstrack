@@ -111,7 +111,7 @@ export function FieldInput({ field, value, onChange, members = [] }: {
                           // through the module — the hairline at 3:1, the label
                           // at 4.5:1, and the brand token when there is no hue.
                           borderColor: on ? ringOn(o.color, SURFACE.card, 'var(--color-brand)') : 'var(--color-border-2)',
-                          color: on ? inkOn(o.color, SURFACE.card, 'var(--color-brand)') : 'var(--color-text-secondary)',
+                          color: on ? inkOn(o.color, SURFACE.card, 'var(--color-brand-ink)') : 'var(--color-text-secondary)',
                           background: 'white',
                         }}>
                   {on && <Check size={11} />}
@@ -182,7 +182,7 @@ export function FieldValueDisplay({ field, value, members = [] }: {
       return (
         <a href={String(value)} target="_blank" rel="noopener noreferrer"
            className="inline-flex items-center gap-1 text-sm hover:underline"
-           style={{ color: 'var(--color-brand)' }}
+           style={{ color: 'var(--color-brand-ink)' }}
            onClick={e => e.stopPropagation()}>
           <span className="truncate" style={{ maxWidth: 200 }}>{String(value)}</span>
           <ExternalLink size={11} className="flex-shrink-0" />

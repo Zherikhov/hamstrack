@@ -169,7 +169,7 @@ export default function ProjectPeoplePage() {
                     boxShadow: 'var(--shadow-card)' }}>
         <div className="flex items-start gap-3">
           <span className="flex items-center justify-center rounded-lg flex-shrink-0"
-                style={{ width: 34, height: 34, color: 'var(--color-brand)',
+                style={{ width: 34, height: 34, color: 'var(--color-brand-ink)',
                          background: 'color-mix(in srgb, var(--color-brand) 12%, white)' }}>
             <Users size={17} />
           </span>
@@ -336,7 +336,7 @@ export default function ProjectPeoplePage() {
                 </div>
               </div>
               {rowError[member.userId] && (
-                <p className="text-xs" style={{ color: 'var(--color-error)' }}>{rowError[member.userId]}</p>
+                <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{rowError[member.userId]}</p>
               )}
             </div>
           )
@@ -426,7 +426,7 @@ function AddMemberRow({ wsId, projectId, roles, candidates, onAdded }: {
           Everyone in the workspace already has a role of their own here.
         </p>
       )}
-      {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
     </form>
   )
 }

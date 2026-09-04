@@ -64,7 +64,7 @@ export default function JoinTeamPage() {
         Invitations sent to your email address appear here.
       </p>
 
-      {error && <p className="text-sm mb-3" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-sm mb-3" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
 
       {isLoading ? (
         <p className="mono text-sm py-8" style={{ color: 'var(--color-text-muted)' }}>loading…</p>
@@ -79,7 +79,7 @@ export default function JoinTeamPage() {
             Ask a team admin to invite you, or{' '}
             <button onClick={createOwnTeam}
                     className="font-medium cursor-pointer hover:underline"
-                    style={{ color: 'var(--color-brand)', background: 'transparent' }}>
+                    style={{ color: 'var(--color-brand-ink)', background: 'transparent' }}>
               create your own team
             </button>.
           </p>

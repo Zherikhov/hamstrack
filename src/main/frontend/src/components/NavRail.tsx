@@ -186,7 +186,7 @@ export default function NavRail() {
       >
         <span
           className="flex items-center justify-center flex-shrink-0"
-          style={{ width: 28, height: 28, borderRadius: 9, fontWeight: 800, fontSize: 15, color: '#04211f',
+          style={{ width: 28, height: 28, borderRadius: 9, fontWeight: 800, fontSize: 15, color: 'var(--color-on-brand)',
             background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))' }}
         >H</span>
         {!collapsed && <b style={{ fontWeight: 800, fontSize: 16, color: '#fff', whiteSpace: 'nowrap' }}>Hamstrack</b>}
@@ -201,7 +201,7 @@ export default function NavRail() {
           width: collapsed ? 26 : undefined, height: collapsed ? 26 : undefined,
           margin: collapsed ? '2px 0 12px' : '2px 4px 12px', padding: collapsed ? 0 : 10,
           borderRadius: collapsed ? 8 : 11, border: 'none',
-          fontWeight: 800, fontSize: 13.5, color: '#04211f', whiteSpace: 'nowrap', overflow: 'hidden',
+          fontWeight: 800, fontSize: 13.5, color: 'var(--color-on-brand)', whiteSpace: 'nowrap', overflow: 'hidden',
           background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))',
         }}
         title={collapsed ? 'New issue' : undefined}

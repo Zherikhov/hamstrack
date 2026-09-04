@@ -64,7 +64,7 @@ export default function WorkspaceProjectsMatrix() {
         title="Projects"
         subtitle="Assign the taxonomy each project in this workspace uses. Sets shown are the workspace's own and the global defaults; a project can also define its own under its Settings."
       />
-      {error && <p className="text-sm mb-3" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-sm mb-3" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
       <AdminTable headers={['Project', ...DIMENSIONS.map(d => d.header)]}>
         {projects.map(p => (
           <tr key={p.projectId} className="border-b" style={{ borderColor: 'var(--color-border)' }}>

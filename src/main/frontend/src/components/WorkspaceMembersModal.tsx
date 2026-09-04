@@ -94,7 +94,7 @@ export default function WorkspaceMembersModal({ wsId, canManage, onClose }: Prop
             // depths, and a relative one would resolve differently in each.
             <Link to={`/w/${wsId}/settings/people`} onClick={onClose}
                   className="text-sm inline-flex items-center gap-1.5 no-underline"
-                  style={{ color: 'var(--color-brand)' }}>
+                  style={{ color: 'var(--color-brand-ink)' }}>
               <Settings size={14} />
               Manage people, roles and invitations
             </Link>

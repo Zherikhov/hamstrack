@@ -6,7 +6,20 @@ import Footer from '../components/Footer'
 
 // ── Static product-visual data (a stylised mirror of the authenticated /home
 //    dashboard). Neutral demo issue keys only — never a real customer's key. ──
-const TYPE = { bug: 'var(--color-error)', task: '#3B5BFD', story: '#7C6CF5' }
+// Each type tile is a SOLID fill with a letter on it, so it takes the rule
+// DESIGN.md declares for text over a solid fill: black or white, whichever
+// measures higher. `.lp-tbadge` used to paint all three white, which is right for
+// exactly one of them — bug measured 3.76 and story 3.95. Decided here, at design
+// time, rather than derived: these are declared design values, not a workspace's
+// stored hues (the distinction is drawn again on PRIORITY below).
+//   bug   #F04438 — white 3.76 / black 5.59 → black
+//   task  #3B5BFD — white 5.12 / black 4.10 → white
+//   story #7C6CF5 — white 3.95 / black 5.32 → black
+const TYPE = {
+  bug: { fill: 'var(--color-error)', ink: '#000000' },
+  task: { fill: '#3B5BFD', ink: '#FFFFFF' },
+  story: { fill: '#7C6CF5', ink: '#000000' },
+}
 
 const LICENSE_URL = 'https://github.com/Zherikhov/hamstrack/blob/main/LICENSE'
 
@@ -18,15 +31,15 @@ const STATS = [
 ]
 
 const ASSIGNED = [
-  { badge: 'B', tint: TYPE.bug, title: 'Refresh-token rotation on re-login', meta: 'WEB-142 · Website', pri: 'var(--color-error)' },
-  { badge: 'T', tint: TYPE.task, title: 'Onboarding empty states', meta: 'APP-31 · Mobile app', pri: 'var(--color-pending)' },
-  { badge: 'S', tint: TYPE.story, title: 'Export board to CSV', meta: 'WEB-138 · Website', pri: 'var(--color-sandbox)' },
-  { badge: 'T', tint: TYPE.task, title: 'Nightly backup verification job', meta: 'OPS-88 · Platform', pri: 'var(--color-pending)' },
+  { badge: 'B', type: TYPE.bug, title: 'Refresh-token rotation on re-login', meta: 'WEB-142 · Website', pri: 'var(--color-error)' },
+  { badge: 'T', type: TYPE.task, title: 'Onboarding empty states', meta: 'APP-31 · Mobile app', pri: 'var(--color-pending)' },
+  { badge: 'S', type: TYPE.story, title: 'Export board to CSV', meta: 'WEB-138 · Website', pri: 'var(--color-sandbox)' },
+  { badge: 'T', type: TYPE.task, title: 'Nightly backup verification job', meta: 'OPS-88 · Platform', pri: 'var(--color-pending)' },
 ]
 
 const DUE = [
-  { badge: 'B', tint: TYPE.bug, title: 'Fix rate-limit header', meta: 'WEB-140 · Website', due: 'Today', now: true },
-  { badge: 'T', tint: TYPE.task, title: 'Draft release notes', meta: 'OPS-84 · Platform', due: '2d', now: false },
+  { badge: 'B', type: TYPE.bug, title: 'Fix rate-limit header', meta: 'WEB-140 · Website', due: 'Today', now: true },
+  { badge: 'T', type: TYPE.task, title: 'Draft release notes', meta: 'OPS-84 · Platform', due: '2d', now: false },
 ]
 
 // `tint`, like STATS/DUE/TYPE above and unlike every other priority swatch in
@@ -135,7 +148,7 @@ export default function LandingPage() {
                       <h4>Assigned to me <span className="lp-hint">7 open</span></h4>
                       {ASSIGNED.map((i) => (
                         <div className="lp-trow" key={i.meta}>
-                          <span className="lp-tbadge" style={{ background: i.tint }}>{i.badge}</span>
+                          <span className="lp-tbadge" style={{ background: i.type.fill, color: i.type.ink }}>{i.badge}</span>
                           <span className="lp-tmain">
                             <span className="lp-ttitle">{i.title}</span>
                             <span className="lp-tmeta">{i.meta}</span>
@@ -151,7 +164,7 @@ export default function LandingPage() {
                         <h4>Due soon</h4>
                         {DUE.map((i) => (
                           <div className="lp-trow" key={i.meta}>
-                            <span className="lp-tbadge" style={{ background: i.tint }}>{i.badge}</span>
+                            <span className="lp-tbadge" style={{ background: i.type.fill, color: i.type.ink }}>{i.badge}</span>
                             <span className="lp-tmain">
                               <span className="lp-ttitle">{i.title}</span>
                               <span className="lp-tmeta">{i.meta}</span>
@@ -222,7 +235,7 @@ export default function LandingPage() {
                 </ul>
               </div>
               <div className="lp-dcard brand">
-                <span className="lp-tag" style={{ background: 'rgba(14,165,164,.12)', color: 'var(--color-brand)' }}>HOSTED CLOUD</span>
+                <span className="lp-tag" style={{ background: 'rgba(14,165,164,.12)', color: 'var(--color-brand-ink)' }}>HOSTED CLOUD</span>
                 <h3>Or let us run it</h3>
                 <p>Same features, managed and updated for you.</p>
                 <ul>

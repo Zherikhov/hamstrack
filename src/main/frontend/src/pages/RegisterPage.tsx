@@ -148,11 +148,11 @@ export default function RegisterPage() {
                 label={
                   <>
                     I agree to the{' '}
-                    <Link to="/terms" target="_blank" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+                    <Link to="/terms" target="_blank" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
                       Terms of Service
                     </Link>{' '}
                     and{' '}
-                    <Link to="/privacy" target="_blank" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+                    <Link to="/privacy" target="_blank" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
                       Privacy Policy
                     </Link>
                   </>
@@ -160,7 +160,7 @@ export default function RegisterPage() {
               />
             )}
             {error && (
-              <p className="text-xs px-1" style={{ color: 'var(--color-error)' }}>{error}</p>
+              <p className="text-xs px-1" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
             )}
             <Button
               type="submit"
@@ -177,7 +177,7 @@ export default function RegisterPage() {
 
         <p className="text-center text-sm mt-4" style={{ color: 'var(--color-text-muted)' }}>
           Already have an account?{' '}
-          <Link to="/login" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+          <Link to="/login" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
             Sign in
           </Link>
         </p>

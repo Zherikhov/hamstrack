@@ -191,7 +191,7 @@ function VersionCell({
             autoFocus
           />
           <div className="flex gap-3 mt-1.5">
-            <button onClick={onCommit} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+            <button onClick={onCommit} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand-ink)' }}>Save</button>
             <button onMouseDown={e => { e.preventDefault(); onCancel() }}
                     className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
           </div>
@@ -977,7 +977,7 @@ export default function IssueDetail({
             border: '2px dashed var(--color-brand)',
           }}
         >
-          <span className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--color-brand)' }}>
+          <span className="text-sm font-medium flex items-center gap-2" style={{ color: 'var(--color-brand-ink)' }}>
             <Paperclip size={16} /> Drop to attach
           </span>
         </div>
@@ -1026,7 +1026,7 @@ export default function IssueDetail({
                   role="menuitem"
                   onClick={handleDelete}
                   className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-left cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
-                  style={{ color: 'var(--color-error)' }}
+                  style={{ color: 'var(--color-error-ink)' }}
                 >
                   <Trash2 size={13} /> Delete issue
                 </button>
@@ -1059,7 +1059,7 @@ export default function IssueDetail({
               onClick={() => n.ref.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
               className="text-xs px-2 py-0.5 rounded whitespace-nowrap cursor-pointer transition-colors"
               style={{
-                color: activeSection === n.id ? 'var(--color-brand)' : 'var(--color-text-muted)',
+                color: activeSection === n.id ? 'var(--color-brand-ink)' : 'var(--color-text-muted)',
                 fontWeight: activeSection === n.id ? 600 : 400,
                 background: activeSection === n.id ? 'var(--color-surface-2)' : 'transparent',
               }}
@@ -1368,7 +1368,7 @@ export default function IssueDetail({
                     <LabelPicker wsId={wsId} value={labelDraft} onChange={setLabelDraft}
                                  known={issueLabels} autoFocus />
                     <div className="flex gap-3 mt-1.5">
-                      <button onClick={commitLabels} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                      <button onClick={commitLabels} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand-ink)' }}>Save</button>
                       <button onMouseDown={e => { e.preventDefault(); setLabelsEditing(false) }}
                               className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
                     </div>
@@ -1438,7 +1438,7 @@ export default function IssueDetail({
                 </div>
               )}
             </div>
-            {metaError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{metaError}</p>}
+            {metaError && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{metaError}</p>}
 
             {/* Custom fields (HD-62) — same `gridCols` and the same
                 muted-label-above-value typography as the built-ins, set off by a
@@ -1457,7 +1457,7 @@ export default function IssueDetail({
                       <button
                         onClick={() => setAddFieldOpen(o => !o)}
                         className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
-                        style={{ color: 'var(--color-brand)' }}
+                        style={{ color: 'var(--color-brand-ink)' }}
                       >
                         <Plus size={12} /> Add field
                       </button>
@@ -1511,7 +1511,7 @@ export default function IssueDetail({
                               />
                               <div className="flex gap-3 mt-1.5">
                                 {!isDiscreteField(f.type) && (
-                                  <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                                  <button onClick={() => commitFieldDraft(f, fieldDraft)} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand-ink)' }}>Save</button>
                                 )}
                                 <button onMouseDown={e => { e.preventDefault(); cancelEditField() }} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
                               </div>
@@ -1589,7 +1589,7 @@ export default function IssueDetail({
                   />
                 )}
                 <div className="flex gap-3 mt-1.5">
-                  <button onClick={commitDesc} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand)' }}>Save</button>
+                  <button onClick={commitDesc} className="text-xs cursor-pointer" style={{ color: 'var(--color-brand-ink)' }}>Save</button>
                   <button onClick={cancelDescEdit} className="text-xs cursor-pointer" style={{ color: 'var(--color-text-muted)' }}>Cancel</button>
                 </div>
               </div>
@@ -1634,7 +1634,7 @@ export default function IssueDetail({
                     parentLevel: issue.type.hierarchyLevel,
                   })}
                   className="inline-flex items-center gap-1 text-xs cursor-pointer hover:underline"
-                  style={{ color: 'var(--color-brand)' }}
+                  style={{ color: 'var(--color-brand-ink)' }}
                 >
                   <Plus size={12} /> Create sub-task
                 </button>
@@ -1688,7 +1688,7 @@ export default function IssueDetail({
                 <button
                   onClick={() => handleDownloadAttachment(a)}
                   className="text-sm font-medium truncate block max-w-full text-left cursor-pointer hover:underline"
-                  style={{ color: 'var(--color-brand)' }}
+                  style={{ color: 'var(--color-brand-ink)' }}
                   title={`Download ${a.filename}`}
                 >
                   {a.filename}
@@ -1718,7 +1718,7 @@ export default function IssueDetail({
             </div>
           ))}
 
-          {fileError && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{fileError}</p>}
+          {fileError && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{fileError}</p>}
 
           {/* The workspace's remaining storage, and ONLY at or above the
               operator's own warn threshold — a storage figure on every issue
@@ -1727,7 +1727,7 @@ export default function IssueDetail({
               settings page is where the number lives in both cases. */}
           {storageLine && (
             <p className="text-xs" style={{
-              color: quotaFull ? 'var(--color-warning)' : 'var(--color-text-secondary)',
+              color: quotaFull ? 'var(--color-warning-ink)' : 'var(--color-text-secondary)',
             }}>
               {storageLine}
             </p>
@@ -1780,7 +1780,7 @@ export default function IssueDetail({
                     className="text-xs px-2 py-0.5 rounded capitalize cursor-pointer transition-colors"
                     style={{
                       background: active ? 'white' : 'transparent',
-                      color: active ? 'var(--color-brand)' : 'var(--color-text-muted)',
+                      color: active ? 'var(--color-brand-ink)' : 'var(--color-text-muted)',
                       fontWeight: active ? 600 : 400,
                       boxShadow: active ? 'var(--shadow-card)' : 'none',
                     }}
@@ -1863,7 +1863,7 @@ export default function IssueDetail({
           )}
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         </div>
       </div>
 

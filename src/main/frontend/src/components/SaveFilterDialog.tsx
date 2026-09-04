@@ -106,7 +106,7 @@ export default function SaveFilterDialog({ wsId, hql, editing, onClose, onSaved,
         )}
 
         {error && (
-          <span className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</span>
+          <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</span>
         )}
 
         <div className="flex items-center justify-end gap-2 mt-1">

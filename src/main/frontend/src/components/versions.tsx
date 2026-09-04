@@ -309,7 +309,7 @@ export function VersionPicker({
                       style={{ width: 8, height: 8, background: versionTint(v.released) }} />
                 <span className="mono text-sm truncate flex-1">{v.name}</span>
                 {v.released && (
-                  <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-success)' }}>released</span>
+                  <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-success-ink)' }}>released</span>
                 )}
                 {v.releaseDate && !v.released && (
                   <span className="mono text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)' }}>
@@ -377,7 +377,7 @@ export function FixVersionFilter({ wsId, projectId, value, onChange }: {
         ? {
             background: 'color-mix(in srgb, var(--color-brand) 12%, white)',
             borderColor: 'var(--color-brand)',
-            color: 'var(--color-brand)',
+            color: 'var(--color-brand-ink)',
           }
         : undefined}
     >

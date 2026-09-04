@@ -205,7 +205,9 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--color-ink': '#101828',
   '--color-brand': '#0EA5A4',
   '--color-pending': '#F79009',
-  '--color-sandbox': '#667085',
+  // HD-175 moved this one (#667085 measured 4.39 on a hovered row). The parity
+  // assertion in `colour.test.ts` is what forces the two to move together.
+  '--color-sandbox': '#606A7E',
   '--color-success': '#12B981',
 }
 

@@ -583,7 +583,7 @@ function Row({ cmd, active, onHover, onRun }: {
   const Icon = cmd.icon
   const color = cmd.disabled
     ? 'var(--color-text-muted)'
-    : active ? 'var(--color-brand)' : 'var(--color-text-secondary)'
+    : active ? 'var(--color-brand-ink)' : 'var(--color-text-secondary)'
 
   return (
     <div

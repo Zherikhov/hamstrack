@@ -283,7 +283,7 @@ export default function RoleEditorModal({ wsId, role, capabilities, onClose, onS
             {showHidden && (
               <button type="button" onClick={() => setShowHidden(false)}
                       className="text-xs text-left cursor-pointer"
-                      style={{ color: 'var(--color-brand)', background: 'none', border: 'none', padding: 0 }}>
+                      style={{ color: 'var(--color-brand-ink)', background: 'none', border: 'none', padding: 0 }}>
                 Hide permissions for ways of working this workspace does not use
               </button>
             )}
@@ -292,7 +292,7 @@ export default function RoleEditorModal({ wsId, role, capabilities, onClose, onS
           <div style={{ width: 300, flexShrink: 0, position: 'sticky', top: 0 }}>
             <AssignmentPanel assignment={assignment} pending={preview.isFetching} />
             {preview.error && (
-              <p className="text-xs mt-2" style={{ color: 'var(--color-error)' }}>
+              <p className="text-xs mt-2" style={{ color: 'var(--color-error-ink)' }}>
                 {preview.error instanceof Error ? preview.error.message : 'Could not check this set.'}
               </p>
             )}

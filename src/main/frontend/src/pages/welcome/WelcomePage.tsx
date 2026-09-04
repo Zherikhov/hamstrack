@@ -91,7 +91,7 @@ function ChoiceCard({ icon, title, description, onClick, badge, disabled }: {
       onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--color-border)')}
     >
       <span className="flex items-center justify-center rounded-lg flex-shrink-0"
-            style={{ width: 44, height: 44, background: '#E7F0EE', color: 'var(--color-brand)' }}>
+            style={{ width: 44, height: 44, background: '#E7F0EE', color: 'var(--color-brand-ink)' }}>
         {icon}
       </span>
       <span className="flex-1 min-w-0">

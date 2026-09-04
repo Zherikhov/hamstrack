@@ -505,7 +505,7 @@ function PageHeading() {
 function ChangeIssue({ change, href }: { change: ScopeChange; href: string | null }): ReactNode {
   if (href) {
     return (
-      <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand)', fontWeight: 600 }}>
+      <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}>
         {change.key}
       </Link>
     )

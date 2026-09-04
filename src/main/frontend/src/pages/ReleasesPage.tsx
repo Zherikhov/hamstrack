@@ -178,7 +178,7 @@ export default function ReleasesPage() {
         )}
 
         {error && !editing && !deleting && !releasing && (
-          <p className="text-xs mb-2" style={{ color: 'var(--color-error)' }}>{error}</p>
+          <p className="text-xs mb-2" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
         )}
 
         {isLoading ? (
@@ -330,7 +330,7 @@ function VersionCard({
             <ReleasedPill released={version.released} />
             {version.archived && (
               <span className="text-xs px-2 py-0.5 rounded-full"
-                    style={{ color: 'var(--color-warning)', background: '#FBF3E8' }}>
+                    style={{ color: 'var(--color-warning-ink)', background: '#FBF3E8' }}>
                 archived
               </span>
             )}
@@ -423,7 +423,7 @@ function MenuItem({ label, danger, onClick }: { label: string; danger?: boolean;
       role="menuitem"
       onClick={onClick}
       className="w-full px-3 py-1.5 text-sm text-left cursor-pointer hover:bg-[var(--color-surface-2)] transition-colors"
-      style={{ color: danger ? 'var(--color-error)' : 'var(--color-text)' }}
+      style={{ color: danger ? 'var(--color-error-ink)' : 'var(--color-text)' }}
     >
       {label}
     </button>
@@ -493,7 +493,7 @@ function VersionForm({ wsId, projectId, version, enableReleases, onClose, onSave
           </span>
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>
@@ -582,7 +582,7 @@ function ReleaseDialog({ wsId, projectId, version, versions, onClose, onReleased
           </span>
         )}
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" loading={release.isPending} onClick={() => release.mutate()}>
@@ -656,7 +656,7 @@ function DeleteVersionDialog({ wsId, projectId, version, versions, onClose, onAr
           </Select>
         )}
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           {!version.archived && (

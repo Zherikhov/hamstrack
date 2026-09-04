@@ -119,3 +119,26 @@ tokens.json.*
 **/tokens.json.*
 ops/loadtest/**/*.bak
 ops/loadtest/results/
+
+### HD-175 — the contrast audit's own output. Not committed: it carries the DOM
+### of a real, logged-in workspace (issue titles, member names) and it is a
+### measurement of one instance at one moment, not a design artefact. The
+### reviewable outputs are the token values in index.css and the numbers quoted
+### on the ticket. The report also carries its own "_warning" key, because an
+### ignore rule protects a repository and protects no ticket, chat thread or
+### email — and the file is what gets pasted into those.
+###
+### THREE patterns, unanchored, for the reason recorded above for tokens.json: an
+### output file is not a thing to ignore by path. `src/main/frontend/audit/*.json`
+### alone was checked by reading rather than with `git check-ignore`, and it
+### ignored the default report while missing every other place the script really
+### writes — `*` does not descend, so `audit/out/report.json` and
+### `audit/nested/deep/r.json` were tracked, and AUDIT_REPORT=audit/out/r.json is
+### a working invocation because the script mkdirSync's the parent: it CREATES a
+### directory inside the directory this rule exists to protect and leaves the
+### report in it. The repo root is missed the same way, and that is where somebody
+### stands when they run `npm run audit:contrast`. Verify a change here by running
+### `git check-ignore -v <path>` on each of those four, not by reading the globs.
+**/contrast-report.json
+src/main/frontend/audit/*.json
+src/main/frontend/audit/**/*.json

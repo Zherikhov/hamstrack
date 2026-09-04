@@ -186,7 +186,7 @@ export function ScrumRequiredCard({ wsId, projectId, canEdit, report }: {
             <Link
               to={deliverySettingsHref(wsId, projectId)}
               className="text-sm no-underline"
-              style={{ color: 'var(--color-brand)', fontWeight: 700 }}
+              style={{ color: 'var(--color-brand-ink)', fontWeight: 700 }}
             >
               Turn on Scrum in project settings →
             </Link>
@@ -227,7 +227,7 @@ export function NoSprintsCard({ wsId, projectId, canCreate }: {
           <Link
             to={backlogHref(wsId, projectId)}
             className="text-sm no-underline"
-            style={{ color: 'var(--color-brand)', fontWeight: 700 }}
+            style={{ color: 'var(--color-brand-ink)', fontWeight: 700 }}
           >
             Plan the first sprint on the Backlog →
           </Link>
@@ -262,7 +262,7 @@ export function EstimationOffHint({ wsId, projectId, canEdit }: {
       <Link
         to={deliverySettingsHref(wsId, projectId)}
         className="no-underline"
-        style={{ color: 'var(--color-brand)', fontWeight: 600 }}
+        style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}
       >
         Turn on estimation to chart story points
       </Link>

@@ -36,7 +36,7 @@ export default function LegalLayout({ title, lastUpdated, children }: LegalLayou
           <Link
             to="/login"
             className="text-sm font-medium hover:underline"
-            style={{ color: 'var(--color-brand)' }}
+            style={{ color: 'var(--color-brand-ink)' }}
           >
             Sign in
           </Link>

@@ -488,7 +488,7 @@ export default function BoardPage() {
             </button>
           )}
           {moveError && (
-            <span className="text-xs" style={{ color: 'var(--color-error)' }}>{moveError}</span>
+            <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{moveError}</span>
           )}
           <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
             {quickActive
@@ -509,7 +509,7 @@ export default function BoardPage() {
               color: 'var(--color-text-secondary)',
             }}
           >
-            <AlertTriangle size={13} style={{ color: 'var(--color-warning)', flexShrink: 0 }} />
+            <AlertTriangle size={13} style={{ color: 'var(--color-warning-ink)', flexShrink: 0 }} />
             <span>
               Showing the first{' '}
               <span className="mono font-semibold">{board.cap}</span> of{' '}
@@ -518,7 +518,7 @@ export default function BoardPage() {
               <Link
                 to={`/w/${wsId}/p/${projectId}/backlog`}
                 className="font-semibold hover:underline"
-                style={{ color: 'var(--color-brand)' }}
+                style={{ color: 'var(--color-brand-ink)' }}
               >
                 Backlog
               </Link>{' '}
@@ -526,7 +526,7 @@ export default function BoardPage() {
               <Link
                 to={`/w/${wsId}/search`}
                 className="font-semibold hover:underline"
-                style={{ color: 'var(--color-brand)' }}
+                style={{ color: 'var(--color-brand-ink)' }}
               >
                 Search
               </Link>{' '}
@@ -590,7 +590,7 @@ export default function BoardPage() {
                       type="button"
                       onClick={() => setCreatingSprint(true)}
                       className="text-xs cursor-pointer hover:underline"
-                      style={{ color: 'var(--color-brand)' }}
+                      style={{ color: 'var(--color-brand-ink)' }}
                     >
                       Create &amp; start a new one instead
                     </button>
@@ -651,7 +651,10 @@ export default function BoardPage() {
                     flex: '1 1 280px',
                     minWidth: 220,
                     maxWidth: 420,
-                    background: isOver && allowed ? '#e2efec' : 'var(--color-surface-2)',
+                    // A 10% brand tint rather than a bespoke literal (HD-175): the literal it
+                    // replaced measured 4.49 under `--color-brand-ink`, a 0.01 miss that only
+                    // exists while a card is over the column and that no screenshot catches.
+                    background: isOver && allowed ? 'color-mix(in srgb, var(--color-brand) 10%, white)' : 'var(--color-surface-2)',
                     borderColor: isOver && allowed ? 'var(--color-brand)' : 'var(--color-border)',
                     opacity: dragging && !allowed && dragging.status.id !== status.id ? 0.45 : 1,
                     maxHeight: '100%',
@@ -864,7 +867,9 @@ function Chip({
         borderRadius: 'var(--radius-sm)',
         background: active ? `color-mix(in srgb, ${c} 14%, white)` : 'white',
         borderColor: active ? c : 'var(--color-border-2)',
-        color: active ? c : 'var(--color-text-secondary)',
+        // `c` is the fill (the 14% tint and the border); the label is ink and takes
+        // the ink sibling — the tint it sits on is darker than the raised surface.
+        color: active ? 'var(--color-brand-ink)' : 'var(--color-text-secondary)',
         outlineColor: 'var(--color-brand)',
       }}
     >

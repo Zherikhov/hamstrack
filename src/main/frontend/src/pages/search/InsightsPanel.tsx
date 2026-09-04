@@ -492,7 +492,7 @@ function tableColumns({ measure, slice, series, barSum, onNarrow }: {
           onClick={() => onNarrow(row.bucket, null)}
           className="cursor-pointer text-left"
           title={`Narrow the query: ${clause}`}
-          style={{ color: 'var(--color-brand)', fontWeight: 600 }}
+          style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}
         >
           {row.label}
         </button>

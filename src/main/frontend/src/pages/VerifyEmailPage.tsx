@@ -61,10 +61,10 @@ export default function VerifyEmailPage() {
         >
           {error ? (
             <>
-              <p className="text-sm" style={{ color: 'var(--color-error)' }}>{error}</p>
+              <p className="text-sm" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
               <p className="text-sm mt-3" style={{ color: 'var(--color-text-muted)' }}>
                 You can request a fresh link from the{' '}
-                <Link to="/login" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+                <Link to="/login" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
                   sign-in page
                 </Link>
                 {' '}— try signing in and use “Resend verification email”.

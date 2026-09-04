@@ -161,7 +161,7 @@ function ReportLink({ to, label, disabled, disabledHint }: {
         borderRadius: 'var(--radius-md)',
         background: isActive ? 'color-mix(in srgb, var(--color-brand) 10%, white)' : 'transparent',
         color: isActive
-          ? 'var(--color-brand)'
+          ? 'var(--color-brand-ink)'
           : disabled ? 'var(--color-text-muted)' : 'var(--color-text-secondary)',
         fontWeight: isActive ? 700 : 500,
       })}

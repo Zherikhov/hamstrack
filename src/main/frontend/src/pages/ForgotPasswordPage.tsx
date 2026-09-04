@@ -240,7 +240,7 @@ export default function ForgotPasswordPage() {
                 autoFocus
               />
               {error && (
-                <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error)' }}>
+                <p role="alert" className="text-xs px-1" style={{ color: 'var(--color-error-ink)' }}>
                   {error}
                 </p>
               )}
@@ -258,7 +258,7 @@ export default function ForgotPasswordPage() {
         </div>
 
         <p className="text-center text-sm mt-4" style={{ color: 'var(--color-text-muted)' }}>
-          <Link to="/login" style={{ color: 'var(--color-brand)' }} className="font-medium hover:underline">
+          <Link to="/login" style={{ color: 'var(--color-brand-ink)' }} className="font-medium hover:underline">
             Back to sign in
           </Link>
         </p>

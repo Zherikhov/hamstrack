@@ -71,7 +71,7 @@ export default function MyWorkPage() {
                     <td style={{ padding: '12px 14px' }}><PriorityBadge priority={i.priority} /></td>
                     <td style={{ padding: '12px 14px' }}>
                       {due
-                        ? <span style={{ fontSize: 12, fontWeight: 700, color: due.urgent ? 'var(--color-error)' : 'var(--color-text-secondary)' }}>{due.text}</span>
+                        ? <span style={{ fontSize: 12, fontWeight: 700, color: due.urgent ? 'var(--color-error-ink)' : 'var(--color-text-secondary)' }}>{due.text}</span>
                         : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}
                     </td>
                   </tr>

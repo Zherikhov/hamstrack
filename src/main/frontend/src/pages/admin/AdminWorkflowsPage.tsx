@@ -50,7 +50,7 @@ export default function AdminWorkflowsPage() {
             </td>
             <td className="px-3 py-2.5">
               <span className="text-xs px-2.5 py-0.5 rounded-full whitespace-nowrap"
-                    style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
+                    style={{ color: 'var(--color-brand-ink)', background: '#E7F0EE' }}>
                 {wf.projectsUsing} project{wf.projectsUsing !== 1 ? 's' : ''}
               </span>
             </td>
@@ -59,7 +59,7 @@ export default function AdminWorkflowsPage() {
                 <>
                   <Button variant="ghost" size="sm" onClick={() => setEditing(wf)}>Edit</Button>
                   {!wf.systemDefault && (
-                    <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                    <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                             onClick={() => { if (window.confirm(`Delete workflow “${wf.name}”?`)) del.mutate(wf.id) }}>
                       Delete
                     </Button>
@@ -200,7 +200,7 @@ function WorkflowForm({ workflow, onClose, onSaved }: {
           </div>
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim() || statusIds.length === 0}

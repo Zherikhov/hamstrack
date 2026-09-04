@@ -64,7 +64,7 @@ export default function AdminStatusesPage() {
                           onClick={() => archive.mutate({ id: s.id, archived: s.archived })}>
                     {s.archived ? 'Unarchive' : 'Archive'}
                   </Button>
-                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                           onClick={() => { setError(''); setDeleting(s) }}>
                     Delete
                   </Button>
@@ -126,7 +126,7 @@ function StatusForm({ status, onClose, onSaved }: {
           {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
         </Select>
         <ColorField value={color} onChange={setColor} />
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>

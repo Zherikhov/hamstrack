@@ -98,7 +98,7 @@ export default function WorkspaceLabelsPage() {
                       onClick={() => archive.mutate({ id: l.id, archived: l.archived })}>
                 {l.archived ? 'Unarchive' : 'Archive'}
               </Button>
-              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+              <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                       onClick={() => { setError(''); setDeleting(l) }}>
                 Delete
               </Button>
@@ -148,7 +148,7 @@ export default function WorkspaceLabelsPage() {
                 <>Not used on any issue — safe to delete.</>
               )}
             </div>
-            {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+            {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setDeleting(null)}>Cancel</Button>
               {!deleting.archived && (
@@ -247,7 +247,7 @@ function LabelForm({ wsId, label, onClose, onSaved }: {
           <LabelChip label={{ id: 'preview', name: name.trim() || 'label', color: effectiveColor, archived: false }} />
         </div>
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>
@@ -313,7 +313,7 @@ function MergeLabelDialog({ wsId, source, candidates, onClose, onMerged }: {
           </div>
         )}
 
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!targetId} loading={merge.isPending} onClick={() => merge.mutate()}>

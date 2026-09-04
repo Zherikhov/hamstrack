@@ -78,7 +78,7 @@ export default function AdminPrioritiesPage() {
                   <Button variant="ghost" size="sm" onClick={() => archive.mutate({ id: p.id, archived: p.archived })}>
                     {p.archived ? 'Unarchive' : 'Archive'}
                   </Button>
-                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                           onClick={() => { setError(''); setDeleting(p) }}>
                     Delete
                   </Button>
@@ -109,19 +109,19 @@ export default function AdminPrioritiesPage() {
                       style={{ borderColor: i.isDefault ? 'var(--color-warning)' : 'var(--color-border-2)', background: 'white' }}>
                   <PriorityIcon priority={i.priority} size={12} />
                   {i.priority.name}
-                  {i.isDefault && <Star size={10} style={{ color: 'var(--color-warning)' }} fill="var(--color-warning)" />}
+                  {i.isDefault && <Star size={10} style={{ color: 'var(--color-warning-ink)' }} fill="var(--color-warning)" />}
                 </span>
               ))}
             </span>
             <span className="text-xs px-2.5 py-0.5 rounded-full whitespace-nowrap"
-                  style={{ color: 'var(--color-brand)', background: '#E7F0EE' }}>
+                  style={{ color: 'var(--color-brand-ink)', background: '#E7F0EE' }}>
               {set.projectsUsing} project{set.projectsUsing !== 1 ? 's' : ''}
             </span>
             {set.scope === ownTag ? (
               <>
                 <Button variant="ghost" size="sm" onClick={() => setEditingSet(set)}>Edit</Button>
                 {!set.systemDefault && (
-                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error)' }}
+                  <Button variant="ghost" size="sm" style={{ color: 'var(--color-error-ink)' }}
                           onClick={() => { if (window.confirm(`Delete set “${set.name}”?`)) delSet.mutate(set.id) }}>
                     Delete
                   </Button>
@@ -186,7 +186,7 @@ function PriorityForm({ priority, onClose, onSaved }: {
           {ICONS.map(i => <option key={i} value={i}>{i}</option>)}
         </Select>
         <ColorField value={color} onChange={setColor} />
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim()} loading={save.isPending} onClick={() => save.mutate()}>
@@ -252,7 +252,7 @@ function PrioritySetForm({ set, priorities, onClose, onSaved }: {
             </div>
           ))}
         </div>
-        {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+        {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
         <div className="flex justify-end gap-2 pt-1">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button variant="primary" disabled={!name.trim() || selected.length === 0}

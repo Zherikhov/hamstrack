@@ -103,7 +103,7 @@ export default function WorkspaceSettingsArea() {
           <NavLink key={s.path} to={s.path ? `${base}/${s.path}` : base} end={s.end}
                    className="block px-3 py-1.5 rounded text-sm mb-0.5"
                    style={({ isActive }) => ({
-                     color: isActive ? 'var(--color-brand)' : 'var(--color-text-secondary)',
+                     color: isActive ? 'var(--color-brand-ink)' : 'var(--color-text-secondary)',
                      background: isActive ? '#E7F0EE' : 'transparent',
                      fontWeight: isActive ? 600 : 400,
                    })}>

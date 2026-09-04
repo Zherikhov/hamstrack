@@ -88,7 +88,7 @@ export default function SavedFiltersPanel({ wsId, onLoad, onEditQuery, onInsight
       }}
     >
       {error && (
-        <div className="text-xs px-2 py-1.5" style={{ color: 'var(--color-error)' }}>{error}</div>
+        <div className="text-xs px-2 py-1.5" style={{ color: 'var(--color-error-ink)' }}>{error}</div>
       )}
       {isLoading ? (
         <div className="mono text-xs px-3 py-3" style={{ color: 'var(--color-text-muted)' }}>loading…</div>
@@ -160,7 +160,7 @@ function FilterRow({
       onMouseEnter={e => { e.currentTarget.style.background = 'var(--color-surface)' }}
       onMouseLeave={e => { e.currentTarget.style.background = 'transparent' }}
     >
-      <button onClick={onLoad} className="cursor-pointer flex-shrink-0" title="Run filter" style={{ color: 'var(--color-brand)' }}>
+      <button onClick={onLoad} className="cursor-pointer flex-shrink-0" title="Run filter" style={{ color: 'var(--color-brand-ink)' }}>
         <Play size={13} />
       </button>
       {/* Beside "run", not hidden in the owner-only cluster: a shared filter is
@@ -203,7 +203,7 @@ function FilterRow({
       {f.mine ? (
         editing ? (
           <>
-            <button onClick={onCommitEdit} className="cursor-pointer flex-shrink-0" title="Save" style={{ color: 'var(--color-brand)' }}>
+            <button onClick={onCommitEdit} className="cursor-pointer flex-shrink-0" title="Save" style={{ color: 'var(--color-brand-ink)' }}>
               <Check size={13} />
             </button>
             <button onClick={onCancelEdit} className="cursor-pointer flex-shrink-0" title="Cancel" style={{ color: 'var(--color-text-muted)' }}>
@@ -215,7 +215,7 @@ function FilterRow({
             <button
               onClick={e => { e.stopPropagation(); onToggleShare() }}
               className="cursor-pointer" title={f.shared ? 'Shared — click to unshare' : 'Share with workspace'}
-              style={{ color: f.shared ? 'var(--color-brand)' : 'var(--color-text-muted)' }}
+              style={{ color: f.shared ? 'var(--color-brand-ink)' : 'var(--color-text-muted)' }}
             >
               <Share2 size={13} />
             </button>

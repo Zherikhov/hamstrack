@@ -440,7 +440,7 @@ function isGone(issue: SprintReviewIssue): boolean {
 function ReviewIssueKey({ issue, href }: { issue: SprintReviewIssue; href: string | null }): ReactNode {
   if (href) {
     return (
-      <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand)', fontWeight: 600 }}>
+      <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}>
         {issue.key}
       </Link>
     )

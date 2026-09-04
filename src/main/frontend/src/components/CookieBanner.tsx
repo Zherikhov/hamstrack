@@ -40,7 +40,9 @@ export default function CookieBanner() {
       <button
         onClick={dismiss}
         className="text-sm font-medium px-4 py-1.5 rounded self-start cursor-pointer transition-colors"
-        style={{ background: 'var(--color-brand)', color: 'white', border: 'none' }}
+        // Text on a solid brand fill takes the fill's own ink (HD-175): white measured
+        // 3.03:1 here. The banner sits on the dark ink surface; only the button moves.
+        style={{ background: 'var(--color-brand)', color: 'var(--color-on-brand)', border: 'none' }}
       >
         Got it
       </button>

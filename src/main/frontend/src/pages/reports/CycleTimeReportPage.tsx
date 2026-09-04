@@ -835,7 +835,7 @@ const HANDLED_STATUSES = [400, 404, 429]
 function IssueLink({ issueKey, href }: { issueKey: string; href: string | null }) {
   if (!href) return <span className="mono">{issueKey}</span>
   return (
-    <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand)', fontWeight: 600 }}>
+    <Link to={href} className="mono no-underline" style={{ color: 'var(--color-brand-ink)', fontWeight: 600 }}>
       {issueKey}
     </Link>
   )

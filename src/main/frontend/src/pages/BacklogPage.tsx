@@ -537,10 +537,10 @@ export default function BacklogPage() {
               Clear filters
             </button>
           )}
-          {moveError && <span className="text-xs" style={{ color: 'var(--color-error)' }}>{moveError}</span>}
-          {notice && <span className="text-xs" style={{ color: 'var(--color-warning)' }}>{notice}</span>}
+          {moveError && <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{moveError}</span>}
+          {notice && <span className="text-xs" style={{ color: 'var(--color-warning-ink)' }}>{notice}</span>}
           {view.sectionError && (
-            <span className="text-xs" style={{ color: 'var(--color-error)' }}>{view.sectionError}</span>
+            <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{view.sectionError}</span>
           )}
           <span className="ml-auto mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
             {totalCount} issue{totalCount === 1 ? '' : 's'}
@@ -980,13 +980,13 @@ function SectionCard({
                    background: 'color-mix(in srgb, var(--color-warning) 10%, white)',
                    color: 'var(--color-text-secondary)',
                  }}>
-              <AlertTriangle size={13} style={{ color: 'var(--color-warning)', flexShrink: 0 }} />
+              <AlertTriangle size={13} style={{ color: 'var(--color-warning-ink)', flexShrink: 0 }} />
               <span>
                 Showing the first <span className="mono font-semibold">{section.issues.length}</span> of{' '}
                 <span className="mono font-semibold">{section.totalAvailable}</span> issues. Totals above
                 cover the whole section. Narrow with filters, or use{' '}
                 <Link to={`/w/${wsId}/search`} className="font-semibold hover:underline"
-                      style={{ color: 'var(--color-brand)' }}>
+                      style={{ color: 'var(--color-brand-ink)' }}>
                   Search
                 </Link>{' '}
                 to see them all.
@@ -1078,7 +1078,7 @@ function SprintSectionHeader({
       )}
       {countdown && (
         <span className="mono text-xs font-semibold flex-shrink-0"
-              style={{ color: overdue ? 'var(--color-warning)' : 'var(--color-text-secondary)' }}>
+              style={{ color: overdue ? 'var(--color-warning-ink)' : 'var(--color-text-secondary)' }}>
           {countdown}
         </span>
       )}
@@ -1382,7 +1382,7 @@ function MenuItem({ label, danger, disabled, onClick }: {
       disabled={disabled}
       onClick={onClick}
       className="w-full px-3 py-1.5 text-sm text-left cursor-pointer transition-colors hover:bg-[var(--color-surface-2)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-      style={{ color: danger ? 'var(--color-error)' : 'var(--color-text)' }}
+      style={{ color: danger ? 'var(--color-error-ink)' : 'var(--color-text)' }}
     >
       {label}
     </button>

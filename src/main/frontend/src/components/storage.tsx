@@ -150,7 +150,7 @@ export function StorageFillBar({ summary }: { summary: WorkspaceStorageSummary }
         </span>
         {percent !== null && (
           <span className="text-sm font-semibold"
-                style={{ color: over ? 'var(--color-error)' : 'var(--color-text-secondary)' }}>
+                style={{ color: over ? 'var(--color-error-ink)' : 'var(--color-text-secondary)' }}>
             {formatPercent(percent)} of the quota
           </span>
         )}

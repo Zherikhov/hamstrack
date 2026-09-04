@@ -536,7 +536,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
                 {moreOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                 More fields
                 {!moreOpen && affectsVersionIds.length > 0 && (
-                  <span className="mono" style={{ color: 'var(--color-brand)' }}>
+                  <span className="mono" style={{ color: 'var(--color-brand-ink)' }}>
                     ({affectsVersionIds.length})
                   </span>
                 )}
@@ -555,7 +555,7 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
           )}
 
           {error && (
-            <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>
+            <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>
           )}
           </div>
 

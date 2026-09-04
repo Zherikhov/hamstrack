@@ -66,7 +66,7 @@ export function UsageChip({ usage, fetchDetail }: {
   const clickable = used && !!fetchDetail
 
   const chipStyle: React.CSSProperties = used
-    ? { color: 'var(--color-brand)', background: '#E7F0EE' }
+    ? { color: 'var(--color-brand-ink)', background: '#E7F0EE' }
     : { color: 'var(--color-text-muted)', background: 'var(--color-surface-2)' }
 
   function toggleOpen() {
@@ -91,7 +91,7 @@ export function UsageChip({ usage, fetchDetail }: {
                 style={{ zIndex: 30, top: '100%', right: 0, marginTop: 4, minWidth: 240,
                          background: 'white', borderColor: 'var(--color-border)',
                          boxShadow: '0 8px 30px rgba(0,0,0,0.12)', display: 'block' }}>
-            {failed && <span className="text-xs" style={{ color: 'var(--color-error)' }}>Failed to load usage</span>}
+            {failed && <span className="text-xs" style={{ color: 'var(--color-error-ink)' }}>Failed to load usage</span>}
             {!failed && detail === null && (
               <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>loading…</span>
             )}
@@ -159,7 +159,7 @@ export function ArchivedToggle({ archivedCount, value, onChange }: {
 export function ArchivedBadge() {
   return (
     <span className="text-xs px-2 py-0.5 rounded-full"
-          style={{ color: 'var(--color-warning)', background: '#FBF3E8' }}>
+          style={{ color: 'var(--color-warning-ink)', background: '#FBF3E8' }}>
       archived
     </span>
   )
@@ -246,7 +246,7 @@ export function DeleteDialog({ entity, name, usage, replacements, onDelete, onAr
         )}
         {!needsRemap && (
           <>
-            {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+            {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={onClose}>Cancel</Button>
               {onArchive && <Button variant="secondary" onClick={onArchive}>Archive instead</Button>}
@@ -286,7 +286,7 @@ function ReplacementSelect({ replacements, onConfirm, onArchive, onClose, error 
       <Select label="Move affected issues to" value={replaceWith} onChange={e => setReplaceWith(e.target.value)}>
         {replacements.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
       </Select>
-      {error && <p className="text-xs" style={{ color: 'var(--color-error)' }}>{error}</p>}
+      {error && <p className="text-xs" style={{ color: 'var(--color-error-ink)' }}>{error}</p>}
       <div className="flex justify-end gap-2">
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
         {onArchive && <Button variant="secondary" onClick={onArchive}>Archive instead</Button>}
