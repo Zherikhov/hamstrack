@@ -9,15 +9,32 @@
 # AND at the end of every apply-config.sh run, so the freshest reading is always the one
 # taken at the moment of a deploy.
 #
+# THOSE TWO RUNS ARE NOT THE SAME FILE. The deploy runs the SYNCED copy under
+# /opt/hamstrack/ops/; the timer's unit runs /usr/local/bin/hamstrack-config-drift, which an
+# operator INSTALLED, because the sync deliberately cannot install (§6.4). So a change to
+# this script reaches production's hourly path only after the install step is re-run — until
+# then the deploy log shows the new behaviour and the metric keeps being published by the
+# old one, with `installed-ops` reading 1 meanwhile. That re-install is a step in
+# docs/release-checklist.md ("Releases that change a file the box runs from a COPY"); do not
+# read a fix off a deploy log and call it deployed.
+#
 # Four comparisons, and together they are the property. Each one catches a failure the
 # others cannot see:
 #
 #   files           re-hash every synced file against .deployed-manifest.sha256, and detect
 #                   files ADDED TO or REMOVED FROM a synced directory — somebody edited the
 #                   box after the deploy, including the incident edit that must be un-done.
-#   containers      each service's com.docker.compose.config-hash label on the RUNNING
-#                   container versus `docker compose config --hash '*'` — the file is right
-#                   and the container was never recreated.
+#   containers      `docker compose up -d --dry-run` — Compose's own plan for the command a
+#                   deploy runs, and anything it would ACT ON is drift: the file is right and
+#                   the container was never recreated. It asks Compose rather than computing
+#                   a second opinion about what Compose would decide (HD-221; the config-hash
+#                   comparison this replaced disagreed with `up -d` on production
+#                   permanently, and the check could not clear). The deploy runs
+#                   `up -d --remove-orphans` and the plan here deliberately drops that flag,
+#                   so it is the deploy's command MINUS the orphan sweep — and the orphans
+#                   are then read out of Compose's own warning on the same output, because a
+#                   service deleted from a file whose container still runs is drift that no
+#                   per-service comparison can see (it is in no file and in no verb line).
 #   installed-ops   /opt/hamstrack/ops/** versus the copies installed under /usr/local/bin
 #                   and /etc/systemd/system. The sync CANNOT install (§6.4), so the check has
 #                   to be able to say that it hasn't.
@@ -60,8 +77,11 @@ TEXTFILE_DIR="${CONFIG_DRIFT_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_colle
 
 # Which compose files describe this box — the same COMPOSE_FILES contract apply-config.sh
 # takes, and for the same reason: a listed file that is ABSENT is skipped, so a deployment
-# without the observability stack does not fail `config --hash` for ever and report
-# containers=1 about a stack that is entirely healthy. Assembled once, used by scope 2.
+# without the observability stack does not fail every Compose invocation for ever and report
+# containers=1 about a stack that is entirely healthy. Assembled once, used by scope 2 —
+# which passes these files to `config --services` and to `up -d --dry-run`, so the rule has
+# to hold for both or the two would resolve different projects and the second would plan to
+# create containers the first never declared.
 #
 # WHERE it is set matters as much as that it exists. Exporting it in a shell reaches only a
 # HAND run; the hourly timer is what actually publishes the metric, and it inherits nothing
@@ -69,11 +89,24 @@ TEXTFILE_DIR="${CONFIG_DRIFT_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_colle
 # (`EnvironmentFile=-…`, optional) — put it there, and NOT by editing the installed unit,
 # which is compared byte-for-byte with the synced copy and would then read as permanent
 # `installed-ops` drift.
+#
+# AND IT HAS TO BE THE SAME VALUE THE DEPLOY USES. apply-config.sh reads COMPOSE_FILES from
+# the environment of whoever runs it (`sudo -E …`); this path reads it from a file nobody
+# else writes. Nothing enforces that the two agree, and narrowing one without the other is
+# not caught anywhere — it surfaces as the orphan report at the bottom of scope 2 naming
+# the operator's own healthy containers, hourly and for ever. Both documents that prescribe
+# one now name the other: docs/self-hosting.md → Applying repository configuration, and
+# docs/ops-prod-hardening.md → Installing the drift check.
 read -r -a COMPOSE_LIST <<< "${COMPOSE_FILES:-docker-compose.prod.yml docker-compose.observability.yml}"
 COMPOSE_ARGS=()
+# The names that actually RESOLVED on this box, as distinct from the ones requested: a
+# listed file absent here is skipped, so a message naming the requested list would name a
+# file this check never passed to Compose. Scope 2's orphan line names this array.
+COMPOSE_RESOLVED=()
 for compose_file in "${COMPOSE_LIST[@]}"; do
   if [ -f "$TARGET/$compose_file" ]; then
     COMPOSE_ARGS+=(-f "$compose_file")
+    COMPOSE_RESOLVED+=("$compose_file")
   fi
 done
 
@@ -268,21 +301,99 @@ check_files() {
 # --- scope 2: containers -----------------------------------------------------
 # The file can be right while the container still runs the previous definition — the shape
 # of "somebody copied the compose file and forgot `up -d`", which is half of what HD-199
-# was. Compose's own config-hash is the comparison it uses internally to decide whether a
-# container needs recreating, so this asks exactly the question `up -d` would answer.
+# was.
+#
+# HD-221 REPLACED THE ORACLE, not a line of it. This used to compare each service's
+# com.docker.compose.config-hash label on the running container against
+# `docker compose config --hash '*'`, on the reasoning that the hash is what `up` decides
+# with. On production the two disagreed permanently — for the app service `running` and
+# `ondisk` differed, stably, while `up -d` itself declined to recreate anything and
+# `--force-recreate` reproduced the RUNNING hash rather than the on-disk one — so this scope
+# reported drift for a week about a box that was in exactly the state it was deployed in.
+# A detector that cannot clear gets muted, and a muted detector is worse than none: the next
+# real drift (a hand-edited compose file on the box, which is what HD-199 exists to prevent)
+# arrives into a channel nobody reads. The value of this check is entirely in its silence
+# being meaningful.
+#
+# WHY THE TWO DISAGREED IS NOT KNOWN, AND THIS COMMENT NAMES NO CAUSE. What is excluded is
+# the ticket's own hypothesis — that `app` is the only service whose definition interpolates
+# a default (`mem_limit: ${APP_MEMORY_LIMIT:-1g}`) and that interpolation reaches one path
+# and not the other. This repository's postgres and caddy carry the same shape and MATCHED,
+# and a probe on Compose v5.1.0 / Docker 29.2.1 hashed `mem_limit: 128m` and
+# `mem_limit: ${VAR:-128m}` byte-identically, each agreeing with its own container's label;
+# that probe could not reproduce the disagreement at all. What stays open: the production
+# Compose version, which nobody recorded, and a difference between the file set the deploy's
+# `up` resolved and the one this check passed. Neither is answerable from off the box.
+#
+# So the comparison stopped being a RE-IMPLEMENTATION of Compose's decision and became
+# Compose's decision. `up -d --dry-run` plans the command a deploy runs — minus its
+# `--remove-orphans` sweep, see (d) — and anything it would act on is drift. The rejected
+# alternative was to narrow the comparison to the fields that matter operationally (image,
+# env, limits, mounts) — which is the same defect with a
+# shorter list: it still computes a second opinion about what `up` would do, and its
+# omissions are SILENT. A field nobody thought to include — ulimits, sysctls, cap_add, a
+# healthcheck, a network alias — then drifts under a green light, which is this ticket's
+# failure pointed the other way and harder to notice.
+#
+# WHAT MAKES THE SILENCE MEANINGFUL — and it is never "the command printed nothing". Each
+# of these is a way a plan could read as health while being unread; a new one is an addition
+# here, which is why this paragraph carries no count of them:
+#
+#   (a) Compose writes this plan to STDERR. Its stdout is EMPTY on a clean box and equally
+#       empty on a drifted one — so a check that read stdout, which is the obvious way to
+#       write this, would be green for ever. That is this ticket's own defect one layer
+#       down, and it is why the redirection below is `2>&1` and not decoration.
+#   (b) A clean service is not ABSENT from the plan, it is present as `Running`. The test is
+#       therefore POSITIVE: every container this box is running must appear in the plan, and
+#       must appear with that verb. An oracle that goes blind — a Compose that stops
+#       printing per-container status, a flag that stops being accepted — then reports every
+#       service as unplanned and is loud, instead of reading as health.
+#   (c) ANY verb that is not `Running` is drift, including one this script has never seen.
+#       Fail-closed on purpose: if a future Compose renames `Recreate`, an allow-list of
+#       drift verbs goes quietly green and a deny-list goes loudly red naming the verb it
+#       did not understand. Only one of those two mistakes is survivable here.
+#   (d) AN ORPHAN IS INVISIBLE TO (b) AND (c), so it is read separately. Delete a service
+#       from a compose file and leave its container running: it is not in `config
+#       --services`, so no per-service comparison reaches it, and Compose prints no
+#       `Container` line for it either — measured, that box publishes containers=0 while a
+#       deploy's `up -d --remove-orphans` would destroy the container. Compose does say so,
+#       on the same output as the plan (`Found orphan containers ([...]) for this project`),
+#       and the success path below greps for exactly that. The flag is NOT added to the
+#       command: `--remove-orphans` in a monitor is a delete verb in a read-only job, and
+#       "a dry run cannot write" then rests on the dry-run client alone rather than on the
+#       command being harmless to begin with.
+#
+# `--dry-run` IS A WRITE-SHAPED COMMAND IN A READ-ONLY MONITOR, run hourly by the timer and
+# again at the end of every deploy, so why it cannot write is worth stating. Compose
+# substitutes the whole Docker API client for a dry-run client at the CLI layer before the
+# command runs, rather than consulting a flag at each mutation, so there is no
+# create / start / remove path that can forget to honour it. That is the mechanism; the
+# EVIDENCE is a checked property and not a reading of somebody's source —
+# ConfigDriftContainerOracleTest brings a scratch project up, drifts it until the plan says
+# `Recreate`, and asserts the container id is unchanged afterwards; and separately runs a
+# plan against a project that is entirely DOWN and asserts that no container and no network
+# came into existence.
+#
+# AND A FAILURE OF THE COMMAND IS NOT AN ANSWER OF "NO". A non-zero exit is reported as
+# drift, with the output, exactly as an unresolvable `config` already was: a monitor that
+# could not ask its question has not shown that the box is clean.
 check_containers() {
-  local hashes svc want got cid errfile mismatched=0
+  local errfile services plan plan_pairs orphans rc svc cids cid name verbs bad mismatched=0
   if [ "${#COMPOSE_ARGS[@]}" -eq 0 ]; then
     log "containers: none of (${COMPOSE_LIST[*]}) is present in $TARGET — there is no declaration to compare the running containers against"
     DRIFT_CONTAINERS=1
     return 0
   fi
-  # stderr goes to its own file rather than into `hashes`. Compose writes ordinary warnings
-  # there on a perfectly good run, and a warning parsed as a `<service> <hash>` line invents
-  # a service that is "declared and not running" — a drift report about a container nobody
-  # ever declared.
+
+  # The service list comes from Compose's own resolution rather than from a grep of the
+  # files, and it is asked for separately from the plan because it answers a different
+  # question: a box on which every container was destroyed still produces a perfectly good
+  # plan, so the list is what says WHICH services are supposed to exist at all. stderr goes
+  # to its own file, as it did before: Compose writes ordinary warnings there on a good run,
+  # and a warning parsed as a service name invents a service that is "declared and not
+  # running" — a drift report about a container nobody ever declared.
   errfile="$(mktemp)"
-  if ! hashes="$( cd "$TARGET" && docker compose "${COMPOSE_ARGS[@]}" config --hash '*' 2>"$errfile" )"; then
+  if ! services="$( cd "$TARGET" && docker compose "${COMPOSE_ARGS[@]}" config --services 2>"$errfile" )"; then
     log "containers: docker compose could not resolve the box's configuration — that is itself a drift:"
     cat "$errfile"
     rm -f "$errfile"
@@ -290,24 +401,156 @@ check_containers() {
     return 0
   fi
   rm -f "$errfile"
+  if [ -z "${services//[[:space:]]/}" ]; then
+    log "containers: the compose files in $TARGET resolve to no services at all — there is nothing here whose definition could be compared"
+    DRIFT_CONTAINERS=1
+    return 0
+  fi
+
+  # THE PLAN. stderr merged in, per (a) — that is where Compose writes it, and a version of
+  # this line without the redirection is a check that can never fail. `--ansi never` so the
+  # parse does not depend on whether a hand run happens to have a terminal attached (the
+  # capture makes it a pipe either way; the flag removes the question rather than relying on
+  # that). Nothing here passes `--no-build`: no service in this repository's compose files
+  # declares `build:`, and a dry run intercepts a build the way it intercepts everything.
+  plan="$( cd "$TARGET" && docker compose --ansi never "${COMPOSE_ARGS[@]}" up -d --dry-run 2>&1 )" && rc=0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    # The diagnostic is printed, on the same terms the `config` failure above already
+    # established: WHATEVER THIS PRINTS IS PUBLIC (see the header) — it reaches the journal
+    # on the box and, on a failed deploy, a GitHub Actions log through SSM. So the bound on
+    # what can appear here has to be the real one, and it is NOT "Compose names files,
+    # services and variables rather than values". Measured, a TYPED field's decode error
+    # quotes the offending RESOLVED VALUE:
+    #     'services[alpha].mem_limit' strconv.ParseFloat: parsing "s3cr3": invalid syntax
+    #     'services[alpha].stop_grace_period' time: invalid duration "hunter2s"
+    # The `${VAR:?}` path is the safe one — it names the variable only. What actually bounds
+    # this exception is the CONTENT of the compose files: every typed interpolation in them
+    # today is a tuning knob (a memory limit, a shm size, a grace period), and EVERY secret
+    # that reaches a service definition lands in an untyped `environment:` string, which has
+    # no parse that can fail. Stated as the category on purpose: the member-shaped version
+    # of this sentence named DB_PASSWORD as "the only" one and was already false when it was
+    # written (GF_SECURITY_ADMIN_PASSWORD, MAIL_PASSWORD, DB_MONITOR_PASSWORD are three
+    # more), and a stale count is the last thing wanted in the comment whose job is bounding
+    # what reaches a public Actions log. A new TYPED field fed by a
+    # secret breaks that and would print it here — that is the condition on this exception,
+    # and the thing to re-check when a compose file gains an interpolated typed value.
+    # Within it, this is the one place in this scope where a body rather than a name reaches
+    # the journal, and it is allowed out because a failure an operator cannot see is a
+    # failure they cannot fix — but it is a deliberate exception and not a licence: nothing
+    # on the SUCCESS path below prints the plan, only per-service verdicts.
+    log "containers: 'docker compose up -d --dry-run' exited $rc — this check could not ask whether the box matches its files, which is not the same as an answer of no:"
+    printf '%s\n' "$plan"
+    # ONE FAILURE IS COMMON ENOUGH TO NAME. A `depends_on: condition: service_healthy`
+    # whose target is not healthy makes Compose abandon the plan where it stands — measured:
+    # ` Container x Error dependency y failed to start`, exit 1 — and every service the plan
+    # had not reached yet goes unexamined.
+    #
+    # HOW LONG THAT TAKES IS A PROPERTY OF THE DEPENDENCY'S STATE, NOT A CONSTANT. A run
+    # planned against an ALREADY-`unhealthy` dependency is refused at once (measured: 1 s).
+    # A dependency that is `starting` makes the dry run WAIT for its healthcheck to settle,
+    # exactly as `up -d` waits — measured on the same pair of containers, a 30 s
+    # `start_period` held the plan 29 s before the same exit 1. That is the state this box
+    # is in during EVERY app restart: `app`
+    # declares start_period 40s / interval 10s / retries 5 and `caddy` waits on `app` being
+    # healthy, so a check landing mid-restart can sit for a minute or two, plus postgres's
+    # own window. It is bounded rather than open-ended, and that is what makes it acceptable
+    # in an hourly job: TimeoutStartSec=300 on the unit, and SIGTERM is trapped like any
+    # other exit, so even a run systemd kills publishes a truthful 1 rather than leaving
+    # yesterday's reading in place.
+    #
+    # This scope then publishes 1 for the duration of a HEALTH incident, which is not a
+    # configuration one. That is deliberate and must not be "fixed" by ignoring the exit
+    # status: a plan that stopped early has shown nothing about the services after it, and
+    # an operator reading a ConfigDrift alert during an outage deserves to be told which of
+    # the two they are looking at rather than left to infer it from a stack trace.
+    if printf '%s\n' "$plan" | grep -q 'dependency failed to start'; then
+      log "containers: …because a service is UNHEALTHY and Compose abandoned the plan there. That is a health incident, not a configuration one, and this scope stays 1 until it clears — a plan that stopped early cannot show that the services after it match."
+    fi
+    DRIFT_CONTAINERS=1
+    return 0
+  fi
+
+  # `<container-name> <TAB> <verb>`, one per progress line. `Container` lines only: Compose
+  # also reports Network / Volume / Image objects, and those are shared rather than any one
+  # service's definition — a network that had to be re-created is reported by the verbs of
+  # the containers hanging off it anyway. `tr -d '\r'` because a CR captured into the verb
+  # would fail every comparison below and read as universal drift.
+  plan_pairs="$(printf '%s\n' "$plan" | tr -d '\r' | awk '$1 == "Container" && NF >= 3 { print $2 "\t" $3 }')"
+
   DRIFT_CONTAINERS=0
-  while read -r svc want; do
+
+  # (d). The `Container` filter above discards this line, and the per-service loop below
+  # iterates services that still exist, so without this block a deleted service whose
+  # container is still running reads as a clean box. Names only, which is what Compose
+  # already put in the warning; the extraction is defensive because a warning this script
+  # can see but cannot parse is still drift.
+  #
+  # WHAT THE DETECTION PROVES AND WHAT IT DOES NOT. Compose scopes the warning to this
+  # project AND to the file set COMPOSE_FILES resolved HERE, so an orphan named below is
+  # really running under a service none of the files THIS CHECK was pointed at declares.
+  # That much is unconditional. Whether a deploy would SWEEP it is not: it holds only if
+  # the deploy resolves the same set, and nothing enforces that.
+  #
+  # THE TWO VALUES COME FROM DIFFERENT PLACES. apply-config.sh takes COMPOSE_FILES from the
+  # environment of whoever runs it (`sudo -E …`, docs/self-hosting.md → Applying repository
+  # configuration); the hourly timer inherits no shell at all and takes it from
+  # /etc/hamstrack/drift.env through the unit's `EnvironmentFile=-…`
+  # (docs/ops-prod-hardening.md → Installing the drift check). Two files, two people, two
+  # occasions. And even EQUAL values can resolve differently: apply-config.sh skips a listed
+  # file absent from the RELEASE TREE, this script skips one absent from the BOX. The single
+  # path where the two sets agree by construction is apply-config.sh's own tail-end run —
+  # `bash "$DRIFT" "$TARGET"`, which inherits that deploy's environment.
+  #
+  # So a self-hoster who runs a compose file of their own, narrows the deploy and leaves the
+  # timer on the bundled default gets their own healthy containers reported as orphans every
+  # hour for ever, under a sentence promising a deletion that would never happen — a monitor
+  # that both fires permanently and mis-prescribes, which is this ticket's own defect wearing
+  # the opposite sign. Hence: name the set actually resolved, and make the sweep CONDITIONAL.
+  if printf '%s\n' "$plan" | grep -q 'Found orphan containers'; then
+    orphans="$(printf '%s\n' "$plan" | tr -d '\r' \
+      | sed -n 's/.*Found orphan containers (\[\([^]]*\)\]).*/\1/p' | head -n 1)"
+    log "containers: compose found orphan containers for this project — ${orphans:-(compose named them in a form this check could not parse)} — running under a service none of (${COMPOSE_RESOLVED[*]:-${COMPOSE_LIST[*]}}) declares. If that is the same set your deploy resolves, its 'up -d --remove-orphans' would delete them. If you narrowed COMPOSE_FILES for the deploy and not for this check, these are your own containers: set the same value in /etc/hamstrack/drift.env"
+    mismatched=1
+  fi
+  while IFS= read -r svc; do
     [ -n "$svc" ] || continue
-    [ -n "$want" ] || continue
-    cid="$( cd "$TARGET" && docker compose "${COMPOSE_ARGS[@]}" ps -q "$svc" 2>/dev/null || true )"
-    if [ -z "$cid" ]; then
+    cids="$( cd "$TARGET" && docker compose "${COMPOSE_ARGS[@]}" ps -q "$svc" 2>/dev/null || true )"
+    if [ -z "${cids//[[:space:]]/}" ]; then
       log "containers: service $svc is declared and not running"
       mismatched=1
       continue
     fi
-    got="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$cid" 2>/dev/null || true)"
-    if [ "$got" != "$want" ]; then
-      log "containers: $svc runs a definition that is not the one on disk"
-      mismatched=1
-    fi
-  done <<< "$hashes"
+    # Every container of the service, not the first: a scaled service has several, and
+    # checking one is a check that silently narrows the moment somebody scales.
+    while IFS= read -r cid; do
+      [ -n "$cid" ] || continue
+      name="$(docker inspect -f '{{.Name}}' "$cid" 2>/dev/null | tr -d '\r' || true)"
+      name="${name#/}"
+      if [ -z "$name" ]; then
+        log "containers: the running container of service $svc could not be named, so its plan cannot be read"
+        mismatched=1
+        continue
+      fi
+      verbs="$( printf '%s\n' "$plan_pairs" | awk -F'\t' -v n="$name" '$1 == n { print $2 }' | LC_ALL=C sort -u )"
+      if [ -z "$verbs" ]; then
+        # (b), and NOT clean. A running container the plan does not mention means the plan
+        # could not be read, and an unreadable plan must never be the thing that publishes 0.
+        log "containers: the dry run planned nothing for $svc, whose container $name is running — 'up -d --dry-run' names every container it considers, so this is an oracle that cannot be read rather than a box that is clean"
+        mismatched=1
+        continue
+      fi
+      bad="$(printf '%s\n' "$verbs" | grep -vx 'Running' | head -n 1 || true)"
+      if [ -n "$bad" ]; then
+        # (c). The verb is printed because a verb this script does not know is exactly the
+        # case where the reader needs to see what Compose actually said.
+        log "containers: 'docker compose up -d' would act on $svc — compose plans '$bad' for container $name, so the definition on disk is not the one it is running"
+        mismatched=1
+      fi
+    done <<< "$cids"
+  done <<< "$services"
+
   [ "$mismatched" = 0 ] || DRIFT_CONTAINERS=1
-  [ "$DRIFT_CONTAINERS" = 0 ] && log "containers: every service runs the definition on disk"
+  [ "$DRIFT_CONTAINERS" = 0 ] && log "containers: 'docker compose up -d --remove-orphans' would act on nothing — every declared service runs the definition on disk, and nothing runs that no file declares"
   return 0
 }
 

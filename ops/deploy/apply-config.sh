@@ -680,6 +680,13 @@ docker image prune -f
 # So the freshest reading is always the one taken at the moment of a deploy, even on a box
 # where the hourly timer has not been installed. Non-fatal: a metric that could not be
 # written must never turn a good deploy into a red one.
+#
+# THIS IS THE SYNCED SCRIPT, and the timer runs /usr/local/bin/hamstrack-config-drift — a
+# COPY, because the sync deliberately cannot install (§6.4). After a release that changed
+# this file the two differ until somebody re-installs, so behaviour visible in THIS run is
+# not yet the behaviour of the hourly path, and `installed-ops` says so meanwhile. The
+# re-install is a step in docs/release-checklist.md ("Releases that change a file the box
+# runs from a COPY").
 DRIFT="$TARGET/ops/drift/hamstrack-config-drift.sh"
 if [ -f "$DRIFT" ]; then
   bash "$DRIFT" "$TARGET" || log "WARN drift metrics could not be published — the deploy itself succeeded"

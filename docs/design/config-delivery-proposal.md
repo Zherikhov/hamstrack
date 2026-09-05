@@ -411,8 +411,26 @@ all installed for HD-187 — so the cost is a script and two rules, not a subsys
 | Scope | Comparison | The failure it catches |
 |---|---|---|
 | `files` | re-hash every synced file and check against `.deployed-manifest.sha256`; also detect files added to or removed from a synced directory | somebody edited (or added to) a synced file after the deploy — including the incident edit that must be un-done |
-| `containers` | each service's `com.docker.compose.config-hash` label on the running container versus `docker compose … config --hash '*'` | the file is right and the container was never recreated — the shape of "consequence 1" if a file had been copied without `up -d` |
+| `containers` | `docker compose … up -d --dry-run` — Compose's own plan for the command a deploy runs, minus its `--remove-orphans` sweep; anything it would **act on** is drift, as is a declared service with no container, as is an orphan named in Compose's own warning, as is a plan that cannot be read | the file is right and the container was never recreated — the shape of "consequence 1" if a file had been copied without `up -d` |
 | `installed-ops` | `sha256sum` of `/opt/hamstrack/ops/**` versus the copies installed under `/usr/local/bin` and `/etc/systemd/system` | the sync cannot install, so the check must be able to say that it hasn't (§6.4) |
+
+**`containers` was re-founded by HD-221.** It originally compared each service's
+`com.docker.compose.config-hash` label against `docker compose config --hash '*'`, on the reasoning
+that the hash is what `up` decides with. On production the two disagreed *permanently* for one
+service that `up -d` itself declined to recreate, so the alarm fired continuously about a box in the
+state it was deployed in — and a detector that cannot clear gets muted, which is strictly worse than
+not having one. **Why they disagreed was never established and stays open**: the interpolation
+hypothesis (only `app` interpolates a default into its definition) is *excluded* — `postgres` and
+`caddy` carry the same shape and matched, and a probe on Compose v5.1.0 hashed a literal and an
+interpolated-with-default value byte-identically, each agreeing with its own container's label;
+what remains unexamined is the production Compose version, which nobody recorded, and any
+difference between the file set the deploy's `up` resolved and the one the check passed. Neither is
+answerable from off the box. The fix therefore stopped *re-implementing* Compose's decision and
+started *asking* for it. The alternative considered and rejected was to narrow the comparison to
+the fields that matter operationally (image, env, limits, mounts): that is the same second opinion
+with a shorter list, and its omissions are silent — a field nobody thought to include drifts under
+a green light. Sealed by `ConfigDriftContainerOracleTest`, whose load-bearing half is that a **clean**
+tree is silent.
 
 Checksums rather than a re-download: no network dependency, no codeload availability in the hourly
 path, and it answers the question that is actually asked ("has this box changed since it was
@@ -725,7 +743,11 @@ Its trigger is the measurement, and both possible answers are actionable.
     land in `.config-backup/` and are worth keeping.
 12. **`.config-backup` growth** → keep 5, prune the rest. Each set is a few tens of kilobytes.
 13. **A synced `ops/` newer than the installed copy** → the `installed-ops` drift scope; the remedy is
-    the install step, and the sync will never do it (§6.4).
+    the install step, and the sync will never do it (§6.4). That tell is reactive and arrives through
+    `ConfigDrift`, so a release that changes a file under `ops/` carries the re-install as a step of
+    its own (`docs/release-checklist.md` → *Releases that change a file the box runs from a COPY*) —
+    the deploy's tail-end run executes the **synced** script while the timer keeps running the copy,
+    so the deploy log is not evidence about the hourly path.
 14. **The drift timer is not installed** → the metric is only as fresh as the last deploy;
     `hamstrack_config_check_timestamp_seconds` is how a reader tells. `noDataState: OK` means silence,
     not health.
@@ -978,6 +1000,12 @@ Setting `COMPOSE_FILES` only in the shell reaches the hand-run path and not the 
 is what publishes the metric — that box would report `containers=1` for ever about a healthy stack.
 Do NOT add the variable by editing the installed unit: that copy is compared byte-for-byte with the
 synced one, so the edit shows as permanent `installed-ops` drift.
+
+It has to be **the same value the deploy uses** — `apply-config.sh` takes `COMPOSE_FILES` from the
+environment of whoever runs it (`sudo -E`), this unit takes it from `/etc/hamstrack/drift.env`, and
+nothing enforces that the two agree. A box narrowed on one side only reports its own containers as
+orphans hourly, and the message claims a deploy's `--remove-orphans` would delete them, which on
+that box it would not.
 
 **8. Run the two-address probe** (§10.2c) and record both status codes on HD-199.
 

@@ -1498,8 +1498,16 @@ systemctl list-timers hamstrack-config-drift.timer
 cat /var/lib/node_exporter/textfile_collector/hamstrack_config.prom
 ```
 
-Like the backup job (§6.3), this is an install the deploy will never do for you — and like
-it, the check itself will tell you when the installed copy has fallen behind the synced one.
+Like the backup job (§6.3), this is an install the deploy will never do for you, and it is
+not a one-time step: **re-run these three `install` commands after any release that changes a
+file under `ops/`**, then `sudo systemctl restart hamstrack-config-drift.service`, then
+un-silence `ConfigDrift`. `docs/release-checklist.md` → *Releases that change a file the box
+runs from a COPY* carries that as a checklist item, and it is the proactive half on purpose.
+The check does say when the installed copy has fallen behind the synced one
+(`hamstrack_config_drift{scope="installed-ops"}` goes to 1) — but that tell is **reactive and
+arrives through `ConfigDrift`**, which is exactly the alert somebody has silenced while a
+release fixes this check, and the deploy's own tail-end run executes the *synced* script, so
+the deploy log shows the new behaviour while the hourly timer keeps publishing the old one.
 
 **This box runs both compose files, so it needs nothing further.** A deployment that runs
 the app *without* the observability stack must narrow the set the `containers` scope
@@ -1517,6 +1525,13 @@ The unit reads that file through `EnvironmentFile=-…` (optional, so its absenc
 Do **not** add the variable by editing the installed unit instead: that copy is compared
 byte-for-byte with the synced one, so the edit would show as permanent `installed-ops`
 drift — the check reporting your own fix.
+
+**It must be the same value the deploy uses.** `apply-config.sh` reads `COMPOSE_FILES` from
+the environment of whoever runs it (`sudo -E`), this unit reads it from the file above, and
+nothing compares the two. Narrow one and not the other and the `containers` scope reports
+your own healthy containers as orphans — under a message that says a deploy's
+`up -d --remove-orphans` would delete them, which for that box is false. The deploy side is
+`docs/self-hosting.md` → *Applying repository configuration*.
 
 ### The two-address probe
 

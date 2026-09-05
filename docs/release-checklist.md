@@ -553,6 +553,76 @@ Two lines, and the second is the one that makes the first checkable:
    allowed to hold.
 
 
+## Releases that change a file the box runs from a COPY
+
+The section above is about a value the repository is not allowed to hold. This one is about a
+file it *does* hold, twice: **`apply-config.sh` syncs `/opt/hamstrack/ops/` and installs
+nothing**, deliberately (config-delivery proposal §6.4 — a deploy able to write
+`/usr/local/bin` and `/etc/systemd/system` and then `daemon-reload` is a deploy that can
+replace a unit on a box nobody is watching). So for any file under `ops/` that production runs
+from an **installed copy** rather than in place, a release ships the new version to
+`/opt/hamstrack/ops/` and production keeps running the old one until somebody installs it.
+
+Read that as a **category, not a list**: *a release that changes a file under `ops/` which is
+installed rather than run in place carries a re-install step.* Today that shape covers the
+drift check (`hamstrack-config-drift.sh` and its `.service`/`.timer`) and the backup job; a
+file added tomorrow to either install step belongs here without this paragraph being edited.
+
+**Nothing looks wrong afterwards, and one reading actively misleads.** `apply-config.sh` ends
+every deploy by running `$TARGET/ops/drift/hamstrack-config-drift.sh` — the *synced* file — so
+the new behaviour appears exactly once, in the deploy's own log, and the hourly timer then goes
+back to `/usr/local/bin/hamstrack-config-drift`, which is the old one. A fix verified from the
+deploy output is therefore not evidence about the path that publishes the metric for the rest
+of the hour. `hamstrack_config_drift{scope="installed-ops"}` does report the gap correctly the
+whole time — and reads identically to every other reason that scope is 1.
+
+**HD-221 is the worked example**: it replaced the `containers` oracle precisely so that scope
+could stop firing on a healthy box, and without the re-install the box keeps publishing the old
+answer hourly, keeps `installed-ops` at 1 as well, and `ConfigDrift` — `for: 30m` against an
+hourly timer — never stops firing. The release ships a fix that is invisible where it counts.
+
+1. **Re-install every installed member this release touched, after the deploy.** Step 2
+   below reads a gauge scoped to the *category*, so this step has to be too:
+   `installed-ops` compares **every** `*.sh`, `*.service` and `*.timer` under
+   `/opt/hamstrack/ops/` against its installed copy. A release that also touched the backup
+   job therefore leaves the gauge at `1` after a completely successful drift re-install —
+   and a step-1-shaped reading of that number is confidently wrong about a step that worked.
+
+   Members other than the drift check first — today that is the backup job
+   (`docs/ops-prod-hardening.md` → *Putting the job on the box*, which wraps the same
+   `install` commands in an SSM invocation and stays the reference). No `restart` here: the
+   unit *is* the backup, and restarting it takes one by hand.
+   ```bash
+   sudo install -m 0750 -o root -g root /opt/hamstrack/ops/backup/hamstrack-backup.sh /usr/local/bin/hamstrack-backup
+   sudo install -m 0644 /opt/hamstrack/ops/backup/hamstrack-backup.service /etc/systemd/system/
+   sudo install -m 0644 /opt/hamstrack/ops/backup/hamstrack-backup.timer   /etc/systemd/system/
+   sudo systemctl daemon-reload
+   ```
+
+   The drift check **last**, because its `restart` is what writes the `.prom` step 2 reads —
+   an install performed after it leaves step 2 reading a file written by the previous copy
+   (`docs/ops-prod-hardening.md` → *Installing the drift check* stays the reference):
+   ```bash
+   sudo install -m 0750 /opt/hamstrack/ops/drift/hamstrack-config-drift.sh /usr/local/bin/hamstrack-config-drift
+   sudo install -m 0644 /opt/hamstrack/ops/drift/hamstrack-config-drift.service /etc/systemd/system/
+   sudo install -m 0644 /opt/hamstrack/ops/drift/hamstrack-config-drift.timer   /etc/systemd/system/
+   sudo systemctl daemon-reload && sudo systemctl restart hamstrack-config-drift.service
+   ```
+2. **Un-silence the alert the release was supposed to quiet.** This is the step that makes the
+   first one checkable, and the one a release fixing a noisy detector is most likely to skip:
+   a muted alert and a fixed one are the same observation. Un-silence `ConfigDrift` in Grafana
+   and read the published numbers rather than the absence of a page:
+   ```bash
+   journalctl -u hamstrack-config-drift -n 20 --no-pager
+   grep drift /var/lib/node_exporter/textfile_collector/hamstrack_config.prom
+   ```
+   Every scope at `0` is the finding. `installed-ops=1` here means an installed copy is
+   still behind the synced one — **the journal line names which file**, and that name is
+   the whole reading: it separates a missed re-install of *this* release's subject from a
+   missed re-install of some other member the release also touched. When the file it names
+   is the drift check itself, this is the alert reporting its own un-applied fix.
+
+
 ## Releases that apply a new rule to data you already have
 
 The two sections above are about a value *moving* under an operator — a default that was resized,
