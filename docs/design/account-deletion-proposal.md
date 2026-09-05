@@ -238,7 +238,13 @@ next reader will treat the criterion as fully discharged.
 
 1. **`LegalLayout lastUpdated` must be bumped** to the ship date. §9 of the policy promises
    exactly that, and an edit that leaves the date is the policy breaking its own terms.
-2. **`PublishedClaimsTest` scans this file.** Three of its assertions bear on the new copy:
+2. **`PublishedClaimsTest` does NOT scan this file — it scans where the copy LANDS.** Its javadoc
+   excludes `docs/design` deliberately (alongside `docs/project-state.md` and
+   `docs/ops-prod-hardening.md`), so nothing here is checked by it. The constraint is real
+   anyway, and that is the point: this wording ships into `PrivacyPage.tsx`, and the SPA source
+   under `src/main/frontend/src` **is** in the scanned set. So the assertions below bind the
+   moment the copy is pasted, not while it sits in this document — which is the worst possible
+   time to discover them. Three bear on the new copy:
    - the negative regex `(data|workspaces?|projects?|issues?) (may|might|can|will) be
      (reset|wiped|erased|cleared)` — so **write "is deleted", never "may be erased" or
      "will be wiped"**. The proposed wording clears it; a reviewer "improving" it may not.
@@ -446,7 +452,15 @@ transferred automatically, and it is escalated to a human before the freeze.**
   of somebody who has asked for nothing and cannot even log in to object. So the resolutions are
   the two a human can take: reactivate the suspended member — a decision belonging to whoever
   suspended them, not to this erasure — and then run branch (b); or obtain the workspace's
-  agreement to delete it, and run branch (c).
+  agreement to delete it, and run branch (c). Branch (c)'s delete carries its own predicate —
+  *nobody un-erased is left* — which by construction does not hold while this branch applies:
+  the un-erased member is what made this b′ rather than (c). So the agreement is not by itself
+  the mechanism; §11's **b′ close-out** says what has to become true first, and that the guard
+  is never edited to make the statement fire. **And the two resolutions are less independent
+  than they look**: every member here is non-ACTIVE by this branch's definition and a non-ACTIVE
+  account cannot sign in, so the member cannot *leave* either — (c) needs the same reactivation
+  (b) does, after which (b) is available and is the cheaper answer. Take (c) only when deletion
+  is what the workspace actually asked for.
 
   **The gate is on phase 3, not on phase 8, and an earlier draft of this document had it in the
   wrong place.** It argued that the scrub is what sets `status = 'DISABLED'` and blinds the
@@ -474,7 +488,11 @@ transferred automatically, and it is escalated to a human before the freeze.**
   Either way, that workspace's `workspace_members` row stays and **phase 8 does not run**: the
   scrub is what destroys the address and display name the operator still needs, and there is no
   reason to spend it while the request is unfinished. Everything else in the erasure (phases 4,
-  6, 7, and the other workspaces' phase 5) proceeds.
+  6, 7, and the other workspaces' phase 5) proceeds. **This workspace's own phase 5 is deferred,
+  not skipped.** Both resolutions above end with the subject holding no row in it, and the step
+  that gets there — re-derive the lists from the database, then re-run phases 2, 5 and 7 for the
+  released workspace, then the scrub and the verification — is §11's **b′ close-out**, written
+  out there rather than improvised on the day the escalation resolves.
 
 **(c) Every other member of the workspace has been erased, or there are none** (a solo
 workspace). **The workspace and everything under it is deleted, including its attachment
@@ -508,6 +526,21 @@ member at all, appoint the workspace's (possibly newly promoted) Owner. **Do not
 Project admin** — V16 and `ADOPTION_ROLE_KEY`'s javadoc carry that argument, and repeating the
 wider grant here would silently overturn it. Record each appointment in the ledger, for the
 same reason as the ownership transfer: the replay after a restore has to redo it.
+
+  **A project in a workspace routed to (c) is outside this branch entirely.** Phase 5 deletes
+  the workspace, its projects and the membership rows together, so there is nothing to appoint
+  anybody to — and by construction nobody un-erased to appoint. The pre-flight flags those rows
+  `workspace_deleted` precisely so the gate does not read them as stranded (§11 phase 1(c)); on
+  a shipped install the seeded demo workspace produces one on every erasure.
+
+  **In a workspace routed to (b′) this branch has no candidate, and that is not an oversight to
+  work around.** There is by definition no other `ACTIVE` member, and the "appoint the
+  workspace's Owner" fallback names the subject. So the projects there stay in the pre-flight's
+  stranded-projects result for the duration of the escalation — the same cost (b′) already
+  states, at project granularity — and the runbook's gate on that query is a partition, with
+  `:ws_blocked` among the fates it excuses, for exactly this reason (§11 phase 2). Appointing a
+  member who cannot sign in is
+  refused above; the resolution is (b′)'s, not this branch's.
 
 **Rejected outright: orphaning.** Leaving a workspace with no Owner, or a project with no
 `project.member.manage` holder, is the state the whole guard family exists to prevent and is
@@ -892,6 +925,14 @@ erasure:
 (workspace id → promoted `user_id`) · `admin_appointments` (project id → appointed `user_id`)
 · `attachment_keys_deleted` (count, with the key list in a sibling file) · `operator`
 
+**`attachment_keys_deleted` is a SUM and the key list is a UNION, because 1(e) runs once per
+round.** A b′ close-out re-runs it for the workspaces that have just released, and it does so
+once per resolution, so a multi-workspace escalation produces `erase-<request_id>-keys-1.txt`,
+`-2.txt` and so on. Every one of them is uploaded, the count is their total, and none of them is
+merged into or overwritten by another: an object version is not restored by a database restore,
+so a round's key file is the only record that that round's objects were deleted, and a file
+replaced by a later round's is a deletion with no evidence left that it happened.
+
 The two appointment fields are there because **the replay has to redo the governance, not only
 the deletion.** A dump taken before the erasure restores the subject as the workspace's only
 Owner, and the successor the operator chose is a fact that exists nowhere in that dump; without
@@ -917,7 +958,8 @@ the `daily/` retention window. There is no disclosure objection to the fields th
 the person erased), but a permanent, growing map of who was handed which workspace and which
 project, in one place, is a governance graph nobody chose to keep. **Past the longest backup
 horizon in §6.1, an entry may be pruned to `erased_at` / `user_id` / `request_id` / `operator`,
-and its `-keys.txt` sibling deleted** — accountability survives (that this erasure happened, on
+and its `-keys-<n>.txt` siblings deleted, all of them** — accountability survives (that this
+erasure happened, on
 this date, by this operator, for this request), and the replay payload goes when it stops being
 replayable. The mechanism and the exact horizon are in `ops-prod-hardening.md` §6.7, beside the
 gate that consumes it; pruning is an owner action, because the instance holds no `DeleteObject`.
@@ -947,8 +989,17 @@ search for, and unlike a live erasure nobody is watching. So:
    derived from a verified address (§5.5) and needs no such derivation: the ledger is our own
    record, not a message from a stranger. `:addr` and `:name` are read from the restored row.
 3. Phases 3–6.
-4. **Phase 8a's checks, until each reads its expected value** — zero for the address-keyed ones,
-   this replay's own 1(g2)/1(g3) out-of-scope totals for the name-keyed ones.
+4. **Phase 8a's checks, until each reads the expected value 8a itself states** — zero for the
+   address-keyed ones, and for the name-keyed ones **the formula written at 8a**, computed from
+   this replay's own 1(g2)/1(g3) figures and read in both directions per phase 9's general
+   reading. Read it there; it is not restated here. It was, once — as a plain 1(g3) out-of-scope
+   total — and it went stale inside a single commit when 8a grew its own-inbox subtraction, so
+   this step told a 2am replay that a correct run had failed. A formula written in two places is
+   a formula that disagrees with itself, and the copy the operator finds first wins.
+   *This replay's own* figures, recomputed against the restored database: the restored copy is a
+   different install-state, so a total carried over from the original erasure is an expectation
+   nothing here can meet, and an expectation nothing can meet is what sends an operator — alone,
+   out of hours — to widen a statement.
 5. Phase 8b (the scrub), then phase 9.
 
 Phase 7 has nothing to do (below), and phase 3's SSE step is already satisfied — `app` is
@@ -1171,6 +1222,17 @@ SELECT :'uid' AS uid, :'addr' AS addr;
 -- reads, and phase 8 destroys the address and the name. A reconnect restores them from the file
 -- with \set; it never re-runs a derivation, which by then returns NULL without erroring — and
 -- `IN (NULL)` matches nothing while looking exactly like a clean run.
+-- RE-DERIVATION IS PERMITTED BY A PROPERTY, NOT BY BEING ONE NAMED STEP: it is available
+-- wherever BOTH (i) phase 8 has not run, so the address still resolves to the subject, and (ii)
+-- the membership rows these queries read have not been deleted — that is, before phase 5's two
+-- membership deletes, or in a workspace phase 5 deliberately held. It is REQUIRED wherever the
+-- database has been observed to disagree with the file's routing, because a list that describes
+-- a routing that has changed is worse than no list. Two steps meet both halves today: the b'
+-- close-out, which resumes a run that stopped for a 5.3(b') escalation, and phase 5's `DELETE 0`
+-- branch, where a workspace routed to 5.3(c) turns out to have gained an un-erased member. A
+-- third will meet them one day; the property is what to check, not the pair. Everywhere else —
+-- and after those membership deletes, always — restore from the file, because the derivation
+-- then returns NULL without erroring.
 
 -- Phase 4 inserts one issue_history row per unassigned issue and therefore has to mint ids.
 -- This project's stated invariant is UUID v7 everywhere, PostgreSQL has no built-in generator
@@ -1183,6 +1245,11 @@ SELECT substr(x::text, 15, 1) AS version_expect_7,
              || '7' || substr(md5(random()::text), 1, 3)
              || to_hex(8 + (random()*3)::int) || substr(md5(random()::text), 1, 3)
              || substr(md5(random()::text), 1, 12))::uuid AS x) t;
+-- Two exact values, and there is no partial pass: `7`, and one of `8`/`9`/`a`/`b`. Anything
+-- else means the expression is wrong, and phase 4 mints its issue_history ids with this exact
+-- expression — so a wrong nibble here is a v4 (or worse, a malformed) id written into an audit
+-- table under an invariant that says v7 everywhere, which nothing downstream will ever report.
+-- Fix the expression before phase 4; do not run it and inspect the ids afterwards.
 ```
 
 ```sql
@@ -1193,6 +1260,13 @@ SELECT substr(x::text, 15, 1) AS version_expect_7,
 SELECT id, email, display_name, status, created_at,
        (email = 'deleted+' || id::text || '@deleted.invalid') AS already_erased
   FROM users WHERE id = :'uid';
+--     `already_erased` reads FALSE on a live request, and it does so by construction rather
+--     than by luck: this row was found by the address a confirmation code was returned from,
+--     and a `.invalid` address can never receive one. TRUE therefore belongs to the §8.3
+--     replay, where :uid comes from the ledger instead of from an address, and there it means
+--     the restored dump already postdates this erasure — SKIP the entry (§5.4's idempotency).
+--     TRUE on a live request means the address in :addr_in was itself a tombstone address:
+--     erase nobody, and re-read the request.
 
 --     Does the INSTANCE keep a signable-in system administrator without this account? Phase 3
 --     writes `status = 'DISABLED'` and `system_role = 'USER'` in one statement, which is both
@@ -1202,6 +1276,13 @@ SELECT id, email, display_name, status, created_at,
 --     before and after the freeze, so a re-run mid-procedure does not silently change its answer.
 SELECT count(*) AS other_active_admins
   FROM users WHERE system_role = 'ADMIN' AND status = 'ACTIVE' AND id <> :'uid';
+--     This is a FLOOR and not a target, so its two directions are not symmetrical. `>= 1`
+--     proceeds and a larger number carries no further signal — there is nothing to read into
+--     it and nothing to do about it. `0` stops the procedure at phase 2, with "appoint another
+--     administrator first" as the remedy. Nothing in this runbook changes the value, so a
+--     number that DROPS between here and phase 2's re-check means somebody else disabled or
+--     demoted an administrator while this ran: re-read it rather than trusting the first
+--     reading, and do not average the two.
 
 --     Is the subject's tombstone address already taken by a squat (§5.1)? Expect NO ROW. A row
 --     is somebody holding `deleted+<subject's id>@deleted.invalid` — free to register, because
@@ -1305,6 +1386,15 @@ SELECT coalesce(string_agg(quote_literal(workspace_id::text), ','), 'NULL') AS w
 -- downstream trusts it. Expect ws_release = ws_all minus ws_blocked, and ws_delete ⊆ ws_all.
 SELECT :'ws_all' AS ws_all, :'ws_delete' AS ws_delete,
        :'ws_blocked' AS ws_blocked, :'ws_release' AS ws_release;
+-- Both directions of a mismatch, because they fail differently and only one of them is
+-- recoverable. TOO WIDE acts outside what phase 1(b) routed and has no undo: a :ws_release
+-- wider than ws_all minus ws_blocked removes the membership row a 5.3(b') escalation is
+-- holding and orphans that workspace; a :ws_delete carrying an id outside :ws_all names a
+-- workspace for deletion that nothing here routed to 5.3(c). TOO NARROW under-acts: rows are
+-- left behind and 8a/phase 9 report them as unexpected numbers, which is the direction to
+-- prefer. Either way, RE-DERIVE the list from the queries above. Never hand-edit one of these
+-- variables to make a later count agree — a list edited to satisfy a check is a check that has
+-- stopped verifying anything.
 
 -- (c) Projects the departure would leave with no ACTIVE administrator (doors 1-3).
 --     The workspace predicate is in the WHERE and is load-bearing: admin_roles includes the
@@ -1312,6 +1402,47 @@ SELECT :'ws_all' AS ws_all, :'ws_delete' AS ws_delete,
 --     without it this query's only tenant boundary would be the HAVING on the last line — and
 --     the ordinary "move this HAVING into WHERE" edit would turn a governance pre-flight into
 --     a report on every project in the install.
+--     THE FIRST THREE COLUMNS EXIST SO THE GATE CAN BE READ OFF THIS REPORT. Phase 2's gate is
+--     a PARTITION of this result, not a row count: a project is stranded only if its workspace
+--     is going to survive the erasure AND is not held by an escalation. So each row carries its
+--     workspace and both of the fates that excuse it —
+--       held_by_escalation: a b' workspace has no ACTIVE member to appoint, so its projects
+--         stay in this result by construction until the escalation closes (see below).
+--       workspace_deleted:  a 5.3(c) workspace is deleted whole in phase 5, taking its projects
+--         with it. THIS IS THE COMMON CASE, NOT AN EXOTIC ONE — DemoDataService seeds every
+--         account a solo workspace containing a project, whoever creates a project holds the
+--         Project admin row in it, and the subject is that project's only ACTIVE admin. An
+--         unqualified "zero rows" gate is therefore unsatisfiable on a shipped install, and
+--         the only keystrokes that turn it green — archive the project, or appoint somebody
+--         into a workspace that is about to be deleted — are both damage.
+--     Without the workspace and the two fates on each row, the operator can only partition this
+--     by hand-typed ad-hoc query — the retyped id phase 7 forbids for the same reason — and the
+--     cheap reading under pressure ("some rows came back, they must be the demo one") passes
+--     the gate over a genuinely stranded project in a workspace that is about to SURVIVE, which
+--     is the orphaning §5.3 exists to refuse. Both flags FALSE sorts first, so every row that
+--     must stop the run is at the top of the output. Both are coalesced because an empty list
+--     interpolates as `NULL` and `x IN (NULL)` is NULL rather than FALSE.
+--     THE ADMIN COUNT EXCLUDES THE SUBJECT, for the reason 1(a) and 1(b) already give in as
+--     many words. All three of these queries are read on BOTH sides of the freeze — 1(a) at
+--     phase 2's re-check, 1(b) in full at the b' close-out's step 1, 1(c) at both — and the
+--     other two were written for it while this one was not. That is the whole defect; it is
+--     one line of arithmetic and it has been excused twice with a new flag instead.
+--     Counting the subject makes the predicate ask "is the subject one of at most one
+--     ACTIVE administrator" before phase 3 and "is there at most one ACTIVE administrator
+--     BESIDES the subject" after it — the same SQL, two different questions, and the second is
+--     satisfied by a project that has just been REPAIRED. At close-out step 3 an ACTIVE Team
+--     lead has been appointed, the subject is DISABLED since phase 3 and so is not counted, the
+--     count is 1, `<= 1` holds, and `bool_or` is still true because step 4 has not yet removed
+--     the held row — so the gate would stop the run over a project it fixed one line earlier,
+--     with every reachable repair forbidden and one of them (deleting the held project_members
+--     row) exactly what step 4 is about to do. Excluding the subject and asking for `= 0`
+--     states the property directly — nobody else here can sign in and administer this — and it
+--     then reads the same at phase 1, at phase 2, at close-out step 3 and at phase 9.
+--     It changes NO row at phase 1 on a live request: the subject is ACTIVE there and is
+--     counted by construction (`bool_or` requires their own row), so `<= 1` already meant "no
+--     OTHER ACTIVE administrator". On a subject who was already suspended when they asked it is
+--     strictly narrower and strictly more correct — the old form reported a project that still
+--     had one administrator who could sign in.
 WITH admin_roles AS (
     SELECT r.id FROM roles r
       JOIN role_permissions rp ON rp.role_id = r.id
@@ -1320,17 +1451,31 @@ WITH admin_roles AS (
        AND rp.own_only = FALSE
        AND (r.workspace_id IS NULL OR r.workspace_id IN (:ws_all))
 )
-SELECT p.id, p.key, p.name,
-       count(*) FILTER (WHERE u.status = 'ACTIVE') AS active_admins
+SELECT p.workspace_id,
+       coalesce(p.workspace_id IN (:ws_blocked), FALSE) AS held_by_escalation,
+       coalesce(p.workspace_id IN (:ws_delete),  FALSE) AS workspace_deleted,
+       p.id, p.key, p.name,
+       count(*) FILTER (WHERE u.status = 'ACTIVE'
+                          AND pm.user_id <> :'uid') AS other_active_project_admins
   FROM project_members pm
   JOIN projects p ON p.id = pm.project_id
   JOIN users    u ON u.id = pm.user_id
  WHERE pm.role_id IN (SELECT id FROM admin_roles)
    AND p.archived_at IS NULL
    AND p.workspace_id IN (:ws_all)
- GROUP BY p.id, p.key, p.name
+ GROUP BY p.workspace_id, p.id, p.key, p.name
 HAVING bool_or(pm.user_id = :'uid')
-   AND count(*) FILTER (WHERE u.status = 'ACTIVE') <= 1;
+   AND count(*) FILTER (WHERE u.status = 'ACTIVE'
+                          AND pm.user_id <> :'uid') = 0
+ ORDER BY workspace_deleted, held_by_escalation, p.workspace_id, p.key;
+--     A row with BOTH flags FALSE is the finding: a project that will outlive this erasure with
+--     no administrator who can sign in. Those are the rows §5.3(d) appoints a Team lead for,
+--     and they are the only rows phase 2's gate counts.
+--     A row leaves this result by ONE of two independent facts, and after the freeze they are
+--     not the same fact: somebody else who can sign in administers the project (the `= 0` fails
+--     — what an appointment does), or the subject no longer administers it (`bool_or` fails —
+--     what phase 5, and the close-out's step 4, do). Both are true of a finished workspace; a
+--     step that says "the row is gone" should name which one it relied on.
 
 -- (d) Are the INHERITED-administrator doors (6-9) live on this install at all?
 --     In the shipped configuration every default is NULL -> Contributor, which does not
@@ -1347,8 +1492,15 @@ SELECT w.id AS ws, w.project_access_mode, w.default_project_role_id AS ws_defaul
 --     once the rows go, the objects are unfindable (filenames live only in the DB).
 --     This file is also what phase 7 derives its object prefixes from — the workspace id is
 --     never retyped into a command that talks to the object store.
+--     THE FILENAME CARRIES A ROUND NUMBER, and `<n>` is `1` here. This step is re-run by the b'
+--     close-out — once per resolution, so several times on a multi-workspace escalation — and a
+--     fixed name means each re-run OVERWRITES the previous round's keys. That file is not a
+--     convenience: object versions are not restored by a database restore, so once phase 7 has
+--     run, the key list is the only surviving evidence that those objects were deleted (§7,
+--     §8.2). Overwriting it destroys the record of a deletion that already happened, silently,
+--     with no query that could notice. Never reuse a round's filename.
 --     ONE LINE: \copy is a meta-command and does not continue across a newline.
-\copy (SELECT a.storage_key FROM issue_attachments a JOIN issues i ON i.id = a.issue_id WHERE i.workspace_id IN (:ws_delete)) TO 'erase-<request_id>-keys.txt'
+\copy (SELECT a.storage_key FROM issue_attachments a JOIN issues i ON i.id = a.issue_id WHERE i.workspace_id IN (:ws_delete)) TO 'erase-<request_id>-keys-<n>.txt'
 --     If your psql leaves `:ws_delete` uninterpolated here, do not hand-widen the query:
 --     paste the ids from the read-back above, then check every line of the resulting file
 --     against phase 1(b)'s routing before phase 7 deletes anything with it.
@@ -1379,11 +1531,20 @@ SELECT count(*) FROM failed_email WHERE lower(recipient) = :'addr';
 --     tenant". That sentence was here, it was a count, and it was wrong the moment a statement
 --     was added elsewhere in the runbook.
 
---     g1. Assignments. Expect every row to be inside :ws_all.
+--     g1. Assignments, split by scope. RECORD BOTH TOTALS, including a zero: the in-scope one
+--     is what phase 4 clears, and the OUT-OF-SCOPE one is the value phase 9's unscoped count
+--     asserts. On a modern install the out-of-scope total is usually 0 — a common shape, not a
+--     requirement, and never on its own a reason to change a statement.
 SELECT workspace_id, count(*) AS assigned,
-       (workspace_id IN (:ws_all)) AS in_scope
+       coalesce(workspace_id IN (:ws_all), FALSE) AS in_scope
   FROM issues WHERE assignee_id = :'uid'
  GROUP BY workspace_id ORDER BY in_scope, 2 DESC;
+--     Every `IN (:ws_…)` boolean in this pre-flight is COALESCED, and none of them may be left
+--     bare: an empty list interpolates as `NULL`, `x IN (NULL)` is NULL rather than FALSE, and
+--     under `ORDER BY in_scope` a NULL sorts LAST — exactly where the in-scope rows are, so the
+--     bare form files the row under the one heading it does not belong to. An empty :ws_all is
+--     not hypothetical: it is what a subject with no workspace_members row and a stray issue or
+--     project_members row looks like, which is the legacy shape these queries exist to find.
 --     An out-of-scope row is an issue assigned to a NON-MEMBER: possible on any instance
 --     predating HD-132, and the reason phase 4's UPDATE is scoped rather than keyed on the
 --     user alone. Phase 4 will NOT touch those rows. Decide each one deliberately, with the
@@ -1391,7 +1552,7 @@ SELECT workspace_id, count(*) AS assigned,
 
 --     g2. issue_history rows carrying the display name, split by workspace and by scope.
 SELECT i.workspace_id, count(*) AS rows_to_rewrite,
-       (i.workspace_id IN (:ws_all)) AS in_scope
+       coalesce(i.workspace_id IN (:ws_all), FALSE) AS in_scope
   FROM issue_history h JOIN issues i ON i.id = h.issue_id
  WHERE h.old_value = :'name' OR h.new_value = :'name'
  GROUP BY i.workspace_id ORDER BY in_scope, 2 DESC;
@@ -1406,10 +1567,18 @@ SELECT i.workspace_id, count(*) AS rows_to_rewrite,
 --     which is the fail-safe direction — a name left in one row, rather than a stranger's row
 --     mangled into 'Deleted usera mentioned you'.
 SELECT workspace_id, count(*) AS titles_to_rewrite,
-       (workspace_id IN (:ws_all)) AS in_scope
+       count(*) FILTER (WHERE user_id = :'uid') AS in_subjects_own_inbox,
+       coalesce(workspace_id IN (:ws_all), FALSE) AS in_scope
   FROM notifications
  WHERE left(title, length(:'name') + 1) = :'name' || ' '
  GROUP BY workspace_id ORDER BY in_scope, 2 DESC;
+--     The third column is what makes 8a's expected number computable instead of approximate.
+--     Phase 4 deletes the subject's OWN notifications by user_id, deliberately unscoped (every
+--     such row is theirs), so an out-of-scope row that is also in their inbox — a workspace
+--     they left, whose notifications ADR-0009 keeps — is DELETED rather than left standing to
+--     be counted. 8a therefore expects (out-of-scope total) MINUS (out-of-scope rows in the
+--     subject's own inbox). Record both parts; the difference is not an anomaly to explain
+--     later, it is the expected value.
 --     READ THIS NUMBER BEFORE PHASE 4. A display name is chosen by its holder and validated
 --     only against control characters, and two characters is a legal name — so a short or
 --     common name matches titles about other people. A three-digit count here, or a count
@@ -1435,15 +1604,36 @@ SELECT DISTINCT u.id, u.display_name
  WHERE m.workspace_id IN (:ws_all) AND u.id <> :'uid'
    AND left(u.display_name, length(:'name')) = :'name';
 
---     g4. Project memberships the subject holds in a workspace they are NOT a member of.
---     Expected: none. Phase 5 removes project_members scoped to :ws_release, so any row here
---     would survive the erasure and show up as a non-zero in phase 9. Legacy data only — the
---     API cannot produce it — but "cannot happen" is what the assignee sweep assumed too.
+--     g4. Project memberships the subject holds, split by scope AND by escalation. RECORD ALL
+--     THREE GROUPS, one line each and including the zeros:
+--       (1) RELEASED — in_scope true, held_by_escalation false. What phase 5 removes.
+--       (2) OUT OF :ws_all — in_scope false. Survives; decided by hand with its own owner.
+--       (3) HELD BY ESCALATION — held_by_escalation true. Survives until the escalation closes.
+--     Three, not two, because phase 9 needs them apart: its project_members expectation is
+--     (2) + (3) while an escalation is open, (2) alone at every other reading, and its HIGHER
+--     remedy re-adds (3) on its own. Phase 5 removes project_members scoped to :ws_release, so
+--     a row in group (2) or (3) survives the erasure BY DESIGN, and phase 9 is a comparison
+--     against a number that cannot be made at all if it was never written down.
+--     RECORDING ONE OVERALL TOTAL IS NOT A SMALLER VERSION OF THIS — it is the loud failure:
+--     phase 9 then reads LOWER than the recorded figure, which this document calls the
+--     unrecoverable direction, over rows that are all present and all deliberately held.
+--     Out-of-:ws_all rows are usually none (the API cannot produce such a row), but "cannot
+--     happen" is what the assignee sweep assumed too. A blocked-workspace row, by contrast, is
+--     ORDINARY: whoever creates a project gets a project_members row in it (the built-in
+--     Project admin), so the Owner of a workspace that routes to 5.3(b′) normally holds one.
+--     A row outside :ws_all is decided by hand with its own workspace's owner; a row inside a
+--     :ws_blocked workspace is held until that escalation resolves. Neither is swept, and
+--     neither is what an unexpected non-zero later means.
 SELECT p.workspace_id, count(*) AS project_memberships,
-       (p.workspace_id IN (:ws_all)) AS in_scope
+       coalesce(p.workspace_id IN (:ws_all), FALSE)     AS in_scope,
+       coalesce(p.workspace_id IN (:ws_blocked), FALSE) AS held_by_escalation
   FROM project_members pm JOIN projects p ON p.id = pm.project_id
  WHERE pm.user_id = :'uid'
- GROUP BY p.workspace_id ORDER BY in_scope;
+ GROUP BY p.workspace_id ORDER BY in_scope, 2 DESC;
+--     Both booleans are coalesced, for g1's reason and with the same consequence: :ws_all is
+--     empty exactly when the subject holds a project_members row and no workspace_members row,
+--     which is the shape group (2) exists to find, and a bare `in_scope` would sort it in with
+--     the in-scope rows.
 
 --     g5. The conditional quarantine table (§6.1). It exists only on installs where V20 found
 --     unattributable notifications, so it must be PROBED, never assumed either way. Prefer
@@ -1460,11 +1650,16 @@ SELECT to_regclass('public.notifications_unresolvable_v20') AS quarantine_table;
 SELECT workspace_id, count(*) FROM workspace_invites
  WHERE lower(email) = :'addr' GROUP BY 1;
 
--- (i) Baselines for the unscoped phase-9 checks: every occurrence of the name anywhere in the
+-- (i) Baselines for the unscoped checks in 8a: every occurrence of the name anywhere in the
 --     install, in scope or not. WRITE BOTH NUMBERS DOWN, together with the out-of-scope totals
---     from (g2) and (g3) — phase 9 does not expect these to reach zero, it expects them to
---     reach exactly the out-of-scope part, and without the recorded number that assertion
---     cannot be made at all.
+--     from (g1), (g2), (g3) — and (g3)'s own-inbox split — and ALL THREE of (g4)'s groups.
+--     Not one unscoped check in this runbook expects zero: each expects exactly the part of
+--     the install this procedure is not allowed to touch, and without the recorded number that
+--     assertion cannot be made at all. What is left instead is an operator looking at a red
+--     number with one obvious way to make it green, which in every case here is a statement
+--     widened out of its tenant or a deliberately held row deleted. Write the numbers down
+--     even when they are 0: three phases later, "it was zero so I did not note it" and "I did
+--     not run the query" read identically.
 SELECT count(*) FROM issue_history
  WHERE old_value = :'name' OR new_value = :'name';
 SELECT count(*) FROM notifications
@@ -1479,9 +1674,49 @@ of a fix. **Write down every promotion and appointment as you make it** — work
 Owner, project id → new Team lead — because phase 10 puts them in the ledger and a restore
 replay has no other way to learn who was chosen (§8.2).
 
-**Do not start phase 3 until phase 1(c) re-run returns zero rows, every workspace routed to
-5.3(b) has a new `ACTIVE` Owner, every workspace in `:ws_blocked` has been decided, phase 1(a)'s
-`other_active_admins` reads at least one, and phase 1(a)'s tombstone probe returns no row.**
+**Do not start phase 3 until phase 1(c) re-run returns *no row whose `held_by_escalation` and
+`workspace_deleted` are both FALSE*, every workspace routed to 5.3(b) has a new `ACTIVE` Owner,
+every workspace in `:ws_blocked` has been decided, phase 1(a)'s `other_active_admins` reads at
+least one, and phase 1(a)'s tombstone probe returns no row.**
+
+**Why 1(c)'s gate is a partition and not a row count.** A project only needs an administrator if
+it is going to exist and be reachable after this erasure, and two kinds of row here are neither.
+**`workspace_deleted`** is the ordinary one and it is why an unqualified "zero rows" gate cannot
+be met on a shipped install: the demo workspace every account is seeded with routes to 5.3(c),
+the subject created its project and therefore holds the only Project admin row in it, so the
+project appears here at phase 1 and stops the run — while phase 5 is about to delete the
+workspace, the project and the row together. An operator facing that gate has exactly two ways
+to make it green, and both are damage: archive a live project, or appoint somebody into a
+workspace that is being deleted. **`held_by_escalation`** is the other, and it is the harder
+one. A b′ workspace has, by its own definition, no other `ACTIVE` member — so §5.3(d)'s
+appointment has
+no candidate: not the longest-tenured `ACTIVE` project member, and not the workspace's Owner,
+who *is* the subject. Any project there that the subject administers therefore stays in 1(c)'s
+result, now and at phase 9, and every keystroke that would clear it is one this document
+forbids: appointing a member who cannot sign in (§5.3(d) refuses exactly that), archiving a
+live project to drop it out of the query, or deleting the held `project_members` row — the
+orphaning b′ exists to prevent. This is not rare in that branch: whoever creates a project holds
+a Project admin row in it, so a b′ workspace usually contains one. An unqualified "zero rows"
+here would also contradict §5.3(b′)'s own stated default that **the freeze proceeds**. So the
+gate is **no row with both flags FALSE**; a row carrying either flag is a fate this document
+already decided — deletion in phase 5, or the escalation's known cost, which §5.3(b′) states in
+prose and which is written on the ticket beside the escalation and cleared when the escalation
+closes, never by making the query green.
+
+**Read the partition off 1(c)'s own two flag columns**, which is the reason they are there.
+Splitting the result by hand means typing a workspace id into an ad-hoc query — the retyped id
+this runbook avoids everywhere else — and the reading it invites under pressure, *"some rows
+came back, they must be the demo one"* or *"…the blocked one"*, passes the gate over a genuinely
+stranded project in a workspace that is about to **survive**. And "cleared when the escalation
+closes" is a step rather than a hope: the **b′ close-out** re-runs phase 2 for the released
+workspace, this gate included. **Two different facts clear the row, at two different steps, and
+merging them hides the defect this gate had for three rounds.** The close-out's **step 3** makes
+the gate pass by *appointing* an ACTIVE administrator — the row drops out because
+`other_active_project_admins` is no longer 0, and it does so only because that count excludes
+the subject; counted in, a DISABLED subject is invisible to it and the appointment moves the old
+`<= 1` predicate not at all. The close-out's **step 4** is what makes 1(c) return *nothing* at
+phase 9: it removes the subject's held `project_members` row, so `bool_or(pm.user_id = :'uid')`
+is false and the project is out of the result entirely, appointment or no appointment.
 
 **`other_active_admins = 0` stops the procedure**, in the same shape as the governance gates
 above and for the same reason: phase 3 clears `system_role` as well as `status`, which is
@@ -1527,6 +1762,22 @@ COMMIT;
 
 Sessions and refresh are dead on the next request — `JwtAuthenticationFilter` re-reads the
 user and filters on `isEnabled()`, and `AuthService.refresh` rejects a non-`ACTIVE` user.
+
+**The three `DELETE`s above are not sealed, and nothing in this runbook counts what comes
+back.** `password_resets` and `email_verifications` are written by *unauthenticated* endpoints
+keyed on an address, so any stranger who types the subject's address into the public
+forgot-password or resend-verification form mints a fresh row minutes after the freeze — no
+later phase re-reads either table, and phase 9 has no check that would see it. **It is harmless
+for one reason, and the reason is a property of a method rather than of this document:
+`AuthService.resetPassword` writes `password_hash` and never touches `status`**, so completing
+a reset on a frozen account produces a password that `login`'s `DISABLED` refusal still rejects
+— the freeze is not undone by the one flow that could plausibly undo it. Recorded here because
+nothing enforces it: a future edit that "helpfully" activates an account on a successful reset
+(a plausible sibling of the verification flow, which *does* set `ACTIVE`) would silently thaw
+every erasure in progress, and this paragraph is the only place that would then be wrong. Phase
+8's scrub sets `password_hash = NULL` and re-asserts `DISABLED`, so a completed run is not
+exposed either way; the window is between phase 3 and phase 8, which a b′ escalation can hold
+open indefinitely.
 
 **Then end the open SSE streams, which the SQL above cannot reach.** Membership and status are
 checked at subscribe time and never again; only the `WorkspaceMemberRemoved` event closes an
@@ -1645,9 +1896,46 @@ DELETE FROM workspaces w
                     WHERE o.workspace_id = w.id AND o.user_id <> :'uid'
                       AND u2.email <> 'deleted+' || u2.id::text || '@deleted.invalid');
 -- EXPECT `DELETE 1` from the second statement. `DELETE 0` means the id is not one of the
--- subject's solo workspaces: ROLL BACK and re-read phase 1(b). Do not remove the guard.
+-- subject's solo workspaces, OR that it is and the workspace has gained an un-erased member
+-- since phase 1. ROLL BACK either way, then read the two causes below BEFORE the membership
+-- deletes: they have different remedies and only one of them ends at "re-read phase 1(b)".
+-- Do not remove the guard.
 COMMIT;
 ```
+
+**`DELETE 0` has two causes and only one of them is a typo, and the other one is not finished by
+rolling back.** The guard is a *prediction* — "no un-erased member besides the subject
+remains" — made at phase 1 and executed here, and the window between them is not quiet:
+`workspace_invites` rows outstanding at phase 1 are addressed to **other people**, nothing in
+phases 2-4 clears them,
+and **phase 6, which does clear invites, runs after this and only for invites addressed to the
+subject**. One of them accepted in that window puts an un-erased member in the workspace, the
+`NOT EXISTS` fails, and the workspace **survives** — while it is still in `:ws_release`, so the
+very next block strips the subject's `workspace_members` and `project_members` rows there. That
+leaves a live workspace with no Owner and a project with no administrator: precisely the
+orphaning §5.3(b′) exists to refuse, arrived at by following the runbook, and 1(c) excused that
+project at phase 2 on the strength of `workspace_deleted` — a flag that has just turned out
+false.
+
+So, on `DELETE 0`: **ROLL BACK, then find out which cause it is before running the membership
+deletes.**
+
+- **A transposed id** — the id is not in `:ws_delete` at all. Re-read the working file's routing
+  and repeat with the right id. Nothing else changes.
+- **The right id, and the workspace has gained a member** — re-read 1(b)'s routing row for it
+  (`others_not_erased` is now ≥ 1). **Re-derive the routing and all four lists from the database**
+  before going any further; this is one of the two steps that meets the re-derivation property
+  above, and it meets it precisely here — phase 8 has not run and the membership deletes are
+  still ahead. Then **re-read 1(c)'s gate** against the new lists, because the workspace now
+  routes to 5.3(a), (b) or (b′) and its projects have lost the `workspace_deleted` excuse: a
+  project of the subject's there is a finding now, and §5.3(d) appoints for it. A workspace that
+  re-derives into `:ws_blocked` also leaves `:ws_release` by construction, which is what stops
+  the membership deletes from orphaning it. Record the re-derived lists in the working file as a
+  new round, keep the previous round, and read the caveats the b′ close-out's step 1 states about
+  a narrowed `:ws_all` — they apply here for the same reason.
+
+Do not delete the new member's row, do not widen the statement, and do not proceed to the
+membership deletes on the theory that the workspace "was going to be deleted anyway".
 
 Repeat for each id `:ws_delete` listed. **Only when every one of them is done**, remove what is
 left of the subject's access — the deleted workspaces took their own membership rows with them,
@@ -1677,9 +1965,14 @@ COMMIT;
 by construction, and **phase 8 does not run at all** until every one of them resolves. Removing
 the row orphans the workspace; scrubbing while it survives spends the address and display name
 the operator still needs and buys nothing, because the freeze has already disabled the account
-(§5.3(b′)). Phase 1(g4) is where any `project_members` row in a workspace outside `:ws_all` was
-counted; if it found one, it survives these statements and must be decided by hand rather than
-discovered as a surprise non-zero in phase 9.
+(§5.3(b′)). **Note what stays here besides the workspace_members row: the subject's
+`project_members` rows inside that workspace stay too**, because the DELETE above is scoped to
+`:ws_release` and a blocked workspace is not in it — and on the usual b′ shape there is at least
+one, since whoever creates a project holds a Project admin row in it. Phase 1(g4) counts both
+groups that survive these statements, its out-of-`:ws_all` rows and its blocked-workspace rows,
+and phase 9's project_members expectation is their sum. A row outside `:ws_all` is decided by
+hand; a blocked-workspace row is held until the escalation resolves. Neither may be discovered
+as a surprise non-zero in phase 9, and neither is deleted to make that count agree.
 
 The workspace delete cascades `projects`, `project_members`, `workspace_members`,
 `workspace_invites`, `roles`, `sprints`, `sprint_scope_events`, `versions`, `components`,
@@ -1707,19 +2000,29 @@ DELETE FROM workspace_invites WHERE lower(email)    = :'addr';
 COMMIT;
 ```
 
-**Phase 7 — objects.** **Derive the prefixes from the phase-1(e) key file; do not retype a
-workspace id.** This is the one step with no undo at all — an object store has no membership
+**Phase 7 — objects.** **Derive the prefixes from THIS ROUND's phase-1(e) key file; do not
+retype a workspace id, and do not reach back into an earlier round's file** — its keys name
+objects an earlier run of this phase already deleted, and re-deriving prefixes from it re-lists
+prefixes that are supposed to be empty, which is the one reading this phase treats as a failure.
+This is the one step with no undo at all — an object store has no membership
 row to check a prefix against, and the Cloud branch removes every version *and* the delete
 markers.
 
 ```bash
-# The prefixes, from the file the pre-flight produced. Keys are ws/{wsId}/issues/{issueId}/{uuid}.
-cut -d/ -f1,2 erase-<request_id>-keys.txt | sort -u > erase-<request_id>-prefixes.txt
-cat erase-<request_id>-prefixes.txt        # read it: every line must be a workspace you routed to 5.3(c)
+# The prefixes, from the key file THIS round's 1(e) produced — `<n>` is `1` on the first pass
+# and the close-out's round number after that. Keys are ws/{wsId}/issues/{issueId}/{uuid}.
+cut -d/ -f1,2 erase-<request_id>-keys-<n>.txt | sort -u > erase-<request_id>-prefixes-<n>.txt
+cat erase-<request_id>-prefixes-<n>.txt
+# Read it, in both directions. A line that is NOT a workspace you routed to 5.3(c) is the one
+# mistake in this document with no undo at all: stop, and do not run the loops below. FEWER
+# lines than :ws_delete has ids is not a mistake — a workspace with no attachments produces no
+# key and therefore no prefix. Reconcile the missing ids against this round's 1(e) key file, never
+# by appending a prefix by hand: a prefix typed here is exactly the retyped workspace id this
+# phase exists to avoid.
 
 # DC (LocalFileStorage): remove each subtree under app.storage.local.base-dir, then verify.
-while read -r p; do rm -rf "$STORAGE_BASE_DIR/$p"; done < erase-<request_id>-prefixes.txt
-while read -r p; do test ! -e "$STORAGE_BASE_DIR/$p" || echo "STILL PRESENT: $p"; done < erase-<request_id>-prefixes.txt
+while read -r p; do rm -rf "$STORAGE_BASE_DIR/$p"; done < erase-<request_id>-prefixes-<n>.txt
+while read -r p; do test ! -e "$STORAGE_BASE_DIR/$p" || echo "STILL PRESENT: $p"; done < erase-<request_id>-prefixes-<n>.txt
 
 # Cloud (S3, versioned): every version AND every delete marker, then re-list to prove empty.
 while read -r p; do
@@ -1730,13 +2033,213 @@ while read -r p; do
     --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' > /tmp/m.json
   aws s3api delete-objects --bucket "$ATTACH_BUCKET" --delete file:///tmp/m.json
   aws s3api list-object-versions --bucket "$ATTACH_BUCKET" --prefix "$p/"   # expect empty
-done < erase-<request_id>-prefixes.txt
+done < erase-<request_id>-prefixes-<n>.txt
+# Empty is the floor on both backends, so there is one direction to read: anything still listed
+# (a version, or a delete marker) is a version that survived the loop — re-run it for that
+# prefix and re-list. Do not accept a non-empty listing on the grounds that the 30-day
+# noncurrent-version rule will finish the job; that is the retention dependency this phase
+# exists to avoid, and the DC branch's `STILL PRESENT:` line reads the same way.
 ```
 
 A plain `DeleteObject` only writes a delete marker and leaves the prior version fully readable
 to anyone holding a version id, and relying on the 30-day noncurrent-version lifecycle rule to
 finish the job would make erasure depend on a retention window — which is exactly what this
 ticket may not assert (§7).
+
+**The b′ close-out — how a blocked run resumes, and where the held rows finally go.** Skip this
+on any run where `:ws_blocked` was empty. A run where it was not stops after phase 7 until the
+escalation resolves, and resumes **here**, not at phase 8. §5.3(b′) offers exactly two
+resolutions and **both end with the subject holding no row in that workspace**, so the phase 5
+this document deferred is performed now — in phase 5's own order, with its guards intact.
+
+**Re-derive the lists from the current database first, and this is the one step in the runbook
+that does.** The working file's `:ws_blocked` names the workspace as it was routed *then*, and
+the entire content of this step is that it is not any more; the file's `:ws_release` was derived
+to exclude it. Re-derivation is available here, and nowhere else, precisely because phase 8 has
+not run: the address still resolves to the subject, and the membership rows every list query
+reads are still present for exactly the workspaces still held. Do not reuse the file's lists,
+and do not hand-type the released id into a statement.
+
+1. **Re-run phase 1(b) in full** — the routing query, all four `\gset` derivations, and the
+   read-back. `:ws_all` now names only what the first pass left standing — the workspaces that
+   were blocked *then*, since phase 5 removed the membership rows of every other one — while
+   `:ws_blocked` names whatever is **still** blocked and `:ws_release` is the complement:
+   exactly the workspaces that have just released. Every routing decision comes from that query,
+   never from a memory of what was decided weeks ago.
+   **All four variables — `:ws_all`, `:ws_delete`, `:ws_blocked`, `:ws_release` — are replaced,
+   and `:ws_all` NARROWS.** It now names only the workspaces still standing, so every check
+   scoped by it verifies strictly less than it did on the first pass: phase 9's scoped assignee
+   count (`workspace_id IN (:ws_all)`) asserts `0` over a smaller set of workspaces than the
+   never-blocked reading of the same line does, and that is correct — the workspaces it no
+   longer covers were deleted or swept rounds ago and cannot be re-read. Write the re-derived
+   four into the working file as a **new round**, beside the previous round rather than over it;
+   the earlier lists are what phase 9's closing `:ws_delete` bullet is read against. That bullet
+   — *every id in `:ws_delete` is gone from `workspaces`, and no id outside it is* — is read
+   against the **union of every round's `:ws_delete`**, never this round's alone: pass 1's
+   deleted ids are absent from the re-derived list, and reading the bullet literally against it
+   would report every one of them as a workspace deleted that nothing routed for deletion.
+2. **Re-run phase 1(a)'s tombstone probe, and 1(c), 1(e), 1(f), 1(g2), 1(g3) — its collision
+   probe g3b included — and 1(g4)** — with this round's `<n>` in 1(e)'s filename.
+   The probe, because 8b is
+   about to run and the address has sat unscrubbed for the length of the escalation — a squat
+   registered in that window blocks the scrub on `users_email_lower_uk`, and the first pass's
+   reading is stale. 1(e), because a workspace that now routes to 5.3(c) has its attachment keys
+   captured **here, before anything deletes the rows that name them**: its keys are not in the
+   first pass's file, since it was not in `:ws_delete` then. 1(g4), because phase 9's post-close
+   expectation is read against *these* totals and not against the first pass's.
+   **1(f), 1(g2) and 1(g3), because 8a is the next hard gate and every expectation it compares
+   against comes from those three — none of them from 1(a), 1(c), 1(e) or 1(g4).** Re-reading
+   them is not bookkeeping: **the escalation window is not quiet.** The subject stayed a member
+   of the held workspace throughout it, and the member reactivated in order to resolve it can
+   assign them issues and generate notification titles and `issue_history` rows carrying their
+   display name — in a workspace phase 4 has not been re-run over. Without a fresh reading, 8a's
+   name-keyed counts read HIGHER than the first pass recorded, and 8a's HIGHER branch names one
+   cause and puts *fix the list* first, at the one reading where the list is right.
+3. **Re-run phase 2 for the released workspaces**, against the routing step 1 has just produced
+   rather than the one this workspace had weeks ago — normally branch (b)'s promotion to the
+   reactivated member, plus §5.3(d)'s project-admin appointments, both written down for the
+   ledger — **and re-read its gate**: 1(c) must now return no row with both flags FALSE. A
+   workspace resolving to 5.3(c) reads `workspace_deleted` TRUE here and is not a finding —
+   step 4 is about to delete it — and one that is still blocked reads `held_by_escalation` TRUE.
+
+   **Phase 2's preferred mechanism is not available here, and its absence is guaranteed rather
+   than likely.** Phase 2 says *prefer the API where one exists*, and in a b′ workspace neither
+   API exists: the only Owner is the subject, `DISABLED` since phase 3, so nobody can call the
+   promote endpoint; the reactivated member is a plain member, and the shipped default is
+   Contributor without `workspace.member.manage` — which is exactly what 1(d) exists to confirm.
+   §5.3(d)'s appointment is worse off still: the project has no holder of
+   `project.member.manage`, so it is outside `projectCuration()` and the *new* Owner cannot make
+   the appointment either. **Both are therefore SQL here, and the statements are given rather
+   than left to be improvised at 2am.** Each is guarded so a wrong id changes nothing, in phase
+   5's shape, and each is read back for `UPDATE 1`.
+
+   ```sql
+   -- The released workspace, from step 1's re-derived :ws_release — never retyped from memory.
+   \set ws '00000000-0000-0000-0000-000000000000'
+
+   -- The candidates, DERIVED. Appoint only an ACTIVE account: an appointee who cannot sign in
+   -- is the stranding this whole branch exists to prevent, wearing the costume of a fix.
+   SELECT m.user_id, u.email, u.display_name, u.status
+     FROM workspace_members m JOIN users u ON u.id = m.user_id
+    WHERE m.workspace_id = :'ws' AND m.user_id <> :'uid' AND u.status = 'ACTIVE';
+   \set new_owner '00000000-0000-0000-0000-000000000000'
+
+   BEGIN;
+   -- (b)'s promotion. The built-in Owner role id is the one 1(b) routes on. The guard re-asserts
+   -- both facts the SELECT above showed, so a stale id or an account that was re-suspended
+   -- between the two statements reports `UPDATE 0` rather than appointing somebody who cannot
+   -- sign in.
+   UPDATE workspace_members
+      SET role_id = '00000000-0000-7000-8000-000000000001'
+    WHERE workspace_id = :'ws' AND user_id = :'new_owner'
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = :'new_owner' AND u.status = 'ACTIVE');
+   COMMIT;
+   -- EXPECT `UPDATE 1`. `UPDATE 0` means the appointee is not a member of this workspace or is
+   -- not ACTIVE: re-read the SELECT, do not relax the guard.
+   ```
+
+   **§5.3(d)'s appointment, for each project 1(c) still returns here — and the role is
+   `TEAM_LEAD`, never Project admin.** V16 seeded that built-in for exactly this act and
+   `ProjectAdminGuard.ADOPTION_ROLE_KEY`'s javadoc argues why the wider grant is wrong;
+   appointing Project admin here would overturn that decision in the one place nothing reviews.
+   It is nonetheless enough to clear 1(c): V16 grants it `project.member.manage` with
+   `own_only = FALSE`, which is the membership `admin_roles` tests. Read the role out of `roles`
+   rather than typing V16's id — a built-in is shared (`workspace_id IS NULL`) and a typed id is
+   a guess at a seed row — and read it back before using it.
+
+   ```sql
+   \set proj '00000000-0000-0000-0000-000000000000'   -- from step 3's re-read of 1(c)
+
+   -- §5.3(d)'s candidate, in its stated order: the longest-tenured ACTIVE member OF THAT
+   -- PROJECT, and only if there is none, the workspace's (now promoted) Owner. Derive it; do
+   -- not assume the reactivated member is a project member, and do not assume they are not.
+   SELECT pm.user_id, pm.joined_at, u.display_name, u.status
+     FROM project_members pm JOIN users u ON u.id = pm.user_id
+    WHERE pm.project_id = :'proj' AND pm.user_id <> :'uid' AND u.status = 'ACTIVE'
+    ORDER BY pm.joined_at;
+   \set lead '00000000-0000-0000-0000-000000000000'   -- that row, or :new_owner if there is none
+
+   -- The built-in Team lead. Expect exactly ONE row, with workspace_id NULL. No row means this
+   -- install predates V16 — stop, and resolve §5.3(d) against ProjectAdminGuard.adoptAll's
+   -- actual role rather than inventing one. More than one row means a workspace-scoped role has
+   -- taken the key; take the one whose workspace_id IS NULL.
+   SELECT r.id, r.workspace_id, r.key, r.name FROM roles r
+    WHERE r.scope = 'PROJECT' AND r.key = 'TEAM_LEAD' AND r.built_in;
+   \set admin_role '00000000-0000-0000-0000-000000000000'
+
+   BEGIN;
+   -- The appointee usually already has a project_members row; this promotes it in place.
+   UPDATE project_members pm
+      SET role_id = :'admin_role'
+     FROM projects p
+    WHERE p.id = pm.project_id AND pm.project_id = :'proj' AND pm.user_id = :'lead'
+      AND p.workspace_id = :'ws'
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = :'lead' AND u.status = 'ACTIVE');
+
+   -- If that reported `UPDATE 0` because they hold no row yet, insert one — same guards, plus
+   -- the workspace-membership check the API would have made, and phase 1's v7 id expression
+   -- because `project_members.id` is a UUID the application generates.
+   INSERT INTO project_members (id, project_id, user_id, role_id, joined_at)
+   SELECT (lpad(to_hex((extract(epoch from clock_timestamp())*1000)::bigint), 12, '0')
+        || '7' || substr(md5(random()::text), 1, 3)
+        || to_hex(8 + (random()*3)::int) || substr(md5(random()::text), 1, 3)
+        || substr(md5(random()::text), 1, 12))::uuid,
+          p.id, :'lead', :'admin_role', NOW()
+     FROM projects p
+    WHERE p.id = :'proj' AND p.workspace_id = :'ws'
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = :'lead' AND u.status = 'ACTIVE')
+      AND EXISTS (SELECT 1 FROM workspace_members m
+                   WHERE m.workspace_id = :'ws' AND m.user_id = :'lead')
+      AND NOT EXISTS (SELECT 1 FROM project_members pm
+                       WHERE pm.project_id = :'proj' AND pm.user_id = :'lead');
+   COMMIT;
+   -- EXPECT exactly one of `UPDATE 1` / `INSERT 0 1`. Both reporting 0 means the appointee is
+   -- not an ACTIVE member of this workspace — re-read the candidate SELECT. Then re-read 1(c):
+   -- the project drops out because `other_active_project_admins` is no longer 0, which is the
+   -- appointment working, and NOT because the subject's held row went anywhere (step 4 does
+   -- that, and it has not run yet).
+   ```
+
+   Write both the promotion and every appointment down as you make them — phase 10's ledger row
+   carries them, and a restore replay has no other way to learn who was chosen (§8.2).
+4. **Re-run phase 5**, in its own order: the per-workspace transaction for every id now in
+   `:ws_delete`, then the two `:ws_release`-scoped membership deletes. The held `project_members`
+   and `workspace_members` rows go here — and only because step 1 moved that workspace into
+   `:ws_release`, never because a list was edited to include it.
+5. **Run phase 7** for any workspace deleted in step 4, from step 2's key file.
+6. Then **phase 8** (8a's checks, then 8b), then **phase 9 at its post-close reading**, then
+   **phase 10**, whose ledger row carries the appointments step 3 made.
+
+**Phases 3, 4 and 6 are not re-run as a matter of course.** 3 and 6 are install-wide and already
+done. Phase 4's sweeps are scoped or subject-keyed and idempotent, and a blocked workspace kept
+the subject a member throughout, so it can have accrued notifications and assignments since.
+**Two steps ask for it, and 8a asks first** — 8a's name-keyed counts are a hard gate that runs
+before 8b, and phase 9 catches the rest afterwards. Do it when one of them asks, not
+pre-emptively, and when it asks, run phase 4 **with the re-derived `:ws_all` from step 1** — the
+accrued rows are in the released workspace, which the narrowed list still covers.
+
+**The agreed-deletion resolution needs one thing to become true first.** Phase 5's workspace
+delete carries 5.3(c)'s predicate — *no un-erased member besides the subject remains* — and it
+does not hold in a b′ workspace by construction, so that statement reports `DELETE 0` and **that
+is the guard working, not a step to edit**. The agreement is executed by making the predicate
+true — and **the obvious way of doing that is not one its subject can perform.** Every member of
+a b′ workspace is non-ACTIVE by that branch's own definition, and a non-ACTIVE account cannot
+sign in, so "the member who agreed leaves the workspace" names an API call they cannot reach.
+The unstated prerequisite is **reactivation**, and it has to be stated, because once it has
+happened the cheaper resolution is also on the table: an ACTIVE member is exactly what branch
+(b) needs, so **reactivate, then prefer (b)'s promotion** — it keeps the workspace, its data and
+its objects, and it is a single guarded `UPDATE` against a deletion, a phase 7 and a key file.
+Take the deletion only when that is what was actually agreed. Either way the predicate becomes
+true the same way: **the member is reactivated and then leaves the workspace themselves, or
+their own account goes through its own erasure** — after which step 1's re-derivation puts the
+workspace in `:ws_delete` and step 4 deletes it with the guard untouched. If neither is
+available, this deletion is not the runbook's to perform: take branch (b), or record on the
+ticket that the workspace stays and treat it as still blocked.
+
+**If several workspaces were blocked and only some resolved**, this step runs once per
+resolution: the re-derived `:ws_blocked` is still non-empty, **phase 8 still does not run**, and
+phase 9 stays at its blocked-open reading for what remains. The close-out is finished when
+`:ws_blocked` re-derives empty.
 
 **Phase 8 — the scrub, last, and gated. The gate is the first half of this phase, not a
 forward reference to the next one**: a runbook is read top to bottom under pressure, and a
@@ -1747,8 +2250,21 @@ precondition printed after the statement it guards is a precondition nobody meet
 a sweep later found incomplete becomes **unfindable** — there is nothing left to search for.
 
 ```sql
--- ADDRESS-KEYED. These must read 0, with no exceptions: they are keyed on the subject's own
--- address and every row they can see is the subject's.
+-- ADDRESS-KEYED. These read 0, and 0 is reachable here for a reason the name-keyed checks
+-- below do not share: every row they can see belongs to the subject, so phase 6 was allowed to
+-- delete all of them unscoped. 0 is also their floor, so only one direction of deviation
+-- exists — ABOVE 0 means a phase-6 statement did not run, or a row was written after it did.
+-- The second is genuinely reachable, and the cause is a PROPERTY rather than one actor:
+-- ANYTHING THAT SPENDS AN ADDRESS-KEYED MAIL BUDGET WRITES A ROW IN mail_send_events — the
+-- throttle records the address as submitted when it allows a send, with no status filter and no
+-- account lookup between the two. An invite re-sent by another member is only the door that
+-- needs one; a forgot-password and a resend-verification are the other two, AND BOTH ARE
+-- UNAUTHENTICATED — any stranger who types the address into the public form drives this count
+-- above 0 with no member and no workspace involved. Say so, because 8a is a hard gate: an
+-- operator told the cause is a re-invite audits workspace_invites and the member list, finds
+-- nothing, and is stuck on a check that blocks the procedure. There is nothing to find there.
+-- Re-run phase 6 and re-read; it is address-keyed and idempotent. Do not enter 8b on a non-zero
+-- — after the scrub :addr is gone from the database and these rows are unfindable by anything.
 SELECT count(*) FROM mail_send_events  WHERE lower(recipient_email) = :'addr'
                                           OR sender_user_id = :'uid';      -- 0
 SELECT count(*) FROM failed_email      WHERE lower(recipient) = :'addr';   -- 0
@@ -1758,25 +2274,60 @@ SELECT count(*) FROM workspace_invites WHERE lower(email) = :'addr';       -- 0
 -- all: a check keyed by user_id or by the address returns a perfectly clean answer no matter
 -- what :ws_all contains, so a verification suite made only of those cannot detect the mistake
 -- this runbook is most likely to make.
--- THESE DO NOT EXPECT 0. They expect exactly the OUT-OF-SCOPE totals recorded in phase 1(g2)
--- and 1(g3): a namesake in another tenant is not swept (1(g2) says those rows stay), so on any
--- install with one, demanding 0 here is unsatisfiable — and the single edit that satisfies it
--- is deleting the `workspace_id IN (:ws_all)` scoping from phase 4, which is this project's top
--- bug class arrived at by following the runbook. If this will not go to zero, THAT IS EXPECTED.
--- Do not widen the sweep.
+-- THESE DO NOT EXPECT 0. They expect the numbers phase 1 recorded for the part of the install
+-- this procedure is not allowed to touch: a namesake in another tenant is not swept (1(g2) says
+-- those rows stay), so on any install with one, demanding 0 here is unsatisfiable — and the
+-- single edit that satisfies it is deleting the `workspace_id IN (:ws_all)` scoping from phase
+-- 4, which is this project's top bug class arrived at by following the runbook. If this will
+-- not go to zero, THAT IS EXPECTED. Do not widen the sweep.
 SELECT count(*) FROM issue_history
  WHERE old_value = :'name' OR new_value = :'name';
--- Expect: 1(g2)'s out-of-scope total. HIGHER means a workspace is missing from :ws_all (the
--- in-scope rows did not all get rewritten) — resolve that before continuing.
+-- Expect 1(g2)'s out-of-scope total, and read a deviation in EITHER direction:
+--   HIGHER — in-scope rows were never rewritten, and there are TWO causes with OPPOSITE
+--     remedies, so read which of this document's three readings you are at before touching
+--     anything. On a never-blocked run: a workspace is missing from :ws_all — fix the list,
+--     re-run phase 4's two issue_history statements (scoped and idempotent), re-read.
+--     AT THE POST-CLOSE READING the list is RIGHT and fixing it is the wrong move: the subject
+--     stayed a member of the held workspace for the length of the escalation and the member
+--     reactivated to resolve it can have written rows carrying the display name in a workspace
+--     phase 4 was never re-run over. Those rows are the excess. Re-run phase 4's two
+--     issue_history statements with the close-out's RE-DERIVED :ws_all — which covers the
+--     released workspace — and re-read against the totals the close-out's step 2 recorded, not
+--     the first pass's. Do not touch the list.
+--   LOWER — rows counted as out-of-scope are gone. Nothing in this runbook can delete them
+--     (:ws_delete ⊆ :ws_all, and the rewrites never delete), so something outside it did: a
+--     tenant deleting its own issue or workspace while this ran, or the namesake renaming
+--     themselves. Not a failure of the erasure. Check it against 1(g2)'s per-workspace
+--     breakdown, record it, and leave the recorded expectation as it was written — an expected
+--     value edited to match what came back has verified nothing.
 SELECT count(*) FROM notifications
  WHERE left(title, length(:'name') + 1) = :'name' || ' ';
--- Expect: 1(g3)'s out-of-scope total, PLUS anything you deliberately left because 1(g3b) found
--- a namesake and the rewrite was done by hand. Same reading, same prohibition.
+-- Expect 1(g3)'s out-of-scope total, MINUS the part of it that sat in the subject's own inbox
+-- (1(g3)'s third column), PLUS anything deliberately left because 1(g3b) found a namesake and
+-- the rewrite was done by hand. That subtraction is ordinary arithmetic, not an anomaly: phase
+-- 4 deletes `notifications WHERE user_id = :'uid'` unscoped, because every such row is the
+-- subject's own, so a title leading with their name in a workspace they had LEFT goes with
+-- their inbox instead of being counted here. Both directions again:
+--   HIGHER — exactly as above, both causes and both remedies: a workspace missing from :ws_all
+--     on a never-blocked run, and at the post-close reading titles accrued in the released
+--     workspace during the escalation, cleared by re-running phase 4's notification statement
+--     with the re-derived :ws_all and read against step 2's totals. Re-run 1(g3b) first if you
+--     re-run the rewrite: the collision probe is a fact about the CURRENT member list, and the
+--     member reactivated to close the escalation was not necessarily in it on the first pass.
+--   LOWER than even that figure — more of their own inbox was out of scope than 1(g3) split
+--     out, or another tenant deleted rows while this ran. Reconcile against 1(g3), record it,
+--     and do not treat it as a step that failed.
+-- The prohibition covers both directions and every reading in between: the edit that drives
+-- either of these counts to 0 is deleting phase 4's `workspace_id IN (:ws_all)`, which rewrites
+-- other tenants' rows. A number that cannot reach 0 is not a failing check.
 ```
 
 **Do not run 8b until 8a has been read and each number matched against what phase 1 recorded**
-— zero for the address-keyed ones, the recorded out-of-scope total for the name-keyed ones. And
-not at all while `:ws_blocked` is non-empty (§5.3(b′)).
+— zero for the address-keyed ones, and for the name-keyed ones the number phase 1 wrote down,
+with a deviation in **either** direction accounted for in writing before you continue. And not
+at all while `:ws_blocked` is non-empty (§5.3(b′)) — a run that stopped there resumes at the
+b′ close-out above, which **re-derives** `:ws_blocked` rather than trusting the working file's
+copy of it, and matches 8a against the numbers that re-derivation recorded.
 
 **8b — the scrub.**
 
@@ -1801,10 +2352,108 @@ COMMIT;
 phase 8a, where it is a precondition rather than a reference. What follows is the rest: the
 identity- and membership-keyed checks, which stay answerable afterwards.
 
+**Phase 9 is read at up to three points in one run, and the same check has a different correct
+value at each.** A check here is not a fact about the install; it is a fact about the install
+*at the reading this document mandates of it*, and a value that is correct at one reading is a
+failure at another. The three readings are:
+
+- **Never-blocked** — `:ws_blocked` was empty throughout. The erasure is complete, and every
+  expectation below is the completed one.
+- **Blocked-open** — `:ws_blocked` is non-empty, so phase 8 deliberately has not run and the
+  subject's row still holds their address and display name (§5.3(b′)). Phase 9 is still worth
+  running on everything that did run, and every deliberately held row is expected to be
+  **present and counted**.
+- **Post-close** — the b′ close-out has run: the escalation resolved, the lists were re-derived,
+  the released workspace went through phases 2 and 5 (and 7, if it was the deletion resolution),
+  and phase 8 followed. `:ws_blocked` now
+  re-derives **empty**, and every expectation returns to the never-blocked one — because both of
+  §5.3(b′)'s resolutions end with the subject holding no row in that workspace. If some other
+  workspace is still blocked, this is not the post-close reading: it stays blocked-open for what
+  remains, and the close-out runs again when that escalation resolves.
+
+Which reading you are at is a fact about the run — re-derive `:ws_blocked` and read it, rather
+than judging it from the numbers. Each check below says what it reads at each.
+
 ```sql
-SELECT email, display_name, status FROM users WHERE id = :'uid';           -- scrubbed
-SELECT count(*) FROM workspace_members WHERE user_id = :'uid';             -- 0
-SELECT count(*) FROM project_members   WHERE user_id = :'uid';             -- 0
+-- The account row. NEVER-BLOCKED and POST-CLOSE: expect §5.1's scrubbed values — the tombstone
+-- address containing this row's own id, `Deleted user`, DISABLED. BLOCKED-OPEN: expect the REAL
+-- address and name still present, because 8b has not run and that is the b' branch working. A
+-- scrubbed row while a workspace is still blocked means 8b ran past its own gate, and the
+-- address and display name the operator still needs are gone. An unscrubbed row after a
+-- close-out means step 6 of it did not finish: 8a, then 8b, then re-read this.
+SELECT email, display_name, status FROM users WHERE id = :'uid';
+
+-- Memberships. THE EXPECTED VALUE IS NOT 0 ON EVERY INSTALL AND NOT AT EVERY READING, which is
+-- why neither line carries a bare `0`. Phase 5 is scoped to :ws_release, so while an escalation
+-- is open every row this procedure deliberately held is still here. Expect, from the numbers
+-- phase 1 wrote down — and after a close-out, from the numbers ITS re-run of 1(g4) wrote down:
+--   BLOCKED-OPEN:
+--     workspace_members = one row per workspace in :ws_blocked
+--     project_members   = the SUM of 1(g4)'s two held groups — its out-of-:ws_all total (2)
+--       PLUS its held_by_escalation total (3). Both are columns on the same 1(g4) report, which
+--       is why that step records a breakdown and not one number: (3) is normally NON-ZERO
+--       whenever :ws_blocked is, because whoever creates a project holds a project_members row
+--       in it, and a blocked workspace's Owner is usually its project creator.
+--   NEVER-BLOCKED and POST-CLOSE — the same two values, and that they are the same is the whole
+--   point of the close-out:
+--     workspace_members = 0
+--     project_members   = 1(g4)'s out-of-:ws_all total (2) ALONE. The held_by_escalation term
+--       is gone because the close-out's re-derivation moved that workspace into :ws_release and
+--       phase 5's re-run removed the rows. A 0 at these two readings is the CORRECT value, not
+--       the unrecoverable direction below — including when (2) is itself 0, which is the usual
+--       modern shape.
+--   HIGHER — TEST THE EXPECTED VALUE BEFORE TOUCHING ANY LIST, because a held row that was
+--     never counted reads exactly like a delete that never ran, and their remedies are
+--     opposites. Check the reading first, then the arithmetic: re-add 1(g4)'s
+--     held_by_escalation total to the expectation, and if the count now matches, nothing failed
+--     and the arithmetic was short. Only when the count exceeds BOTH held groups did phase 5
+--     fail to reach a workspace it should have: re-derive :ws_release from phase 1 (it is
+--     :ws_all minus :ws_blocked, never wider), re-run phase 5's two deletes, re-read. That much
+--     is recoverable, and the deletes are idempotent.
+--     WHILE THE ESCALATION IS OPEN, a :ws_release widened to cover a :ws_blocked workspace is
+--     NOT that remedy — it is the one keystroke that deletes the held rows the next paragraph
+--     says nothing puts back, and it is the only edit that can move this number when the cause
+--     was the arithmetic. Once the escalation CLOSES, that same workspace enters :ws_release
+--     legitimately — by the close-out's re-derivation from the database, never by an edit to a
+--     saved list.
+--   LOWER, AT THE BLOCKED-OPEN READING — a row that was being held on purpose is gone, and
+--     nothing in this runbook puts it back. The subject's workspace_members row in a
+--     :ws_blocked workspace IS what keeps that workspace from being orphaned, and its only
+--     remaining Owner cannot sign in; removing it inflicts precisely the harm the b' branch
+--     exists to refuse. A 0 at that reading, on an install with a blocked workspace, is not a
+--     clean run.
+--   LOWER, AT THE NEVER-BLOCKED AND POST-CLOSE READINGS — reachable exactly when 1(g4)'s group
+--     (2) is non-zero, which is the whole reason the expectation is that number and not `0`.
+--     workspace_members has 0 as its floor there and nothing below it; project_members does
+--     NOT, and the direction is BENIGN: group (2) is the legacy rows outside :ws_all, and 1(g4)
+--     says they are decided one at a time with their own workspace's owner — an act that
+--     REMOVES them, and that this procedure neither performs nor prevents. It is the same
+--     outcome the scoped assignee count already writes up as "not a step that failed".
+--     Reconcile against 1(g4)'s three groups, record it, and leave the recorded expectation as
+--     it was written. Only where group (2) is itself 0 is the expectation its own floor, and
+--     that is the usual modern shape rather than a property of the check.
+-- So: at the never-blocked and post-close readings workspace_members reads 0, and
+-- project_members reads 1(g4)'s out-of-:ws_all total — which is itself 0 on the usual modern
+-- install, so two zeros there are a pass. At the blocked-open reading a 0 on either line is the
+-- failure above. The one keystroke that turns a non-zero green while an escalation is open is
+-- deleting the held row.
+-- DO NOT. Record the number and why on the ticket instead: an unexplained non-zero and a
+-- deliberately held one look identical, and only the note tells them apart.
+SELECT count(*) FROM workspace_members WHERE user_id = :'uid';
+SELECT count(*) FROM project_members   WHERE user_id = :'uid';
+
+-- The subject's own inbox and sessions. Keyed on user_id and swept unscoped — every row they
+-- can see is the subject's — so 0 is reachable and is the floor, and only one direction exists.
+--   notifications ABOVE 0: rows arrived after phase 4, by either of two routes, and the second
+--     needs no :ws_blocked at all. (i) A blocked workspace still carries the subject's
+--     membership. (ii) Between phase 4 and phase 5 the subject is still a member of every
+--     workspace in :ws_all, and ADR-0009 keeps a notification row after its owner leaves — so
+--     a row written in that window is still here at phase 9 on a run where :ws_blocked was
+--     empty throughout. Re-running phase 4's `DELETE FROM notifications WHERE user_id = :'uid'`
+--     is safe, idempotent and the whole remedy for both.
+--   refresh_tokens ABOVE 0: the account obtained a session after the freeze, which phase 3 makes
+--     impossible (`isEnabled()` per request, `AuthService.refresh` refuses a non-ACTIVE user).
+--     Do not re-run and move on — find out why before the request is closed.
 SELECT count(*) FROM notifications     WHERE user_id = :'uid';             -- 0
 SELECT count(*) FROM refresh_tokens    WHERE user_id = :'uid';             -- 0
 
@@ -1816,33 +2465,107 @@ SELECT count(*) FROM refresh_tokens    WHERE user_id = :'uid';             -- 0
 -- STAY (they are decided one at a time with their workspace's owner, not swept).
 SELECT count(*) FROM issues WHERE assignee_id = :'uid' AND workspace_id IN (:ws_all);  -- 0
 SELECT count(*) FROM issues WHERE assignee_id = :'uid';   -- = 1(g1)'s out-of-scope total
--- and: every workspace routed to 5.3(b) has >= 1 ACTIVE Owner; phase 1(c) returns no rows;
--- every id in :ws_delete is gone from `workspaces`; no id outside it is.
--- The two membership counts are 0 EXCEPT for rows phase 5 deliberately did not reach: the
--- :ws_blocked workspaces (a 5.3(b') escalation is open, and phase 8 has not run), and anything
--- 1(g4) reported outside :ws_all. Both are known before phase 5 runs, so both are expected
--- numbers rather than discoveries. Record which and why on the ticket — an unexplained non-zero
--- here and a deliberately held one look identical, and only the note tells them apart.
+--   The scoped one: 0, and 0 is its floor — above it, either phase 4's UPDATE did not reach
+--     rows in :ws_all, or an issue in one was assigned to the subject after it ran (possible
+--     until phase 5 removes the memberships, and for as long as a :ws_blocked workspace keeps
+--     one). Both causes have the same remedy: re-run it; it is scoped and idempotent.
+--   The unscoped one, HIGHER than 1(g1) recorded: a workspace is missing from :ws_all, or an
+--     issue in one was assigned to the subject after phase 4. Either way rows exist that phase
+--     4 should have cleared — fix the list, re-run phase 4, re-read.
+--   The unscoped one, LOWER: somebody cleared one of those out-of-scope rows themselves. That
+--     is the ordinary outcome of the conversation 1(g1) sends the operator into — each such row
+--     is decided with its own workspace's owner — and it is not this procedure's doing. Record
+--     it against 1(g1)'s breakdown; it is not a step that failed.
+-- and: every workspace routed to 5.3(b) has >= 1 ACTIVE Owner;
+-- and: phase 1(c), read off its own two flag columns. By this point no row can carry
+--   workspace_deleted: those workspaces, and their projects, were deleted in phase 5, so that
+--   column reads FALSE for everything that is left. BLOCKED-OPEN — no row whose
+--   held_by_escalation is FALSE; inside a blocked workspace it legitimately still returns a
+--   project, because phase 5 holds the subject's project_members row there (`bool_or` true) and
+--   a b′ workspace has, by that branch's own definition, no OTHER member who can sign in
+--   (`other_active_project_admins = 0`) — so the project genuinely has no administrator who can
+--   sign in, which is the escalation's cost and not an artefact of the subject's own status.
+--   Both halves are facts about OTHER people, which is why this reads the same before and after
+--   the freeze and why the same row is a finding at neither. That is the
+--   escalation's cost, recorded with it and re-read when it closes (phase 2's gate carries the
+--   argument, §5.3(b′) the harm). Demanding zero of it at that reading asks for the held row to
+--   be deleted, which is the orphaning that branch exists to refuse. NEVER-BLOCKED and
+--   POST-CLOSE — no rows at all, and by the SECOND of the two facts that clear a row: phase 5
+--   (and the close-out's step 4) removed the subject's project_members rows, so `bool_or` is
+--   false and no project of theirs is in the result at all. The appointment step 3 made is what
+--   satisfied the GATE at step 3, one reading earlier, and is why the project still has an
+--   administrator who can sign in — it is not what empties this query;
+-- and: every id in :ws_delete is gone from `workspaces`, and no id outside it is.
 ```
 
-**The general reading, because it is the one an operator gets wrong at 2am:** a check that is
-scoped asserts 0; a check that is unscoped asserts *the number phase 1 wrote down*. Anything
-that will not reach zero because rows outside `:ws_all` legitimately stay is not a failure and
-is never fixed by widening a statement.
+**The general reading. It governs anywhere this document tells a reader to read a value and
+compare it** — an annotated count, an `Expect …`, a `DELETE 1`, a re-listing that must come back
+empty, **a gate of the form "do not start phase N until X returns zero rows"**, a rehearsal
+fixture's assertion — **in whatever section, phase and form it is written.** It is deliberately a
+property and not a list, because a list of the steps that have needed fixing is what keeps
+failing here: each round of this work has found an instance in a step the previous round's list
+did not name, and the one that survived longest — phase 2's gate, unsatisfiable since HD-193 —
+was in no list at all. A trailing "and not only the ones listed here" carries no load, because a
+reader checks what is named. **It is what an operator gets wrong at 2am, so it is a short set of
+rules and no counts:**
+
+- **A check has as many expected values as this document has readings of it, and the reading is
+  part of the expectation.** The same count is read at up to three points in one b′ run — while
+  the escalation is open, after the close-out, and on a run where nothing was ever blocked — and
+  a value that is correct at one is a failure at another: a `0` that is "the unrecoverable
+  direction" at the blocked-open reading is the correct outcome at the post-close one. So a step
+  that can be read more than once **names each reading and the value that belongs to it**, and a
+  step written for a single reading is a defect even when every word of it is true. This is the
+  failure this document has now shipped three times, and it survives review because the step
+  reads correctly — for the reading its author had in mind.
+- **An expected value is a number this procedure recorded, never the number that looks tidy.** A
+  check may assert `0` only where everything it can see is the subject's — the row itself, *or
+  the one column of it this procedure owns* — and a statement in this runbook was permitted to
+  **clear or remove** all of them. Both widenings are deliberate: the scoped assignee count
+  asserts `0` over the *team's* issues, which phase 4 never removes and is only permitted to
+  null a column of, and a rule that said "the row belongs to the subject and a statement removed
+  it" would invite a future editor to strip that correct `0`. Every other check asserts what
+  phase 1 wrote down. A `0` annotated on a check that can legitimately see somebody else's row —
+  another tenant's namesake, a workspace held open by a 5.3(b′) escalation, a legacy membership
+  outside `:ws_all` — is a defect in this document, not a finding about the install, and it is
+  fixed here rather than in the database.
+- **Read both directions, and know which one is recoverable.** *Too high* nearly always means
+  work was not done, and the remedy is to re-derive a list and re-run a scoped, idempotent
+  statement. *Too low* means a row that was meant to stay is gone, and nothing in this document
+  puts it back. Where only one direction is reachable — a count whose expected value is its own
+  floor — the step says so, so the other direction is never left to be improvised.
+- **The reachable repair for a red number is usually the destructive one, which is why a red
+  number is recorded and not chased.** Deleting phase 4's `workspace_id IN (:ws_all)` drives a
+  name-keyed count to zero by rewriting another tenant's rows; deleting the membership row a b′
+  escalation is holding drives a membership count to zero by orphaning the workspace that branch
+  exists to protect. Both are one keystroke, both look like fixing the check, and both are the
+  harm. **A number that will not go green is a fact for the ticket, never a statement to widen
+  or a held row to delete** — and a check that a correct run cannot satisfy is a bug in the
+  check, to be reported as one.
 
 Then boot or hit the running application: the subject cannot log in; an issue they reported
 renders "Deleted user"; a comment they wrote is intact under "Deleted user"; a project they
-administered still has an administrator.
+administered still has an administrator. **These describe the completed erasure**, so they
+belong to the never-blocked and post-close readings — with a 5.3(b′) escalation still open the
+scrub has not run, the subject still renders by name, and the project in the blocked workspace
+still has no administrator who can sign in. Make them once the b′ close-out has run phase 8.
 
 **Phase 10 — close.** Append the ledger row (§8.2) — including the ownership transfers and
-project-admin appointments phase 2 made — upload it and the key list to
-`s3://<backup-bucket>/manual/erasures/`, and reply to the subject confirming the deletion is
-done, **with no statement about periods**.
+project-admin appointments phase 2 made, **and the ones every b′ close-out's step 3 made** —
+upload it and **every round's key file** to `s3://<backup-bucket>/manual/erasures/`, and reply
+to the subject confirming the deletion is done, **with no statement about periods**.
+
+**The ledger's key list is the UNION of `erase-<request_id>-keys-1.txt` and every close-out
+round's file, and `attachment_keys_deleted` is their SUM** (§8.2). Upload the files as they are
+rather than concatenating them: which round deleted which objects is the only thing that says
+*when* they went, and a run that stopped for an escalation deleted them weeks apart.
 
 **Then destroy every remaining copy of the address, and there are two kinds.**
 
-- **The local working files**: they hold `:addr`, `:name`, the derived workspace lists and the
-  key list. Phase 9 is what established they are no longer needed.
+- **The local working files**: they hold `:addr`, `:name`, the derived workspace lists of every
+  round, and every round's key and prefix file. Phase 9 is what established they are no longer
+  needed, and phase 10 has just uploaded the key files — destroy the local copies only after
+  that upload, not before.
 - **The mailbox.** Delete the request thread, the message carrying the confirmation code, and
   its **Sent** copy — then empty the mail client's Trash of them. This is not tidiness: the
   intake thread carries the address and, because the in-app `mailto:` pre-fills it, the
@@ -1900,6 +2623,40 @@ survived" is satisfied by runs that did the wrong thing for the wrong reason:**
   the workspace still exists; **A's `workspace_members` row is still there**; and **phase 8 did
   not run** (A's address and display name are intact). If the workspace is deleted, the liveness
   predicate has reverted to `status <> 'DISABLED'`. If A is scrubbed, the b′ gate is missing.
+  **Give this workspace a project, created by A** — one line of setup, and without it neither
+  of the two paragraphs below is reachable at all. Creating a project writes its creator a
+  Project admin `project_members` row, which is the ordinary b′ shape rather than an exotic one.
+  **This fixture is also the one that exercises phase 9's non-zero expectations**: with it in
+  play `workspace_members` reads 1, **`project_members` reads at least 1** (phase 5 holds it,
+  and phase 1(g4)'s `held_by_escalation` column is where that 1 was recorded — a rehearsal that
+  recorded only g4's overall total reads phase 9 as LOWER than expected and calls a correct run
+  a failure), and the account row is unscrubbed. A rehearsal that records any of the three as a
+  failure — or a check that demands 0 there — is asserting the orphaning.
+  **And phase 1(c) must still return that project, at phase 2 and again at phase 9, with
+  `held_by_escalation` TRUE on that row and without stopping the run**: there is no `ACTIVE`
+  member in this workspace to appoint, so §5.3(d) has no candidate and the project genuinely has
+  no signable-in administrator for the duration of the escalation. That is the cost §5.3(b′)
+  accepts in the open. A rehearsal that "fixes" it by
+  archiving the project, promoting C, or deleting A's `project_members` row has performed the
+  harm and scored it as a pass.
+  **Then close the escalation and run the close-out, because the blocked-open reading is only
+  one of phase 9's three.** Reactivate C, then run the b′ close-out as written: re-derive (this
+  workspace must now leave `:ws_blocked` and appear in `:ws_release`), re-run phase 2 for it
+  (C promoted to Owner, and appointed to the project under §5.3(d)), then phase 5, phase 8,
+  phase 9.
+  **Assert step 3's gate BETWEEN the appointment and step 4, which is the reading that has to be
+  taken on purpose:** with C appointed and A's held `project_members` row still present, 1(c)
+  must return **no row with both flags FALSE**. This is where the gate had been wrong since it
+  was written — A is `DISABLED` by then, so a count that includes them sees one ACTIVE
+  administrator and reads the repaired project as stranded — and a rehearsal that jumps from the
+  appointment to step 4 never takes it, because step 4 removes the row and empties the query for
+  an unrelated reason. Neither the blocked-open nor the post-close reading can see this;
+  only the one between them can.
+  The post-close reading must be `workspace_members` **0**, `project_members` back to
+  1(g4)'s out-of-`:ws_all` total (**0** in this fixture), **1(c) returning no rows at all**, and
+  A's row **scrubbed**. A rehearsal that stops at the blocked-open reading proves the hold and
+  never the release — and the release is where the held rows are supposed to go. It is also the
+  only way to rehearse a step that re-derives the working lists instead of restoring them.
 - **b — a workspace with a second Owner who is `DISABLED` *and* a third member C who is
   `ACTIVE` and not an Owner.** It must route to **transfer, to C** — not to "there are two
   Owners, nothing to do", and not to the suspended Owner B, who cannot sign in. The two-member
@@ -1926,7 +2683,10 @@ survived" is satisfied by runs that did the wrong thing for the wrong reason:**
   this procedure (scrub them first, or seed the tombstone address in its self-referential form).
   It must appear in `:ws_delete` and be deleted with its contents. Without this fixture the
   suite proves only that workspaces are *not* deleted, which every broken predicate also
-  achieves.
+  achieves. **Give it a project the subject created**, and check phase 2's gate against it: the
+  project appears in 1(c) with `workspace_deleted` TRUE and **does not stop the run**. That row
+  is not exotic — the demo workspace produces one on every real erasure — and a gate that reads
+  1(c) as a row count instead of a partition fails here, on the most ordinary install there is.
 
 *What Stage A proves:* the SQL is correct and ordered correctly; the FK behaviour on the
 workspace delete is what §11 phase 5 claims; the guards' invariants survive; the pre-flight
@@ -2180,13 +2940,52 @@ one is checkable by reading §11 alone)
    check whose unexpected result names both of its possible causes. The claim in phase 1(g) is
    written as a property over statements, never as a count of them.
 3e. The assignee sweep is scoped by workspace, not by `assignee_id` alone.
-3f. **No verification step asserts 0 from a check the runbook itself guarantees is non-zero.**
-   Concretely: the name-keyed checks in 8a and the unscoped assignee count in phase 9 assert
-   *the out-of-scope totals recorded in phase 1*, and each says in words that failing to reach
-   zero is expected and must not be answered by widening a statement.
+3f. **Every verification step in this document asserts a value a correct run can actually
+   produce — at every point in a run where this document has it read — and states what a
+   deviation in *each* direction means.** The criterion is over the
+   category: **anywhere this document tells a reader to read a value and compare it** — an
+   annotated count, an "Expect …", a `DELETE 1`, a re-listing that should come back empty, a
+   rehearsal fixture's assertion — in whatever form and whatever section it is written in. It is
+   deliberately *not* a list of the steps that have needed fixing, and it carries no count of
+   them: every round of this work found instances that had survived a criterion naming the
+   previous round's, and the next round will survive an enumeration of these. Read as a set of
+   properties — **and they are not checked the same way**, which is the trap this criterion set
+   for its own reviewer:
+   - **Satisfiability.** No step asserts a value that another statement in this document
+     guarantees it cannot hold. A step whose expected value is a number the pre-flight recorded
+     names that number and never `0`; `0` appears only where everything the check can see is
+     the subject's — the row, or the one column of it this procedure owns — and a statement here
+     was permitted to **clear or remove** all of them.
+     **This property is inherently cross-referential and CANNOT be checked by reading a step in
+     isolation**, because the statement that defeats a step is written somewhere else — which is
+     why a review pass that walks the steps one at a time returns clean over it. The instance
+     that survived longest here was a phase-2 gate demanding zero rows from a query that two
+     other sections guarantee will return one — §5.3(b′), and (found a round later, in the same
+     gate) §5.3(c), whose deleted workspaces are the ordinary case rather than the exotic one.
+     Check it the other way round, and over
+     **every expected value** rather than only the zeros: take each `0`, each "returns zero
+     rows" **and each "equals what phase 1 recorded"**, and ask — **for each reading this
+     document mandates of it** — which branch of §5.3, which deliberately held row or which
+     other tenant's data could put something there, and which later step could take it away.
+     The load-bearing word is *reading*: one b′ run reads the same check while the escalation is
+     open and again after the close-out, and a method that takes only the zeros returns clean
+     over a recorded NON-zero expectation that a later step legitimately empties — which is
+     exactly the instance this criterion missed last.
+   - **Both directions** — and this one *is* checkable by reading the step in isolation. Each
+     step says what *higher* and what *lower* mean, and which of the two is recoverable. Where
+     only one direction is reachable — a count whose expected value is its own floor — the step
+     says that, rather than leaving the other direction to be guessed.
+   - **The repair is named and, where it is destructive, forbidden** — also checkable by reading
+     the step in isolation. Wherever the obvious way to turn a red number green is widening a
+     workspace-scoped statement or deleting a deliberately held row, the step names that action
+     and refuses it, and says the number is recorded on the ticket instead. A verification
+     step that cannot go green teaches an operator to satisfy it the wrong way, under time
+     pressure, at this runbook's most destructive moment — so an unsatisfiable check is a
+     defect of the same class as a missing tenant predicate, not a wording nit.
 3g. Every exclusion for a 5.3(b′) escalation is expressed as an `IN` over a **derived
    complement** (`:ws_release`), never as a `NOT IN` over the blocked list and never for a
-   single hand-typed workspace.
+   single hand-typed workspace — and when the escalation closes, that complement is
+   **re-derived from the database** by the b′ close-out, never edited to admit the released id.
 3h. The liveness predicate is **self-referential** everywhere it appears (`email = 'deleted+' ||
    id::text || '@deleted.invalid'`), in §5, §8, §11 and all three ADRs. `rg "LIKE '%@deleted"`
    finds nothing outside the paragraphs explaining why that form was rejected.
@@ -2210,7 +3009,10 @@ one is checkable by reading §11 alone)
 
 4. §12 Stage A has been run on a synthetic database and every phase-9 assertion passed,
    including a second (idempotent) run, and the fixture set in §12.2 is carried in full — each
-   fixture asserting the **route taken**, not merely that something survived.
+   fixture asserting the **route taken**, not merely that something survived. "Passed" means
+   each check read the value phase 1 recorded for it: a fixture set that exercises the branches
+   which deliberately hold rows makes some of those values non-zero, and a rehearsal that scores
+   itself on zeros is scoring the orphaning as a pass (3f).
 5. §12 Stage B has been run against a restored copy of production with the owner's explicit
    authorisation, using a throwaway account the owner created; the run is logged in §6.8 in the
    past tense with its date, and any step not walked is named. *(If the owner declines, the
