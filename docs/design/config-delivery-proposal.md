@@ -422,15 +422,54 @@ state it was deployed in — and a detector that cannot clear gets muted, which 
 not having one. **Why they disagreed was never established and stays open**: the interpolation
 hypothesis (only `app` interpolates a default into its definition) is *excluded* — `postgres` and
 `caddy` carry the same shape and matched, and a probe on Compose v5.1.0 hashed a literal and an
-interpolated-with-default value byte-identically, each agreeing with its own container's label;
-what remains unexamined is the production Compose version, which nobody recorded, and any
-difference between the file set the deploy's `up` resolved and the one the check passed. Neither is
+interpolated-with-default value byte-identically, each agreeing with its own container's label —
+and so is the second suspect: **production runs Compose v5.1.2 on Docker Engine 25.0.16** (read over
+SSM on 2026-09-05, one patch above that probe), so the version is no longer unrecorded and does not
+explain the disagreement. What remains unexamined is any difference between the file set the
+deploy's `up` resolved and the one the check passed, which is not
 answerable from off the box. The fix therefore stopped *re-implementing* Compose's decision and
 started *asking* for it. The alternative considered and rejected was to narrow the comparison to
 the fields that matter operationally (image, env, limits, mounts): that is the same second opinion
 with a shorter list, and its omissions are silent — a field nobody thought to include drifts under
 a green light. Sealed by `ConfigDriftContainerOracleTest`, whose load-bearing half is that a **clean**
 tree is silent.
+
+**How the plan is read: the presence of `Running`, never the absence of everything else.** A
+container the plan will not touch is named `Running`; a container it will act on gets an action verb
+(`Recreate`, `Starting`, …) and no `Running`. So a container missing `Running` is drift *whatever it
+carries instead*, which keeps the fail-closed property — an unseen verb arriving without `Running`
+goes loudly red quoting itself, where an allow-list of "verbs that are fine" would go quietly green.
+The distinction is not academic: `depends_on: condition: service_healthy` makes Compose report the
+waited-on container's condition progress on the same stream and in the *same*
+`Container <name> <verb>` shape as the plan, so a clean dependency is named `Running`, then
+`Waiting`, then `Healthy`. Production declares two such edges, and reading "any verb that is not
+`Running`" reported `postgres` and `app` as drifted on every hourly run — this section's own defect
+wearing the opposite sign. What would falsify the rule is a Compose that prints `Running` for a
+container it would nonetheless act on; that has not been observed on v5.1.0 or v5.1.2, and both
+directions are driven against a real daemon by a fixture that carries a `service_healthy` edge.
+
+**And the oracle is only as readable as the local Compose, which is two line formats and not one.**
+Measured on one project on 2026-09-05: v5.1.x prints ` Container p-alpha-1 Running`, while v2.27.1
+prints ` DRY-RUN MODE -  Container p-alpha-1  Running`. So the parse *locates* the word `Container`
+in the line and takes the two fields after it, rather than requiring it to be the first — a `$1`
+parse discards every line of a v2 plan, and the scope then reported an unreadable oracle and
+published `1` on a clean box for every self-hoster whose distro ships Compose v2 (and for CI, which
+is how it was found; production is v5.1.2, so it was invisible there). The widening is bounded to a
+field exactly equal to `Container`; the orphan warning is matched separately and is byte-identical
+on both generations.
+
+The general case remains: the scope reads a *positive* signal, so a Compose whose plan this cannot
+read at all publishes `1` on a clean box permanently — which the script says in as many words rather
+than reporting health. That is a property of the environment, not of the script, so
+`ConfigDriftContainerOracleTest` probes the capability before it judges anything and fails naming
+the Compose version and printing the raw plan (a green run there would be the project agreeing not
+to find out that a self-hoster on that version gets a permanently firing monitor).
+
+*Also measured, and worth knowing before reading an alert:* containers created by one Compose
+generation and checked by another are genuinely planned for recreation — a v2-created `depends_on`
+service is `Recreate` under v5.1.0 while v2 itself calls it `Running`. The scope reports that as
+drift and is right to: `up -d` really would act. Upgrading Docker/Compose on a box is therefore
+expected to raise `containers` once, until the next deploy recreates the containers.
 
 Checksums rather than a re-download: no network dependency, no codeload availability in the hourly
 path, and it answers the question that is actually asked ("has this box changed since it was

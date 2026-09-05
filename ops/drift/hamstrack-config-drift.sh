@@ -321,9 +321,12 @@ check_files() {
 # and not the other. This repository's postgres and caddy carry the same shape and MATCHED,
 # and a probe on Compose v5.1.0 / Docker 29.2.1 hashed `mem_limit: 128m` and
 # `mem_limit: ${VAR:-128m}` byte-identically, each agreeing with its own container's label;
-# that probe could not reproduce the disagreement at all. What stays open: the production
-# Compose version, which nobody recorded, and a difference between the file set the deploy's
-# `up` resolved and the one this check passed. Neither is answerable from off the box.
+# that probe could not reproduce the disagreement at all. ONE OF THE TWO REMAINING UNKNOWNS
+# IS NOW MEASURED, AND IT DID NOT EXPLAIN IT: production runs Compose v5.1.2 on Docker
+# Engine 25.0.16 (read over SSM, 2026-09-05), one patch above the probe's v5.1.0, and its
+# dry run prints `Running` for the services it would leave alone — so the oracle below is
+# readable there. What stays open: a difference between the file set the deploy's `up`
+# resolved and the one this check passed. That one is still not answerable from off the box.
 #
 # So the comparison stopped being a RE-IMPLEMENTATION of Compose's decision and became
 # Compose's decision. `up -d --dry-run` plans the command a deploy runs — minus its
@@ -346,12 +349,49 @@ check_files() {
 #   (b) A clean service is not ABSENT from the plan, it is present as `Running`. The test is
 #       therefore POSITIVE: every container this box is running must appear in the plan, and
 #       must appear with that verb. An oracle that goes blind — a Compose that stops
-#       printing per-container status, a flag that stops being accepted — then reports every
-#       service as unplanned and is loud, instead of reading as health.
-#   (c) ANY verb that is not `Running` is drift, including one this script has never seen.
-#       Fail-closed on purpose: if a future Compose renames `Recreate`, an allow-list of
-#       drift verbs goes quietly green and a deny-list goes loudly red naming the verb it
-#       did not understand. Only one of those two mistakes is survivable here.
+#       printing per-container status, a flag that stops being accepted, a LINE FORMAT this
+#       parse does not recognise — then reports every service as unplanned and is loud,
+#       instead of reading as health. That last one is not hypothetical: Compose v2 prefixes
+#       every progress line with `DRY-RUN MODE - `, which an `$1 == "Container"` parse
+#       discarded wholesale, and the scope said so rather than going green. Both formats are
+#       read now, see the parse below — but the fail-closed direction is what bought the
+#       time to find that out.
+#   (c) A CONTAINER WITHOUT `Running` IS DRIFT, whatever it has instead, including a verb
+#       this script has never seen. Fail-closed on purpose: if a future Compose renames
+#       `Recreate`, an allow-list of drift verbs goes quietly green and this goes loudly red
+#       quoting the verbs it did not understand. Only one of those two mistakes is
+#       survivable here — so the test is `Running` ∈ verbs, and NEVER a list of verbs to
+#       ignore.
+#
+#       THE RULE IS PRESENCE OF `Running`, NOT ABSENCE OF EVERYTHING ELSE, and the
+#       difference is not academic: it shipped as a defect. A container gets SEVERAL lines
+#       on this stream in the same ` Container <name> <verb> ` shape, and only some of them
+#       are the plan. `depends_on: condition: service_healthy` makes Compose report the
+#       DEPENDENCY-CONDITION progress of the container being waited on — measured on a clean,
+#       unchanged project (Compose v5.1.0 / Docker 29.2.1, and the same shape read off
+#       production's v5.1.2 / Engine 25.0.16 on 2026-09-05):
+#           Container p-beta-1 Running     <- the plan: this one will not be touched
+#           Container p-alpha-1 Running
+#           Container p-beta-1 Waiting     <- alpha waiting on beta's healthcheck
+#           Container p-beta-1 Healthy
+#       Read as "any verb that is not Running is drift", `beta`'s set {Healthy, Running,
+#       Waiting} yields `Healthy` and the box reports permanent drift — this ticket's own
+#       defect in a new suit, and production declares two such edges, so it would have fired
+#       hourly there for ever. It was invisible locally only because the scratch fixture had
+#       no health dependency; it has one now.
+#       THE EVIDENCE FOR THE OTHER DIRECTION, which is the half that matters: a container
+#       Compose WOULD act on never carries `Running`. Measured on the same pair — drift the
+#       dependent and it is {Recreate, Recreated}; drift the DEPENDENCY, which still gets
+#       waited on, and it is {Healthy, Recreate, Recreated, Waiting}, with no `Running` in
+#       either. A stopped container is {Starting, Started}. So progress verbs arrive IN
+#       ADDITION to `Running` when there is nothing to do, and never instead of an action
+#       verb.
+#       WHAT WOULD FALSIFY IT: a Compose that prints `Running` for a container it would
+#       nonetheless act on — that pair has never been observed, and it is the one shape this
+#       rule reads as health. (The opposite drift, a Compose that stops printing `Running`
+#       for kept containers, is loud by construction and is (b).) Both directions are held
+#       by ConfigDriftContainerOracleTest against a real daemon, whose fixture carries a
+#       `service_healthy` edge precisely so the clean side of this is exercised.
 #   (d) AN ORPHAN IS INVISIBLE TO (b) AND (c), so it is read separately. Delete a service
 #       from a compose file and leave its container running: it is not in `config
 #       --services`, so no per-service comparison reaches it, and Compose prints no
@@ -475,7 +515,30 @@ check_containers() {
   # service's definition — a network that had to be re-created is reported by the verbs of
   # the containers hanging off it anyway. `tr -d '\r'` because a CR captured into the verb
   # would fail every comparison below and read as universal drift.
-  plan_pairs="$(printf '%s\n' "$plan" | tr -d '\r' | awk '$1 == "Container" && NF >= 3 { print $2 "\t" $3 }')"
+  #
+  # THE WORD `Container` IS LOCATED, NOT ASSUMED TO BE FIRST, because two supported Compose
+  # generations disagree about what precedes it — measured on the same project on the same
+  # day (2026-09-05):
+  #     v5.1.0 / v5.1.2:   ' Container p-alpha-1 Running'
+  #     v2.27.1:           ' DRY-RUN MODE -  Container p-alpha-1  Running'
+  # An `$1 == "Container"` parse throws away EVERY line of a v2 plan, so on v2 this scope
+  # reported "the dry run planned nothing" for every service and published 1 on a clean box
+  # — correct fail-closed behaviour, and permanent drift for anyone whose distro ships
+  # Compose v2 (which is most self-hosters, and CI's runner). Production is v5.1.2, so this
+  # was invisible there. The widening is bounded: a field exactly equal to `Container`, with
+  # the two fields after it. Compose's own prose about containers does not match it — the
+  # orphan warning says "Found orphan containers", lower-case and plural, and is read
+  # separately in (d) — and that warning is byte-identical on both generations.
+  #
+  # A COMPOSE UPGRADE ON THE BOX RAISES THIS SCOPE ONCE, and that is not a false positive:
+  # measured, a container CREATED by v2 is planned `Recreate` by v5.1.0 while v2 itself calls
+  # it `Running`. `up -d` really would act, which is exactly what this scope reports. It
+  # clears at the next deploy, when the containers are recreated by the Compose now installed.
+  plan_pairs="$(printf '%s\n' "$plan" | tr -d '\r' | awk '{
+      for (i = 1; i <= NF - 2; i++) {
+        if ($i == "Container") { print $(i + 1) "\t" $(i + 2); break }
+      }
+    }')"
 
   DRIFT_CONTAINERS=0
 
@@ -539,11 +602,14 @@ check_containers() {
         mismatched=1
         continue
       fi
-      bad="$(printf '%s\n' "$verbs" | grep -vx 'Running' | head -n 1 || true)"
-      if [ -n "$bad" ]; then
-        # (c). The verb is printed because a verb this script does not know is exactly the
-        # case where the reader needs to see what Compose actually said.
-        log "containers: 'docker compose up -d' would act on $svc — compose plans '$bad' for container $name, so the definition on disk is not the one it is running"
+      # (c). PRESENCE OF `Running`, NOT ABSENCE OF EVERYTHING ELSE. A container gets more
+      # than one line on this stream, and only some of them are the plan.
+      if ! printf '%s\n' "$verbs" | grep -qx 'Running'; then
+        # The verbs are printed — all of them, not the first — because a verb this script
+        # does not know is exactly the case where the reader needs to see what Compose said,
+        # and because "the first one" has no meaning in a set that arrives unordered.
+        bad="$(printf '%s\n' "$verbs" | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
+        log "containers: 'docker compose up -d' would act on $svc — compose plans '$bad' for container $name and does not report it as Running, so the definition on disk is not the one it is running"
         mismatched=1
       fi
     done <<< "$cids"

@@ -1617,6 +1617,38 @@ Two further notes if you use it on a schedule: it takes a lock, so a hand run an
 automated one cannot overlap, and it is idempotent — re-running on an unchanged tree
 replaces identical files and leaves every container alone.
 
+**The drift check's `containers` scope reads Compose's own words, so it depends on your
+Compose.** That scope answers "would `docker compose up -d` act on anything?" by running
+`up -d --dry-run` and reading the per-container plan, and it is deliberately **fail-closed**:
+a plan it cannot read is reported as drift (`hamstrack_config_drift{scope="containers"} 1`,
+journal line *"the dry run planned nothing for X, whose container … is running — … an oracle
+that cannot be read rather than a box that is clean"*), never as health. So if you see that
+sentence, the check is telling you it could not ask its question on your machine — not that
+your box has drifted.
+
+This is a measurement rather than a supported-versions list, because the list would be a
+promise about versions nobody has run: **the check itself is the authority on your box**, and
+it says so in that line. What has actually been measured (2026-09-05) is two Compose
+generations, whose plans are printed in different shapes and both of which are read —
+
+```
+v5.1.x     Container p-alpha-1 Running
+v2.27.1    DRY-RUN MODE -  Container p-alpha-1  Running
+```
+
+— on Compose **v2.27.1** and on **v5.1.0**, with Hamstrack's own production box on **v5.1.2**
+(Docker Engine 25.0.16). On anything else, the check will tell you the moment it cannot read
+the plan; if it does, report it rather than treating the alarm as noise or silencing it.
+
+**Upgrading Docker or Compose on the box raises this scope once, and that is not a false
+alarm.** Measured on the same day: a container *created* by Compose v2 is planned `Recreate`
+by v5.1.0, while v2 itself called that same container `Running`. The two generations disagree
+about what the running container should look like, so `up -d` really would act on it — which
+is exactly what the scope reports. It clears at your next deploy, when the containers are
+recreated by the Compose you now have installed. Nothing is wrong with your configuration, and
+nothing needs editing; if you would rather not wait for the alert to clear on its own,
+`docker compose … up -d` is the action it is describing.
+
 ### Notifications are scoped to a workspace from 0.17.0
 
 **Two changes, and one of them wants five minutes *before* you pull the image.**

@@ -94,10 +94,51 @@ class ConfigDriftContainerOracleTest {
                 stops printing per-container status, a flag that stops being accepted -- then
                 reports every service as unplanned and is loud, instead of reading as health.
 
-              * ANY VERB THAT IS NOT `Running` IS DRIFT, including one the script has never seen.
-                If a future Compose renames `Recreate`, an allow-list of drift verbs goes quietly
-                green and a deny-list goes loudly red naming the verb it did not understand. Only
-                one of those two mistakes is survivable in a monitor.
+              * A CONTAINER THAT IS NOT NAMED `Running` IS DRIFT, whatever it carries instead,
+                including a verb the script has never seen. If a future Compose renames
+                `Recreate`, an allow-list of drift verbs goes quietly green and this goes loudly
+                red quoting what it did not understand. Only one of those two mistakes is
+                survivable in a monitor.
+
+              * BUT THE TEST IS THE PRESENCE OF `Running`, NEVER THE ABSENCE OF EVERYTHING ELSE,
+                and the difference between those two sentences shipped as a defect. A container
+                gets SEVERAL lines on this stream: `depends_on: condition: service_healthy` makes
+                Compose report the waited-on container's condition progress in the identical
+                ` Container <name> <verb> ` shape, so a CLEAN dependency is named `Running`, then
+                `Waiting`, then `Healthy`. "Any verb that is not Running" picks `Healthy` out of
+                that and reports permanent drift on a clean box -- HD-221's own defect wearing the
+                opposite sign, and production declares two such edges, so it would have fired for
+                `postgres` and `app` hourly for ever. Evidence for the other direction, which is
+                what makes presence sufficient: a container Compose WOULD act on never carries
+                `Running` -- measured, a drifted dependent is {Recreate, Recreated}, a drifted
+                DEPENDENCY is {Healthy, Recreate, Recreated, Waiting}, a stopped one is {Starting,
+                Started}. Progress verbs arrive BESIDE `Running`, never instead of an action verb.
+                What would falsify it: a Compose that prints `Running` for a container it would
+                nonetheless act on. That pair has never been observed and is the one shape this
+                rule would read as health -- which is why the fixture below carries a
+                `service_healthy` edge and drives both sides of it against a real daemon. Do not
+                answer this with a list of ignorable verbs: `Waiting`/`Healthy` today is one
+                Compose release from being the wrong list, and a wrong allow-list is silent.
+
+              * TWO COMPOSE GENERATIONS, TWO LINE FORMATS, ONE PARSE. v5.1.x prints
+                ` Container p-alpha-1 Running`; v2.27.1 prints
+                ` DRY-RUN MODE -  Container p-alpha-1  Running` -- measured on the same project on
+                the same day. So the word `Container` is LOCATED in the line and the two fields
+                after it are taken, never `$1`. That is what CI's failure was: the runner ships
+                Compose v2, every plan line was discarded, and the scope reported an unreadable
+                oracle -- correctly, and permanently, for every self-hoster on a v2 distro.
+                Production is v5.1.2, so it was invisible there. The widening is bounded to a
+                field exactly equal to `Container`; the orphan warning ("Found orphan containers",
+                lower-case and plural) is read separately and is byte-identical on both.
+
+              * "A CLEAN TREE IS SILENT" IS A PROPERTY OF THE SCRIPT **AND** OF THE COMPOSE IT RAN
+                AGAINST, so the environment's capability is established before the script is
+                judged. CI failed here once while the script was behaving perfectly: the runner's
+                Compose printed no per-container line at all, the script correctly said it had an
+                oracle it could not read, and the assertion blamed the parse. requireAReadableOracle
+                probes first and fails with the environment's own diagnosis -- and it FAILS rather
+                than skips, because a Compose that cannot be read is a self-hoster with a
+                permanently firing monitor, which the project should know about.
 
               * AN ORPHAN IS DRIFT, AND NO PER-SERVICE COMPARISON CAN SEE ONE. A deploy runs
                 `up -d --remove-orphans`; this plans `up -d` without that flag, deliberately, since
@@ -136,9 +177,11 @@ class ConfigDriftContainerOracleTest {
             And the cause of the production disagreement between the two hashes was never
             established. It stays open, deliberately: the interpolation hypothesis is EXCLUDED
             (postgres and caddy carry the same interpolated-with-default shape and matched, and a
-            probe on Compose v5.1.0 hashed the literal and the interpolated form identically),
-            and what remains -- the production Compose version, and the file set each path
-            resolved -- cannot be settled from off the box. Do not write a cause into this file.
+            probe on Compose v5.1.0 hashed the literal and the interpolated form identically), and
+            so is the second suspect -- production has since been read over SSM and runs Compose
+            v5.1.2 on Docker Engine 25.0.16, one patch above that probe, with a dry run that prints
+            `Running` for the services it would leave alone. What remains is the file set each path
+            resolved, which cannot be settled from off the box. Do not write a cause into this file.
             """;
 
     /**
@@ -186,6 +229,23 @@ class ConfigDriftContainerOracleTest {
         // than about the only member of one. The drift is an ENVIRONMENT value and not a
         // mem_limit: memory limits depend on what the host's cgroups will express, and the
         // property under test is not "Compose notices memory".
+        //
+        // THE `service_healthy` EDGE IS THE FIXTURE'S LOAD-BEARING PART, added after a
+        // version of this file without one let a permanent-drift defect through code review
+        // and CI both. Compose reports dependency-condition progress for the container being
+        // WAITED ON, on the same stream and in the same ` Container <name> <verb> ` shape as
+        // the plan, so a clean `alpha` here is named three times — `Running`, then `Waiting`,
+        // then `Healthy`. A check reading "any verb that is not Running is drift" therefore
+        // reports a clean box as drifted for ever, which is HD-221's own defect; production
+        // declares two such edges and a fixture without one cannot see it.
+        //
+        // The DEPENDENCY is the service that drifts (beta waits on alpha, and alpha is the one
+        // carrying HD221_KNOB) so that the loud half is exercised in its hardest shape too: a
+        // drifted alpha is {Healthy, Recreate, Recreated, Waiting}, i.e. a container that must
+        // be red while carrying the very verbs a clean one carries. The direction also keeps
+        // the orphan case below legal — deleting the DEPENDENT leaves a configuration that
+        // still resolves, while deleting a depended-on service would make `config --services`
+        // fail and turn that case into a different test.
         var bothServices = """
                 services:
                   alpha:
@@ -194,10 +254,19 @@ class ConfigDriftContainerOracleTest {
                     command: ["300"]
                     environment:
                       HD221_KNOB: "one"
+                    healthcheck:
+                      test: ["CMD-SHELL", "exit 0"]
+                      interval: 2s
+                      timeout: 2s
+                      retries: 3
+                      start_period: 1s
                   beta:
                     image: %s
                     entrypoint: ["sleep"]
                     command: ["300"]
+                    depends_on:
+                      alpha:
+                        condition: service_healthy
                 """.formatted(image, image);
         write(compose, bothServices);
 
@@ -212,6 +281,9 @@ class ConfigDriftContainerOracleTest {
             var betaBefore = containerId(box, project, "beta");
             expect(failures, "the scratch project really started", !alphaBefore.isBlank() && !betaBefore.isBlank(),
                     up);
+
+            // --- can this environment's Compose be read at all? -----------------------
+            requireAReadableOracle(box, project);
 
             // --- clean ---------------------------------------------------------------
             var clean = runDrift(box, project, Map.of());
@@ -245,7 +317,23 @@ class ConfigDriftContainerOracleTest {
             // against whatever the new mutating verb is.
             expect(failures, "the plan was a genuinely mutating one, so the id check below means "
                     + "something (Compose's word for it today is `Recreate`)",
-                    drifted.output().contains("compose plans 'Recreate'"), drifted);
+                    drifted.output().contains("Recreate"), drifted);
+            // alpha is the health dependency, so its verb SET here is
+            // {Healthy, Recreate, Recreated, Waiting} — the progress verbs a clean container
+            // also carries, arriving beside a real action verb. Two things must hold and only
+            // one of them is the verdict: it is red (above), and the sentence an operator
+            // reads names the ACTION rather than whichever verb happened to sort first. A
+            // "report the first non-Running verb" fix passes the verdict and prints `Healthy`,
+            // which sends the reader to a health incident that is not happening.
+            expect(failures, "…and the drift line quotes what Compose planned rather than the "
+                    + "dependency-progress verb that shares the stream with it",
+                    drifted.output().contains("compose plans '")
+                            && drifted.output().replaceAll("(?s).*compose plans '([^']*)'.*", "$1")
+                                    .contains("Recreate"),
+                    drifted);
+            expect(failures, "…and says which reading made it red, since the rule is the presence "
+                    + "of `Running` and not the absence of everything else",
+                    drifted.output().contains("does not report it as Running"), drifted);
             // If `--dry-run` were doing anything at all, this is where it would show: a
             // recreated container has a new id.
             expect(failures, "the dry run that planned a recreate left alpha's container id alone",
@@ -318,6 +406,39 @@ class ConfigDriftContainerOracleTest {
                 + "reading stdout, which Compose leaves empty either way",
                 containersGauge(clean.box()) == 0, clean.result());
 
+        // (0b) THE ROW CI PAID FOR. Compose v2 prefixes every progress line with
+        //      `DRY-RUN MODE - `, so the same clean plan reads
+        //      ` DRY-RUN MODE -  Container alpha  Running` — measured on v2.27.1 against the
+        //      same scratch project, where v5.1.0 and production's v5.1.2 print no prefix at
+        //      all. An `$1 == "Container"` parse throws away every line of a v2 plan; the
+        //      scope then said "the dry run planned nothing" for every service and published 1
+        //      on a clean box, which is correct fail-closed behaviour and permanent drift for
+        //      anyone whose distro ships v2 — most self-hosters, and the GitHub runner, which
+        //      is how this was found. Both generations must read as clean here.
+        var v2Clean = runStubbed("v2-prefix", Map.of(
+                "STUB_PLAN", " DRY-RUN MODE -  Container alpha  Running \n"
+                        + " DRY-RUN MODE -  Container beta  Running \n"
+                        + " DRY-RUN MODE -  Container alpha  Waiting \n"
+                        + " DRY-RUN MODE -  Container alpha  Healthy "));
+        expect(failures, "a Compose v2 plan is read too — the container line is FOUND in the "
+                        + "line rather than assumed to start it",
+                containersGauge(v2Clean.box()) == 0, v2Clean.result());
+        expect(failures, "…and reads as clean rather than as an unreadable oracle",
+                !v2Clean.result().output().contains("planned nothing"), v2Clean.result());
+
+        // (0c) …and the loud half of the same format, so that "v2 is readable" cannot be
+        //      satisfied by a parse that reads every v2 line as clean.
+        var v2Drifted = runStubbed("v2-prefix-drifted", Map.of(
+                "STUB_PLAN", " DRY-RUN MODE -  Container alpha  Recreate \n"
+                        + " DRY-RUN MODE -  Container alpha  Recreated \n"
+                        + " DRY-RUN MODE -  Container beta  Running "));
+        expect(failures, "a Compose v2 plan that would act on a container is drift",
+                containersGauge(v2Drifted.box()) == 1, v2Drifted.result());
+        expect(failures, "…naming the service and quoting the verb",
+                v2Drifted.result().output().contains("act on alpha")
+                        && v2Drifted.result().output().contains("Recreate"),
+                v2Drifted.result());
+
         // (1) The plan says nothing at all, successfully. This is precisely the shape of the
         //     obvious wrong implementation, and it must NOT be health.
         var blind = runStubbed("blind", Map.of("STUB_PLAN", ""));
@@ -365,6 +486,45 @@ class ConfigDriftContainerOracleTest {
         expect(failures, "…and names it as a health incident rather than leaving the reader to "
                 + "infer it from compose's output",
                 unhealthy.result().output().contains("UNHEALTHY"), unhealthy.result());
+
+        // (3c) THE ROW THAT WOULD HAVE SHIPPED. `depends_on: condition: service_healthy` makes
+        //      Compose print the dependency's condition progress on the SAME stream and in the
+        //      SAME ` Container <name> <verb> ` shape as the plan, so a clean container is
+        //      named three times. Read as "any verb that is not Running is drift", this box is
+        //      permanently drifted while being perfectly clean — production carries two such
+        //      edges, and it fired for `postgres` and `app` on every hourly run. The rule is
+        //      therefore the PRESENCE of `Running`, which leaves the deny-list intact: an
+        //      unseen verb arriving WITHOUT `Running` is still red, row (4).
+        //
+        //      This row is daemon-free so it holds where the real-daemon test skips; the
+        //      fixture in aCleanTreeIsSilentAndARealDriftIsLoud carries the same edge so that
+        //      the claim is also checked against a Compose nobody wrote.
+        var healthWaits = runStubbed("health-dependency", Map.of(
+                "STUB_PLAN", " Container alpha Running \n Container beta Running \n"
+                        + " Container alpha Waiting \n Container alpha Healthy "));
+        expect(failures, "dependency-condition progress beside `Running` is a clean box — a "
+                        + "`service_healthy` edge must not make a clean tree drift for ever",
+                containersGauge(healthWaits.box()) == 0, healthWaits.result());
+        expect(failures, "…and it is reported as clean rather than merely not named",
+                healthWaits.result().output().contains("would act on nothing"), healthWaits.result());
+
+        // (3d) The same verbs on a container that IS being acted on: the progress lines arrive
+        //      beside `Recreate` and NOT beside `Running`, which is the whole basis of the
+        //      rule. Red, and the sentence must name the action rather than the verb that
+        //      sorts first — an operator sent to a health incident during a config drift is
+        //      the failure this row exists to prevent.
+        var driftedDependency = runStubbed("health-dependency-drifted", Map.of(
+                "STUB_PLAN", " Container alpha Recreate \n Container alpha Recreated \n"
+                        + " Container beta Running \n Container alpha Waiting \n"
+                        + " Container alpha Healthy "));
+        expect(failures, "a drifted container is drift even when it also carries Waiting/Healthy",
+                containersGauge(driftedDependency.box()) == 1, driftedDependency.result());
+        expect(failures, "…and the message quotes the action verb, not just the progress one",
+                driftedDependency.result().output().contains("Recreate"), driftedDependency.result());
+        expect(failures, "…against the service it belongs to, and not against the untouched one",
+                driftedDependency.result().output().contains("act on alpha")
+                        && !driftedDependency.result().output().contains("act on beta"),
+                driftedDependency.result());
 
         // (4) A verb this script has never seen. Fail-closed: a renamed `Recreate` must go red
         //     and print the word, not go green because it is not on a list.
@@ -755,6 +915,95 @@ class ConfigDriftContainerOracleTest {
         return null;
     }
 
+    /**
+     * <strong>Establishes the ENVIRONMENT'S capability before anything is asserted about the
+     * script, because "a clean tree publishes containers=0" is not a property of the script
+     * alone — it is a property of the script AND of the Compose it is run against.</strong>
+     *
+     * <p>CI failed here once with the script behaving perfectly: on the runner's Compose,
+     * {@code up -d --dry-run} printed no per-container line at all for a clean, running
+     * project, so the script correctly reported an oracle it could not read and published 1.
+     * A test that answers that with "a clean tree was not silent" blames the wrong component
+     * and sends the next reader into the parse. So the plan is read here FIRST, and if this
+     * machine's Compose does not name a clean, unchanged container {@code Running}, the
+     * failure says <em>that</em>.
+     *
+     * <p>It fails rather than skips, deliberately. A blind Compose is not a missing test
+     * dependency — it is a fact worth knowing: a self-hoster on that version would run this
+     * monitor and get a permanently firing ConfigDrift alert about a box that is clean, be
+     * told to re-run a deploy that changes nothing, and mute it. That is HD-221 happening
+     * again on somebody else's machine, and a green CI run would be the project agreeing not
+     * to find out.
+     */
+    private void requireAReadableOracle(Path box, String project) throws Exception {
+        var names = List.of(containerName(box, project, "alpha"), containerName(box, project, "beta"));
+        var plan = docker(box, "compose", "--ansi", "never", "-p", project, "-f", "docker-compose.yml",
+                "up", "-d", "--dry-run");
+        var verbs = verbsByContainer(plan.output());
+        var version = docker(box, "compose", "version", "--short").output().strip();
+
+        for (String name : names) {
+            assertThat(verbs.getOrDefault(name, List.of()))
+                    .withFailMessage(CHECKLIST + """
+
+                            THIS ENVIRONMENT'S COMPOSE CANNOT SUPPORT THE CONTAINER ORACLE. This is a fact \
+                            about the machine, not a failure of \
+                            ops/drift/hamstrack-config-drift.sh -- read the next paragraph before touching \
+                            the parse.
+
+                            A scratch Compose project was brought up and left completely unchanged, and \
+                            `docker compose up -d --dry-run` did not name %s as `Running`. Verbs it printed \
+                            for that container: %s. Compose here reports itself as `%s`.
+
+                            The scope reads a POSITIVE signal -- a container the plan will not touch is \
+                            named `Running`, and its ABSENCE is drift -- because the alternative is reading \
+                            an absence, and Compose's stdout is empty whether the box is clean or drifted. \
+                            On a Compose that prints no per-container plan line (or prints some other verb \
+                            for a container it will leave alone), that signal never arrives and \
+                            hamstrack_config_drift{scope="containers"} is 1 on a CLEAN BOX FOR EVER.
+
+                            Two line formats are already read, so this is a THIRD one or no line at all: \
+                            v5.1.x prints ` Container <name> Running` and v2.27.1 prints \
+                            ` DRY-RUN MODE -  Container <name>  Running` (that prefix is what made CI \
+                            report an unreadable oracle before the parse located the word `Container` \
+                            instead of assuming it starts the line). Read the raw plan below before \
+                            deciding which.
+
+                            This fails instead of skipping on purpose. A self-hoster running this Compose \
+                            version gets a monitor that fires permanently, prescribes a deploy that changes \
+                            nothing, and is muted within a week -- which is the defect HD-221 exists to \
+                            delete, reproduced on their machine. Production runs Compose v5.1.2 (Docker \
+                            Engine 25.0.16, measured 2026-09-05) and DOES print `Running` for the services \
+                            it would leave alone. If this environment does not, the choice is to teach the \
+                            parse this format, to pin a Compose in .github/workflows/build.yml, or to \
+                            re-found the scope on a signal this Compose does emit -- and to say in \
+                            docs/self-hosting.md which versions the monitor can be run on. Do not "fix" it \
+                            by treating an unreadable plan as health.
+
+                            The whole plan, exactly as Compose printed it (stderr merged):
+                            %s""", name, verbs.getOrDefault(name, List.of()), version, plan.output().strip())
+                    .contains("Running");
+        }
+    }
+
+    /**
+     * {@code name -> every verb Compose printed for it}, the same reading the script does:
+     * {@code Container} lines only, whitespace-split, {@code $2} is the name and {@code $3} the
+     * verb. Deliberately keeps DUPLICATES and ORDER out of the question — a container gets
+     * several lines, and which of them arrives first is not something either the script or this
+     * test is allowed to depend on.
+     */
+    private static Map<String, List<String>> verbsByContainer(String plan) {
+        var verbs = new LinkedHashMap<String, List<String>>();
+        for (String line : plan.replace("\r", "").lines().toList()) {
+            var f = line.strip().split("\\s+");
+            if (f.length >= 3 && f[0].equals("Container")) {
+                verbs.computeIfAbsent(f[1], k -> new ArrayList<>()).add(f[2]);
+            }
+        }
+        return verbs;
+    }
+
     private Result docker(Path cwd, String... args) throws Exception {
         var cmd = new ArrayList<String>();
         cmd.add("docker");
@@ -772,6 +1021,17 @@ class ConfigDriftContainerOracleTest {
     private String containerId(Path box, String project, String service) throws Exception {
         return docker(box, "compose", "-p", project, "-f", "docker-compose.yml", "ps", "-q", service)
                 .output().strip();
+    }
+
+    /**
+     * The name the PLAN uses, asked of the daemon rather than assembled from
+     * {@code <project>-<service>-1} — the plan's names are container names, and a fixture that
+     * guesses the pattern would fail for a reason that has nothing to do with the oracle.
+     */
+    private String containerName(Path box, String project, String service) throws Exception {
+        var name = docker(box, "inspect", "-f", "{{.Name}}", containerId(box, project, service))
+                .output().strip();
+        return name.startsWith("/") ? name.substring(1) : name;
     }
 
     // --- file helpers, same rules as ApplyConfigPinGuardTest --------------------------
