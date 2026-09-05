@@ -76,7 +76,8 @@ import org.springframework.validation.annotation.Validated;
  * aggregate, i.e. <strong>32</strong> at {@code AGILE_MAX_OPEN_SPRINTS=20}, and 11–12 for a
  * section. {@code DB_STATEMENT_TIMEOUT_MS} bounds each of them and nothing bounds their sum, so the
  * worst-case connection hold for one planning aggregate is ~320 seconds against a default pool of
- * 10 and a 30 s {@code connectionTimeout} for everybody else. <strong>A rate budget provably
+ * 10, while everybody else waits out the pool's acquisition bound and then fails.
+ * <strong>A rate budget provably
  * cannot bound that</strong>: it spends the same unit whether a request takes 8 ms or 8 s, so its
  * protection evaporates precisely as the instance slows down.
  *

@@ -655,6 +655,16 @@ and branches:
 | latency p95/p99 · `hs_budget_422` · `hs_refused_429` · `hs_conflict_409` · `hs_rebalance_429` · `hs_errors_5xx` | **breach** | the capacity result. |
 | *(non-zero exit, no failed threshold)* | **unknown** | usually a script error or a refused `setup()` — read the stage log. |
 
+`hs_busy_503` is in none of those rows on purpose. A `503 DATABASE_BUSY` is the named
+refusal `DB_CONNECTION_TIMEOUT_MS` produces from 0.18.0, so it is **recorded and never
+aborted on** (`count>=0`) — where it starts is a capacity finding you read off the number,
+and a run that died on the first one could never report it. It is carved out of
+`hs_errors_5xx` by `errorType`, not by status — which is the durable form of the rule and not
+merely the convenient one: the carve-out is for the refusal the product *names*, so a `500`
+from the same exhaustion still aborts. Since 0.18.0 the named refusal covers the authenticated
+half too (a servlet filter answers the acquisitions that fail before a handler is matched), so
+a `500` in a saturation run is now a finding rather than the expected shape of it.
+
 Writing any of the first row up as "capacity is *N* VU" produces a figure that looks
 conservative, reads as defensible and is wrong. That is exactly what "stage N VU: BREACHED"
 on **any** non-zero exit used to do.

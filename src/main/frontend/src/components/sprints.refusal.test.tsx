@@ -193,8 +193,8 @@ describe('a refused section refresh does not provoke the aggregate (HD-174 §5.4
  * about the refusal alone.
  *
  * The failure a busy instance hands back for a reason *outside* the planning
- * surface — the rest of the pool exhausted by writes, Hikari's 30 s
- * `connectionTimeout` expiring, an edge that stopped waiting — is a 5xx. In that
+ * surface — the rest of the pool exhausted by writes, the pool's acquisition
+ * timeout expiring, an edge that stopped waiting — is a 5xx. In that
  * state a refused section refresh still provoked the `12 + N`-statement
  * aggregate, per section, per planner, which is the same escalation arriving
  * through a status nobody had listed.

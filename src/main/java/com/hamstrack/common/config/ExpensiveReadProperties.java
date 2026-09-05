@@ -44,8 +44,11 @@ import org.springframework.validation.annotation.Validated;
  * {@code DB_STATEMENT_TIMEOUT_MS} (10 s) — twice that on {@code POST …/search}, which runs its
  * predicate for the count and again for the page. A replica supplies 600 connection-seconds a
  * minute; one principal was entitled to 1800–3600 of them. Everything else on the replica then
- * waited out Hikari's 30 s {@code connectionTimeout} and failed, including interactive endpoints
- * with nothing to do with reports. Probe P1 of {@code ops/loadtest/RESULTS-2026-08-31.md} measured
+ * waited out the pool's acquisition bound — 30 s and unset at the time — and failed, including
+ * interactive endpoints with nothing to do with reports. (The bound is 3 s and chosen since
+ * HD-233, and this paragraph keeps its number because it is a measurement rather than a rule:
+ * re-parameterising it to today's value would falsify the evidence it reports.) Probe P1 of
+ * {@code ops/loadtest/RESULTS-2026-08-31.md} measured
  * it: a single principal, violating nothing, saturated the instance, and the probe could not even
  * reach its intended arrival rate.
  *

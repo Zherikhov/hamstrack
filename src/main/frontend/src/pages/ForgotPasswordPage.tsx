@@ -36,8 +36,11 @@ import { Button, Input } from '../components/ui'
  * they are.</strong> The known branch pays a `SecureRandom` token, a SHA-256 hash
  * and a `password_resets` insert the unknown branch never does, and
  * `FailedEmailWriter`'s javadoc records an address-correlated park on that branch
- * alone (bounded only by the unset Hikari connection-timeout) which it lists as
- * <em>still open</em>. What bounds sampling here is the <strong>per-address
+ * alone — bounded by the pool's acquisition timeout, which HD-233 lowered from
+ * 30 s to <strong>3 s</strong> — which it still lists as <em>still open</em>: ten
+ * times smaller is not unmeasurable, since 3 s is one to two orders of magnitude
+ * above internet RTT jitter and therefore separable at n = 1. What bounds sampling
+ * here is the <strong>per-address
  * ceiling</strong>, not equal work — a strictly weaker property than constant time,
  * and the one that is true.
  *

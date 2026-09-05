@@ -50,9 +50,11 @@ abstract class BulkheadSaturationBase extends LabelTestBase {
     static final String POOL_SIZE = "4";
 
     /**
-     * Short enough that the negative control fails in a second and a half instead of Hikari's
-     * default thirty seconds — the control has to demonstrate starvation, and a starvation that
-     * takes half a minute is a starvation nobody puts in a suite.
+     * Short enough that the negative control fails in a second and a half rather than at the
+     * shipped acquisition bound — the control has to demonstrate starvation, and a starvation that
+     * costs seconds per assertion is a starvation nobody puts in a suite. Pinned here rather than
+     * inherited for the reason a starved-pool test always pins it: this pair of classes must not
+     * change behaviour when the shipped bound is tuned.
      */
     static final String CONNECTION_TIMEOUT_MS = "1500";
 

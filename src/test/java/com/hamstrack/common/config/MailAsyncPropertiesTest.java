@@ -46,6 +46,14 @@ import static org.assertj.core.api.Assertions.fail;
  * a mechanism in the code that makes a reader believe otherwise. That is the assertion, and all
  * three knobs appear in it.
  *
+ * <p><strong>Three of four terms, and the fourth is asserted elsewhere on purpose.</strong> The
+ * residue write also has to obtain a connection, and how long that may take is a pool property this
+ * record cannot see — so {@code DatabaseTimeoutConsistency} asserts the same sum with the
+ * acquisition term included, and {@code DatabaseTimeoutFamilyTest} pins that half (HD-233). What
+ * this file must keep proving is that the binding-time triple still refuses on its own: a
+ * combination caught only by the wider check would fail at a different moment, with a different
+ * message, for the same misconfiguration.
+ *
  * <h2>Both halves, because an {@code @AssertTrue} on a record is an assumption until a context
  * refuses to start</h2>
  * The predicate is tested directly (cheap, and it is the only way to reach combinations the binder

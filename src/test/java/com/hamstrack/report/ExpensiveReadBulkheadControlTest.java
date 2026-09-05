@@ -36,6 +36,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.hikari.minimum-idle=0",
         "spring.datasource.hikari.connection-timeout="
         + BulkheadSaturationBase.CONNECTION_TIMEOUT_MS,
+        // The same number, because the pool seal refuses a context where the two Hikari lines
+        // have come apart — application.properties spells one variable into both.
+        "spring.datasource.hikari.validation-timeout="
+        + BulkheadSaturationBase.CONNECTION_TIMEOUT_MS,
         "app.rate-limit.enabled=false",
         "app.expensive-read.limit-enabled=false",
         "app.demo.seed-on-first-login=false",

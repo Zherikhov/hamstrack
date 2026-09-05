@@ -105,6 +105,76 @@ info:
     else is changing this right now* and retrying works, this one means *this
     took too long and will take too long again* and retrying does not.
 
+    **A connection the instance could not give in time is a `503` with
+    `errorType: "DATABASE_BUSY"` and `Retry-After: 1`.** Every request that
+    reads or writes needs a connection from the instance's database pool, and
+    the wait for one is bounded (`spring.datasource.hikari.connection-timeout`,
+    3 s by default; before 0.18.0 it was unset and the pool's own 30 s applied).
+    A request that outwaits that bound is refused rather than parked.
+    **This is a property of the API rather than of a set of endpoints** — the
+    bound is on *getting* a connection, which every request needs, so any
+    operation in this document may answer it, unauthenticated ones included,
+    whatever its own `responses` list enumerates. It is defined once as
+    `DatabaseBusy` and deliberately attached to no path. It is written wherever
+    the acquisition failed — inside a handler, or earlier in the filter chain,
+    which is where an authenticated request's bearer token is resolved to a
+    user — and the two writers agree on everything a client reads off the
+    document: the same `status`, the same `detail`, the same `errorType` and
+    the same `Retry-After`. They differ only in the optional members
+    `ProblemDetail` describes — the one written in the filter omits `instance`.
+    **The transaction that failed applied nothing**, since with no connection
+    there was no statement;
+    whether the *request* is safe to repeat is a property of the operation
+    rather than of this status, because an operation that commits in more than
+    one step can be refused on a later step with an earlier one already applied.
+
+    **The `5xx` is chosen, for exactly the reason the time-budget `422` above
+    is not one**, and the two must not be harmonised: that refusal avoids a 5xx
+    because intermediaries and SDKs retry one automatically and an automatic
+    retry there re-spends the whole statement budget, while this failure is
+    transient by construction — the obstacle is somebody else's transaction,
+    which ends — and one retry costs one acquisition attempt. "Retryable" is
+    still not "retry from everywhere at once": the moment this arrives is the
+    moment the instance has least room, so a client that runs in many tabs or
+    many workers should render `detail` and leave the retry to a person or to
+    an intermediary. Hamstrack's own web client does exactly that and never
+    retries this automatically. See `DatabaseBusyProblemDetail`.
+
+    **What still cannot be given this answer is a failure with no answer left
+    to change**, which is a property of the mechanism rather than a list of
+    endpoints: a status can only be set while there is still a response to set
+    it on. That excludes a failure raised on an `ASYNC` or `ERROR` dispatch,
+    where the answer has already been decided or already begun; one raised after the response has been committed, such as an
+    attachment download already streaming or an open SSE stream; and one raised
+    outside any request at all, such as a scheduled job or a migration at
+    startup, which has no caller to refuse. Those are exactly the conditions
+    under which *no* refusal in this API can change an answer, this one
+    included. Read `DATABASE_BUSY` as the shape overload takes wherever an
+    answer can still be given, never as a promise that overload always looks
+    like this.
+
+    **Telling the "busy" refusals apart.** More than one status here means
+    *something is in the way right now*, and they are separated by `errorType`
+    and by the presence of `Retry-After` rather than by the status alone. They
+    ask for different behaviour, so a client that folds them into one either
+    hammers an instance that is already saturated or abandons a request that
+    would have succeeded. Code against the row rather than against how many
+    rows there are — a refusal added later joins this table instead of
+    invalidating a count in it:
+
+    | Refusal | What is in the way | What to do |
+    |---|---|---|
+    | `409` with `Retry-After` and **no** `errorType` | Another transaction holds a row this write needs | Retry the **identical** request after the header's seconds |
+    | `429` with `errorType: "EXPENSIVE_SURFACE_BUSY"` (or `TOO_MANY_IN_FLIGHT`) | The expensive-read surface is running as much at once as it may — or the caller's own requests are | Let something finish, then retry shortly and **not** automatically. A `429` with **no** `errorType` is a per-minute budget instead, and waiting out its window is the whole remedy |
+    | `503` with `errorType: "DATABASE_BUSY"` and `Retry-After: 1` | The instance had no database connection to give inside its bound | Safe to repeat unchanged after the wait — once, from one place, not from every open tab |
+    | `422` with `errorType: "STATEMENT_BUDGET_EXCEEDED"` and **no** `Retry-After` | The request itself is too expensive for this instance | **Never retry it unchanged** — it is refused identically. Send a smaller request |
+
+    **`Retry-After: 1` does not mean the same thing on every row**: on the
+    occupancy refusals and on the `503` it means *the obstacle is a request
+    that ends shortly*, while on a per-minute budget it counts a window down
+    and can say up to 60. Obey the header everywhere, and never carry a backoff
+    derived from one over to another.
+
     **A write that conflicts with a related record is a `409`, not a crash.**
     Where the database itself refuses a write because a reference cannot be
     satisfied — in either direction: something still points at a row being
@@ -167,7 +237,9 @@ info:
     `STATEMENT_BUDGET_EXCEEDED`, a write the database refuses because a
     reference could not be satisfied carries
     `REFERENCE_CONSTRAINT_VIOLATION`, and one it refuses because a string was
-    wider than its column carries `VALUE_TOO_LONG`.
+    wider than its column carries `VALUE_TOO_LONG`, and one refused because
+    the instance could not obtain a database connection in time carries
+    `DATABASE_BUSY`.
     Two rules for consuming
     it: treat a value you do not
     recognise as "no recovery I know about" rather than guessing at one, and do
@@ -226,7 +298,20 @@ info:
     **Rate limits** — sensitive auth endpoints share a per-IP budget
     (15 requests/min by default), and repeated failed logins for one account
     trigger an exponential backoff. Both return `429` with a `Retry-After`
-    header (seconds). Several non-auth surfaces have throttles of their own:
+    header (seconds). A request on those endpoints refused with `503`
+    `DATABASE_BUSY` is **refunded** its per-IP token: a refusal carrying
+    `Retry-After: 1` would otherwise drain that budget in as many seconds as it
+    has tokens, on the door a caller needs most during an incident. **The
+    refund is itself capped at one budget's worth per window**, so an address
+    can spend at most twice the budget in a minute and the door keeps a
+    ceiling — the token bought a park (the request held a worker for the whole
+    acquisition wait), so an uncapped refund would switch the per-IP bound off
+    for as long as the pool stayed starved. At the default 15, a client obeying
+    `Retry-After: 1` has its first 15 refusals refunded, the next 15 charged,
+    and its 31st request in that minute answered with an ordinary `429`; the
+    next window starts with a full budget and a full refund allowance. Nothing
+    else is refunded — a rejected password, a malformed body and a `500` all
+    spend, since only the `503` means the instance never got as far as the work. Several non-auth surfaces have throttles of their own:
     `POST …/issues/{number}/rank` allows at most one whole-project rank
     rebalance per project per 60 s and answers `429` + `Retry-After` for a
     second one inside that window — a retryable throttle, not a fault; every
@@ -8941,6 +9026,36 @@ components:
         application/problem+json:
           schema: { $ref: '#/components/schemas/StatementBudgetProblemDetail' }
 
+    DatabaseBusy:
+      description: >-
+        The instance could not obtain a database connection inside its
+        acquisition bound: `503` with `errorType: "DATABASE_BUSY"` and
+        `Retry-After: 1`. The transaction that failed applied nothing — with no
+        connection there was no statement — but whether the *request* is safe to
+        repeat is a property of the operation rather than of this status: an
+        operation that commits in more than one step can be refused on a later
+        step with an earlier one already applied.
+
+
+        **Deliberately referenced by no operation.** Every request that reads or
+        writes needs a pooled connection, so this answer belongs to the API as a
+        whole rather than to a list of paths — unauthenticated operations
+        included. It is defined here so the shape has one home; do not
+        "complete" the spec by attaching it to whichever endpoints look
+        expensive today, which would say the opposite of what it is.
+      headers:
+        Retry-After:
+          description: >-
+            Always `1`, and it means *the obstacle is a transaction that ends
+            shortly* rather than *a window has one second left*. Obey it, but do
+            not derive a backoff from it and do not let every open tab obey it
+            at the same instant: this refusal arrives exactly when the instance
+            has least room.
+          schema: { type: integer, example: 1 }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/DatabaseBusyProblemDetail' }
+
     ReferenceConstraintViolation:
       description: >-
         The write was refused by the database because a reference could not be
@@ -9458,12 +9573,37 @@ components:
   schemas:
     ProblemDetail:
       type: object
-      description: RFC 9457 problem details
+      description: >-
+        RFC 9457 problem details. **Branch on `status` and on `errorType`, never
+        on which optional members a body carries.** `type` and `instance` are
+        optional in the RFC and this API is deliberately uneven about them,
+        because more than one thing here writes a problem document: one rendered
+        by the application carries `instance` (the request path, filled in on the
+        way out) and leaves `type` unset, while one written before a request
+        reaches the application — a refusal from a servlet filter, such as the
+        per-IP auth `429` or `DatabaseBusy` — carries less, since a filter has no
+        serializer behind it and hand-escaping a caller-supplied path into a
+        hand-built document is not a thing worth owning. Nothing that matters
+        differs: the `status`, the `detail`, any `errorType` and any
+        `Retry-After` are identical either way.
       properties:
-        type: { type: string, example: 'about:blank' }
+        type:
+          type: string
+          description: >-
+            Absent from an application-rendered body, where RFC 9457 reads that
+            absence as `about:blank`. Not a member to branch on.
+          example: 'about:blank'
         title: { type: string, example: Conflict }
         status: { type: integer, example: 409 }
         detail: { type: string, example: Issue was modified by someone else — refresh and retry }
+        instance:
+          type: string
+          description: >-
+            The request path, filled in by the application as it serialises the
+            body, and absent from a body written by a filter. It discloses
+            nothing either way — it is the caller's own request path — and is
+            not a member to branch on.
+          example: /api/auth/login
 
     ValidationProblemDetail:
       description: >-
@@ -9557,6 +9697,59 @@ components:
             errorType:
               type: string
               enum: [STATEMENT_BUDGET_EXCEEDED]
+
+    DatabaseBusyProblemDetail:
+      description: >-
+        The `503` body of a request refused because the instance could not
+        obtain a database connection inside its acquisition bound
+        (`spring.datasource.hikari.connection-timeout`, 3 s by default; before
+        0.18.0 the key was unset and the pool's own 30 s applied). Any operation
+        that reads or writes can answer it, unauthenticated ones included, so it
+        is documented as a property of the API and deliberately listed under no
+        individual path.
+
+
+        **The `5xx` is chosen rather than inherited, and it is the exact
+        inverse of the time-budget `422`.** That refusal avoids a 5xx because
+        intermediaries and SDKs retry one automatically and an automatic retry
+        re-spends the whole statement budget; this failure is transient by
+        construction — the obstacle is somebody else's transaction, which ends —
+        and one retry costs one acquisition attempt, so the status that invites
+        an automatic retry is the right one. Not `504`, which is
+        indistinguishable from a gateway timeout on the wire, so an operator
+        could not tell whether the app refused or a proxy gave up. Not `429`,
+        which already means "you are being rate-limited" to every client and
+        would make a pool incident read as a throttle on the most-attacked
+        endpoints in the product. Not `500`, which is honest about "we failed"
+        and wrong about "we decided".
+
+
+        **The body says nothing about the pool** — no size, no queue depth, no
+        property name, no environment variable, no SQL. It is reachable
+        unauthenticated and reads identically for every caller but for
+        `instance`, which is that caller's own request path (see
+        `ProblemDetail`) — which is what keeps it from answering a question
+        about somebody's account. The
+        operator's copy of this refusal is a log line and a counter.
+      allOf:
+        - $ref: '#/components/schemas/ProblemDetail'
+        - type: object
+          properties:
+            status: { type: integer, example: 503 }
+            detail:
+              type: string
+              description: >-
+                States the condition, says it is temporary, and prescribes the
+                one action its reader can take. It names no remedy belonging to
+                an operator: on Cloud there is none the caller can reach, and
+                self-hosted the dials are the operator's rather than the
+                caller's.
+              example: >-
+                The instance is at its database capacity right now. This is
+                temporary — retry in a moment.
+            errorType:
+              type: string
+              enum: [DATABASE_BUSY]
 
     ConcurrencyLimitedProblemDetail:
       description: >-

@@ -206,6 +206,10 @@ function buildOptions() {
       // would abort the measurement at the moment it became interesting.
       thresholds: {
         hs_errors_5xx: [{ threshold: 'count==0', abortOnFail: true, delayAbortEval: '30s' }],
+        // Declared for the reason lib/classes.js declares it: a named 503 DATABASE_BUSY is
+        // a data point this probe can legitimately produce, and it must be REPORTED rather
+        // than either aborted on or silently absent from the summary.
+        hs_busy_503: [{ threshold: 'count>=0' }],
       },
     };
   }
@@ -225,9 +229,12 @@ function buildOptions() {
       },
     },
     thresholds: {
-      // The ONLY assertion: no 5xx. A limiter that answers 500 instead of 429 is a finding
-      // about the refusal contract, and it is the thing this probe is really checking.
+      // The ONLY assertion: no UNNAMED 5xx. A limiter that answers 500 instead of 429 is a
+      // finding about the refusal contract, and it is the thing this probe is really
+      // checking. A 503 DATABASE_BUSY is not that finding — it is the pool, named, and
+      // record() counts it in hs_busy_503 instead (see lib/classes.js).
       hs_errors_5xx: [{ threshold: 'count==0', abortOnFail: true, delayAbortEval: '15s' }],
+      hs_busy_503: [{ threshold: 'count>=0' }],
     },
   };
 }

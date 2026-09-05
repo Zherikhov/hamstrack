@@ -49,11 +49,14 @@ public record StatementTimeoutProperties(
          *    PostgreSQL's own docs say as much under lock_timeout. Enforced by
          *    DatabaseTimeoutConsistency, which requires a 2x margin so a transaction that waited
          *    nearly the whole lock budget still has time to do its work.
-         *  - ROUGHLY A THIRD of Hikari's 30 s connectionTimeout (unset, so the default applies).
-         *    With every statement <= 10 s a fully saturated pool turns over about three times
-         *    inside the window a waiting request is prepared to wait, so saturation degrades to
-         *    latency instead of connection-acquisition failures. At 30 s it would not.
          *  - ~100x an ordinary request, so it fires on pathology and not on a cold cache.
+         *
+         * The pool's ACQUISITION bound is not a term in this number, in either direction: it is a
+         * queueing budget (how long a request waits for a connection), while this is a bound on
+         * work. A third clause here used to derive this value from it, and that clause is what
+         * closed the family into a circle. DatabaseTimeoutConsistency owns the one relation this
+         * bound has to the rest of the family, and states it in one place; see it, and ADR-0034,
+         * rather than restating a version of it here.
          *
          * PRIMITIVE int ON PURPOSE — do not "tidy" it to Integer. `DB_STATEMENT_TIMEOUT_MS=` is
          * how an operator ordinarily disables a line in a .env file, and that binds an EMPTY

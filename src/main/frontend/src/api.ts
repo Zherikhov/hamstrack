@@ -428,8 +428,11 @@ export async function apiResendVerification(email: string) {
  * The known branch pays a `SecureRandom` token, a SHA-256 hash and an `INSERT` into
  * `password_resets` that the unknown branch never does; on top of that,
  * `FailedEmailWriter`'s javadoc records a larger asymmetry it lists as still open —
- * an address-correlated park, bounded only by the unset Hikari connection-timeout,
- * on the known branch alone. What makes sampling impractical here is the
+ * an address-correlated park on the known branch alone, bounded by the pool's
+ * acquisition timeout, which HD-233 lowered from 30 s to **3 s**. Ten times
+ * smaller and still separable at n = 1 over the internet, where RTT jitter is
+ * tens of milliseconds: a conditional park on one branch does not become
+ * unmeasurable by becoming shorter. What makes sampling impractical here is the
  * **per-address ceiling** (a handful of requests per window, counted across
  * everybody who asks), not equal work. That is a weaker claim than "constant time",
  * and it is the true one — do not upgrade it in a comment, a document or a test

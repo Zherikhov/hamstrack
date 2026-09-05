@@ -1,5 +1,6 @@
 package com.hamstrack.common.exception;
 
+import com.hamstrack.common.config.DatabaseTimeoutConsistency;
 import com.hamstrack.common.config.StatementTimeoutProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.ratelimit.ConcurrencyLimitedException;
@@ -30,6 +31,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.CannotGetJdbcConnectionException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.validation.FieldError;
 import org.springframework.validation.method.ParameterValidationResult;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -77,9 +80,14 @@ import java.util.stream.Collectors;
  * note that this paragraph is a count, so it goes stale one handler before the list does:
  * if you take over a third, name it here.
  *
- * <p>{@link #handleStorageQuotaExceeded} (HD-191) is <strong>not</strong> a third: it is a
- * Hamstrack type, absent from that list, so it changes no existing response anywhere — it gives
- * a body to a 409 this class did not previously produce. The count above stays at two.
+ * <p><strong>What does not raise that count, stated as the category rather than as its
+ * members</strong>, since the count above already goes stale one handler before the list does:
+ * a handler bound to a type Boot's advice does not declare — a Hamstrack exception, or one from
+ * {@code org.springframework.dao} / {@code org.springframework.transaction} / {@code …jdbc} —
+ * changes no existing response anywhere. It gives a body to a status this class did not
+ * previously produce, which is a different act from taking one over.
+ * {@link #handleStorageQuotaExceeded} (HD-191) and {@link #handleDatabaseBusy} (HD-233) are both
+ * of that kind; the count stays at two.
  *
  * <p>Ordered at {@code HIGHEST_PRECEDENCE + 100} rather than the bare minimum: it beats
  * Boot's order-0 advice just as reliably while leaving room for an advice that ever needs
@@ -97,6 +105,15 @@ public class GlobalExceptionHandler {
      * {@link #handleQueryTimeout}.
      */
     private final StatementTimeoutProperties statementTimeoutProperties;
+
+    /**
+     * Read for one thing only, and deliberately not from the pool: so the WARN beside a
+     * {@code 503 DATABASE_BUSY} can say how long the request was allowed to wait for a connection.
+     * The number reaches the log; nothing about the pool reaches the caller. Injected rather than
+     * re-read from the {@code Environment} because that class is where the acquisition bound is
+     * validated and resolved, and two readings of one value is how they come to disagree.
+     */
+    private final DatabaseTimeoutConsistency databaseTimeouts;
 
     /** Makes a refused request alertable without anybody reading a log. */
     private final ProductMetrics productMetrics;
@@ -723,6 +740,97 @@ public class GlobalExceptionHandler {
     private static String humanSeconds(int millis) {
         long seconds = Math.round(millis / 1000.0);
         return seconds <= 1 ? "1 second" : seconds + " seconds";
+    }
+
+    /**
+     * <strong>A connection the pool could not hand over in time is a 503, and this is the one
+     * refusal in the class whose status was chosen BECAUSE intermediaries retry it</strong>
+     * (HD-233, ADR-0034).
+     *
+     * <p>Hikari raises {@link java.sql.SQLTransientConnectionException} when an acquisition outruns
+     * {@code spring.datasource.hikari.connection-timeout}; Spring wraps it as
+     * {@link CannotCreateTransactionException} on the transactional path and
+     * {@link CannotGetJdbcConnectionException} on the plain JDBC one. Neither had a handler, so
+     * until this existed a saturated pool answered a bare <strong>500</strong> — tolerable while the
+     * bound was Hikari's unset 30 s and the condition was rare, and not tolerable at 3 s, where it
+     * becomes the ordinary shape of saturation.
+     *
+     * <p><strong>5xx is right here for exactly the reason it is wrong for
+     * {@link #STATEMENT_BUDGET_ERROR_TYPE}, and the two are documented as a contrast so that nobody
+     * harmonises them.</strong> That refusal rejects 5xx because intermediaries and SDKs retry it
+     * automatically and an automatic retry re-spends the whole statement budget. A failed
+     * <em>acquisition</em> is transient by construction — the obstacle is somebody else's
+     * transaction, which will end — and one retry costs one acquisition attempt rather than a
+     * re-run of an expensive query. Auto-retry is the correct behaviour, so the status that invites
+     * it is the correct status. Not {@code 504}, which is indistinguishable from a gateway timeout
+     * on the wire, so an operator cannot tell whether the app refused or the proxy gave up. Not
+     * {@code 429}: the caller has consumed no budget of theirs, and on {@code /api/auth/*} a 429
+     * already means "you are being rate-limited" to every client and every operator — reusing it
+     * would make a pool incident indistinguishable from a throttle on the two most-attacked
+     * endpoints in the product. (The bulkhead's {@code EXPENSIVE_SURFACE_BUSY} is a 429 for a
+     * superficially similar condition; the difference is that it is a deliberate refusal on a
+     * designated surface, while this one is a property of every request that needs a connection —
+     * an unauthenticated one included.) And not {@code 500}, which is honest about "we failed" and
+     * wrong about "we decided". That last one is not a matter of taste: the SPA declines to retry a
+     * 503 and deliberately DOES retry a 500, so for as long as this condition answered 500 it was
+     * amplified by every open tab at the moment the instance had least room to give.
+     *
+     * <p><strong>The body says nothing about the pool</strong>, and it is a constant rather than a
+     * sentence composed here — {@link DatabaseBusyRefusal} owns every value that goes on the wire,
+     * because {@link DatabaseBusyFilter} answers the same condition from outside the dispatcher and
+     * two hand-written copies of one JSON body is the defect this ticket is otherwise about. No
+     * size, no queue depth, no property name, no environment variable, no SQL: it is reachable
+     * unauthenticated, and it must read identically for every caller, in particular on both
+     * branches of {@code forgot-password}. The operator's copy of this refusal is the WARN, which
+     * names the bound and the two dials; the counter beside it is what makes the condition alertable
+     * without anybody reading a log, and it is tagged with the <strong>mapped pattern</strong>
+     * rather than the URI, which carries workspace and project ids. Unlike the 422, a 503 also
+     * reaches the {@code HighErrorRate} 5xx alert, and that is correct: pool exhaustion is an
+     * incident. That is a property of the STATUS and not of this handler, so it holds for the other
+     * writer too — but only because {@link DatabaseBusyFilter} runs <em>inside</em> Boot's
+     * {@code ServerHttpObservationFilter}. Outside it, the exception unwinds through the
+     * observation with the response still at 200 and the alert goes blind to exactly the
+     * authenticated half; the two filters were on the same order constant once, and
+     * {@code DatabaseBusyFilterOrderTest} is what now decides it.
+     *
+     * <p><strong>Not every arrival is an acquisition timeout, so the cause chain decides.</strong>
+     * Both declared types are also raised for failures that are not this condition at all — a
+     * driver that will not start, a transaction manager that cannot begin for its own reasons — and
+     * answering "the instance is busy, retry" to one of those is a wrong sentence with a wrong
+     * remedy. {@link DatabaseBusyRefusal#acquisitionTimeoutIn} looks for Hikari's own exception type
+     * in the chain, and anything else keeps today's outcome exactly: ERROR with the full throwable,
+     * answered 500.
+     *
+     * <p><strong>Which half of the condition arrives here.</strong> This is a
+     * {@code @RestControllerAdvice}, so it sees what a handler method raises. A failure earlier than
+     * that — {@code JwtAuthenticationFilter}'s user lookup is the one on every authenticated
+     * request — unwinds through the filter chain and reaches no advice; {@link DatabaseBusyFilter}
+     * answers those with the identical body. The two together are the whole of what a status can be
+     * given to, and that class states what is left over.
+     */
+    @ExceptionHandler({CannotCreateTransactionException.class, CannotGetJdbcConnectionException.class})
+    public ResponseEntity<ProblemDetail> handleDatabaseBusy(RuntimeException ex,
+                                                            HttpServletRequest request) {
+        var pattern = request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);
+        String route = pattern == null ? request.getRequestURI() : pattern.toString();
+        var timeout = DatabaseBusyRefusal.acquisitionTimeoutIn(ex);
+        if (timeout == null) {
+            log.error("Could not open a database transaction on {} {}, and it was not an "
+                      + "acquisition timeout — answering 500 rather than 503 DATABASE_BUSY, which "
+                      + "would tell the caller to retry something that is not going to clear on "
+                      + "its own.", request.getMethod(), route, ex);
+            var problem = ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Something went wrong");
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(problem);
+        }
+        DatabaseBusyRefusal.logRefusal(log, databaseTimeouts.acquisitionBoundMs(),
+                request.getMethod(), route, timeout);
+        productMetrics.connectionAcquisitionFailed(request.getMethod(),
+                pattern == null ? null : pattern.toString());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .header(HttpHeaders.RETRY_AFTER,
+                        String.valueOf(DatabaseBusyRefusal.RETRY_AFTER_SECONDS))
+                .body(DatabaseBusyRefusal.problemDetail());
     }
 
     /**

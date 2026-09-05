@@ -146,8 +146,10 @@ Response-code mix over time, **every non-2xx class attributed** (429 by `kind`, 
 > 10 s, and a 200 there would be a security incident) and the held **SSE** stream, whose
 > completion k6 does not score as a success. Do not copy this number into the results as an
 > error rate, and do not compare it with `HighErrorRate`'s 5%. The error signals are the
-> named ones: `hs_errors_5xx`, `hs_unexpected_404`, `hs_budget_422`, `hs_refused_429`,
-> `hs_conflict_409`, `hs_rebalance_429` — and, splitting the 429s by what they mean,
+> named ones: `hs_errors_5xx` (which excludes the named `503 DATABASE_BUSY` — that one is
+> counted, not failed, in `hs_busy_503`), `hs_unexpected_404`, `hs_budget_422`,
+> `hs_refused_429`, `hs_conflict_409`, `hs_rebalance_429` — and, splitting the 429s by what
+> they mean,
 > `hs_occupancy_429` (too many RUNNING at once) beside `hs_minute_budget_429` (asked too
 > often). Both are inside `hs_refused_429`; they are attribution, not extra refusals.
 
@@ -334,7 +336,7 @@ Observed: `<TODO — did the mixes reach any budget at all before breaching?>`
 | Observed | Resource that ran out | Metric that shows it | Seen? |
 |---|---|---|---|
 | TTFB up, `hikaricp_connections_pending` > 0, acquire time climbing | Connection pool | `hikaricp_connections_pending`, `_acquire_seconds` | `<TODO>` |
-| …plus 5xx and `hikaricp_connections_timeout_total` rising | Pool exhaustion past the 30 s `connectionTimeout` | `hikaricp_connections_timeout_total` | `<TODO>` |
+| …plus 503 `DATABASE_BUSY` and `hikaricp_connections_timeout_total` rising | Pool exhaustion past `DB_CONNECTION_TIMEOUT_MS` (3 s from 0.18.0; unset and 30 s before it, which is why a probe run against an older build shows this as latency instead) | `hs_busy_503` on the harness side; `hamstrack_db_connection_acquisition_failed_total{route}` + `hikaricp_connections_timeout_total` on the instance. **Expect the HikariCP counter to be the larger**, but only by the acquisitions that had no caller to refuse (a scheduled job, the shutdown write, Flyway at startup): since 0.18.0 both halves of the request traffic are refused `503` and counted, `route=unmapped` being the one that failed before a handler was matched. A `500` spike beside these is the same incident and now also a finding — it means a failure with no response left to change | `<TODO>` |
 | 422 `STATEMENT_BUDGET_EXCEEDED` | A single statement's cost | `hamstrack_db_statement_budget_exceeded_total{route}` | `<TODO>` |
 | 409 + `Retry-After` on writes | Row-lock contention | 409 count + sampler `wait_event_type='Lock'` | `<TODO>` |
 | 429 | An entitlement ceiling — `kind` says which | `hamstrack_ratelimit_hit_total{kind}` | `<TODO>` |

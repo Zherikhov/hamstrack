@@ -59,6 +59,23 @@ export const errors5xx = new Counter('hs_errors_5xx');
 // point and a stage boundary, not noise to be averaged away.
 export const budget422 = new Counter('hs_budget_422');
 
+// 503 DATABASE_BUSY, carved out of hs_errors_5xx for the reason the 422 above was carved
+// out of the general error rate: from 0.18.0 pool exhaustion IS a named refusal
+// (DB_CONNECTION_TIMEOUT_MS, HD-233), and RESULTS-TEMPLATE §5 asks the operator to record
+// it as the attribution for exactly that. A run that aborts on the first one can never
+// fill that row in. The FIRST one is a data point and a stage boundary, like the 422.
+//
+// KEYED ON errorType, NEVER ON THE STATUS ALONE, and that is not fastidiousness. The
+// carve-out is for the refusal the PRODUCT NAMES, so anything else arriving as a 5xx from
+// the same condition still aborts: a 503 that is somebody else's (a proxy, a shutdown), and
+// a bare 500 from an acquisition the server could not turn into a status. The product now
+// names both halves of the request traffic — a handler answers one, an outermost servlet
+// filter answers the other, which is every authenticated request, whose token is resolved to
+// a user inside the filter chain — so a 500 here is a finding rather than the expected
+// shape of saturation, and reading it as expected is how the harness would stop being able
+// to see it.
+export const busy503 = new Counter('hs_busy_503');
+
 // 429s, split by what they mean. `kind` is the attribution (§4.8): a per-principal budget,
 // a per-IP auth budget and a per-project rank-rebalance cooldown are three different
 // findings and only the kind tells them apart.
@@ -172,10 +189,23 @@ export function thresholdsFor(classes) {
     // afterwards.
     dropped_iterations: [{ threshold: 'count==0', abortOnFail: true, delayAbortEval: '30s' }],
 
-    // A 5xx is not a budget item. abortOnFail because the run's premise — that saturation
-    // produces named refusals — has failed, and everything measured after it is measured
-    // against a different product than the one being described.
+    // An UNNAMED 5xx is not a budget item. abortOnFail because the run's premise — that
+    // saturation produces refusals a reader can attribute — has failed, and everything
+    // measured after it is measured against a different product than the one described.
+    //
+    // The premise moved once and the comment here did not, which is the whole of why this
+    // paragraph is longer than it wants to be: HD-233 made pool exhaustion produce a NAMED
+    // refusal that is itself a 5xx, so "any 5xx means the premise failed" stopped being
+    // true and this threshold started killing runs 30 s after the first correct 503. The
+    // carve-out is hs_busy_503 below; record() keeps everything else here.
     hs_errors_5xx: [{ threshold: 'count==0', abortOnFail: true, delayAbortEval: '30s' }],
+
+    // A DATA POINT, not a budget and not an abort: 'count>=0' cannot fail. It is declared
+    // rather than left to record() alone because k6 materialises a sub-metric for every
+    // DECLARED threshold key, so this way the number is in every summary — a stage whose
+    // pool never refused and a stage nobody counted must not read identically. Where the
+    // 503s begin is a capacity finding, and it is read off this number, not off an abort.
+    hs_busy_503: [{ threshold: 'count>=0' }],
 
     // Not a capacity threshold. This is the security abort (section 5.3 condition 5): stop,
     // preserve everything, and treat it as an incident. delayAbortEval is short because the
@@ -312,6 +342,14 @@ export function record(res, cls, tags) {
   // failing the write mix (exit 6). Measured on k6 v2.2.0.
   const t = Object.assign({ class: cls, phase: phase() }, tags || {});
   respBytes.add(res.body ? res.body.length : 0, t);
+
+  // BEFORE the 5xx branch, and only on the errorType. See hs_busy_503 in the declarations
+  // above for why a bare 500 from the same exhaustion must keep falling through to
+  // hs_errors_5xx.
+  if (res.status === 503 && /DATABASE_BUSY/.test(res.body || '')) {
+    busy503.add(1, t);
+    return;
+  }
 
   if (res.status >= 500) {
     errors5xx.add(1, t);

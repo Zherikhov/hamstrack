@@ -24,8 +24,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code @SpringBootTest(properties = …)} context owns its own Hikari pool and the annotation sits
  * above the surefire system property, so this class pins its own pool of {@value #POOL_SIZE} — the
  * same size the suite already caps every context at — and a {@code connection-timeout} of
- * {@value #CONNECTION_TIMEOUT_MS} ms, so a starved request fails in a second and a half rather than
- * in Hikari's default thirty.
+ * {@value #CONNECTION_TIMEOUT_MS} ms, so a starved request fails inside a test rather than at the
+ * shipped bound, once per assertion. A class whose subject <em>is</em> a starved acquisition must
+ * not depend on the shipped default, which is why this override stays now that there is one.
  *
  * <p><strong>Its negative control is a separate class</strong>
  * ({@code ExpensiveReadBulkheadControlTest}), because "the cap is off" is a property of a Spring
@@ -47,6 +48,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.datasource.hikari.maximum-pool-size=" + BulkheadSaturationBase.POOL_SIZE,
         "spring.datasource.hikari.minimum-idle=0",
         "spring.datasource.hikari.connection-timeout="
+        + BulkheadSaturationBase.CONNECTION_TIMEOUT_MS,
+        // The same number, because the pool seal refuses a context where the two Hikari lines
+        // have come apart — application.properties spells one variable into both.
+        "spring.datasource.hikari.validation-timeout="
         + BulkheadSaturationBase.CONNECTION_TIMEOUT_MS,
         "app.rate-limit.enabled=false",
         "app.expensive-read.limit-enabled=true",

@@ -238,10 +238,28 @@ export function isThrottleRefusal(e: unknown): boolean {
  * up waiting — is a 502/503/504, and in that state asking for something bigger
  * is exactly as wrong as it is after a refusal.
  *
+ * Since HD-233 the middle one of those is **deliberate rather than incidental**:
+ * a failed connection acquisition answers `503` with `errorType: DATABASE_BUSY`
+ * and `Retry-After: 1`. That does not change this predicate, and the omission is
+ * the decision: an *intermediary* retrying one acquisition attempt is cheap,
+ * while this layer would retry from every open tab at the moment the instance has
+ * least room. The banner that renders `detail` is the right answer here; the
+ * retry belongs to the person reading it.
+ *
  * **500 is deliberately NOT here**, and that is the whole distinction: a 500 is
  * a genuine bug on one request, where a fresh read is worth having and may well
  * succeed. An overloaded server is not going to be helped by being asked for
  * more.
+ *
+ * That distinction is only sound while the server does not answer 500 for a
+ * condition that belongs in the list above, and for one release it did: the
+ * `DATABASE_BUSY` refusal reached only requests that got as far as a handler,
+ * so a starved instance answered every *authenticated* query with a 500 — and
+ * this file's own reasoning then had each tab ask again. The server closed it
+ * (a servlet filter answers the acquisitions that fail before the dispatcher),
+ * which is the shape of the fix to insist on: **a status that means "the
+ * instance is out of room" is worth nothing unless the paths that carry the
+ * traffic can actually produce it.**
  *
  * That last sentence binds the **automatic** layer as hard as the hand-written
  * ones: `queryClient.ts` reads this predicate so its global single retry cannot

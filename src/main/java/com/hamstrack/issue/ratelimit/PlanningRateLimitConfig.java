@@ -73,8 +73,8 @@ public class PlanningRateLimitConfig implements WebMvcConfigurer {
      * method, so one Hikari connection is held across {@code 12 + N} statements — 32 at
      * {@code AGILE_MAX_OPEN_SPRINTS=20}. {@code DB_STATEMENT_TIMEOUT_MS} bounds each of them and
      * nothing bounds their sum, so the worst-case hold for one planning aggregate is ~320 seconds
-     * against a default pool of 10 and a 30 s {@code connectionTimeout} for everybody else. A rate
-     * budget cannot bound that even in principle: it spends the same unit whether a request takes
+     * against a default pool of 10, while everybody else waits out the pool's acquisition bound and
+     * then fails. A rate budget cannot bound that even in principle: it spends the same unit whether a request takes
      * 8 ms or 8 s, so its protection evaporates precisely as the instance slows down.
      *
      * <p><strong>Why not a second share.</strong> A {@code PlanningConcurrencyLimit} with its own
@@ -89,8 +89,8 @@ public class PlanningRateLimitConfig implements WebMvcConfigurer {
      * <p><strong>The cost, stated rather than tolerated:</strong> planning, reports and search now
      * refuse each other under saturation, and a planning-heavy team can be the reason a colleague's
      * report is refused. Accepted, because the alternative is not "no refusal" — it is that
-     * colleague waiting out a 30 s {@code connectionTimeout} behind a planning read that may
-     * legitimately hold its connection for minutes. The per-principal ceiling (3 of 6) is what
+     * colleague waiting out the pool's acquisition bound behind a planning read that may
+     * legitimately hold its connection for minutes, and then being refused anyway. The per-principal ceiling (3 of 6) is what
      * stops one planner being the whole cause, and it needed no re-argument: the Backlog page's
      * mount puts ONE request on this surface and {@code refreshSections} iterates with
      * {@code for … await}, so this surface does not raise the largest correct-client burst.

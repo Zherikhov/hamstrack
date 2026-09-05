@@ -45,8 +45,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@code @Transactional(readOnly = true)} over the whole method, so one Hikari connection is held
  * across {@code 12 + N} statements — 32 at {@code AGILE_MAX_OPEN_SPRINTS=20};
  * {@code DB_STATEMENT_TIMEOUT_MS} bounds each of them and nothing bounds their sum, so the
- * worst-case hold for one planning aggregate is ~320 s against a 30 s {@code connectionTimeout} for
- * everybody else. A rate budget provably cannot bound that: it spends the same unit whether a
+ * worst-case hold for one planning aggregate is ~320 s, while everybody else waits out the pool's
+ * acquisition bound and then fails. A rate budget provably cannot bound that: it spends the same unit whether a
  * request takes 8 ms or 8 s.
  *
  * <p><strong>The important assertion in this file is that permits come BACK.</strong> A leaked

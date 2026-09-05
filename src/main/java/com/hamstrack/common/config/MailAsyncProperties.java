@@ -87,11 +87,15 @@ public record MailAsyncProperties(
              * either one while one of them is a literal in a Java file.
              *
              * The @Max is the ANNOTATION's bound and never the operative one: what an operator may
-             * actually set is decided by isShutdownWithinTheStopGrace() against the grace below, so
-             * at the default grace this tops out near 28 and at a grace of 300 the whole range is
-             * reachable. An earlier revision paired this @Max(120) with a hard-coded 30 s grace,
-             * which made 29..120 a range no value could ever pass — a false affordance in the one
-             * place an operator looks for the permitted range.
+             * actually set is decided by the whole shutdown arithmetic against the grace below —
+             * isShutdownWithinTheStopGrace() here, COMPLETED by DatabaseTimeoutConsistency with
+             * the connection acquisition a nested record cannot see — so at the shipped defaults
+             * this tops out at 25 and at a grace of 300 the whole range is reachable. (It was 28
+             * until the acquisition became a term, which is why the operative bound is named as a
+             * relation and not as a method: the check that decides it has moved once already.)
+             * An earlier revision paired this @Max(120) with a hard-coded 30 s grace, which made
+             * 29..120 a range no value could ever pass — a false affordance in the one place an
+             * operator looks for the permitted range.
              */
             @DefaultValue("15") @Min(1) @Max(120) int shutdownDrainSeconds,
             /*
@@ -113,32 +117,27 @@ public record MailAsyncProperties(
     ) {
 
         /**
-         * One connection acquisition plus a transaction begin/commit for the residue batch. It is a
-         * budget, not a measurement — a healthy local INSERT is single-digit milliseconds, and this
-         * leaves room for a database that is itself shutting down.
+         * A transaction begin/commit for the residue batch. It is a budget, not a measurement — a
+         * healthy local INSERT is single-digit milliseconds, and this leaves room for a database
+         * that is itself shutting down.
          *
-         * <p><strong>It does not cover a starved pool, and that gap is accepted rather than
-         * overlooked.</strong> {@code spring.datasource.hikari.connection-timeout} is unset, so an
-         * acquisition that finds no free connection waits Hikari's 30 s default and blows this
-         * budget on its own. Binding it lower is not available as a local fix: {@code
-         * StatementTimeoutProperties} derives its 10 s default as roughly a third of that same 30 s
-         * so that a saturated pool turns over inside the window a waiting request will wait, and
-         * {@code DatabaseTimeoutConsistency} warns at startup when the statement bound exceeds half
-         * the acquisition bound — so a 3 s acquisition would need a ≤1.5 s statement bound, which
-         * is below that property's own hard floor of twice {@code DB_LOCK_TIMEOUT_MS}. In other
-         * words the pool's wait is already sized against the statement bound by a rule this file
-         * does not get to overrule, and shortening it here would trade "saturation degrades to
-         * latency" for "saturation degrades to 500s" across the whole application.
+         * <p><strong>It deliberately does not cover the connection acquisition, because that term
+         * is checked against the stop grace where both halves are visible.</strong> How long an
+         * acquisition may take is a property of the pool ({@code DB_CONNECTION_TIMEOUT_MS}) and is
+         * not bindable inside a nested record, so {@code DatabaseTimeoutConsistency} — which can
+         * see this record and that bound — asserts the whole sum: drain + acquisition + this +
+         * queue. {@link #isShutdownWithinTheStopGrace()} below stays as the binding-time triple,
+         * and the two refusals are worded as one relation so that a single misconfiguration cannot
+         * produce two unrelated-looking failures.
          *
-         * <p>What covers the gap instead is ordering: the WARN naming the abandoned count is
-         * emitted <em>before</em> the write is attempted, so when the write does outrun the grace
-         * the count is still in the log. A budget that cannot be guaranteed is paired with a record
-         * that does not depend on it.
+         * <p>What covers the residual is ordering: the WARN naming the abandoned count is emitted
+         * <em>before</em> the write is attempted, so if the write ever does outrun the grace the
+         * count is still in the log.
          */
-        private static final long RESIDUE_WRITE_FIXED_MS = 1_000;
+        static final long RESIDUE_WRITE_FIXED_MS = 1_000;
 
         /** One row of a batched INSERT. */
-        private static final long RESIDUE_WRITE_PER_MESSAGE_MS = 1;
+        static final long RESIDUE_WRITE_PER_MESSAGE_MS = 1;
 
         /**
          * <strong>The whole shutdown must fit inside the stop grace.</strong>
@@ -155,6 +154,12 @@ public record MailAsyncProperties(
          * and at a 20-second drain it does not — while at a grace of 60 both do. No one of the
          * three is wrong on its own; the triple can be.
          *
+         * <p><strong>It is the binding-time half of one relation, not the whole of it.</strong> The
+         * residue write also has to obtain a connection, and how long that may take is a pool
+         * property this record cannot see. {@code DatabaseTimeoutConsistency} asserts the same sum
+         * with that term included and refuses the boot when it does not fit; the two messages are
+         * written as one relation so a single misconfiguration does not read as two.
+         *
          * <p>A unit test wanting the {@code false} branch constructs the record directly rather
          * than binding properties.
          */
@@ -168,10 +173,29 @@ public record MailAsyncProperties(
                 + "larger APP_STOP_GRACE_SECONDS — which raises the container's stop_grace_period "
                 + "and this bound together, since docker-compose.prod.yml reads the same variable")
         public boolean isShutdownWithinTheStopGrace() {
+            return shutdownCostMs(0) <= stopGraceMs();
+        }
+
+        /**
+         * What the whole shutdown costs: the drain, then one connection acquisition, then the batch
+         * write of the residue. Expressed once so the binding-time check above and the wider one in
+         * {@code DatabaseTimeoutConsistency} are the same arithmetic with one term differing, not
+         * two copies that can drift.
+         *
+         * @param acquisitionMs how long a connection may be waited for
+         *                      ({@code spring.datasource.hikari.connection-timeout}); {@code 0}
+         *                      from the binding-time caller, which cannot see it
+         */
+        long shutdownCostMs(long acquisitionMs) {
             return shutdownDrainSeconds * 1_000L
+                   + acquisitionMs
                    + RESIDUE_WRITE_FIXED_MS
-                   + (long) queueCapacity * RESIDUE_WRITE_PER_MESSAGE_MS
-                   <= stopGraceSeconds * 1_000L;
+                   + (long) queueCapacity * RESIDUE_WRITE_PER_MESSAGE_MS;
+        }
+
+        /** The grace the platform gives the process, in the unit the arithmetic above is in. */
+        long stopGraceMs() {
+            return stopGraceSeconds * 1_000L;
         }
     }
 

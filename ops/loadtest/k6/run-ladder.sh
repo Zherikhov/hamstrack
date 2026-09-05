@@ -414,9 +414,11 @@ check_thresholds_received_samples() {
     #   absent            no sample ever carried these tags;
     #   Rate              passes + fails == 0;
     #   Trend             every statistic is 0, which no real duration sample can produce.
-    # A COUNTER IS NOT ASKED FOR SAMPLES. hs_errors_5xx, hs_canary_leak, hs_auth_failures,
-    # hs_unexpected_404 and hs_budget_422 are `count==0` targets whose correct outcome IS an
-    # empty metric; demanding a sample from them would fail every clean stage. They are
+    # A COUNTER IS NOT ASKED FOR SAMPLES — that is a property of the METRIC TYPE and not a
+    # list of names, because a list here goes stale one entry before it looks wrong. A
+    # Counter key in this harness states a count (`count==0` for the ones that must not
+    # happen, `count>=0` for the ones that are merely recorded), and its correct outcome is
+    # an EMPTY metric; demanding a sample from any of them would fail every clean stage. They are
     # still checked for ABSENCE, but AN ABSENT KEY IS A BACKSTOP THAT DOES NOT FIRE, AND THE
     # DRY RUN AGAINST REAL k6 v2.2.0 IS WHERE THAT WAS MEASURED: k6 materialises a sub-metric
     # for every threshold key it is DECLARED, whether or not any sample ever carried those

@@ -36,6 +36,13 @@ class StatementTimeoutPropertiesTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations
                     .of(ConfigurationPropertiesAutoConfiguration.class))
+            // The shipped acquisition bound, because this runner does not load
+            // application.properties and DatabaseTimeoutConsistency also owns the rule that the
+            // mail shutdown fits inside the stop grace ONCE AN ACQUISITION IS COUNTED (HD-233).
+            // Absent, the check falls back to Hikari's 30 s — which does not fit a 30 s grace, and
+            // is the state that ticket deleted. Simulating a boot means simulating the value the
+            // boot has.
+            .withPropertyValues("spring.datasource.hikari.connection-timeout=3000")
             .withUserConfiguration(TestConfig.class);
 
     @Test
@@ -212,7 +219,11 @@ class StatementTimeoutPropertiesTest {
     }
 
     @Configuration(proxyBeanMethods = false)
-    @EnableConfigurationProperties({StatementTimeoutProperties.class, LockingProperties.class})
+    // MailAsyncProperties is here because DatabaseTimeoutConsistency also owns the rule that the
+    // shutdown residue write fits inside the stop grace once a connection acquisition is counted
+    // (HD-233). Nothing in this file varies it; the defaults fit.
+    @EnableConfigurationProperties({StatementTimeoutProperties.class, LockingProperties.class,
+            MailAsyncProperties.class})
     @Import(DatabaseTimeoutConsistency.class)
     static class TestConfig {}
 }

@@ -462,6 +462,46 @@ box too small to have been slow yesterday is exactly the one that meets it today
 > `RATE_LIMIT_ENABLED=false` deliberately does **not** turn it off. Details:
 > [Expensive reads are bounded by concurrency from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#expensive-reads-are-bounded-by-concurrency-from-0180).
 
+And the connection-acquisition bound, which is the sharpest member of this class in the release:
+the two above turn a *slow* request into an error, while this one can turn a request that is not
+slow at all into one — because the failure lands on whoever asks *while* something else is slow.
+The break-even is not a host size either; it is whether the instance ever runs out of connections:
+
+> **Database connection acquisition is now bounded (`DB_CONNECTION_TIMEOUT_MS`, default 3 s) —
+> and it can stop an install at boot, so read the last paragraph before you pull.** If you set
+> that bound yourself, a value over `13900` at the shipped mail settings, under `250`, `0`, or a
+> blank one stops the container; `30000`, the pre-0.18.0 wait you are most likely to reach for,
+> is above that ceiling. **And a raised `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` or
+> `MAIL_ASYNC_QUEUE_CAPACITY` can stop it even if you never touch this variable**, because the
+> new bound joins a sum those two are checked against.
+> Before 0.18.0 a request that found no free connection waited HikariCP's 30-second default —
+> a number Hamstrack had never set — holding a worker thread the whole time. From now on it
+> gives up after 3 seconds and answers **`503`** with `errorType: DATABASE_BUSY` and
+> `Retry-After: 1`, on every endpoint — including the authenticated ones, whose connection is
+> needed before any handler runs and which answered a bare `500` until this release. That `500`
+> mattered: the web UI does not retry a `503` and deliberately *does* retry a `500`, so a
+> starved instance was asked again by every open tab.
+> **On a busy or under-provisioned install this turns a slow period into visible errors
+> instead of a slow one** — which is the intent, and it is a change you will see. Note which
+> request fails: not the slow one, but whoever asks while something else is holding the
+> connections. If you get them, the fix is usually `DB_POOL_MAX_SIZE` (raise
+> `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit); raise
+> `DB_CONNECTION_TIMEOUT_MS` only if you would rather wait than shed, and know that each
+> waiting request holds a worker while it waits.
+> **Nothing in `.env` needs changing before you pull — unless you have raised
+> `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` or `MAIL_ASYNC_QUEUE_CAPACITY` against the default
+> `APP_STOP_GRACE_SECONDS`.** This release adds a 3000 ms acquisition term to a sum those two
+> are already checked against, so an install with under 3 s of slack **boots today and refuses
+> to start after the upgrade** — `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS=28` with a queue of 100
+> against a 30 s grace is `29 100 ≤ 30 000` now and `32 100 > 30 000` afterwards. At the
+> shipped mail settings the drain's ceiling is **25**. What the refusals in the lead are:
+> `0` is HikariCP's ~24.8 days — *no bound*, not *no wait* — `250` is its own floor, a blank
+> line is an empty value rather than an absent one, and the `13900` ceiling is the same
+> arithmetic seen from the acquisition's end: the shutdown's mail drain plus one connection
+> acquisition must fit inside `APP_STOP_GRACE_SECONDS`, which you raise in the same edit if you
+> want longer. Details:
+> [Connection acquisition is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#connection-acquisition-is-bounded-from-0180).
+
 And one line that changes no default but answers a question every one of the lines above
 makes an operator ask:
 

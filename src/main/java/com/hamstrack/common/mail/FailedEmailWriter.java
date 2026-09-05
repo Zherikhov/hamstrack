@@ -90,56 +90,60 @@ import java.util.List;
  * and is logged with the mail type and recipient. Before, the same starvation produced a write that
  * was dropped in silence, which is nothing to see at all.
  *
- * <p><strong>The pool's own acquisition bound is a separate decision, and this is the third review
- * to reach it and the first to find out why it cannot simply be taken here.</strong>
- * {@code spring.datasource.hikari.connection-timeout} is unset, so a starved acquisition anywhere
- * in the application waits the 30 s default — and that unset default is now the sole bound on
- * <em>four</em> harms:
+ * <p><strong>The pool's own acquisition bound was a separate decision, and HD-233 took it.</strong>
+ * {@code spring.datasource.hikari.connection-timeout} is set now
+ * ({@code DB_CONNECTION_TIMEOUT_MS}, 3000 ms) rather than inherited at Hikari's 30 s default. While
+ * it was unset it was the sole bound on <em>four</em> harms, and the list is kept with an outcome
+ * against each, because "the timeout is shorter" is not by itself an answer to any of them:
  *
  * <ol>
- *   <li>a 30 s park on unauthenticated {@code register} / {@code forgot-password} under database
- *       pressure;</li>
+ *   <li>a park on unauthenticated {@code register} / {@code forgot-password} under database
+ *       pressure. <strong>Reduced tenfold, not removed</strong> — a park is a park, and what the
+ *       guard below removes is the avalanche rather than the wait;</li>
  *   <li>an address-correlated one on the known branch alone — a timing signal on the endpoint whose
- *       whole design is that its branches are indistinguishable;</li>
+ *       whole design is that its branches are indistinguishable. <strong>Still open</strong>; see
+ *       the paragraph after this list, which carries the arithmetic;</li>
  *   <li>the shutdown residue write, whose budget is a budget only while the acquisition inside it
- *       is short;</li>
+ *       is short. <strong>Closed</strong>: {@code DatabaseTimeoutConsistency} refuses a boot whose
+ *       drain + acquisition + commit + queued rows does not fit inside
+ *       {@code app.mail.async.stop-grace-seconds}, so that budget is arithmetic checked at startup
+ *       instead of a number hoped for;</li>
  *   <li><strong>and the one that actually hurts: an application-wide stall, not a mail-path
  *       latency.</strong> The measurement above is what makes it — {@code inEffect=1} to
  *       {@code inRequiresNew=2} means the committing thread <em>holds its first connection while
  *       parking for the second</em>. Under a saturated mail queue, N Tomcat threads inside their
- *       {@code AfterCommit} window each hold one connection and wait up to 30 s for another; with
- *       {@code DB_POOL_MAX_SIZE=10} against Tomcat's 200 threads, ten of them empty the pool and
- *       <em>every acquisition anywhere in the application</em> parks — reports, board, login,
- *       nothing to do with mail. It is self-amplifying, because each parked thread keeps its first
- *       connection for the full wait and so shrinks the free pool further, and self-resolving in
- *       30 s waves. The first three harms are latency on the mail path; this one is the whole
- *       instance.</li>
+ *       {@code AfterCommit} window each hold one connection and wait out the acquisition bound for
+ *       another; with {@code DB_POOL_MAX_SIZE=10} against Tomcat's 200 threads, ten of them empty
+ *       the pool and <em>every acquisition anywhere in the application</em> parks — reports, board,
+ *       login, nothing to do with mail. It is self-amplifying, because each parked thread keeps its
+ *       first connection for the full wait and so shrinks the free pool further, and self-resolving
+ *       in waves as long as that bound. The first three harms are latency on the mail path; this
+ *       one is the whole instance. <strong>Closed by {@link #poolIsStarved()}</strong> rather than
+ *       accepted — see that method, which removes the amplification without depending on any
+ *       timeout, and therefore keeps working at every value of one.</li>
  * </ol>
  *
- * <p>The fourth is <strong>closed by {@link #poolIsStarved()}</strong> rather than accepted — see
- * that method, which removes the amplification without touching a global timeout. The other three
- * remain, and the reason a shorter acquisition bound is not the fix for them is a relationship this
- * codebase already reasons about and already checks. {@code StatementTimeoutProperties} derives its
- * 10 s default as roughly a third of Hikari's 30 s precisely so that a saturated pool turns over
- * inside the window a waiting request will wait, and
- * {@code DatabaseTimeoutConsistency.warnIfTheBoundOutlastsTheWait} logs a WARN whenever the
- * statement bound exceeds half the acquisition bound. A 3 s acquisition would therefore warn at
- * every boot <em>on the shipped defaults</em>, and silencing it honestly would need a statement
- * bound of 1.5 s — below that property's own hard floor of twice {@code DB_LOCK_TIMEOUT_MS} at
- * <em>its</em> default of 3000 ms.
+ * <p><strong>The second harm is attenuated tenfold and NOT closed, and nothing may write it up as
+ * a fix.</strong> The known branch spends the per-address ceiling, finds the account, mints a
+ * {@code SecureRandom} token, hashes it, inserts into {@code password_resets}, commits, and runs an
+ * {@code AfterCommit} effect that — with a full mail queue and {@link #poolIsStarved()} answering
+ * false — parks for up to the acquisition bound. The unknown branch spends the same ceiling and
+ * returns. So the maximum branch delta <em>is</em> that bound: <strong>3 s</strong> today where it
+ * was 30 s. Internet RTT jitter is tens of milliseconds and a few hundred on a poor mobile link, so
+ * three seconds remains one to two orders of magnitude above the noise and is separable at
+ * <strong>n = 1</strong>, over the internet rather than merely on a LAN. Shrinking the number
+ * further does not fix it: even Hikari's 250 ms floor is separable at small n on a decent link, and
+ * that floor is far below this family's own. <strong>A conditional park on one branch cannot be
+ * made unmeasurable by making it shorter.</strong> What bounds sampling is what {@code api.ts} and
+ * {@code ForgotPasswordPage.tsx} already say it is — {@code app.auth-mail.max-per-recipient-per-window}
+ * plus the per-IP budget on {@code /api/auth/*} — and this change does not improve that by one
+ * request. Closing it takes a structural change: a matched bounded cost on the unknown branch, or
+ * moving the dead-letter write off the committing thread onto an outbox, which is ADR-0021's
+ * rejected alternative 4. Until one lands, the claim in those two files keeps its exact shape with
+ * only the number changed, and the words <em>still open</em> stay in it.
  *
- * <p><strong>That is a bound on what one ticket may change, not a proof of impossibility, and an
- * earlier revision of this paragraph read as the latter.</strong> "The shortest consistent
- * acquisition bound is around 20 s" is true only while the statement bound stays where it is:
- * {@code lockTimeoutMs}'s own {@code @Min} is 100, so a fully re-sized family — lock 500, statement
- * 1000, acquisition 2000 — is expressible today and violates none of the three rules. What makes it
- * out of scope here is that it is the whole family: re-sizing it trades "saturation degrades to
- * latency" for "saturation degrades to 500s" across every endpoint, and needs an env var, a compose
- * file and two deployment docs behind it. A mail ticket may not take that on the way past; the
- * ticket that does take it should know these paths are among its beneficiaries.
- *
- * <p>Recorded here rather than left implicit so the next reviewer meets the counter-argument
- * instead of the omission.
+ * <p>Recorded here rather than left implicit so the next reviewer meets the verdict instead of the
+ * omission.
  *
  * <p>This is the "durability of its own inside the effect" that {@code AfterCommit} and
  * {@code BoundedJpaTransactionManager} both point at for account-critical mail. It is the only
@@ -220,7 +224,7 @@ public class FailedEmailWriter {
      * enters that window before the first one becomes visible in the count passes the guard too.
      * The conclusion is unchanged, and put this way it survives a future where refusals arrive in
      * a correlated burst — a constant instead of a self-feeding wave. Each of those parkers still
-     * holds its own first connection for up to the 30 s default, so the per-thread cost is exactly
+     * holds its own first connection for the whole acquisition bound, so the per-thread cost is exactly
      * what it always was; only the multiplication is gone. And acquisitions with nothing to do
      * with mail still join the queue behind them: what is closed is mail's <em>contribution</em>
      * to the cascade, which is how the fourth harm is defined.

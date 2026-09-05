@@ -723,6 +723,33 @@ public class ProductMetrics {
                 "route", mappedPattern == null ? "unmapped" : mappedPattern).increment();
     }
 
+    /**
+     * {@code hamstrack.db.connection_acquisition_failed{method,route}} — a request the connection
+     * pool could not serve within {@code DB_CONNECTION_TIMEOUT_MS} (HD-233).
+     *
+     * <p>Hikari's own {@code hikaricp_connections_timeout_total} counts the same event and is not a
+     * substitute: it says the pool refused somebody, never which route they were on. Read together
+     * with {@code hikaricp_connections_pending}, this is what separates "the pool is tight" from
+     * "the pool is gone".
+     *
+     * <p>Unlike the statement budget above, this refusal is a 5xx and therefore <em>does</em> reach
+     * the general error-rate alert — correctly, since pool exhaustion is an incident. The counter
+     * is what says <em>which</em> incident without anybody reading a log.
+     *
+     * <p>Same cardinality guard, for the same reason: the <strong>mapped pattern</strong>, never the
+     * request URI, which carries workspace and project UUIDs. Both writers of the refusal increment
+     * it — {@code GlobalExceptionHandler} for a failure inside a handler, {@code DatabaseBusyFilter}
+     * for one that unwound through the filter chain — and the second has no pattern to report,
+     * because no handler had been matched when the acquisition failed. It reads {@code unmapped},
+     * which is how the two halves are told apart on one graph; on a normal instance it is the
+     * larger half, since an authenticated request's token is resolved to a user in the filter chain.
+     */
+    public void connectionAcquisitionFailed(String method, String mappedPattern) {
+        registry.counter("hamstrack.db.connection_acquisition_failed",
+                "method", method == null ? "unknown" : method,
+                "route", mappedPattern == null ? "unmapped" : mappedPattern).increment();
+    }
+
     // --- attachments ---
 
     /** {@code hamstrack.attachments.uploaded} + {@code hamstrack.attachments.bytes}. */
