@@ -208,8 +208,20 @@ while IFS= read -r line || [ -n "$line" ]; do
       die "manifest entry '$entry' names the target directory itself rather than a path inside it" ;;
     *"*"*|*"?"*|*"["*)
       die "manifest entry '$entry' contains a glob character — the manifest lists literal paths so that what a deploy touches can be read off it" ;;
-    .env|.env.*|*/.env|*/.env.*)
-      die "manifest entry '$entry' matches .env and is NEVER synced: $TARGET/.env holds the secrets and the machine's own decisions (APP_IMAGE_TAG, APP_MEMORY_LIMIT, SITE_ADDRESS), and the single rollback story depends on it surviving every deploy" ;;
+    # `*.env` covers the shapes the arms before it missed, and it is not redundant with
+    # them: those match a basename that BEGINS with `.env`, while a real secret file in this
+    # repository is named `<something>.env` — `config.env` (HD-186), `backup.env` (HD-187),
+    # both inside directories this repository syncs wholesale — so that shape went through.
+    # A `*` in a case pattern spans `/`, so `*.env` also names it at any depth.
+    # If this brace is ever "simplified": `.env` and `*/.env` are now strictly redundant with
+    # `*.env` and could go, but `.env.*` and `*/.env.*` are LOAD-BEARING — they are the only
+    # arms that match a name which ends in neither `.env` nor anything `*.env` sees
+    # (`.env.production`, `.env.local`). Delete those two and the brace silently narrows.
+    # A `<name>.env.example` template ends in `.example` and stays syncable, which it must:
+    # it is the instructions for the file being refused (ops/loadtest/config.env.example,
+    # ops/backup/backup.env.example).
+    .env|.env.*|*/.env|*/.env.*|*.env)
+      die "manifest entry '$entry' matches .env, .env.* or *.env and is NEVER synced: $TARGET/.env holds the secrets and the machine's own decisions (APP_IMAGE_TAG, APP_MEMORY_LIMIT, SITE_ADDRESS), and the single rollback story depends on it surviving every deploy; a *.env beside a synced script (config.env, backup.env) is a secret file that a deploy would copy into .config-backup/ five times over, and its <name>.env.example template travels in its place" ;;
     Caddyfile|*/Caddyfile)
       die "manifest entry '$entry' is NEVER synced: the production Caddyfile carries a hand-added Cloudflare trusted_proxies block that this repository's copy does not, so applying it would replace a hardened config with a bare one and downgrade production silently (docs/design/config-delivery-proposal.md §6.3 states the precondition for lifting this)" ;;
   esac
@@ -227,12 +239,21 @@ done < "$SRC/$MANIFEST_REL"
 # sentence is made true here rather than narrowed there. Not reachable from today's tree,
 # which is the point: a guard that holds only for the current contents of a directory is
 # not a guard.
+#
+# The `*.env` arm is what makes "UNCONDITIONALLY" true of the shape this project actually
+# writes. A secret file here is named `<something>.env`, not `.env`: HD-186's load harness
+# keeps its secrets in `ops/loadtest/config.env`, and HD-187's backups in `backup.env`
+# (`ops/backup/backup.env.example` is its template) — basenames matched by none of `.env`,
+# `.env.*`, `*/.env`, `*/.env.*`, and both inside `ops/`, which IS synced wholesale. So the
+# never-sync brace could not see the very naming convention this repository uses for the
+# thing it exists to refuse. The mirror of that rule is what keeps it usable: a
+# `<name>.env.example` TEMPLATE travels, the `<name>.env` it describes does not.
 for entry in "${ENTRIES[@]}"; do
   [ -d "$SRC/$entry" ] || continue
   while IFS= read -r placed; do
     case "${placed##*/}" in
-      .env|.env.*|Caddyfile)
-        die "manifest entry '$entry' would place '$placed', and .env* and Caddyfile are NEVER synced (the reasons are in $MANIFEST_REL): .env holds this box's secrets and its own decisions, and the production Caddyfile carries a hand-added Cloudflare trusted_proxies block that this repository's copy does not. Remove it from the release tree, or stop syncing the directory that carries it." ;;
+      .env|.env.*|*.env|Caddyfile)
+        die "manifest entry '$entry' would place '$placed', and .env, .env.*, *.env and Caddyfile are NEVER synced (the reasons are in $MANIFEST_REL): a file named .env, starting with .env. or ending in .env holds secrets and a machine's own decisions, and the production Caddyfile carries a hand-added Cloudflare trusted_proxies block that this repository's copy does not. Move it out of the release tree — a load-harness config belongs at /opt/hamstrack/.loadtest.env and a backup config at /etc/hamstrack/backup.env, each described by a .example that DOES travel — or delete it, or stop syncing the directory that carries it." ;;
     esac
   done < <( cd "$SRC" && find "$entry" -print )
 done

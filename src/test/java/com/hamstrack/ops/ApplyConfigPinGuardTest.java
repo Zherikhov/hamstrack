@@ -120,6 +120,17 @@ class ApplyConfigPinGuardTest {
                 normalisation must stay above them: stripped once, `Caddyfile///` became
                 `Caddyfile/`, matched neither arm, and was stopped only by an accident of
                 directory resolution -- with a refusal that blamed the release tree.
+                "Every spelling" includes a PREFIX, not only a dot: a secret file in this
+                repository is named `<something>.env` -- `ops/loadtest/config.env` (HD-186),
+                `ops/backup/backup.env` (HD-187) -- and that shape matched none of `.env`,
+                `.env.*`, `*/.env`, `*/.env.*` until the `*.env` arm was added. The mirror
+                rule is a CLASS and not a file: a `<name>.env.example` TEMPLATE must stay
+                syncable, because it is the instructions for the `<name>.env` being refused.
+                A new template goes into the syncable loop below -- a one-element List.of
+                guarding a two-member category is how that claim went stale the first time.
+                And a refusal must describe the entry the operator TYPED: the `.env.*` arms
+                refuse names that do not end in `.env`, so a message saying they do is a
+                falsehood about the line in front of them.
 
             What else moves with a change here: docs/release-checklist.md (the rollback
             section), docs/ops-prod-hardening.md section 3, docs/self-hosting.md ("Applying
@@ -425,14 +436,41 @@ class ApplyConfigPinGuardTest {
      * files the manifest never names, so a {@code .env} or a {@code Caddyfile} committed inside
      * {@code observability/} would reach the box through a line that reads {@code observability/}.
      * A dry run caught exactly that overwriting the hardened Caddyfile with the bare one.
+     *
+     * <p><strong>And the shape the brace could not see was the one this repository actually
+     * writes.</strong> Both arms matched a basename that BEGINS with {@code .env}, while a
+     * secret file here is named {@code <something>.env}: {@code ops/loadtest/config.env}
+     * (HD-186) and {@code ops/backup/backup.env} (HD-187), both inside {@code ops/}, which is
+     * synced wholesale, and both named in prose by their own templates as the thing that must
+     * not be placed there. The comment above the refusal says the guarantee holds
+     * "UNCONDITIONALLY"; a {@code *.env} arm is what makes that sentence true rather than
+     * aspirational. The cases below are therefore in three groups, and the third carries the
+     * weight — as a CATEGORY, not a file: <strong>a {@code <name>.env.example} template
+     * travels; the {@code <name>.env} it describes does not.</strong> Every such template must
+     * keep travelling, or the widening deletes the instructions for the file it protects, so
+     * a new one belongs in that loop.
+     *
+     * <p>The first group also checks that the refusal describes the entry that was TYPED.
+     * The two {@code .env.} arms — the bare one and the "any directory, then the name" glob
+     * beside it — refuse names ending in {@code .local} or {@code .production}, and the
+     * message said "ends in .env" for all five arms — an
+     * operator who wrote {@code ops/.env.local} was told something demonstrably untrue about
+     * their own line, and no case here reached that arm to notice.
      */
     @Test
     void neitherDotEnvNorTheCaddyfileCanBeSyncedInAnySpelling() throws Exception {
         var failures = new ArrayList<String>();
 
         // Named directly, including the spellings normalisation has to fold away first.
+        // `config.env` is the one that was NOT covered: the arms matched `.env` and
+        // `.env.*`, i.e. a basename that BEGINS with `.env`, while HD-186's real secret file
+        // is `ops/loadtest/config.env` — basename `config.env`, inside a directory this
+        // repository syncs wholesale. The comment above the guard says the refusal holds
+        // UNCONDITIONALLY, and that sentence is made true here rather than narrowed there.
         int n = 0;
-        for (String entry : List.of("Caddyfile", "./Caddyfile", "Caddyfile///", ".env", "./config/.env")) {
+        for (String entry : List.of("Caddyfile", "./Caddyfile", "Caddyfile///", ".env", "./config/.env",
+                ".env.local", "./ops/.env.production",
+                "config.env", "./ops/loadtest/config.env", "./ops/backup/backup.env")) {
             var d = deployment("never-" + (n++), "OTHER=1\n", null,
                     "docker-compose.prod.yml\n" + entry + "\n");
             var r = run(d);
@@ -443,13 +481,19 @@ class ApplyConfigPinGuardTest {
             expect(failures, "[" + entry + "] does not blame the release tree for a path that is "
                     + "refused on principle",
                     !r.output().contains("does not exist in the release tree"), r);
+            // The message has to be true of the line the operator wrote. `.env.local` is
+            // refused by the `.env.*` arm and ends in `.local`, so a refusal claiming it
+            // "ends in .env" describes a different file than the one on screen.
+            expect(failures, "[" + entry + "] is not told a falsehood about its own entry: only "
+                    + "a name that ENDS IN .env may be refused with a message saying it does",
+                    !r.output().contains("ends in .env") || entry.endsWith(".env"), r);
             expect(failures, "[" + entry + "] replaced nothing",
                     !Files.exists(d.box().resolve("docker-compose.prod.yml")), r);
         }
 
         // Carried INSIDE a synced directory, which no manifest line names. The scan is
         // per placed file, so the entry that reaches the box is `observability/`.
-        for (String planted : List.of(".env", ".env.production", "Caddyfile")) {
+        for (String planted : List.of(".env", ".env.production", "Caddyfile", "config.env")) {
             var d = deployment("planted-" + planted, "OTHER=1\n", null);
             write(d.src().resolve("observability").resolve(planted), "SECRET=1\n");
             var r = run(d);
@@ -458,6 +502,26 @@ class ApplyConfigPinGuardTest {
                     r.output().contains("would place") && r.output().contains(planted), r);
             expect(failures, "…having replaced nothing",
                     !Files.exists(d.box().resolve("docker-compose.prod.yml")), r);
+        }
+
+        // The other end of the same widening, and the reason the arm is `*.env` and not
+        // `*env*`: the TEMPLATE has to keep travelling. A `<name>.env.example` is
+        // documentation an operator reads on the box, it carries no value, and a guard that
+        // swallowed it would delete the instructions for the file it is protecting. This is a
+        // CATEGORY — the repository has two members today (ops/loadtest/config.env.example
+        // for HD-186, ops/backup/backup.env.example for HD-187, the DC-facing one an operator
+        // installs to /etc/hamstrack/backup.env) and every prose statement that named only
+        // the first went stale the moment the second shipped. A new template is added here.
+        // (`.env.example` is a different question and is deliberately still refused by the
+        // `.env.*` arm — that name would break every deploy of the product, which is why
+        // neither of these templates is called that.)
+        for (String syncable : List.of("config.env.example", "backup.env.example")) {
+            var d = deployment("syncable-" + syncable, "OTHER=1\n", null);
+            write(d.src().resolve("observability").resolve(syncable), "LOAD_PASSWORD_HASH=\n");
+            var r = run(d);
+            expect(failures, "a " + syncable + " inside a synced directory still applies", r.exit() == 0, r);
+            expect(failures, "…and reaches the box",
+                    Files.exists(d.box().resolve("observability").resolve(syncable)), r);
         }
 
         assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();

@@ -40,8 +40,10 @@ import java.util.regex.Pattern;
  * <p><strong>What makes a published value acceptable.</strong> Not "it looks strong" —
  * every value in here is public, so strength is irrelevant. One of:
  * <ol>
- *   <li><strong>empty</strong>, or an interpolation ({@code ${...}}, {@code $(...)}): not a
- *       value at all, and the guard that fires on absence gets to fire;</li>
+ *   <li><strong>empty</strong>, or an interpolation ({@code ${...}}, {@code $(...)},
+ *       {@code $VAR}): not a value at all, and the guard that fires on absence gets to fire.
+ *       An interpolation is those forms and not "anything opening with a {@code $}" — see
+ *       {@link #isNotAValue}, where the looser reading exempted every bcrypt digest;</li>
  *   <li><strong>self-labelled as unfilled</strong> — {@code <a strong password>},
  *       {@code ...}. The angle brackets are the whole point of the convention:
  *       {@code <a strong password>} reads as a blank to fill in, where
@@ -73,9 +75,28 @@ public final class PublishedCredentials {
      * are here because the first version of this pattern ended at
      * {@code (PASSWORD|SECRET|TOKEN|KEY)} and a name is a credential by what it holds, not by
      * which four words we happened to think of.
+     *
+     * <p><strong>The trailing {@code _HASH} is a WIDENING, which is the direction this rule
+     * permits</strong> — {@code JwtSecretValidationTest}'s failure message forbids
+     * <em>narrowing</em> the pattern, and for a stated reason: a narrowing is permanent,
+     * silent and applies to every file. Widening costs a false positive at worst, and here
+     * the false-positive risk is near zero, because the optional suffix only ever attaches
+     * to a name that was ALREADY credential-shaped: {@code X_PASSWORD_HASH},
+     * {@code X_TOKEN_HASH}. A name holding a genuinely public digest is a {@code SHA},
+     * a {@code CHECKSUM} or a {@code DIGEST}, none of which this pattern has ever matched,
+     * and a bare {@code HASH} still matches nothing.
+     *
+     * <p>Anchoring the credential word at the END of the name meant a hash was invisible:
+     * {@code LOAD_PASSWORD} was seen and {@code LOAD_PASSWORD_HASH} was not. This repository
+     * states the opposing threat in its own words — the {@code .gitignore} block added by
+     * HD-186 says <em>"A hash in a source-available repository whose plaintext is beside it
+     * is a credential, not a digest"</em> — so it named a threat its own scanner could not
+     * see, while {@code ops/loadtest/config.env.example} shipped exactly that line empty and
+     * passed for the wrong reason. Filling it in was a silent pass.
      */
     public static final String CREDENTIAL_SHAPED =
-            "(?:[A-Z][A-Z0-9]*_)*(?:PASSWORD|PASSWD|PASS|PWD|SECRET|CREDENTIALS|TOKEN|KEY_ID|KEY)";
+            "(?:[A-Z][A-Z0-9]*_)*(?:PASSWORD|PASSWD|PASS|PWD|SECRET|CREDENTIALS|TOKEN|KEY_ID|KEY)"
+            + "(?:_HASH)?";
 
     public static final Pattern CREDENTIAL_SHAPED_NAME = Pattern.compile(CREDENTIAL_SHAPED);
 
@@ -231,9 +252,23 @@ public final class PublishedCredentials {
         if (value.endsWith("\\")) {
             value = value.substring(0, value.length() - 1).strip();
         }
+        return unquote(value);
+    }
+
+    /**
+     * One layer of matching surrounding quotes taken off, because they are punctuation around
+     * the value and not the value. Shared so the two tests cannot disagree about whether
+     * {@code VAR=''} carries something: {@link #clean} has always read it as empty (the file
+     * is sourced by a shell, which reads it that way too), while the template guard compared
+     * the RAW text and read the same line as a shipped credential. Nothing depended on the
+     * disagreement until {@code LOAD_PASSWORD_HASH} became visible — the template ships that
+     * line quoted on purpose, since it is sourced under {@code set -u} and a bcrypt digest
+     * always contains {@code $}.
+     */
+    public static String unquote(String value) {
         if (value.length() >= 2 && (value.startsWith("\"") && value.endsWith("\"")
                 || value.startsWith("'") && value.endsWith("'"))) {
-            value = value.substring(1, value.length() - 1);
+            return value.substring(1, value.length() - 1);
         }
         return value;
     }
@@ -248,8 +283,25 @@ public final class PublishedCredentials {
         return line;
     }
 
+    /**
+     * An expansion the shell (or Compose) resolves elsewhere: {@code ${VAR}}, {@code $(cmd)},
+     * {@code $((…))}, {@code $VAR}.
+     *
+     * <p><strong>Deliberately not "starts with a {@code $}".</strong> That was the whole test,
+     * and it is one character wider than the rule this class states for itself — wide enough
+     * to swallow <em>every bcrypt digest ever written</em>, because they all open {@code $2}.
+     * So the one value {@code LOAD_PASSWORD_HASH} can ever hold was classified as "not a value
+     * at all", and widening the NAME to see that variable would have found it and let it
+     * through: two latent gaps that compose into a rule staying green on exactly the input it
+     * exists to refuse.
+     *
+     * <p>{@code $} followed by a digit is a positional parameter, which nothing publishes as a
+     * setting — and, unquoted, is precisely how a pasted bcrypt hash breaks a sourced file.
+     */
+    private static final Pattern INTERPOLATION = Pattern.compile("^\\$[{(A-Za-z_]");
+
     public static boolean isNotAValue(String value) {
-        return value.isEmpty() || value.startsWith("$");
+        return value.isEmpty() || INTERPOLATION.matcher(value).find();
     }
 
     public static boolean isUnfilledPlaceholder(String value) {

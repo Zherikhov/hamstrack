@@ -33,7 +33,19 @@ ops/
 #                 APP_MEMORY_LIMIT, SITE_ADDRESS. The single rollback story depends on
 #                 this file surviving every deploy by construction (§5), so the refusal
 #                 is in the script and not merely in this comment.
-# .env*         — same, for every variant an editor or a hand-copy leaves behind.
+# .env.*        — same, for every variant an editor or a hand-copy leaves behind
+#                 (`.env.local`, `.env.production`). It is `.env.*`, NOT `.env*`: `.envrc`
+#                 and `.environment` are not refused, and this line spelled the wider
+#                 pattern for a while — a comment promising a guard the script does not
+#                 implement is worse than no comment.
+# *.env         — and for every variant a PREFIX leaves behind, which is the shape this
+#                 repository actually writes: a secret file here is named `<something>.env`,
+#                 not `.env`. ops/loadtest/config.env (HD-186) and ops/backup/backup.env
+#                 (HD-187) both live inside `ops/`, which is synced wholesale. The mirror
+#                 rule is what keeps the widening usable: a `<name>.env.example` TEMPLATE
+#                 travels, the `<name>.env` it describes does not — config.env.example and
+#                 backup.env.example are both still synced, because they are the
+#                 instructions, not the secret.
 # Caddyfile     — the production copy carries a hand-added Cloudflare `trusted_proxies`
 #                 block (docs/ops-prod-hardening.md §2) that this repository's four-line
 #                 copy does not. Syncing it would replace a hardened config with a bare

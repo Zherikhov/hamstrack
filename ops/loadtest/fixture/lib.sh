@@ -51,10 +51,11 @@ note() { log "  $*"; }
 #     bar, so with a config file in here NO STAGE COULD BE RECORDED AS PASSED. The harness
 #     would invalidate its own run.
 #
-# So the real configuration lives outside the synced tree, and it is named WITHOUT a
-# leading `.env` — apply-config.sh refuses to PLACE any file whose basename is `.env` or
-# starts with `.env.`, per placed file (see config.env.example for why that refusal
-# matters and why renaming around it would break every deploy of the product).
+# So the real configuration lives outside the synced tree — and since HD-222 the NAME is no
+# longer a way around that either: apply-config.sh refuses to PLACE any file whose basename
+# is `.env`, starts with `.env.`, or ENDS IN `.env`, per placed file (see
+# config.env.example for why that refusal matters, and why renaming around it in the other
+# direction — to `.env.something` — would break every deploy of the product).
 : "${LOAD_CONFIG:=/opt/hamstrack/.loadtest.env}"
 
 # Run output, for the same reason: a `results/` directory inside ops/loadtest/ is a set of

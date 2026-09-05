@@ -120,6 +120,19 @@ tokens.json.*
 ops/loadtest/**/*.bak
 ops/loadtest/results/
 
+### HD-187 backup configuration. The real file lives at /etc/hamstrack/backup.env and
+### carries AWS_SECRET_ACCESS_KEY, so nothing here should ever be committed — but the
+### install line in backup.env.example is run from THIS directory, and an operator who
+### copies rather than installs lands `ops/backup/backup.env` in the tree. That is the
+### same shape as ops/loadtest/config.env: a secret inside `ops/`, which a deploy syncs
+### wholesale. apply-config.sh refuses it either way (it scans the release tree, and an
+### ignored file is still a file), so this block is the second belt, not the guard.
+### The template must keep travelling — a `<name>.env.example` is the instructions for
+### the file being refused — hence the negation.
+ops/backup/backup.env
+ops/backup/backup.env.*
+!ops/backup/backup.env.example
+
 ### HD-175 — the contrast audit's own output. Not committed: it carries the DOM
 ### of a real, logged-in workspace (issue titles, member names) and it is a
 ### measurement of one instance at one moment, not a design artefact. The

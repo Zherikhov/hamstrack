@@ -1477,6 +1477,18 @@ Two things to know before you run it:
   there are replaced **wholesale** — a file you dropped into `observability/` on the box is
   gone afterwards. `.env` and `Caddyfile` are never touched, whatever that list says.
 
+  **And it checks the tree you run it *from*, not only the box.** If your working copy
+  carries a file named `.env`, starting with `.env.`, or *ending in* `.env` — `config.env`,
+  `backup.env` — anywhere inside a directory that `synced-paths.txt` lists (`ops/` and
+  `observability/` today), the script refuses the whole apply and names the file, because a
+  synced directory is copied wholesale and would carry that file to the box and into five
+  retained `.config-backup/` copies. `git pull` does not delete untracked files, so a config
+  you once wrote next to the script it configures will fail *every* deploy from that clone
+  until you move it — and being listed in `.gitignore` does not help, because the script
+  reads the tree rather than git. Each such file has a `.example` beside it saying where the
+  real copy belongs (`/opt/hamstrack/.loadtest.env`, `/etc/hamstrack/backup.env`); the
+  `.example` itself travels normally.
+
 - **A pinned `APP_IMAGE_TAG` is fine; a pin that MOVED needs a flag.** Pinning is what this
   page tells you to do, so re-applying configuration onto a tag that has not changed since
   the last apply just proceeds. When the tag *has* changed — you bumped the version, or you

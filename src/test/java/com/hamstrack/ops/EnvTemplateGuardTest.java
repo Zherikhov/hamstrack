@@ -178,7 +178,7 @@ class EnvTemplateGuardTest {
             String name = entry.getKey();
             String declaredBy = entry.getValue();
             Assignment shipped = enabled.get(name);
-            if (shipped != null && !shipped.value().isEmpty()) {
+            if (shipped != null && !isEmptyValue(shipped.value())) {
                 offences.add(".env.prod.example:%d ships `%s=%s`, but %s guards it - ship `%s=`"
                         .formatted(shipped.line(), name, render(shipped.value()), declaredBy, name));
             }
@@ -247,7 +247,7 @@ class EnvTemplateGuardTest {
             for (Pattern form : List.of(ENABLED, DISABLED)) {
                 assignments(template, form).forEach((name, a) -> {
                     if (PublishedCredentials.CREDENTIAL_SHAPED_NAME.matcher(name).matches()
-                            && !a.value().isEmpty()) {
+                            && !isEmptyValue(a.value())) {
                         offences.add(("%s:%d ships `%s=%s` - a credential published in this repository is "
                                 + "not a credential, whether or not anything refuses it at startup")
                                 .formatted(template, a.line(), name, render(a.value())));
@@ -388,6 +388,27 @@ class EnvTemplateGuardTest {
     }
 
     private record Assignment(int line, String value) {}
+
+    /**
+     * <strong>{@code VAR=''} ships no value, and the two halves of this rule have to agree
+     * about that.</strong> {@code PublishedCredentials.clean} has always taken one layer of
+     * matching quotes off, so the repository-wide scan reads that line as empty — a raw
+     * {@code isEmpty()} here read the same line as a shipped credential, and the disagreement
+     * was invisible only because no template quoted an emptied line.
+     *
+     * <p>One does, deliberately: {@code ops/loadtest/config.env.example} is SOURCED under
+     * {@code set -u} and a bcrypt digest always contains {@code $}, so the quotes on
+     * {@code LOAD_PASSWORD_HASH=''} are the instruction for the operator who fills the line
+     * in — {@code $2a$12$…} unquoted dies with {@code $2: unbound variable}, on a value that
+     * looks correct in {@code cat}. Every dialect a template here is read by (a sourcing
+     * shell, Compose's dotenv parser, systemd's {@code EnvironmentFile}) unquotes it too.
+     *
+     * <p>A trailing carriage return survives this, which is the point: {@code VAR=''\r} does
+     * not end in a quote, so it is not unquoted and is still not empty.
+     */
+    private static boolean isEmptyValue(String raw) {
+        return PublishedCredentials.unquote(raw).isEmpty();
+    }
 
     private static Map<String, Assignment> assignments(Path template, Pattern form) throws IOException {
         var out = new LinkedHashMap<String, Assignment>();

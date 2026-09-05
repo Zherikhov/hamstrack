@@ -226,9 +226,19 @@ operator meets it.
 - **`.env`** — secrets, and the machine's own decisions (`APP_MEMORY_LIMIT`, `APP_IMAGE_TAG`,
   `SITE_ADDRESS`). §5 depends on this.
 - **`Caddyfile`** — until §6.3's precondition is met.
-- **Anything outside the target directory**, and anything matching `.env*`, whatever the manifest says.
-  The script refuses these as a hard error rather than trusting the manifest, because the manifest is
-  the thing a careless edit would change.
+- **Anything outside the target directory**, and anything matching `.env`, `.env.*` **or `*.env`**,
+  whatever the manifest says. The script refuses these as a hard error rather than trusting the manifest,
+  because the manifest is the thing a careless edit would change. The pattern is `.env.*` and not
+  `.env*`: `.envrc`/`.environment` pass, and this section said `.env*` for a while — prose that claims
+  a wider guard than the `case` implements is how the next reader stops checking.
+- The `*.env` half was added by **HD-222** and is not redundant with `.env`/`.env.*`: those match a
+  basename that *begins* with `.env`, while **a secret file in this repository is named
+  `<something>.env`** — `ops/loadtest/config.env` (HD-186) and `ops/backup/backup.env` (HD-187), a
+  *prefix*, not a dot, both inside `ops/`, which is synced wholesale. The load harness's template names
+  the hazard at length while quoting a pattern that did not cover it. The mirror rule is what keeps the
+  widening usable: **a `<name>.env.example` template travels; the `<name>.env` it describes does not.**
+  `config.env.example` and `backup.env.example` both end in `.example` and stay synced — they are the
+  instructions for the file being refused.
 
 ### 6.3 The `Caddyfile`, deferred with a precondition rather than left vague
 
@@ -1163,7 +1173,7 @@ under load.** §9's numbers are peaks observed during ordinary quiet use. `docs/
 | **HD-122: ship the sync, or delete the section?** | **Ship it** — and delete the section anyway, because the runbook must stop describing pipeline behaviour in prose | §4, §14 |
 | How does config reach the box? | codeload tarball **by commit sha**, applied by a repo-owned script | §4, §7 |
 | Where does the file list live? | `ops/deploy/synced-paths.txt`, not in the workflow | §6.1 |
-| What is never synced? | `.env`, `Caddyfile` (for now), anything outside the target — refused by the script regardless of the manifest | §6.2 |
+| What is never synced? | `.env`, `.env.*`, **any `*.env`** (HD-222 — a secret file here is named `<something>.env`: `config.env`, `backup.env`), `Caddyfile` (for now), anything outside the target — refused by the script regardless of the manifest. A `<name>.env.example` template still travels | §6.2 |
 | Does the sync install things? | **No.** It places files. The gap is a measured drift scope | §6.4, §8.1 |
 | Where does the image pin live? | `APP_IMAGE_TAG` in `.env`, so it survives a deploy by construction | §5 |
 | Un-pin reminder? | A metric and an alert, not a sentence in a checklist | §5, §8.3 |

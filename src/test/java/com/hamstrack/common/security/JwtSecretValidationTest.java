@@ -64,8 +64,25 @@ class JwtSecretValidationTest {
      */
     private static final String TEMPLATE_KEY = "JWT_SECRET" + "=";
 
+    /**
+     * <p>{@code sql} is here because {@link PublishedCredentials#SQL_PASSWORD} exists for
+     * {@code CREATE ROLE … PASSWORD '…'}, which is the canonical content of a {@code .sql}
+     * file — so until it was added, that pattern could only ever fire inside Markdown that
+     * happened to quote SQL. <strong>A rule that can only match in the file types it was not
+     * written for is the shape worth naming</strong>: it looks like coverage, it goes green,
+     * and the one place its subject actually lives is the place it never reads. It pulls in
+     * the Flyway migrations and the load-harness fixtures, neither of which has ever been
+     * read by this scan.
+     *
+     * <p>{@code js} is deliberately NOT here: it would pull the whole of
+     * {@code src/main/frontend} into the walk, and no JavaScript in this tree holds a
+     * credential. That is a judgement about this repository's contents and it is the kind
+     * that expires — if a script under {@code ops/} or {@code k6/} ever sets one, this is
+     * where it becomes visible.
+     */
     private static final Set<String> SCANNED_EXTENSIONS =
-            Set.of("md", "yml", "yaml", "properties", "sh", "java", "txt", "example", "service", "timer");
+            Set.of("md", "yml", "yaml", "properties", "sh", "java", "txt", "example", "service", "timer",
+                    "sql");
 
     private static void validate(String secret) {
         new JwtService(new JwtProperties(secret, Duration.ofMinutes(30), Duration.ofDays(7))).validateSecret();
@@ -437,6 +454,25 @@ class JwtSecretValidationTest {
                         + "export " + assign("API_TOKEN", "literal-token") + "\n", true,
                         "an unfilled blank is one token, but never across a line break"),
 
+                // A DIGEST of a credential, which this repository names as a threat in its
+                // own words (.gitignore, HD-186: "A hash in a source-available repository
+                // whose plaintext is beside it is a credential, not a digest") and could not
+                // see: the credential word had to be the END of the name, so LOAD_PASSWORD
+                // was watched and LOAD_PASSWORD_HASH was not. ops/loadtest/config.env.example
+                // ships that line empty and therefore passed for the wrong reason - it is the
+                // one line in this repository somebody is expected to fill in with a hash.
+                new Case("ops/loadtest/config.env.example",
+                        assign("LOAD_PASSWORD_HASH", singleQuoted(bcryptDigest())), true,
+                        "a digest is a credential when its plaintext is published beside it"),
+                // And the second half of that, which the name widening alone does NOT reach:
+                // every bcrypt digest begins `$2`, and "starts with a $" was the whole of the
+                // interpolation test - so a filled-in hash was read as `${...}` and allowed as
+                // "not a value at all". The two defects compose into a rule that stays green
+                // on exactly the value it exists to refuse.
+                new Case("ops/loadtest/README.md",
+                        "export " + assign("LOAD_PASSWORD_HASH", singleQuoted(bcryptDigest())), true,
+                        "a bcrypt digest is not an interpolation, whatever its first character is"),
+
                 new Case("docker-compose.yml", yaml("POSTGRES_PASSWORD", "hamstrack"), false,
                         "the local dev stack, in the file that creates it"),
                 // The multi-word blank, in EVERY dialect that ends a value at a delimiter.
@@ -460,6 +496,19 @@ class JwtSecretValidationTest {
                         "self-labelled as a throwaway, and the label travels with the value"),
                 new Case(".env.prod.example", assign("JWT_SECRET", ""), false,
                         "empty is not a value, and the guard that fires on absence gets to fire"),
+                // The two forms the widened name actually meets in this tree, which must stay
+                // allowed or the widening is a rule that reports the template telling its
+                // reader what to do. The quotes are not decoration: config.env.example is
+                // SOURCED under `set -u` and a bcrypt hash always contains `$`, so the empty
+                // line ships QUOTED and the blank beside it is quoted too.
+                new Case("ops/loadtest/config.env.example", assign("LOAD_PASSWORD_HASH", "''"), false,
+                        "an empty quoted string is empty - the template ships the line, not a value"),
+                new Case("ops/loadtest/README.md",
+                        "export " + assign("LOAD_PASSWORD_HASH", singleQuoted("$2a$12$…")), false,
+                        "the runbook's own instruction, written as an unfilled blank"),
+                new Case("docker-compose.observability.yml",
+                        yaml("DATA_SOURCE_PASS", "${DB_MONITOR_PASSWORD:-${DB_PASSWORD}}"), false,
+                        "an interpolation is still an interpolation once `$` alone stops being the test"),
                 new Case("docs/self-hosting.md", yaml("JWT_SECRET", "${JWT_SECRET:?set it in .env}"), false,
                         "an interpolation, which IS the refusal"),
                 new Case("docs/self-hosting.md",
@@ -522,6 +571,32 @@ class JwtSecretValidationTest {
                         itself. Removing one of these is how this scan goes quiet without going \
                         red.""")
                 .contains("md", "yml", "properties");
+
+        // SQL_PASSWORD exists for `CREATE ROLE ... PASSWORD '...'`, which is the canonical
+        // content of a .sql file — so a rule that reaches every extension EXCEPT that one can
+        // only ever fire in the file type it was not written for. It found the observability
+        // runbook's CREATE ROLE because that line was quoted in Markdown, and would have said
+        // nothing about the same line in a migration or a fixture.
+        assertThat(SCANNED_EXTENSIONS)
+                .withFailMessage("""
+
+                        The SQL dialect of this rule (PublishedCredentials.SQL_PASSWORD) can \
+                        only match where the scan reads, and .sql is where a CREATE ROLE ... \
+                        PASSWORD line actually lives — migrations under \
+                        src/main/resources/db/migration and the load fixtures under \
+                        ops/loadtest/fixture. Without this extension the pattern is reachable \
+                        only through Markdown that happens to quote SQL, i.e. everywhere \
+                        except its own file type.""")
+                .contains("sql");
+
+        assertThat(isScannable(REPO_ROOT.resolve("src/main/resources/db/migration/V1__init_schema.sql")))
+                .withFailMessage("""
+
+                        The walk no longer reaches the migrations, which are the SQL this \
+                        repository publishes most of. `db` or `migration` in \
+                        SKIPPED_DIRECTORIES has exactly this effect and reads like a scope \
+                        narrowing.""")
+                .isTrue();
 
         assertThat(isScannable(REPO_ROOT.resolve("docs/self-hosting.md")))
                 .withFailMessage("""
@@ -645,6 +720,26 @@ class JwtSecretValidationTest {
      */
     private static String powershellUnquoted(String variable, String value) {
         return "$env:DB_USERNAME=hamstrack; $env:" + variable + "=" + value;
+    }
+
+    /**
+     * The quoting {@code ops/loadtest/config.env.example} requires of its hash — that file is
+     * SOURCED under {@code set -u} and a bcrypt digest always contains {@code $}, so the form
+     * this rule meets in practice is the quoted one, in both dialects.
+     */
+    private static String singleQuoted(String value) {
+        return "'" + value + "'";
+    }
+
+    /**
+     * A bcrypt digest at the strength {@code SecurityConfig} uses, assembled rather than
+     * written out for the reason every fixture here is: this file is inside the scan. It is
+     * not the hash of anything — what the fixture needs is the SHAPE, and the shape is the
+     * whole difficulty: it opens {@code $2}, which is why "starts with a {@code $}" read it
+     * as an interpolation.
+     */
+    private static String bcryptDigest() {
+        return "$2a$" + "12$" + "K1qYs8mN4bV7cX2zL6pR3eTuI9oW0aG5hJ2dF8kS1nB4vC7xZ3mQu";
     }
 
     /** Assembled, quote by quote, so no literal {@code PASSWORD '…'} appears in a scanned file. */
