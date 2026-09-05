@@ -170,6 +170,25 @@ services:
     # a hand-copy. MailAsyncPropertiesTest asserts the default below is the same number
     # application.properties falls back to.
     stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
+    # LOG ROTATION, WHICH DOCKER DOES NOT DO FOR YOU (HD-264). The default `json-file`
+    # driver has NO max-size and NO max-file: a container's log grows without bound, on
+    # the same disk as PostgreSQL's data directory and the attachments volume. That is a
+    # ceiling this stack otherwise did not have anywhere — mem_limit bounds memory,
+    # nothing bounded this — and it is the belt under every log-volume argument in the
+    # app: the CSP report sink's per-line budget bounds what an anonymous sender can add,
+    # and this bounds what the instance keeps regardless of who wrote it. Alloy tails
+    # these same files, and rotation is transparent to it.
+    #
+    # 50 MB × 5 = 250 MB per container, ~2-3 days of ordinary INFO traffic on the
+    # production box and enough to read an incident out of after the fact; Loki holds the
+    # longer history. Variables rather than literals for the reason mem_limit above is —
+    # a literal is a value your .env cannot reach — and ONE PAIR of variables for all
+    # three services here, because how much log a box keeps is a property of the box.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-50m}
+        max-file: ${LOG_MAX_FILES:-5}
     volumes:
       - attachments_data:/app/data/attachments   # used only when storage type = local
     healthcheck:
@@ -281,6 +300,12 @@ services:
     # so under pressure this swaps before it dies, which is the behaviour the app
     # already has (MemorySwap 2 GiB, measured on the running box).
     mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
+    # Same rotation as the app, same two variables - see the app service above.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-50m}
+        max-file: ${LOG_MAX_FILES:-5}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d hamstrack"]
       interval: 5s
@@ -313,6 +338,13 @@ services:
     # on the way back up, while ~100 MB of unused ceiling costs nothing (a ceiling is
     # not a reservation). Sized to contain a leak, not to ration capacity.
     mem_limit: ${CADDY_MEMORY_LIMIT:-128m}
+    # Same rotation as the app, same two variables - see the app service above. This one
+    # is the busiest producer of the three: it logs a line per request.
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-50m}
+        max-file: ${LOG_MAX_FILES:-5}
     depends_on:
       app:
         condition: service_healthy

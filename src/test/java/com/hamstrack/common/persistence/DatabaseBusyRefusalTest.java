@@ -6,6 +6,7 @@ import ch.qos.logback.core.read.ListAppender;
 import com.hamstrack.common.exception.DatabaseBusyFilter;
 import com.hamstrack.common.exception.DatabaseBusyRefusal;
 import com.hamstrack.common.exception.GlobalExceptionHandler;
+import com.hamstrack.common.security.ContentSecurityPolicy;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.slf4j.LoggerFactory;
@@ -240,6 +241,16 @@ class DatabaseBusyRefusalTest extends PoolStarvedBase {
      * response would gain the header except this one, and a seal that cannot see a header cannot say
      * so. So the pair runs a second time over {@code .secure(true)}, with the conditional header
      * named in the tripwire rather than in the comparison.
+     *
+     * <p><strong>{@code Content-Security-Policy-Report-Only} is in the tripwire for exactly the
+     * reason HSTS is</strong> (HD-264). It is not written by {@code HeaderWriterFilter}'s default
+     * block but by {@code SecurityConfig.writeContentSecurityPolicy}, and the filter's half of the
+     * 503 restores it through {@code ContentSecurityPolicy.applyTo} — so if that call or that
+     * configuration regressed, <em>both</em> sides would lose the header together and a comparison
+     * of "whatever the advice carries" would agree about a header neither response had. Naming it
+     * here is what turns that silent agreement into a failure. It is unconditional in every
+     * configuration this suite runs ({@code app.csp.report-only-enabled} defaults to true), which
+     * is why it belongs in the plain list as well as the secure one.
      */
     @Test
     @Timeout(240)
@@ -251,10 +262,11 @@ class DatabaseBusyRefusalTest extends PoolStarvedBase {
                 loginAnonymously(true), authenticated(ctx, true)));
 
         assertTheTwoWritersCarryTheSameHeaderBlock(responses.get(0), responses.get(1), "plain",
-                List.of("X-Content-Type-Options", "X-Frame-Options", "Cache-Control"));
+                List.of("X-Content-Type-Options", "X-Frame-Options", "Cache-Control",
+                        ContentSecurityPolicy.HEADER));
         assertTheTwoWritersCarryTheSameHeaderBlock(responses.get(2), responses.get(3), "secure",
                 List.of("X-Content-Type-Options", "X-Frame-Options", "Cache-Control",
-                        "Strict-Transport-Security"));
+                        "Strict-Transport-Security", ContentSecurityPolicy.HEADER));
     }
 
     /**

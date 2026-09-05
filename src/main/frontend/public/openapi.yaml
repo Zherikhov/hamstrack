@@ -650,6 +650,15 @@ tags:
       the project is already listed to that caller by GET .../projects; the
       tenancy rule is untouched, and a non-member of the WORKSPACE still gets
       404.
+  - name: Security
+    description: >-
+      The Content-Security-Policy violation report sink. **Its caller is a
+      browser, not a client of this API**: the instance sets a
+      `Content-Security-Policy-Report-Only` header whose `report-uri` names the
+      path below, and the browser posts to it on its own when a page breaks the
+      policy. There is nothing here to call by hand, nothing to read back and
+      nothing tenant-scoped — it is documented because it is part of the public
+      HTTP surface, not because there is an integration to write against it.
 
 security:
   - bearerAuth: []
@@ -8165,6 +8174,99 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '429': { $ref: '#/components/responses/SearchThrottled' }
 
+  /security/csp-report:
+    post:
+      tags: [Security]
+      summary: Receive a browser's Content-Security-Policy violation report
+      description: >-
+        **Called by a browser, never by hand.** This instance sends a
+        `Content-Security-Policy-Report-Only` header on every response, and the
+        header's `report-uri` names this path; a browser posts here by itself
+        when a page this instance served breaks the policy. No client of this
+        API has a reason to call it, and reading the statuses below as though a
+        person were calling is what makes them look strange.
+
+
+        **Unauthenticated by necessity.** A browser sends a violation report
+        with no credentials, so requiring any is requiring a report nobody can
+        send. What makes that safe is that the endpoint only ingests: there is
+        no read path behind it, nothing is persisted, and nothing it accepts or
+        returns is tenant-derived. The anonymous exemption is scoped to `POST`
+        on this one path, so every other method here is an ordinary `/api/**`
+        request and needs a token like any other.
+
+
+        **`204` does not mean "accepted", and there is no status that does.** A
+        report that was parsed and logged, one dropped because the page it names
+        belongs to another site, a body that was not JSON at all, and everything
+        past the twentieth report in one batch are all answered `204` with an
+        empty body. Nothing in the response distinguishes them, deliberately: a
+        discriminating answer would be a free oracle about the instance,
+        including an answer to "is this sink watching?". The refusals below all
+        happen *before* the handler — in the security chain, the mapping or the
+        guard filter — and are about the request rather than about the report.
+
+
+        **Where the sink is not served, this path answers `405`.** Serving the
+        endpoint and naming it in the header are one setting, so a `report-uri`
+        that points at nothing cannot be configured; a self-hosted instance
+        collects nothing unless its operator turned collection on, and the
+        header it sends then names no `report-uri` at all. The `405` rather than
+        a `404` is incidental — the SPA fallback maps every dotless path for
+        `GET`, so the dispatcher finds the path and refuses the method.
+      operationId: reportCspViolation
+      security: []
+      requestBody:
+        required: true
+        description: >-
+          One report, or a batch of them. At most **20** reports are read from a
+          body and the rest are discarded (still `204`), and the whole body is
+          bounded at **16 KB**.
+        content:
+          application/csp-report:
+            schema: { $ref: '#/components/schemas/CspReportBody' }
+          application/json:
+            schema: { $ref: '#/components/schemas/CspReportBody' }
+          application/reports+json:
+            schema: { $ref: '#/components/schemas/CspReportBody' }
+      responses:
+        '204':
+          description: >-
+            The request reached the handler. Says nothing about what became of
+            the report — see the description above.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413':
+          description: >-
+            The declared `Content-Length` is over 16 KB. Refused in a filter,
+            before the body is read: a cap enforced after a body has been read
+            and parsed has already paid the cost it exists to avoid. A body that
+            declares no length at all (chunked) is bounded too, but by the
+            handler, which stops reading at the ceiling and discards — so that
+            one is answered `204`. No body.
+        '415':
+          description: >-
+            The content type is not one of the three the sink accepts.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '429':
+          description: >-
+            Over the sink's own volume budget — 60 reports a minute from one
+            client address, 600 a minute across the instance, counted in memory
+            per app node. **It is its own pot and in particular not the auth
+            budget**: shared client addresses are ordinary, and a browser
+            violating the policy on a page this instance serves must never be
+            able to spend a person's `/login` allowance. The per-address window
+            is charged first, so the `Retry-After` a sender reads is the one
+            that refused it. **No body at all** — there is nothing a report
+            sender is entitled to know.
+          headers:
+            Retry-After:
+              description: >-
+                Seconds until the minute window rolls — at least 1, never more
+                than 60.
+              schema: { type: integer, minimum: 1, maximum: 60 }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -15570,3 +15672,71 @@ components:
         link: { type: string, nullable: true, example: /w/…/p/…?issue=18 }
         read: { type: boolean }
         createdAt: { type: string, format: date-time }
+
+    CspReportBody:
+      description: >-
+        What a browser posts to the report sink: one report object, or an array
+        of them (the Reporting API's batch shape). Every envelope is accepted
+        from day one, and a body the sink cannot read is dropped rather than
+        refused — it is still answered `204`.
+      oneOf:
+        - $ref: '#/components/schemas/CspReport'
+        - type: array
+          items: { $ref: '#/components/schemas/CspReport' }
+
+    CspReport:
+      type: object
+      additionalProperties: true
+      description: >-
+        One violation report, in any of the three envelopes the sink unwraps:
+        the `report-uri` shape (`csp-report`), a Reporting API entry (`body`),
+        or a bare report object. **Nothing is required and nothing is
+        validated** — a body naming neither a document nor a directive is
+        counted as unreadable and dropped, and a report about a page this
+        instance does not serve is dropped as foreign. Both are answered `204`
+        like everything else. Field spellings differ between engines, so each
+        one below is read in the hyphenated form and in the camel-case one, and
+        every member not listed here is ignored.
+      properties:
+        csp-report:
+          type: object
+          additionalProperties: true
+          description: The `report-uri` envelope. Its contents are a report of this shape.
+        body:
+          type: object
+          additionalProperties: true
+          description: The Reporting API envelope. Its contents are a report of this shape.
+        document-uri:
+          type: string
+          description: >-
+            The page that reported. **The host is compared against this
+            instance's own** — a report about somebody else's page is dropped,
+            which is what stops an unauthenticated sink being anybody's public
+            log. Only its path is ever recorded: in this product the query can
+            carry an HQL search, i.e. the text of somebody's issue titles.
+          example: https://hamstrack.com/w/…/search?q=…
+        effective-directive:
+          type: string
+          description: The directive that refused the load.
+          example: img-src
+        violated-directive:
+          type: string
+          description: >-
+            The older spelling, which also carries the source list
+            (`img-src 'self'`); read only when `effective-directive` is absent,
+            and only its first token.
+          example: "img-src 'self' data:"
+        blocked-uri:
+          type: string
+          description: >-
+            What was refused. Recorded as scheme, host and path — or verbatim
+            when it is one of the browsers' keywords (`inline`, `eval`, `data`)
+            rather than a URL.
+          example: https://validator.swagger.io/validator
+        source-file:
+          type: string
+          description: Recorded as a path only, exactly like `document-uri`.
+        line-number: { type: integer }
+        script-sample:
+          type: string
+          description: Truncated to the 40 characters the browsers themselves cap it at.

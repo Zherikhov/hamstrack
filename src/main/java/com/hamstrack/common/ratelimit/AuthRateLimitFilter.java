@@ -103,23 +103,11 @@ public class AuthRateLimitFilter extends OncePerRequestFilter {
     }
 
     /**
-     * When {@code trustForwardedFor} is enabled the request is assumed to come
-     * through a trusted proxy that strips client-supplied X-Forwarded-For (prod
-     * Caddy ≥ 2.5 does), so the rightmost entry is the real peer address. When
-     * disabled (default — DC self-host on a directly-reachable app port) the
-     * header is ignored entirely, because a client could otherwise spoof it to
-     * dodge the per-IP budget; the socket address is used instead.
+     * Shared with the CSP report sink's budget since HD-264 — see {@link ClientIp} for the
+     * trusted-proxy reasoning and for why there is exactly one copy of it.
      */
     private String clientIp(HttpServletRequest request) {
-        if (!trustForwardedFor) {
-            return request.getRemoteAddr();
-        }
-        var forwarded = request.getHeader("X-Forwarded-For");
-        if (forwarded == null || forwarded.isBlank()) {
-            return request.getRemoteAddr();
-        }
-        var parts = forwarded.split(",");
-        return parts[parts.length - 1].trim();
+        return ClientIp.of(request, trustForwardedFor);
     }
 
     // Hand-built RFC 9457 body (fields are constants — no user input): Boot 4

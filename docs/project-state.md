@@ -412,6 +412,122 @@ Two controls that look alike and defend different things. **The write budget is 
 
 **Where this is documented:** `openapi.yaml` (the two operations, `WorkspaceStorageResponse` / `ProjectStorageEntry` / `WorkspaceStorageByProjectResponse` / `StorageQuotaProblemDetail`, the `WriteThrottled` response, the upload's 409/429 and the info-description rate-limit prose) · `docs/api-cloud.md` + `docs/api-dc.md` (*Workspace storage* under Workspaces, the *Attachments* refusal ordering, *Rate limits*, and on DC the six operator rows) · `docs/self-hosting.md` · `.env.prod.example` · `application.properties` + `application-cloud.properties` · `docs/design/write-budget-and-storage-quota-proposal.md`. The authoritative propagation list for a change to a *throttled path* remains `ThrottleCoverageTest.PROPAGATION_CHECKLIST`.
 
+## Content-Security-Policy — the report-only half (HD-264, ADR-0035)
+
+**No migration, no table, no column, and no enforcement.** Every response of the main chain carries a
+`Content-Security-Policy-Report-Only` header written by `SecurityConfig`; nothing in this release
+makes it enforcing, deliberately — the acceptance criterion is that the enforcement decision *cites
+evidence*, and a flag that flips it on later is how the evidence step gets skipped under release
+pressure. The enforcing header is a separate ticket that opens with an inventory rather than a guess.
+
+**Where it lives is the decision (ADR-0035):** the application, not the `Caddyfile`. A CSP is a
+statement *about the JavaScript bundle*, the bundle ships inside the image, and the `Caddyfile` is one
+of the two paths `apply-config.sh` hard-refuses to sync — so a policy at the edge would be a claim
+about an artefact it cannot travel with, absent for every self-hoster who fronts the app with
+something else, and owed a fifth `hamstrack_config_drift{scope}`. The rule that decides future cases
+is a category: *a control the repository can ship inside the image does not belong in the one file a
+deploy is forbidden to sync; `edge-body-limit` is at the edge because its control cannot live
+anywhere else.* Four classes of response stay uncovered (Caddy's own `413`, `502`/`504`, its redirects
+and its malformed-request refusals) and none of them is a document that can execute script.
+
+**The policy** (`common.security.ContentSecurityPolicy`) contains **no deployment-specific value** —
+every source is `'self'`, `'none'`, `data:` or one of two Google Fonts origins — which is what makes
+one version-controlled string correct for Cloud and every self-hosted install at once. Each directive
+was derived from the **built artefact** rather than from sources, and the derivations are in that
+class's javadoc. `img-src 'self' data:` is the one that closes HD-176's class outright, including the
+paint sites nobody has written yet: a stored colour of `url(https://attacker.example/…)` painted as a
+CSS background resolves against `img-src`. The escape hatches are **deliberately absent** — a
+report-only policy carrying `'unsafe-inline'` measures nothing about whether `'unsafe-inline'` is
+needed, and the highest-risk assumption in the design is that `style-src 'self'` holds for React 19 +
+Tailwind v4 + Swagger UI. A flood of style reports is *the measurement working*, and its answer is
+the narrower `style-src-attr 'unsafe-inline'` decided with counts in hand.
+
+**The canary, and why zero reports is not good news.** The docs page loads a Swagger validator badge
+from `validator.swagger.io` carrying this instance's own spec URL — on every real hostname and
+**never on `localhost`**, because the bundle's guard rejects only `localhost`/`127.0.0.1`. `img-src`
+will report it. That is a dated, pre-declared prediction, and it is the proof the collection pipeline
+works: **an empty report stream and a broken sink are the same observation.** The one-line fix
+(`validatorUrl: null`) ships with the enforcement ticket, not before — owner decision, 2026-09-05.
+
+**API (new).** `POST /api/security/csp-report` — unauthenticated by necessity (a browser sends a
+report with no credentials), not workspace-scoped and unable to be, `204` **always** including for a
+body it threw away, `16 KB` bound refused before the handler, `415` on any other content type, `401`
+on any other method (the anonymous exemption is POST-scoped), `429` + `Retry-After` past its budget.
+**No repository call, no transaction, no connection, no mail** — one parse, one log line, one counter.
+With the sink off the handler is not registered at all and the header names no `report-uri`: one
+property decides both halves, which is what makes "a `report-uri` that 404s" unreachable by
+configuration rather than merely unlikely.
+
+**Its budget is its own and is outside `RATE_LIMIT_ENABLED`.** Not the auth pot: a report flood must
+never be able to lock a user out of `/login`, which is HD-233's refund defect arriving from a new
+direction. Not the master switch either, for a reason none of the other exemptions has — it is the
+only bound on a door that requires no account at all, so *the off switch for that door is the door*
+(`CSP_REPORT_SINK_ENABLED=false`).
+
+**Config** (`application.properties`, both profile files, `.env.prod.example`, `docs/self-hosting.md`):
+`CSP_REPORT_ONLY_ENABLED` (true in both modes — DC gets the policy, and its evidence is the browser
+console), `CSP_REPORT_SINK_ENABLED` (**the one profile-defaulted value**: false on `dc`, true on
+`cloud`), `CSP_POLICY` (empty; validated at startup as printable ASCII so a CR/LF cannot split every
+response, **and refused if any `report-uri` aimed at this instance is not one it serves** — a token
+with no host, or with `APP_BASE_URL`'s host, must decode to exactly `/api/security/csp-report` with
+the sink on; the check is on the resolved *target*, not on a substring, so a different case, a
+percent-encoded character and a trailing slash are all caught while another Hamstrack acting as a
+central collector for a fleet is untouched — and the **raw** path is consulted too, because a
+decoder disagreement runs both ways: `%2F` decodes to our exact path while the container rejects an
+encoded slash with `400`), `CSP_REPORTS_PER_MINUTE_PER_IP` (60) and
+`CSP_REPORTS_PER_MINUTE` (600), both in **log lines**. Pair the sink with
+`RATE_LIMIT_TRUST_FORWARDED_FOR`, or behind a proxy the per-IP bound degrades to the instance bound.
+**With the sink on, an `APP_BASE_URL` no host can be read from refuses the boot** (a missing scheme,
+an underscore in the hostname): the own-host comparison is the only thing between an unauthenticated
+endpoint and reports about any page on the internet from anyone, and it used to fail *open* with a
+`WARN`. The loopback case stays a warning — that one fails closed. Both budgets key through
+`common.ratelimit.ClientIp`, the single copy of the trusted-proxy decision, which **falls back to the
+socket peer for any `X-Forwarded-For` whose rightmost entries are empty**: `","` splits to a
+zero-length array while `isBlank()` reports content, and the read that threw on it sat two lines
+*before* `budget.spend` on both doors — an unmetered stack trace per attempt on the one endpoint
+whose whole design is a log-volume budget (`ClientIpTest`).
+Container log rotation (`LOG_MAX_SIZE`/`LOG_MAX_FILES`, `docker-compose.prod.yml`, all three
+services) is the belt under all of it: Docker's `json-file` default has no `max-size` at all.
+
+**Two counters, no alert rule, nothing persisted.** `hamstrack_csp_violations_total{directive}` — the
+label is mapped through a **closed set**, because `effective-directive` is attacker-supplied text on
+an unauthenticated endpoint and a pass-through is an unbounded-cardinality write into Prometheus from
+the public internet. `hamstrack_csp_reports_dropped_total{reason}` (`foreign_document`/`too_large`/
+`unparseable`/`budget`) exists because the sink answers `204` to everything, so a silent discard would
+otherwise be indistinguishable from a clean policy. Reports are never written to Postgres: an
+unauthenticated door that writes rows is a disk-fill vector, and Loki's retention already answers the
+aggregate questions the enforcement ticket asks.
+
+**One log line per accepted report, with the contents stripped and every field bounded.** A
+`document-uri` here can be a search URL carrying an HQL query — the text of somebody's issue titles —
+and it carries workspace and project ids in its path, so the query is dropped and **every** URL in
+the line has its UUID-shaped and all-digit path segments replaced by placeholders, i.e. is logged as
+the **route pattern** it matches (`/w/{id}/p/{id}/issues/{n}`): the document as that pattern alone,
+the blocked URI and the source file with `scheme://host[:port]` in front of it — the scheme is what
+separates an injected `chrome-extension://…/content.js` from our own bundle, and extension noise is
+the main confounder of the `style-src` count this design exists to take. The sample is cut at the
+browsers' own 40. The pattern rather than the path because every other line in this product naming a
+workspace names one *the server resolved for an authenticated actor*, and this one would name one
+*the caller typed* on a door needing no account — which is also why the line is bounded field by
+field to **~700 bytes, counted in UTF-8 bytes rather than characters** (a char-counted bound is ~3×
+its stated size in CJK, the `@Size`-versus-BCrypt lesson applied to a log budget), with control
+characters stripped at the write site so the safety does not depend on which log encoder is
+configured. **The budgets are counted in log lines, not requests** — one request may carry a batch,
+so the guard filter's admission token pays for the first line and the sink spends one more for each
+further line; counted per request, 600/min would have bought ~12,000 lines a minute. In bytes: about
+1 GB a day at the instance ceiling, ~100 MB a day per address. Reports about a page this
+instance does not serve are dropped before logging and counted: an open report sink is otherwise a
+public log-fill primitive that anyone can aim at us from their own site. That host check is the only
+thing it establishes — it is not a credential, and `source-file` is never compared against anything,
+so the whole line is sender-asserted evidence about what a browser reported rather than about which
+tenant was affected.
+
+**Where this is documented:** `docs/design/content-security-policy-proposal.md` (the derivations and
+the evidence bar the enforcement ticket must clear), `docs/adr/0035-security-headers-set-by-the-
+application.md`, `docs/self-hosting.md` (the operator section), `docs/observability.md` (the two
+metric rows), `.env.prod.example`, `openapi.yaml` + `docs/api-*.md` (the sink, including its absence
+on DC), and the javadoc on `ContentSecurityPolicy` / `CspReportController` / `CspReportSink`.
+
 ## Phase 3 API surface
 
 The user-facing REST reference lives in `docs/api-cloud.md` / `docs/api-dc.md` and `src/main/frontend/public/openapi.yaml`. Quick internal map (roles in parens):

@@ -23,6 +23,29 @@ function RestApiTab() {
     if (!nodeRef.current) return
     // The spec is hand-maintained (springdoc doesn't support Boot 4 yet) and
     // served as a static file — also handy for Postman/codegen imports.
+    //
+    // DO NOT ADD `validatorUrl: null` HERE. Owner decision, 2026-09-05 (HD-264): the
+    // Swagger validator badge STAYS LIVE, deliberately, for the duration of the
+    // report-only Content-Security-Policy's 14-day observation window.
+    //
+    // With no `validatorUrl` the bundle defaults to "https://validator.swagger.io/validator"
+    // and renders an <img> whose src carries THIS INSTANCE'S spec URL. Under
+    // `img-src 'self' data:` that is a violation the design predicted before deployment,
+    // which makes it the canary that proves the collection pipeline works: zero reports and
+    // a broken sink are the same observation, so until this one is seen, "no violations"
+    // means "no evidence". Fixing it first would delete the only pre-declared proof.
+    //
+    // Two non-obvious halves, so nobody re-opens this from the wrong end:
+    //  - IT DOES NOT FIRE ON A DEVELOPER'S MACHINE. The bundle's guard rejects only
+    //    "localhost", "127.0.0.1" and "none", so on a local run the badge is never rendered
+    //    and the canary looks absent. Its absence locally says nothing.
+    //  - WHAT IT DISCLOSES IS REAL AND WAS ACCEPTED, not overlooked: this installation's
+    //    public spec URL, plus the viewer's IP and user agent, to validator.swagger.io on
+    //    every load of this page. Accepted for a bounded window, not indefinitely.
+    //
+    // The one-line fix ships with the ENFORCEMENT ticket, after the canary has been
+    // observed — at which point the canary disappearing proves the pipeline in the other
+    // direction too. See docs/design/content-security-policy-proposal.md §4.4 and §11.
     SwaggerUIBundle({
       url: '/openapi.yaml',
       domNode: nodeRef.current,

@@ -2,6 +2,7 @@ package com.hamstrack.common.exception;
 
 import com.hamstrack.common.config.DatabaseTimeoutConsistency;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.security.ContentSecurityPolicy;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -98,6 +99,14 @@ public class DatabaseBusyFilter extends OncePerRequestFilter {
     private final ProductMetrics productMetrics;
 
     /**
+     * The seventh header of the block {@code response.reset()} removes (HD-264). Injected rather
+     * than restated as a constant beside the other six: the policy is suppressible and its
+     * {@code report-uri} clause is conditional on the sink, so the only copy that cannot disagree
+     * with the rest of the product's responses is the one the instance actually emits.
+     */
+    private final ContentSecurityPolicy contentSecurityPolicy;
+
+    /**
      * Catches both unchecked throwables a filter may propagate. {@link RuntimeException} is how the
      * condition actually arrives today — Spring's {@code CannotCreateTransactionException} out of a
      * repository call in {@code JwtAuthenticationFilter} — and {@link ServletException} is included
@@ -150,6 +159,6 @@ public class DatabaseBusyFilter extends OncePerRequestFilter {
         // advice's.
         productMetrics.connectionAcquisitionFailed(request.getMethod(), null);
         response.reset();
-        DatabaseBusyRefusal.write(request, response);
+        DatabaseBusyRefusal.write(request, response, contentSecurityPolicy);
     }
 }

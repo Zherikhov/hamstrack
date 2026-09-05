@@ -1,5 +1,6 @@
 package com.hamstrack.common.exception;
 
+import com.hamstrack.common.security.ContentSecurityPolicy;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.slf4j.Logger;
@@ -155,6 +156,19 @@ public final class DatabaseBusyRefusal {
      * drops or re-values a default header fails there rather than reaching a caller — and the
      * comparison is against whatever the advice carries rather than against a list, because a list
      * would be a third copy going stale in the same direction.
+     *
+     * <p><strong>The seventh header this response owes is the Content-Security-Policy, and it is
+     * NOT in this map</strong> (HD-264). It belongs to the same block — {@code SecurityConfig}
+     * writes it on every other response and {@code response.reset()} takes it off this one — but it
+     * is not a compile-time constant in the way the six above are: an operator suppresses the whole
+     * header with {@code CSP_REPORT_ONLY_ENABLED=false}, and the {@code report-uri} clause is
+     * present exactly when the sink is. A literal here would therefore ship a 503 whose policy
+     * disagrees with every other response on the deployment where the sink is on — which is Cloud,
+     * i.e. every deployment the reports come from — and it would do so silently, because the
+     * comparison below runs at the test profile's settings. So the resolved value is handed to
+     * {@link #write} instead, by the one caller that has it. Nothing about the seal changes: the
+     * filter's response is compared against whatever the advice carries, so an absent CSP is red
+     * whichever mechanism put it there.
      */
     private static final Map<String, String> SECURITY_HEADERS = Map.of(
             "X-Content-Type-Options", "nosniff",
@@ -194,12 +208,15 @@ public final class DatabaseBusyRefusal {
      *
      * <p>It takes the request for one reason: one header of the security block is conditional on
      * {@link HttpServletRequest#isSecure()} and cannot be restored without asking
-     * ({@link #HSTS_HEADER}).
+     * ({@link #HSTS_HEADER}). It takes the policy for a different one: that header's value is
+     * resolved from configuration at startup rather than being a constant — see
+     * {@link #SECURITY_HEADERS} — so the only honest copy is the one the instance actually emits.
      */
-    public static void write(HttpServletRequest request, HttpServletResponse response)
-            throws IOException {
+    public static void write(HttpServletRequest request, HttpServletResponse response,
+                             ContentSecurityPolicy contentSecurityPolicy) throws IOException {
         response.setStatus(HttpStatus.SERVICE_UNAVAILABLE.value());
         SECURITY_HEADERS.forEach(response::setHeader);
+        contentSecurityPolicy.applyTo(response);
         if (request.isSecure()) {
             response.setHeader(HSTS_HEADER, HSTS_VALUE);
         }

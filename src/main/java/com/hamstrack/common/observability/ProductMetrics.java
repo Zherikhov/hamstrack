@@ -233,6 +233,93 @@ public class ProductMetrics {
         EmailOutcome(String tag) { this.tag = tag; }
     }
 
+    /**
+     * <strong>The directive a CSP violation report named, mapped through a CLOSED set</strong>
+     * (HD-264).
+     *
+     * <p>This is the one place in this feature where cardinality could have exploded, and it is
+     * not a hypothetical: {@code effective-directive} arrives in the body of an
+     * <em>unauthenticated</em> POST, so it is attacker-supplied text. Passing it through as a label
+     * would let one {@code curl} loop create unbounded Prometheus series — the same argument
+     * {@link #statementBudgetExceeded} makes about a request URI, arriving from a door that needs
+     * no account at all. The mapping is the guard, and {@link #OTHER} is what a directive this
+     * policy does not ship lands on.
+     *
+     * <p>The twelve constants are exactly the twelve directives
+     * {@code ContentSecurityPolicy.BASE_POLICY} ships. {@code report-uri} is deliberately absent:
+     * it is a delivery instruction rather than a directive anything can violate.
+     */
+    public enum CspDirective {
+        DEFAULT_SRC("default-src"),
+        BASE_URI("base-uri"),
+        OBJECT_SRC("object-src"),
+        FRAME_ANCESTORS("frame-ancestors"),
+        FORM_ACTION("form-action"),
+        SCRIPT_SRC("script-src"),
+        STYLE_SRC("style-src"),
+        FONT_SRC("font-src"),
+        IMG_SRC("img-src"),
+        CONNECT_SRC("connect-src"),
+        FRAME_SRC("frame-src"),
+        WORKER_SRC("worker-src"),
+        /**
+         * Anything else a browser reports, including the {@code -elem}/{@code -attr} refinements
+         * ({@code style-src-attr}, {@code script-src-elem}) that engines emit in place of the
+         * directive we wrote. Those are grouped rather than enumerated on purpose: the report body
+         * carries the full directive text, so the LOG keeps the distinction the label does not —
+         * and the enforcement ticket's style question (how many violations are attribute-shaped)
+         * is answered from the log, where the answer is exact, not from a label that would have to
+         * anticipate every engine's vocabulary.
+         */
+        OTHER("other");
+
+        final String tag;
+        CspDirective(String tag) { this.tag = tag; }
+
+        /** The directive's name as it appears in a policy, which is also the metric's tag value. */
+        public String tag() { return tag; }
+
+        /**
+         * The closed-set mapping. Case-insensitive and whitespace-tolerant because a report is
+         * written by somebody else's code; anything unrecognised — a novel directive, a typo, a
+         * 4 KB string, {@code "'; DROP"} — is {@link #OTHER}, which is the entire point.
+         */
+        public static CspDirective of(String reported) {
+            if (reported == null) {
+                return OTHER;
+            }
+            var name = reported.strip().toLowerCase(java.util.Locale.ROOT);
+            for (var directive : values()) {
+                if (directive.tag.equals(name)) {
+                    return directive;
+                }
+            }
+            return OTHER;
+        }
+    }
+
+    /**
+     * Why a CSP report was not counted as a violation. <strong>A sink that silently discards is a
+     * sink whose silence cannot be read</strong>, and silence is precisely what this feature must
+     * not be allowed to fake: zero reports and a broken pipeline are the same observation, so every
+     * path that ends without a violation being counted ends on one of these instead.
+     */
+    public enum CspDropReason {
+        /** {@code document-uri} is not this instance's origin — see {@code CspReportSink}. */
+        FOREIGN_DOCUMENT("foreign_document"),
+        /** Over the 16 KB body bound, refused before the body was read. */
+        TOO_LARGE("too_large"),
+        /** Not JSON, or JSON that carries no report object. */
+        UNPARSEABLE("unparseable"),
+        /** Over the per-IP or the instance budget. */
+        BUDGET("budget");
+
+        final String tag;
+        CspDropReason(String tag) { this.tag = tag; }
+
+        public String tag() { return tag; }
+    }
+
     private final MeterRegistry registry;
 
     // Label-free counters registered up front (they carry no dynamic tags)
@@ -748,6 +835,46 @@ public class ProductMetrics {
         registry.counter("hamstrack.db.connection_acquisition_failed",
                 "method", method == null ? "unknown" : method,
                 "route", mappedPattern == null ? "unmapped" : mappedPattern).increment();
+    }
+
+    // --- content security policy (HD-264) ---
+
+    /**
+     * {@code hamstrack.csp.violations{directive}} — one browser reported one violation of the
+     * report-only Content-Security-Policy.
+     *
+     * <p><strong>It is the instrument the enforcement decision is made from</strong>, which is why
+     * it exists before anything is enforced: the policy ships report-only precisely so that
+     * "what would break" is a number rather than a guess, grouped per directive so that each group
+     * gets its own decision (fix the source, widen the directive, or accept and document).
+     *
+     * <p><strong>A rise here is not an incident and there is deliberately no alert rule</strong> —
+     * the same convention {@code report_requests} and {@code search_requests} follow. Report-only
+     * cannot block anything, so a large count means the measurement is working; the one reading
+     * that IS a finding is a flat zero, because a broken sink, a dropped header and a clean policy
+     * all look like that. The proposal names a violation predicted in advance (the docs page's
+     * Swagger validator badge, an {@code img-src} report from {@code validator.swagger.io}) so that
+     * the pipeline can be proved live rather than assumed.
+     *
+     * <p>Cardinality guard: {@link CspDirective}, a closed set, because the raw value is
+     * attacker-supplied text on an unauthenticated endpoint.
+     */
+    public void cspViolation(CspDirective directive) {
+        registry.counter("hamstrack.csp.violations", "directive", directive.tag).increment();
+    }
+
+    /**
+     * {@code hamstrack.csp.reports_dropped{reason}} — a report that arrived and was not counted as
+     * a violation.
+     *
+     * <p>Its whole job is to keep the counter above honest. Every refusal the sink makes is cheap
+     * and silent by design — it answers {@code 204} even to a body it threw away, because a
+     * discriminating response is a free oracle about the instance's state — so without this an
+     * operator reading a quiet violations graph could not tell a clean policy from a foreign-origin
+     * flood filling the budget, or from a body bound nobody noticed was too tight.
+     */
+    public void cspReportDropped(CspDropReason reason) {
+        registry.counter("hamstrack.csp.reports_dropped", "reason", reason.tag).increment();
     }
 
     // --- attachments ---

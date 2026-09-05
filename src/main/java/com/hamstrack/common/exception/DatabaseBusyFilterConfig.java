@@ -2,6 +2,7 @@ package com.hamstrack.common.exception;
 
 import com.hamstrack.common.config.DatabaseTimeoutConsistency;
 import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.security.ContentSecurityPolicy;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -25,9 +26,10 @@ public class DatabaseBusyFilterConfig {
 
     @Bean
     public FilterRegistrationBean<DatabaseBusyFilter> databaseBusyFilter(
-            DatabaseTimeoutConsistency databaseTimeouts, ProductMetrics productMetrics) {
+            DatabaseTimeoutConsistency databaseTimeouts, ProductMetrics productMetrics,
+            ContentSecurityPolicy contentSecurityPolicy) {
         var registration = new FilterRegistrationBean<>(
-                new DatabaseBusyFilter(databaseTimeouts, productMetrics));
+                new DatabaseBusyFilter(databaseTimeouts, productMetrics, contentSecurityPolicy));
         registration.addUrlPatterns("/*");
         // +2, not +1: at +1 it TIES with Boot's own ServerHttpObservationFilter and the winner is
         // whichever bean definition was registered first. See DatabaseBusyFilter.

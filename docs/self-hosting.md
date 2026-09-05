@@ -469,7 +469,7 @@ Full reference:
 | `DB_CONNECTION_TIMEOUT_MS` | `3000` | How long a request may wait for a **connection from the pool** before it is refused, in ms — the third member of the family above, and **new in 0.18.0**: until this release it was never set, so every acquisition waited HikariCP's 30-second default, which nobody had chosen. **The three are one derivation**: the lock bound is how long a transaction waits for a *row*, the statement bound how long one statement *runs* (at least twice the lock bound, because it counts that wait), and this is how long a request waits for a *connection* — at least the lock bound, because a connection held by a lock-waiting transaction is legitimately unavailable for exactly that long. None of the three is derived from the pool size, and this one is not derived from the statement bound in either direction: waiting for a connection is queueing, not work, which is why it can be short while a statement may legitimately run for ten seconds. Exceeding it answers **`503`** with `errorType: DATABASE_BUSY` and `Retry-After: 1` — a 5xx on purpose, unlike the `422` above, because one retry costs one acquisition attempt and the obstacle is somebody else's transaction, which ends. **Every request gets that answer, wherever the acquisition failed** — inside a handler, or earlier in the security filter chain, which is where an authenticated request's token is resolved to a user. Two pieces of code write it, and they agree on everything a client acts on: the same status, the same `detail`, the same `Retry-After`. They differ only in optional members — the filter-written body omits `instance` (the request path Spring MVC fills in for you), because hand-escaping a caller-supplied string into a hand-built JSON document is a worse thing to own than a missing member nothing here reads. What cannot be given a status is a failure with no answer left to change: one on an `ASYNC` or `ERROR` dispatch, one after the response has already begun (a streamed download, an SSE stream), and one outside a request altogether — a scheduled job, the shutdown residue write, Flyway at startup. Those last are also why HikariCP's own `hikaricp_connections_timeout_total` can still read higher than `hamstrack_db_connection_acquisition_failed_total`: it counts acquisitions with no caller to refuse. **On a busy or under-provisioned instance this turns a slow period into visible errors rather than a slow one** — see [Connection acquisition is bounded from 0.18.0](#connection-acquisition-is-bounded-from-0180). It does **not** bound how long a connection is *held* (that is `EXPENSIVE_READ_MAX_IN_FLIGHT`), and Flyway is unaffected although it shares the pool: migrations take their connections at startup from a pool nothing else is using, and this bounds *getting* one rather than keeping it. **It sets two HikariCP values, not one**: the same number is also the pool's `validation-timeout`, which bounds the aliveness check run on a connection that has sat idle in the pool past `aliveBypassWindowMs`. They are one number deliberately — left apart, a single `getConnection()` can cost this bound *plus* HikariCP's 5-second validation default, in exactly the degraded-database case this bound exists for — but it means raising this to `6000` also gives that check 6 seconds. The app compares **both** values against what the pool ended up holding and refuses to start if either was moved by another name or from another property source. Must stay at or above `DB_LOCK_TIMEOUT_MS` or every boot logs a sizing WARN. **`0` is refused at startup** — HikariCP maps it to `Integer.MAX_VALUE`, about 24.8 days, so it means *no bound* rather than *no wait* — as is anything below **250** (HikariCP's own floor) and a **blank** value. **There is also a ceiling nothing else states**: the shutdown residue write must fit inside `APP_STOP_GRACE_SECONDS` together with the mail drain, so at the default mail settings the largest value that boots is **13900**; above that the boot stops, naming every knob that can move the arithmetic. Identical in `dc` and `cloud` |
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required). Generate it — `openssl rand -base64 48` — never reuse a value from any documentation: the app additionally refuses the placeholders this project has published, by name, because they are long enough to pass the length check and an instance signing tokens with one can be impersonated by anybody. See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
-| `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap |
+| `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap — and, if you enable the CSP report sink, its **host** is what decides which violation reports are accepted (see [Content-Security-Policy (report-only)](#content-security-policy-report-only)) |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
 | `MAIL_SMTP_CONNECT_TIMEOUT_MS` / `MAIL_SMTP_READ_TIMEOUT_MS` / `MAIL_SMTP_WRITE_TIMEOUT_MS` | `5000` / `10000` / `10000` | SMTP socket timeouts (ms) — a black-holed mail host fails a worker fast instead of hanging (connect / per-read / per-write) |
 | `MAIL_ASYNC_CORE_POOL` / `MAIL_ASYNC_MAX_POOL` / `MAIL_ASYNC_QUEUE_CAPACITY` | `2` / `5` / `100` | Bounded mail executor — mail can't starve other async work or spawn a thread-per-task under an SMTP stall. A full queue **drops and dead-letters** the message rather than sending it on the request thread, so a slow SMTP host cannot take Tomcat workers with it. Valid ranges 1–50 / 1–50 / 1–10000; the queue's practical ceiling is lower, because the drain plus a batch write of that many rows has to fit inside `APP_STOP_GRACE_SECONDS` — with the connection that write has to obtain first (`DB_CONNECTION_TIMEOUT_MS`) counted in. The refusal names every knob that can move the arithmetic, so read it rather than guessing which one to change. A **blank** value stops the boot rather than restoring the default — these bind as `int`, so `MAIL_ASYNC_MAX_POOL=` is not "unset". Identical in `dc` and `cloud` |
@@ -908,13 +908,14 @@ DC operators can disable Cloud-oriented behavior:
 | `TERMS_ACCEPTANCE_REQUIRED=false` | removes the required terms checkbox at registration |
 | `PRIVACY_CONTACT_EMAIL=privacy@example.com` | publishes that address on the in-app Account page as the one to write to for account deletion. Empty by default, and the section is never hidden — unset, the page tells the user their installation's administrator handles it. Also served on the public `GET /api/meta`, so setting it publishes it. A malformed value **aborts startup** rather than being published: it must be a single address of at most 255 characters, and the characters `mailto:` treats as separators (`? & # % , ; < >`), whitespace, quotes and backslashes are refused. |
 | `DEMO_SEED_ON_FIRST_LOGIN=false` | disables the demo workspace seeded on first login |
-| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for **every limiter that has an off switch and does not carry one of its own** — the auth brute-force protection, and each of the per-principal request budgets. **A control with a switch of its own, or with none at all, is outside it**, and that is the category to check rather than a list to extend: today it excludes the workspace storage quota (`STORAGE_QUOTA_ENABLED`), the expensive-read occupancy bound (`EXPENSIVE_READ_LIMIT_ENABLED`) and the backlog-rebalance cooldown (no variable at all). Note it no longer says *in-memory* — the recipient-keyed mail ceilings keep their state in PostgreSQL |
+| `CSP_REPORT_SINK_ENABLED=true` | serves the unauthenticated CSP violation-report endpoint and makes the report-only policy name it. Off by default on DC; leaving it off is a complete answer, since the header still ships and violations still appear in your own browser console. See [Content-Security-Policy (report-only)](#content-security-policy-report-only) before enabling it |
+| `RATE_LIMIT_ENABLED` (+ tuning vars) | master switch for **every limiter that has an off switch and does not carry one of its own** — the auth brute-force protection, and each of the per-principal request budgets. **A control with a switch of its own, or with none at all, is outside it**, and that is the category to check rather than a list to extend: today it excludes the workspace storage quota (`STORAGE_QUOTA_ENABLED`), the expensive-read occupancy bound (`EXPENSIVE_READ_LIMIT_ENABLED`) and the backlog-rebalance cooldown (no variable at all), and the CSP report sink's budget (`CSP_REPORT_SINK_ENABLED`). Note it no longer says *in-memory* — the recipient-keyed mail ceilings keep their state in PostgreSQL |
 
 Rate-limit tuning (all optional; defaults shown):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off, in one go, **every limiter that has an off switch and does not carry one of its own**: the auth budgets in this table, every per-principal request budget (`REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE`, `PLANNING_REQUESTS_PER_MINUTE`, `WRITE_REQUESTS_PER_MINUTE`), the uploaded-byte budget (`WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. **What is outside it is a category, not a list to extend: a control that carries a switch of its own, or carries none at all.** Read it that way rather than by the membership below, which is what today's controls happen to be — a control added tomorrow belongs to whichever category it belongs to, and an enumeration here goes stale one entry before the list does. Today that category holds the **workspace storage quota** (`STORAGE_QUOTA_ENABLED`) and the **expensive-read occupancy bound** (`EXPENSIVE_READ_LIMIT_ENABLED`), each with its own switch because removing a bound on your disk — or on your connection pool — must not require disabling brute-force protection on your login page; and the backlog-rebalance cooldown, a fixed internal safety valve protecting the database from a whole-table rewrite storm, which has no variable at all. It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
+| `RATE_LIMIT_ENABLED` | `true` | master switch — turns off, in one go, **every limiter that has an off switch and does not carry one of its own**: the auth budgets in this table, every per-principal request budget (`REPORTS_REQUESTS_PER_MINUTE`, `SEARCH_REQUESTS_PER_MINUTE`, `PLANNING_REQUESTS_PER_MINUTE`, `WRITE_REQUESTS_PER_MINUTE`), the uploaded-byte budget (`WRITE_UPLOAD_BYTES_PER_MINUTE`) and every recipient-keyed mail ceiling (`INVITE_*`, `AUTH_MAIL_*`) — switching it off is the one way to make `forgot-password` send a link on every request, which is worth knowing before you do it on an instance with public signup. **What is outside it is a category, not a list to extend: a control that carries a switch of its own, or carries none at all.** Read it that way rather than by the membership below, which is what today's controls happen to be — a control added tomorrow belongs to whichever category it belongs to, and an enumeration here goes stale one entry before the list does. Today that category holds the **workspace storage quota** (`STORAGE_QUOTA_ENABLED`) and the **expensive-read occupancy bound** (`EXPENSIVE_READ_LIMIT_ENABLED`), each with its own switch because removing a bound on your disk — or on your connection pool — must not require disabling brute-force protection on your login page; and the backlog-rebalance cooldown, a fixed internal safety valve protecting the database from a whole-table rewrite storm, which has no variable at all. It also does not reach the **CSP report sink's budget** (`CSP_REPORTS_PER_MINUTE_PER_IP`, `CSP_REPORTS_PER_MINUTE`), whose own switch is `CSP_REPORT_SINK_ENABLED` — that budget is the only bound on an endpoint needing no account, so folding it in here would let "turn limiting off for a moment" mean "let anyone write unlimited lines into this log". It does **not** stop `mail_send_events` rows being written or swept — those are your forensic trail after a volume alert, and a table that only grows while a switch is off would be the worse trade |
 | `RATE_LIMIT_AUTH_IP_PER_MINUTE` | `15` | per-IP request budget/min across login, register, verify, resend, forgot & reset |
 | `RATE_LIMIT_LOGIN_FAILURE_THRESHOLD` | `5` | failed logins for one account before backoff starts |
 | `RATE_LIMIT_LOGIN_BACKOFF_BASE_SECONDS` | `30` | first backoff delay (doubles on each further failure) |
@@ -998,6 +999,87 @@ neutrally is the database behind them: the instance's aggregate ceiling against 
 `max_connections` is `EXPENSIVE_READ_MAX_IN_FLIGHT × replicas`, which is the number to check
 when scaling out, beside the `work_mem × nodes × backends` arithmetic. It is also outside
 `RATE_LIMIT_ENABLED`, with a switch of its own, for the same reason the storage quota is.
+
+
+### Content-Security-Policy (report-only)
+
+Every response carries a **`Content-Security-Policy-Report-Only`** header. *Report-only* means
+the browser enforces nothing: it checks each thing a page loads against the policy and, where
+the policy would have refused, writes a console message and — if the report sink below is on —
+posts a small JSON report back. **Nothing about the product's behaviour changes**, and no
+configuration in this release makes the policy enforcing. The policy deliberately omits the
+usual escape hatches so that violations are *measured* before anything is enforced; enforcing
+it is a later, separate decision made from what the reports actually contain.
+
+So during this period **violation reports are the feature working, not a fault**, and one of
+them is expected immediately: the API documentation page loads a validator badge image from
+`validator.swagger.io`, which `img-src 'self' data:` reports. It is left in place on purpose as
+the proof that collection works at all — an empty report stream and a broken sink look exactly
+alike.
+
+The policy names **no address of yours**: every source in it is `'self'`, `'none'`, `data:` or
+one of the two Google Fonts origins the SPA loads its typefaces from. That is why one
+version-controlled string is correct for every installation and why there is nothing here to
+configure per host.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CSP_REPORT_ONLY_ENABLED` | `true` | Whether the header is sent at all. On in both `dc` and `cloud`. ~280 bytes per response, and on HTTP/2 an identical header repeats as a dynamic-table index of a few bytes after the first, so the cost of a 40-request page load is ~280 bytes rather than 11 KB. Set `false` only if the header itself is a problem for you; violations then have no witness at all |
+| `CSP_REPORT_SINK_ENABLED` | `false` (`true` on `cloud`) | Whether **this instance collects** reports, by serving `POST /api/security/csp-report` — and, by the same property, whether the header names a `report-uri`. One setting for both halves, so there is no configuration in which the header names an endpoint that does not exist. **Read the paragraph below before turning it on** |
+| `CSP_POLICY` | *(empty)* | Replaces the built-in directive string entirely. Leave it empty unless you have a reason. **Checked at startup: the app refuses to boot on a value containing a control character**, because this string goes verbatim into a response header where a carriage return does not break the policy — it splits the response. Max 2000 characters. It **also refuses to boot on a `report-uri` aimed at this instance that this instance does not serve** — one with no host (a browser resolves it against the page it is on, which is a page you served) or with *your* `APP_BASE_URL` host must be exactly `/api/security/csp-report`, matched case-sensitively, without a trailing slash and with percent-encoding decoded first, and `CSP_REPORT_SINK_ENABLED` must be `true`; otherwise every violation a browser sees is a POST answered `405`. It is the mistake to expect, since the obvious way to write this variable is to copy the header off a running Hamstrack Cloud page. A `report-uri` on **any other host is untouched — including another Hamstrack** acting as a central collector for a fleet, whose URL contains that path by construction |
+| `CSP_REPORTS_PER_MINUTE_PER_IP` | `60` | The sink's per-sender budget, **counted in log lines** (a batched request spends one token per line it writes, so this is not a request count). Past it: `429` + `Retry-After`. A worst-case page in which *every* subresource is refused produces at most 22 reports, so 60 leaves roughly 3× headroom over a client hard-navigating twice a minute. In bytes: ~70 KB a minute, about **100 MB a day** from one address. Valid range 1–10000; no "unlimited" value |
+| `CSP_REPORTS_PER_MINUTE` | `600` | The instance-wide ceiling, 10× the per-sender one, in the same unit: 600 lines a minute ≈ **~700 KB a minute, about 1 GB a day** if it is saturated every minute of every day. A sink hearing from ten simultaneously-violating clients has already told you everything it can and must not become your log budget. Valid range 1–100000 |
+
+**Before you turn the sink on.** It is an **unauthenticated, public** endpoint — it has to be,
+because a browser sends a violation report with no credentials. It stores nothing (no table, no
+row, no file), answers `204` to everything including bodies it threw away, refuses bodies over
+16 KB, drops reports about pages this instance does not serve, and has the budget above. What it
+costs you is **log lines**: one `INFO` line per accepted report, **of at most ~700 bytes of field
+values** (~1.2 KB on the wire with the field names and the log envelope) — every field in it is
+individually truncated **in UTF-8 bytes**, query strings are stripped from every URL, and
+UUID-shaped and numeric path segments are replaced by placeholders wherever they appear. Two
+bounds rather than one, and neither substitutes for the other: the length bound is why a line
+cannot be as long as the sender wants, and the budget above is **counted in lines rather than in
+requests** — one request may carry a batch — which is why 600 a minute means about 1 GB a day at the
+absolute worst and not twenty times that. Together they are the difference between a known cost
+and a licence to write somebody else's text onto the disk that also holds your database and your
+attachments. **Rotate your container logs regardless** — the bundled `docker-compose.prod.yml`
+sets `max-size`/`max-file` on the app's `json-file` driver, and a stack assembled by hand should
+too. Leaving it **off is a complete answer rather than a gap** — the header
+still ships, so violations still appear in your own browser's console, which for a
+single-instance install is a genuinely adequate instrument and is the same thing you would read
+anyway.
+
+**Pair `CSP_REPORT_SINK_ENABLED` with `APP_BASE_URL`.** The "pages this instance does not
+serve" filter compares the reported page's **host** against `APP_BASE_URL`'s, so with the sink on
+and `APP_BASE_URL` left at its `http://localhost:8080` default, **every real report is dropped**
+(counted as `foreign_document`) and you collect nothing while everything looks configured. The
+app logs a `WARN` at startup for exactly that pair. A base URL the app cannot read a **host** from
+at all is refused harder: with the sink on, **the app does not start**, because the filter is the
+only thing between an unauthenticated endpoint and reports about any page on the internet from
+anyone, and a value with no host would switch it off. Include the scheme
+(`https://tracker.example.com`, not `tracker.example.com`) and use no underscore in the hostname.
+If `SITE_ADDRESS` lists apex *and* `www`,
+reports from whichever host is not `APP_BASE_URL`'s are dropped the same way and land on the
+same counter as third-party noise — redirect one host to the other at your proxy if that matters.
+
+**Pair `CSP_REPORT_SINK_ENABLED` with `RATE_LIMIT_TRUST_FORWARDED_FOR`.** The per-IP budget keys
+on the client address, and behind a reverse proxy every request arrives from the proxy unless
+that setting is on — so with the sink on and forwarded-for off, the per-sender bound quietly
+degrades to the instance bound. Turn both on together, and only if your proxy strips
+client-supplied `X-Forwarded-For` (the bundled Caddy does).
+
+**The sink's budget is deliberately outside `RATE_LIMIT_ENABLED`**, unlike every per-principal
+budget above and for a reason none of them has: it is the only bound on a door that requires no
+account at all, so if the master switch reached it, "turn limiting off while I debug something"
+would silently mean "let anyone on the internet write unlimited lines into this instance's log".
+The off switch for that door is the door — `CSP_REPORT_SINK_ENABLED=false`. It is also
+node-local, on the same terms as every in-memory budget here: N replicas allow up to N × both
+ceilings.
+
+**Two counters make the reports readable without anybody grepping**:
+`hamstrack_csp_violations_total{directive}` and `hamstrack_csp_reports_dropped_total{reason}`
+(`foreign_document` / `too_large` / `unparseable` / `budget`). See `docs/observability.md`.
 
 **A gap worth knowing about rather than discovering: nothing budgets read BYTES, and read
 responses are not compressed.** Every bound above is denominated in requests, in rows or in
@@ -1448,6 +1530,17 @@ provisioning under `observability/`, and the ops scripts under `ops/`. If you de
 clone, `git pull` already updates them and `docker compose up -d` applies them — that is
 enough, and nothing below is required.
 
+**One exception, and it is the only thing on this page that a `git pull` cannot do for
+you.** A script or unit under `ops/` that you *installed* — copied to `/usr/local/bin` or
+`/etc/systemd/system`, as the backup job and the drift check are — is run from that copy,
+not from your clone. Neither `git pull` nor `docker compose up -d` nor
+`apply-config.sh` touches it, on purpose: a deploy that rewrites systemd units is a blast
+radius nobody asked for. So after a release that changed a file under `ops/`, re-run the
+install step you originally used (`docs/ops-prod-hardening.md` §6.3 for the backup job,
+*Installing the drift check* for the drift timer). If you installed the drift check, it
+tells you when this is outstanding: `hamstrack_config_drift{scope="installed-ops"}` goes
+to `1` and the journal names the file.
+
 `ops/deploy/apply-config.sh` is the same step done deliberately. It is what this project's
 own production box runs, it contains no AWS and no GitHub, and it is offered here because
 it does four things a bare `up -d` does not: it validates the new compose files against
@@ -1472,6 +1565,12 @@ Two things to know before you run it:
   ```bash
   sudo COMPOSE_FILES=docker-compose.prod.yml ops/deploy/apply-config.sh . /opt/hamstrack
   ```
+
+  **If you also installed the drift check, set the same value in `/etc/hamstrack/drift.env`.**
+  That check resolves its own compose file set from `COMPOSE_FILES`, and the hourly timer
+  inherits nothing from the shell you ran the line above in — so a box narrowed here and not
+  there reports your own containers as orphans, every hour, and tells you a deploy would
+  delete them. Commands in `docs/ops-prod-hardening.md` → *Installing the drift check*.
 
   It replaces exactly the paths listed in `ops/deploy/synced-paths.txt`, and directories
   there are replaced **wholesale** — a file you dropped into `observability/` on the box is
