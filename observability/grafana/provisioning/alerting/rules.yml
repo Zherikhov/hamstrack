@@ -1685,3 +1685,223 @@ groups:
                   query: { params: [] }
                   reducer: { type: last, params: [] }
                   type: query
+
+      # HD-262. The three rules below watch backup LAYER 3 - the daily EBS snapshot of the
+      # root volume (docs/ops-prod-hardening.md §6.1), the only layer covering the BOX:
+      # /opt/hamstrack/.env (the only copy of JWT_SECRET anywhere), the hand-edited
+      # Caddyfile, the caddy_data certificates and the observability volumes. Layers 1/2
+      # cover the database and layer 4 covers attachments; neither covers the box. The
+      # metrics come from the host systemd unit hamstrack-volume-snapshot.service
+      # (ops/snapshot/) through node-exporter's textfile collector, so they arrive under the
+      # Prometheus job `node`, exactly like the backup and drift metrics above and for the
+      # same reason: an EBS snapshot is not something the JAR can see.
+      #
+      # WHY THIS EXISTS, IN ONE PARAGRAPH. Layer 3 produced nothing usable from 2026-08-29
+      # to 2026-09-06 in TWO consecutive outages with one shared cause, and every mechanism
+      # watching this deployment reported success throughout both. 08-29 to 09-03: the root
+      # volume was replaced with an encrypted one and the Backup=hamstrack tag was not
+      # carried over, so DLM policy policy-0ee1644759462e1f7 went on selecting the OLD,
+      # DETACHED volume - it ran nightly and SUCCEEDED nightly while the live volume had no
+      # daily snapshots at all. 09-04 onward: adding the tag on 09-03 ARMED the second
+      # failure, because the schedule does CopyTags:true AND TagsToAdd:[{Key:Name}] and the
+      # new volume carries a Name tag, so every run since has died on "Duplicate tag key
+      # 'Name'" and the policy has been in ERROR. A "did the schedule run" check would have
+      # missed the first entirely and caught the second only if somebody had been reading a
+      # field nobody reads. ONE QUESTION CATCHES BOTH, and the next one too, because it
+      # never asks why: how old is the newest snapshot of the volume this instance is
+      # actually running on right now.
+      #
+      # THE METRIC IS A TIMESTAMP, NEVER A PRE-COMPUTED AGE, and that is the load-bearing
+      # choice of the whole design. An age gauge frozen in a .prom that nobody rewrites
+      # reads as permanently fresh: the collector dies, the file keeps saying "3600", and
+      # the rule never fires. A timestamp in the same frozen file gets older on its own -
+      # `time() - ts` grows between runs - so a stopped collector CONVERGES ON THE ALERT
+      # instead of hiding behind it, and detection latency stops depending on the timer's
+      # cadence. This file has already paid the inverse: hamstrack_config_drift was
+      # published only by the deploy, looked healthy, and nothing detected it because no
+      # rule read its timestamp - which is why ConfigDriftCheckStale exists.
+      #
+      # `0` IS AN ANSWER AND NOT A MISSING VALUE: "resolved successfully, and this volume
+      # has no completed snapshots at all". That is what makes the 08-29 case fire - a
+      # freshly swapped volume publishes 0, `time() - 0` is past any threshold, and
+      # VolumeSnapshotStale is up the same evening. Omitting the series instead would be
+      # noData, which is OK, which is silence. When the collector could not FIND OUT, the
+      # series is omitted rather than zeroed, and VolumeSnapshotCheckFailing is what carries
+      # "we could not ask" - a value nobody has must not be published as a value somebody
+      # does.
+      #
+      # DLM'S OWN `State` IS DELIBERATELY NOT READ. It is the "did it run" question in its
+      # purest form: it needs a new IAM grant (dlm:GetLifecyclePolicies), and it would have
+      # caught one of the two outages. It survives as a first move NAMED IN THE SUMMARY,
+      # which costs nothing and needs no permission.
+      #
+      # AN ANNOTATION IS RENDERED PER INSTANCE, SO IT MUST DESCRIBE EXACTLY ONE. The queries
+      # are UNAGGREGATED, like ConfigDrift and the backup pair, and must stay that way: the
+      # summaries branch on $labels.volume and $labels.stage, and any aggregation that drops
+      # the label - a max(), a sum(), a count() - renders the branch against an instance that
+      # has none. The `else` in VolumeSnapshotCheckFailing makes its branch TOTAL, which is
+      # only truthful while `stage` has exactly the two values the collector emits: a third
+      # one would be described as a failure to reach the EC2 API. SO IF YOU ADD A STAGE TO
+      # THE .prom, ADD ITS ARM HERE IN THE SAME COMMIT. That rule is stated above the backup
+      # rules as a comment and was a comment only; VolumeSnapshotCollectorContractTest is
+      # what makes it a mechanism, by comparing the stage literals in
+      # ops/snapshot/hamstrack-volume-snapshot.sh with the arms below.
+      #
+      # noDataState: OK and execErrState: OK throughout, matching every rule in this file:
+      # the three must be dormant on an install that runs the observability stack without
+      # this collector, or the product ships an alert that fires on every self-hoster for a
+      # thing they do not have. THE PRICE IS REAL AND IS THIS DESIGN'S HIGHEST-RISK ITEM:
+      # deleting the .prom, or losing the node-exporter bind mount, SILENCES ALL THREE
+      # rather than firing any. VolumeSnapshotCheckStale does not close that - it is
+      # noDataState: OK too, so if the file disappears its series disappears with the
+      # others. The hole is narrowed, not closed. Closing it means an absent()-based
+      # companion for hamstrack_backup_*, hamstrack_config_* and
+      # hamstrack_volume_snapshot_* AT ONCE (a one-family fix is the member-shaped answer
+      # this project keeps paying for), which is its own ticket because getting it wrong
+      # pages every self-hoster.
+      #
+      # 30 HOURS, AND WHAT IT IS MADE OF: the DLM schedule is Interval 24 HOURS at 04:30, and
+      # AWS documents a policy starting within about an hour of its scheduled time, so the
+      # worst case between two consecutive successful StartTimes is 25 h, plus the completion
+      # of a `completed`-filtered snapshot (a full copy rather than an incremental delta,
+      # after a volume replacement). 30 h is that worst case plus a deliberate margin, and it
+      # is strictly below 48 h so a single missed night is always caught inside the same day.
+      # IT IS REASONED, NOT FITTED, and that is stated rather than hidden: HostMemoryLow's
+      # 200 MiB sits below a measured 7-day minimum and nothing comparable exists here,
+      # because the live volume has one snapshot in its entire history. Same situation as
+      # HostSwapInUse, handled the same way - RE-CHECK IT ONCE A WEEK OF REAL DLM HISTORY
+      # EXISTS ON THIS VOLUME. The falsifier is explicit: if a genuine inter-snapshot gap
+      # ever exceeds about 26 h in the recorded history, the number moves, not the rule.
+      # This is the only `critical` of the three, and a critical that cries wolf on a Sunday
+      # morning gets muted - a muted detector is worse than none, which the drift check has
+      # already paid for once.
+      - uid: hamstrack-volume-snapshot-stale
+        title: VolumeSnapshotStale
+        condition: B
+        for: 15m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No completed EBS snapshot of {{ $labels.volume }} - the volume this instance is running on - in over 30 hours, so backup layer 3 is protecting nothing: /opt/hamstrack/.env is the only copy of JWT_SECRET anywhere, and the hand-edited Caddyfile, the caddy_data certificates and the observability volumes are covered by no other layer. A value of 0 means this volume has NEVER been snapshotted, which is what a volume replacement leaves behind. FIRST MOVE, one command, and it printed the exact cause last time: aws dlm get-lifecycle-policies --region eu-north-1 and then aws dlm get-lifecycle-policy --policy-id P - read State and StatusMessage. The two causes seen so far are a selection tag that was not carried onto the new volume (the policy then snapshots the OLD one, greenly) and a duplicate tag key between CopyTags and TagsToAdd. YOU CAN CLEAR THIS NOW WITHOUT FIXING DLM: any completed snapshot of this volume satisfies the rule, whoever took it, so take one by hand and repair the schedule afterwards. Runbook: docs/ops-prod-hardening.md section 6'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - hamstrack_volume_snapshot_newest_timestamp_seconds'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [108000] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The two stages have OPPOSITE first moves, which is the whole reason the gauge carries
+      # a stage label rather than being one flag. `resolve` is IMDSv2 token -> instance id ->
+      # region -> root device name -> DescribeVolumes -> one volume id, and a failure there
+      # is a refused configuration, a missing tool, a metadata problem or an ambiguous set of
+      # attached volumes - the collector refuses to guess which volume holds the box rather
+      # than picking one. `describe` is DescribeSnapshots for that volume, and a failure there
+      # is a permission, a region condition or the EC2 API.
+      #
+      # NEITHER ARM MAY ASSERT WHAT THE OTHER STAGE DID, and the describe arm used to. Both
+      # gauges start at 0 and the collector's EXIT trap publishes BOTH on any failure, so
+      # every failure before the describe call fires TWO instances of this rule - and the
+      # rule is unaggregated on purpose, so the reader sees both texts. An arm that opens
+      # "the check resolved the volume but..." then describes a run in which no volume was
+      # ever resolved, and sends the reader to IAM for a missing AWS CLI. Publishing the
+      # stages independently (omitting `describe` when the run never got there) was the other
+      # option and is rejected: an omitted series reads as noData, which reads as OK, which is
+      # the silence this whole ticket exists to end. So the arms are written
+      # conditional-safe - each true of a run that failed anywhere - and the describe arm
+      # opens by telling the reader what the pair means.
+      #
+      # `volume` is deliberately NOT a label on this metric: at the resolve stage there is no
+      # volume yet, and a status series that sometimes carries a label and sometimes does not
+      # is two metrics wearing one name. The summary therefore names the stage and never a
+      # volume.
+      - uid: hamstrack-snapshot-check-failing
+        title: VolumeSnapshotCheckFailing
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: '{{ if eq $labels.stage "resolve" }}The snapshot check never reached a resolved volume, so it is watching nothing. THE JOURNAL LINE NAMES WHAT STOPPED IT, and that line is the complete answer where any list here is only the cases seen so far: a refused SNAPSHOT_SOURCE in /etc/hamstrack/snapshot.env (exactly ebs or none, and a file saved with CRLF fails it); a tool that is not installed, which off Amazon Linux is usually AWS CLI v2 - AL2023 ships it and a stock Ubuntu or Debian does not, and curl and flock are demanded the same way; IMDS unreachable or refusing IMDSv2, and a metadata hop limit reset to 1 breaks the app''s own S3 credentials too, so read that one as wider than this check; or attached volumes the collector refused to guess between, where the line names the root device it was matching against{{ else }}The snapshot check did not complete the describe stage, so the age of the newest snapshot is unknown and VolumeSnapshotStale is blind. IF THE RESOLVE ARM OF THIS ALERT IS FIRING TOO, READ THAT ONE AND IGNORE THIS: both stage gauges start at 0 and a run that stops before the describe call is ever made publishes both, so the pair means the fault is upstream of everything below and nothing here happened. With resolve at 1, the usual causes are: the ec2-snapshot-read inline policy on role hamstrack-ec2 was detached or narrowed, its aws:RequestedRegion condition no longer matches this instance''s region, or the EC2 API is throttling - a single blip clears at the next hourly run. The journal names the call and its error code (the CLI''s own message is deliberately not echoed: an AccessDenied quotes the assumed-role ARN, which carries the account id){{ end }}; journalctl -u hamstrack-volume-snapshot on the host'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_volume_snapshot_check_status'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # 3 h and not 2: the timer is hourly and one missed run on a busy box is not an
+      # incident. Same number and same reasoning as ConfigDriftCheckStale, so there is one
+      # convention here rather than two.
+      #
+      # ITS VALUE IS DIAGNOSTIC, AND THAT IS WORTH SAYING PLAINLY: VolumeSnapshotStale fires
+      # on its own when the collector stops, because the timestamp ages - but it fires with
+      # the WRONG DIAGNOSIS, sending the reader to DLM when the fault is a dead timer, and
+      # DLM is then exactly what they would wrongly "fix". This rule is what arrives first
+      # with the right one. It shares the blind spot of the pair above: it can say the check
+      # has STOPPED, never that it was never installed on a box that has also never published
+      # a series.
+      - uid: hamstrack-snapshot-check-stale
+        title: VolumeSnapshotCheckStale
+        condition: B
+        for: 1h
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The root-volume snapshot check has not run in over three hours, so hamstrack_volume_snapshot_newest_timestamp_seconds is frozen and VolumeSnapshotStale is now measuring the age of a reading rather than the age of a snapshot. Do not go looking at DLM first: the fault is on this box. The usual cause is the hourly timer - a deploy places /opt/hamstrack/ops and installs nothing, on purpose - so check systemctl list-timers hamstrack-volume-snapshot.timer and journalctl -u hamstrack-volume-snapshot. Install it: docs/ops-prod-hardening.md section 6, then systemctl enable --now hamstrack-volume-snapshot.timer. If the timer IS running, the unit is dying before it publishes rather than not running at all: systemctl show -p Result -p ExecMainStatus hamstrack-volume-snapshot.service. Result=signal with SIGSYS means the units seccomp filter is short a syscall - widen SystemCallFilter in a drop-in, never delete it - and SIGSYS runs no exit handler, which is why the metrics froze instead of reporting a failure.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - hamstrack_volume_snapshot_check_timestamp_seconds'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [10800] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query

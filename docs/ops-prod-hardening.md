@@ -604,14 +604,19 @@ that last declaration with a measurement, and until it has run, "1 GB is fine" r
 belief. The rule this section keeps re-learning: read the limit back from the running
 container, and read the load off a box that has some.
 
-### 5.5 OPEN — the root volume is not encrypted, and that is the control swap raises
+### 5.5 The root volume was unencrypted, and was replaced with an encrypted one on 2026-08-29
 
-**Status: open. Nothing below has been decided or done; the owner has not chosen.**
+**Status: done. The swap happened on 2026-08-29** — `vol-02d8251fd45b62472` (unencrypted)
+was replaced by `vol-0867f8d73630ca5a1` (encrypted), which is the volume the instance runs
+on today. The reasoning below is kept because it is *why* encryption was the control, and
+because the same reasoning applies to the next volume anybody creates here. **What the swap
+also did, and nobody noticed for five days, is documented in §5.6 and §6.1: the selection
+tag backup layer 3 depends on stayed behind on the old volume.**
 
-**Measured 2026-08-28.** The production root volume `vol-02d8251fd45b62472` reports
-`Encrypted: false`, and the account's **default EBS encryption is off**, so anything
-created from that default inherits the same state — including the daily snapshots of
-§6.1's layer 3.
+**Measured 2026-08-28, on the volume that has since been replaced.** The production root
+volume `vol-02d8251fd45b62472` reported `Encrypted: false`, and the account's **default EBS
+encryption was off**, so anything created from that default inherited the same state —
+including the daily snapshots of §6.1's layer 3.
 
 Adding a swapfile put a copy of anonymous process memory on that volume, which is what
 raises the question. It is the wrong end of it. That volume already holds, in plaintext,
@@ -627,13 +632,63 @@ of the OOM kill §5.3 describes for a partial cleanup of the least valuable thin
 its snapshots, and removing artefacts one at a time does not change that.* Encryption
 covers all of them at once, including the ones nobody enumerated.
 
-What is genuinely undecided is the sequencing and the cost: EBS encryption cannot be
-enabled in place, so it means snapshot → copy with encryption → restore, i.e. a stop of
-the instance. **A snapshot is imminent for HD-186**, and that snapshot will be unencrypted
-unless this is settled first — which is the only reason it is written down now rather than
-filed. Also unsettled: turning on the account default (cheap, prevents the *next*
-unencrypted volume, does nothing for this one) and whether the backup bucket's SSE-S3
-(§6.2, already on) changes the priority.
+**What it cost, since that was the open question:** EBS encryption cannot be enabled in
+place, so it meant snapshot → copy with encryption → restore, i.e. a **stop of the
+instance**. That is what was done on 2026-08-29. Still worth doing and still not done:
+turning on the **account default**, which is cheap, prevents the *next* unencrypted volume,
+and does nothing for this one.
+
+### 5.6 Replacing the root volume — and the tags that do not come with it
+
+**A tag is a capability, and detaching a volume does not move it.** Everything that selects
+a volume by tag — the DLM snapshot policy of §6.1's layer 3, any cost allocation, any
+future automation — is pointed at a *tag*, not at *this box*. Replace the volume and every
+one of those mechanisms silently keeps pointing at the volume you just detached. It goes on
+working. It goes on reporting success. It is simply now about something else.
+
+That is not hypothetical: it is exactly what the 2026-08-29 swap in §5.5 did, and layer 3
+protected nothing for five days while its schedule ran green every night (§6.1).
+
+**Before detaching, enumerate the old volume's tags:**
+
+```bash
+aws ec2 describe-tags --region "$REGION" \
+  --filters Name=resource-id,Values=<OLD_VOLUME_ID> --output table
+```
+
+**After attaching, re-apply every one of them to the new volume** — not the ones you
+remember, the ones the command above printed.
+
+**Then verify by SELECTION, not by inspection.** "The tag is on the new volume" is the weaker
+claim and it passes while the old volume also still carries it, which is precisely the state
+that broke layer 3. Ask the question the way the mechanism asks it:
+
+```bash
+aws ec2 describe-volumes --region "$REGION" \
+  --filters Name=tag:Backup,Values=hamstrack \
+  --query 'Volumes[].[VolumeId,State,Attachments[0].InstanceId]' --output table
+# Expect exactly ONE row: the NEW volume id, in-use, attached to this instance.
+```
+
+**And then verify the next scheduled snapshot actually appeared** — the tag is the input, an
+artefact is the outcome, and only the second one is evidence. §6.4 carries the command; since
+HD-262 `VolumeSnapshotStale` also answers it hourly and without anybody remembering to look.
+
+> **Before adding a selection tag to a volume, check whether that volume already carries a
+> tag key the DLM schedule also ADDS.** `CopyTags: true` together with
+> `TagsToAdd: [{Key: Name, …}]` is a **duplicate-key failure** the moment the source volume
+> has a `Name` tag — and it fails **the whole schedule**, not one snapshot, leaving the
+> policy in `ERROR`. That is outage 2 in §6.1: the old volume had no `Name` tag, so the
+> collision could not occur while the policy was pointed at the wrong volume, and **adding
+> `Backup=hamstrack` to the correctly-named new volume on 09-03 is what armed it.** Repairing
+> the volume made the second failure, and there was nothing on the box to say so.
+>
+> ```bash
+> aws dlm get-lifecycle-policy --policy-id <POLICY_ID> \
+>   --query 'Policy.PolicyDetails.Schedules[].[Name,CopyTags,TagsToAdd]' --output json
+> aws ec2 describe-tags --region "$REGION" --filters Name=resource-id,Values=<NEW_VOLUME_ID>
+> # Any key present in BOTH lists is a duplicate-key failure waiting for the next run.
+> ```
 
 ---
 
@@ -646,11 +701,13 @@ Design, and every decision behind it:
 owner-side runbook: what runs where, the AWS commands that only account credentials
 can run, and the drill log.
 
-The script, the units and the alert rules are in the repository; **§6.2 and §6.3 are
-the one-time steps that install them**, §6.4 is how each durability property is
-checked rather than assumed, §6.7 is the gate that a restore is not finished until it
-passes, and the log subsections are where a run is recorded **after** it has happened.
-Nothing outside those logs is a report of work already done.
+The scripts, the units and the alert rules are in the repository, and a deploy **places**
+them without installing anything; **the subsections headed "one-time setup" or "installing"
+are what install them** — §6.2 and §6.3 for the database backup, §6.9 for layer 3's outcome
+check — and each of them has to be re-run after a release that changes a file under `ops/`.
+§6.4 is how each durability property is checked rather than assumed, §6.7 is the gate that a
+restore is not finished until it passes, and the log subsections are where a run is recorded
+**after** it has happened. Nothing outside those logs is a report of work already done.
 
 ### 6.1 What runs where
 
@@ -659,6 +716,27 @@ Nothing outside those logs is a report of work already done.
 | 1 + 2 | daily `pg_dump -Fc` + `pg_dumpall --globals-only` → the backup bucket | host `systemd` timer `hamstrack-backup.timer`, script from [`ops/backup/`](../ops/backup/) | 30 days, by S3 lifecycle | a bad migration, a dropped table, an application bug that deletes rows, ransomware, loss of the instance **and** its volume |
 | 3 | daily EBS snapshot of the root volume | AWS Data Lifecycle Manager | 7 snapshots | loss of the **box**: `/opt/hamstrack/.env` (which is the only copy of `JWT_SECRET` anywhere), the hand-edited `Caddyfile`, `caddy_data` certificates, the observability volumes |
 | 4 | versioning + noncurrent-version expiry on the **attachments** bucket | bucket settings | 30 days of noncurrent versions | an accidental or malicious delete/overwrite of an attachment, which the database dump cannot undo |
+
+**Which alert watches which layer**, named rather than left to inference:
+
+| Layer | Watched by | Fires when |
+|---|---|---|
+| 1 + 2 | `BackupStale` (critical), `BackupRunFailed` (warning) | no stage has succeeded in 26 h; the last run reported a stage failure |
+| 3 | `VolumeSnapshotStale` (critical), `VolumeSnapshotCheckFailing` / `VolumeSnapshotCheckStale` (warning) — HD-262, [`ops/snapshot/`](../ops/snapshot/) | the newest **completed** snapshot of the volume **this instance is actually running on** is over 30 h old, or the check itself cannot answer / has stopped running |
+| 4 | **nothing** | — |
+
+**Layer 4 has no outcome check, and that is a known gap rather than an oversight.** Nothing
+watches attachments-bucket versioning, and — the same family — nothing watches the *remote*
+state of layers 1/2 either: §6.2 records that the backup metrics measure the **local run**
+and never the remote object, so an archive silently emptied in S3 reads as green. Both are
+filed as their own ticket rather than bolted onto HD-262, because the principle ("every
+durability layer gets an outcome check", ADR-0037) is what should be applied, not one more
+member of the list.
+
+**Layers 1/2 and 3 are watched by different KINDS of check, and the difference is the whole
+of ADR-0037.** `BackupRunFailed` asks whether the mechanism ran; `VolumeSnapshotStale` asks
+whether the artefact exists. §6.1's own history is why: a mechanism check on layer 3 was
+green throughout both outages below.
 
 **Deliberately absent, so the mechanism above is not read as covering them:**
 point-in-time recovery (layer 1 loses up to 24 hours; closing that needs a permanently
@@ -687,6 +765,33 @@ overwrite either one (§6.2 step 1).
 
 The job runs at **03:15 UTC** and the DLM window is **04:30 UTC**, offset so the two
 never contend for the same volume I/O.
+
+#### Layer 3 gap log
+
+Recorded in the **past tense with the dates it happened**, the way §6.6 records drills. A
+line written in advance, or a promise that this will not recur, is not a line.
+
+| Window | Layer 3 state | Root cause | What every signal said |
+|---|---|---|---|
+| **2026-08-29 → 2026-09-03** (5 nights) | the live root volume `vol-0867f8d73630ca5a1` had **no daily snapshots at all**; the policy was snapshotting `vol-02d8251fd45b62472`, detached since 08-29 | the encryption swap (§5.5) did not carry the `Backup=hamstrack` tag onto the new volume, so DLM policy `policy-0ee1644759462e1f7` kept selecting the old one | **green.** The schedule ran nightly and *succeeded* nightly. Snapshots existed and were recent. They were of a detached volume |
+| **2026-09-04 → open** (still open at the time of writing, 2026-09-06) | no new snapshot at all; the newest snapshot of `vol-0867f8d73630ca5a1` is the **manual one taken 2026-09-03** | adding the tag on 09-03 **armed** a second failure: the schedule carries `CopyTags: true` **and** `TagsToAdd: [{Key: Name, Value: hamstrack-auto}]`, and the new volume carries `Name=hamstrack-root-encrypted` | `State: ERROR`, `StatusMessage: Duplicate tag key 'Name' specified.`, `DateModified: 2026-09-04T04:42:30Z` — the 04:30 run, the morning after the repair. Reported **only** in the policy's `State`, which nothing read |
+
+**One cause, two consecutive outages, the second hidden behind the first, and the repair to
+the first is what created the second.** The old volume had no `Name` tag, so the duplicate-key
+collision could not occur while the policy was pointed at the wrong volume.
+
+**Layer 3 protected nothing for that period, and what it is the only layer covering is named
+in the table directly above**: `/opt/hamstrack/.env` — the only copy of `JWT_SECRET` anywhere
+— the hand-edited `Caddyfile` with its Cloudflare `trusted_proxies` block, the `caddy_data`
+certificates and the observability volumes. Layers 1/2 cover the database and layer 4 covers
+attachments. Neither covers the box.
+
+**The generalisable defect is neither the tag nor the duplicate key: it is that this layer had
+no outcome check at all.** A "did the schedule run" check misses the first window entirely and
+catches the second only if somebody happens to be reading a field nobody reads. `VolumeSnapshotStale`
+(HD-262) is the answer, and the standard it sets is ADR-0037: **a durability layer is watched by
+the age of the artefact it produces, never by the state of the mechanism that produces it.** The
+prevention for the *cause* is §5.6.
 
 ### 6.2 One-time AWS setup (CloudShell, owner credentials)
 
@@ -819,9 +924,24 @@ can verify from the box during install; it discloses key names, which are timest
 
 **4. Tag the volume and create the DLM snapshot policy (7 snapshots, 04:30 UTC).**
 
+**Resolve the volume by matching `RootDeviceName`, never by taking index 0.**
+`BlockDeviceMappings[0]` is not guaranteed to be the root device — the list is not ordered by
+role — so on any instance with a second volume that expression tags whichever one AWS happened
+to list first, and the mistake is invisible: `create-tags` succeeds, DLM runs nightly and
+succeeds nightly, and it is snapshotting the wrong disk. That is the same failure as §6.1's
+first window arriving by a different door, and this command carried a latent copy of it until
+HD-262. The `[?DeviceName==RootDeviceName]` filter below is the fix, and the `test` is not
+decoration: an empty result would otherwise be tagged as the literal string `None`.
+
 ```bash
+ROOT_DEV=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
+  --query 'Reservations[0].Instances[0].RootDeviceName' --output text)
 VOL_ID=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" \
-  --query 'Reservations[0].Instances[0].BlockDeviceMappings[0].Ebs.VolumeId' --output text)
+  --query "Reservations[0].Instances[0].BlockDeviceMappings[?DeviceName=='$ROOT_DEV'].Ebs.VolumeId" \
+  --output text)
+# Refuse to tag a guess: one id, and not the literal string an empty result prints.
+[ -n "$VOL_ID" ] && [ "$VOL_ID" != None ] && [ "$(echo "$VOL_ID" | wc -w)" = 1 ] \
+  && echo "root volume of $INSTANCE_ID is $VOL_ID (device $ROOT_DEV)"
 aws ec2 create-tags --region "$REGION" --resources "$VOL_ID" --tags Key=Backup,Value=hamstrack
 
 aws dlm create-default-role --resource-type snapshot
@@ -840,6 +960,13 @@ aws dlm create-lifecycle-policy --region "$REGION" \
       "TagsToAdd":[{"Key":"Name","Value":"hamstrack-auto"}],
       "CopyTags":true}]}'
 ```
+
+> **`CopyTags: true` beside `TagsToAdd: [{Key: Name, …}]` is a live trap in the policy
+> above.** The moment the selected volume carries a `Name` tag of its own, every run of this
+> schedule fails with `Duplicate tag key 'Name' specified.` and the **policy** goes to
+> `ERROR` — not one snapshot, the schedule. That is §6.1's second window, and it was armed by
+> correctly tagging a correctly named volume. Before adding a selection tag to any volume,
+> compare its tag keys with this schedule's `TagsToAdd`; the commands are in §5.6.
 
 A snapshot of a running Postgres is crash-consistent, and PostgreSQL is designed to come
 up from a crash by replaying WAL; the whole data directory is on the **one** volume, so
@@ -1053,6 +1180,16 @@ aws dlm get-lifecycle-policies                                          # one EN
 aws ec2 describe-snapshots --owner-ids self \
   --filters Name=tag:Name,Values=hamstrack-* \
   --query 'Snapshots[].[StartTime,SnapshotId]' --output table
+
+# Layer 3, asked as the second party's version of the question the box asks hourly. BY
+# VOLUME ID, never by tag: a tag filter is what was green throughout §6.1's first window,
+# because the tag was on a volume nobody was running on. $VOL is the id §6.2 step 4
+# resolved by RootDeviceName.
+aws ec2 describe-snapshots --owner-ids self \
+  --filters Name=volume-id,Values=$VOL Name=status,Values=completed \
+  --query 'reverse(sort_by(Snapshots,&StartTime))[:3].[StartTime,SnapshotId,State]' --output table
+# Expect the newest row to be less than ~30h old — the same bound VolumeSnapshotStale uses.
+# An EMPTY table is the 2026-08-29 state and is what the collector publishes as 0.
 ```
 
 **Read the lifecycle output for the right property.** The check is **not** "no rule matches
@@ -1422,6 +1559,195 @@ Two rules the first entry will be judged against:
 - **Name every step that did not run.** §6.6's first row is the model: it recorded that the
   globals file was never applied, which is the only reason anybody knows the drill was walked in
   part rather than in full. A pass that hides its gaps is worth less than a fail that names them.
+
+### 6.9 Installing the root-volume snapshot check (layer 3's outcome check)
+
+The check that would have caught both windows in §6.1's gap log. It resolves the volume this
+instance is running on — **every run, from IMDS, matching the root device name** — and
+publishes the age of that volume's newest completed snapshot. HD-262; design in
+[`docs/design/root-volume-snapshot-age-proposal.md`](design/root-volume-snapshot-age-proposal.md),
+files in [`ops/snapshot/`](../ops/snapshot/), rationale in ADR-0037 and ADR-0038.
+
+**The grant first — and on this box it is already done.** The inline policy
+`ec2-snapshot-read` was attached to role `hamstrack-ec2` on **2026-09-06** and verified
+working *from the instance* rather than from the console. The command is recorded so the
+grant is reproducible on a rebuild and readable without opening IAM; do not re-run it
+expecting a change. Both actions
+are read-only and this unit will never hold a write — a monitor that can create a snapshot can
+be made to delete one. `Resource: "*"` because EC2 `Describe*` supports no resource ARNs; the
+region condition is what narrows it, and it also means **the region is never implicit** (the
+script resolves it from IMDS and passes `--region` on every call).
+
+```bash
+aws iam put-role-policy --role-name hamstrack-ec2 --policy-name ec2-snapshot-read --policy-document "{
+  \"Version\":\"2012-10-17\",
+  \"Statement\":[
+    {\"Sid\":\"ReadOwnVolumeSnapshotAge\",\"Effect\":\"Allow\",
+     \"Action\":[\"ec2:DescribeVolumes\",\"ec2:DescribeSnapshots\"],\"Resource\":\"*\",
+     \"Condition\":{\"StringEquals\":{\"aws:RequestedRegion\":\"$REGION\"}}}]}"
+```
+
+`ec2:DescribeInstances` is **deliberately absent**, and the collector is shaped around that:
+the instance id comes from IMDS and the volume from a `DescribeVolumes` filter. Do not add it
+to make a more convenient query work.
+
+**Then the install.** SSH is closed (§3), so this is one SSM command reading from
+`/opt/hamstrack/ops/`, which a deploy places.
+
+```bash
+aws ssm send-command --region "$REGION" --instance-ids "$INSTANCE_ID" \
+  --document-name AWS-RunShellScript --comment "HD-262 install snapshot age check" \
+  --parameters 'commands=["set -e",
+"install -m 0750 -o root -g root /opt/hamstrack/ops/snapshot/hamstrack-volume-snapshot.sh /usr/local/bin/hamstrack-volume-snapshot",
+"install -m 0644 /opt/hamstrack/ops/snapshot/hamstrack-volume-snapshot.service /etc/systemd/system/",
+"install -m 0644 /opt/hamstrack/ops/snapshot/hamstrack-volume-snapshot.timer /etc/systemd/system/",
+"mkdir -p /etc/hamstrack /var/lib/node_exporter/textfile_collector",
+"test -f /etc/hamstrack/snapshot.env || install -m 0640 -o root -g root /opt/hamstrack/ops/snapshot/snapshot.env.example /etc/hamstrack/snapshot.env",
+"systemctl daemon-reload"]'
+```
+
+> **A deploy places `/opt/hamstrack/ops/` and installs nothing** — this step is what installs
+> it, and it stays a human step for the same reason §6.3 does. Re-run it whenever a release
+> changes a file under `ops/snapshot/`; `hamstrack_config_drift{scope="installed-ops"}` is
+> what tells you it has, and it covers this unit **with no change to the drift check** —
+> `installed_path_for` already maps `*.sh` → `/usr/local/bin/<name minus .sh>` and
+> `*.service`/`*.timer` → `/etc/systemd/system/`, and `check_installed_ops` walks every file
+> under `$TARGET/ops`. That was verified against the drift script rather than assumed.
+>
+> **There is nothing to configure**, and that is the design: `snapshot.env` carries the off
+> switch `SNAPSHOT_SOURCE` (exactly `ebs`, the default, or `none`), two values whose defaults
+> are already right on this box (`SNAPSHOT_REGION`, empty, i.e. read from the instance;
+> `SNAPSHOT_TEXTFILE_DIR`, node-exporter's directory) and two testing seams
+> (`SNAPSHOT_IMDS_BASE`, `SNAPSHOT_AWS_BIN`) that have no business on a real instance; the
+> volume is resolved fresh on every run, and both alert thresholds live in `rules.yml`. The
+> template is installed anyway so the next person finds the explanations where they expect
+> them. **The only setting a working install ever needs is the off switch**, and what it
+> does is *delete* the published `.prom` — see "Turning it off" below, because the difference
+> between deleting and not writing is the difference between an off switch and a permanent
+> critical alert.
+>
+> **Host prerequisites**: AWS CLI v2 (AL2023 ships it — a stock Ubuntu or Debian does not),
+> `curl`, `flock` (util-linux), and `/var/lib/node_exporter/textfile_collector` existing
+> **before the unit starts** — `ProtectSystem=strict` + `ReadWritePaths=` makes systemd refuse
+> to set up the namespace otherwise and the unit fails before the script runs. The `mkdir -p`
+> in the command above is what guarantees the last one. No credentials: the two IAM actions
+> arrive with the instance role over IMDS.
+
+Then run it once, through systemd, and read the file it wrote:
+
+```bash
+# a. NEVER as a bare command. Only `systemctl start` exercises the unit — its
+#    EnvironmentFile=, its ReadWritePaths= (a hand run writes fine and the unit then fails
+#    with "Read-only file system"), and its memory ceiling. It is also the only invocation
+#    that reads /etc/hamstrack/snapshot.env at all: this script does not source it.
+sudo systemctl start hamstrack-volume-snapshot.service
+journalctl -u hamstrack-volume-snapshot -n 30 --no-pager
+
+# b. THE ACCEPTANCE TEST FOR THE WHOLE TICKET is one line of this file: it must name the
+#    volume the instance is running on TODAY, and the volume the DLM policy was wrongly
+#    pointed at must be absent from it.
+cat /var/lib/node_exporter/textfile_collector/hamstrack_volume_snapshot.prom
+#    Expect: newest_timestamp{volume="vol-0867f8d73630ca5a1"} <unix ts, or 0>
+#            check_status{stage="resolve"} 1
+#            check_status{stage="describe"} 1
+#            check_timestamp_seconds <now>
+#    A `0` is an ANSWER — "this volume has no completed snapshots at all" — and it makes
+#    VolumeSnapshotStale fire the same evening. That is the 2026-08-29 state, detected.
+#    vol-02d8251fd45b62472 appearing here means the collector resolved the DETACHED volume,
+#    which is the one outcome that would invalidate the whole check.
+
+# c. The series reached Prometheus. Until the script has run once and written a .prom, the
+#    series does not exist — and the rules are noDataState: OK, so an absent series is
+#    silence and not an alert. This is why (b) is not optional.
+curl -s 'http://localhost:9090/api/v1/query?query=hamstrack_volume_snapshot_check_status' | head -c 400
+
+# d. Measure the memory ceiling instead of trusting it. `systemctl show -p MemoryPeak` does
+#    NOT exist on AL2023 (systemd 252; the property arrived in 253, and `show` returns 0
+#    while silently omitting it), so read the cgroup WHILE IT RUNS, from a second shell —
+#    exactly as §6.3 step (f) does for the backup unit. The 256M/384M pair bounds bash, curl
+#    and the AWS CLI (a PyInstaller bundle, 120-180 MB baseline) and is A GUESS until then.
+
+# e. THE SANDBOX IS ALSO UNMEASURED, and it is tighter than the other two ops units on
+#    purpose: this one needs no docker socket, so CapabilityBoundingSet= is empty,
+#    SystemCallFilter=@system-service is set, and the address families are restricted. It
+#    still runs as uid 0 — a deliberate decision recorded in the unit, because the textfile
+#    directory is root-owned and shared with the backup and drift units — so what bounds it
+#    is ProtectSystem=strict rather than the capability set (a capability-less uid 0 still
+#    writes everything it OWNS by ordinary DAC), plus ProtectProc=invisible — which hides
+#    only OTHER uids' processes, never another uid-0 one, because that check short-circuits
+#    on a matching fsuid (HD-286) — and InaccessiblePaths= on the docker socket, which uid 0
+#    could otherwise connect() to as its owner, read-only mount or not. A sandbox that is
+#    too tight does not degrade, it fails the unit, so read the exit status of (a) before
+#    trusting it, and confirm the profile it actually got:
+systemd-analyze security hamstrack-volume-snapshot.service | tail -5
+systemctl show -p Result -p ExecMainStatus hamstrack-volume-snapshot.service
+#    A run that dies on SIGSYS (Result=signal, SIGSYS) means @system-service is short
+#    something the AWS CLI needs on this host — widen the filter in the unit, do not delete
+#    the line, and say which call in the commit.
+
+# f. Only now arm the schedule.
+sudo systemctl enable --now hamstrack-volume-snapshot.timer
+systemctl list-timers hamstrack-volume-snapshot.timer
+```
+
+**Two refusals worth forcing rather than reviewing**, because a translation path nobody
+exercised is indistinguishable from one that works:
+
+```bash
+# The AccessDenied path. Narrow or detach ec2-snapshot-read, run once, and confirm three
+# things: check_status{stage="describe"} is 0, the journal names the failing call and its
+# error code, and the journal does NOT contain the account id. That last one is the reason
+# the CLI's raw stderr is never echoed — an AccessDenied quotes the assumed-role ARN
+# arn:aws:sts::<account>:assumed-role/hamstrack-ec2/i-… . Then restore the policy.
+sudo systemctl start hamstrack-volume-snapshot.service
+journalctl -u hamstrack-volume-snapshot -n 20 --no-pager | grep -c "$ACCOUNT_ID"   # expect 0
+
+# The drift scope really does cover this unit. Touch the installed copy, check, restore it.
+sudo sh -c 'printf "\n# drift probe\n" >> /usr/local/bin/hamstrack-volume-snapshot'
+sudo systemctl start hamstrack-config-drift.service
+grep installed-ops /var/lib/node_exporter/textfile_collector/hamstrack_config.prom  # expect 1
+sudo install -m 0750 /opt/hamstrack/ops/snapshot/hamstrack-volume-snapshot.sh /usr/local/bin/hamstrack-volume-snapshot
+sudo systemctl start hamstrack-config-drift.service
+grep installed-ops /var/lib/node_exporter/textfile_collector/hamstrack_config.prom  # expect 0
+```
+
+**Turning it off — `systemctl disable --now` is NOT enough, and on its own it produces a
+permanent critical alert.** Stopping the timer deletes nothing, and node-exporter goes on
+scraping the last `.prom` for ever: `check_timestamp_seconds` stops advancing, so
+`VolumeSnapshotCheckStale` fires within 3 h and never clears, and the frozen snapshot age
+takes the **critical** `VolumeSnapshotStale` with it within 30 h. The file has to go, and the
+collector has a branch that removes it. **Order matters — remove first, then disable:**
+
+```bash
+# a. The supported way: run once with the off switch. It takes the lock, deletes
+#    hamstrack_volume_snapshot.prom (and any *.prom.<pid>), logs what it removed, exits 0.
+#    Through systemd, because the script does not read snapshot.env itself.
+sudo sh -c 'printf "SNAPSHOT_SOURCE=none\n" >> /etc/hamstrack/snapshot.env'
+sudo systemctl start hamstrack-volume-snapshot.service
+journalctl -u hamstrack-volume-snapshot -n 5 --no-pager   # expect "removed …/hamstrack_volume_snapshot.prom"
+
+# b. Only now stop the schedule. (Leaving the timer armed with SNAPSHOT_SOURCE=none is also
+#    a valid resting state: an hourly run that removes nothing and costs nothing.)
+sudo systemctl disable --now hamstrack-volume-snapshot.timer
+
+# c. Removing the unit entirely — the .prom is NOT part of any of these paths, so it is
+#    listed first on purpose.
+sudo rm -f /var/lib/node_exporter/textfile_collector/hamstrack_volume_snapshot.prom
+sudo rm -f /etc/systemd/system/hamstrack-volume-snapshot.{service,timer} \
+           /usr/local/bin/hamstrack-volume-snapshot /etc/hamstrack/snapshot.env
+sudo systemctl daemon-reload
+#    After this the three rules are silent through noDataState: OK — which is why (c) is a
+#    decision and not a cleanup: nothing then watches backup layer 3 on this box.
+```
+
+**The three rules can be fired without AWS at all** — hand-write a `.prom` into
+node-exporter's textfile directory on the dev stack, which needs no account and no volume.
+The recipe is in [`docs/observability.md`](observability.md), under the section on firing an
+alert deliberately. **It has not been walked yet**, and neither have steps (a)-(f) above: as
+of 2026-09-06 nothing in this subsection has been run on the instance or on a dev stack, and
+the collector's own answer — that it resolves the volume this box is running on and not the
+detached one — is the acceptance test that is still outstanding. Read this subsection as the
+procedure, not as a record.
 
 ---
 

@@ -256,9 +256,41 @@ that disagree.
 | `hamstrack_config_check_timestamp_seconds` | gauge | — | when this check last ran. It exists to tell a fresh `0` from a stale one, which matters because the deploy publishes these metrics even where the hourly timer is **not** installed |
 | `hamstrack_deploy_image_pinned` | gauge | `tag` | `1` while `APP_IMAGE_TAG` in `/opt/hamstrack/.env` names anything other than `latest` — an emergency rollback still in place, or a version somebody is deliberately holding. It says the tag is not `latest`; it does **not** say the deploy is blocked, which depends on whether the pin has *moved* since `.deployed-image-tag` was written. The pin lives in `.env` because that file survives every deploy by construction; this metric is what makes un-pinning a mechanism instead of a memory task. Ending the alert has exactly two honest endings — un-pin, or adopt the pin with one `--adopt-pin` apply; `--allow-pinned` deliberately does not end it, because it applies one run without declaring the tag intended |
 
-`scope` is a closed three-valued enum. `sha` and `tag` change on a deploy — a handful of new
-series a week against a 15-day retention, which is worth writing down in a project that
-otherwise forbids unbounded labels.
+`scope` is a **closed** enum — its values are the ones listed in the table above, and each
+addition costs a series per box plus an arm in `ConfigDrift`'s summary, which is why it is
+closed at all. (Deliberately not written as a count: a number goes stale one entry before the
+list does, and this sentence had already said "three" while the table named four.) `sha` and
+`tag` change on a deploy — a handful of new series a week against a 15-day retention, which is
+worth writing down in a project that otherwise forbids unbounded labels.
+
+#### Root-volume snapshot metrics — not emitted by the app either
+
+Same channel again, and the question is **backup layer 3**: is there a recent restorable
+image of the volume this instance is actually running on? Written by
+[`ops/snapshot/hamstrack-volume-snapshot.sh`](../ops/snapshot/hamstrack-volume-snapshot.sh)
+(HD-262), hourly from `hamstrack-volume-snapshot.timer` and **never** from a deploy — unlike
+the drift check, this one is deliberately off the deploy path, so nothing it prints travels
+off the box.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `hamstrack_volume_snapshot_newest_timestamp_seconds` | gauge | `volume` | Unix time (`StartTime`) of the newest **completed** snapshot of the volume attached at this instance's root device. **`0` means "resolved successfully, and there are none"** — an answer, not a missing value, and the one that makes a freshly swapped volume fire the alert the same evening. The series is **absent** when the run could not find out, because a value nobody has must not be published as a value somebody does |
+| `hamstrack_volume_snapshot_check_status` | gauge | `stage` (`resolve`/`describe`) | whether this run completed that stage (`1`) or not (`0`). **`resolve`**: everything up to a volume id — the configuration, the tools, IMDSv2 token → instance id → region → root device name → `DescribeVolumes` → exactly one volume; a failure means a refused `SNAPSHOT_SOURCE`, a missing `aws`/`curl`/`flock` (AWS CLI v2 is the likely one off Amazon Linux), IMDS unreachable or refusing v2, a lowered metadata hop limit, or attached volumes the collector refused to guess between — the journal line names which. **`describe`**: `DescribeSnapshots` for that volume; a failure means the `ec2-snapshot-read` policy was detached or its region condition no longer matches, the API is throttling, or a `StartTime` could not be parsed. The two have opposite first moves, which is why this is one metric with a label and not one flag. **Both start at `0` and both are published on every failure**, so a run that stops before the describe call is ever made sets `describe` to `0` as well: when the pair fires, the `resolve` arm is the one to read, and neither annotation may assert what the other stage did. No `volume` label, deliberately: at the `resolve` stage there is no volume yet, and a status series that sometimes carries a label and sometimes does not is two metrics wearing one name |
+| `hamstrack_volume_snapshot_check_timestamp_seconds` | gauge | — | when this check last ran, so a fresh answer can be told from a frozen one |
+
+**It is a TIMESTAMP and never a pre-computed age, and that is the load-bearing choice.** An
+`..._age_seconds` gauge frozen in a `.prom` nobody rewrites reads as permanently fresh — the
+collector dies, the file keeps saying `3600`, and the rule never fires. A timestamp in the same
+frozen file gets older on its own, so a dead collector **converges on the alert** instead of
+hiding behind it. It also decouples detection latency from the collector's cadence entirely.
+
+**`volume` is a label and `snapshot` is not.** The `volume` label is what lets the alert name
+its subject, which is the operator's first question; its cardinality is bounded by a real-world
+action — one new series per root-volume replacement, roughly one a year — and **the series
+break is itself the evidence of a swap**, which is the event this check exists for. A snapshot
+id label would produce a new series every night and is forbidden. Written down here because
+this repository otherwise forbids unbounded labels, so an exception is recorded where it is
+taken.
 
 ---
 
@@ -409,6 +441,9 @@ row of that rule rather than an exception to it.
 | BackupStale | `time() - hamstrack_backup_last_success_timestamp_seconds > 93600` (26 h, per `stage`) | 15m | critical |
 | BackupRunFailed | `hamstrack_backup_last_status < 1` (per `stage`) | 5m | warning |
 | ConfigDrift | `hamstrack_config_drift > 0` (per `scope`) | 30m | warning |
+| VolumeSnapshotStale | `time() - hamstrack_volume_snapshot_newest_timestamp_seconds > 108000` (30 h, per `volume`) | 15m | critical |
+| VolumeSnapshotCheckFailing | `hamstrack_volume_snapshot_check_status < 1` (per `stage`) | 5m | warning |
+| VolumeSnapshotCheckStale | `time() - hamstrack_volume_snapshot_check_timestamp_seconds > 10800` (3 h) | 1h | warning |
 | DeployImagePinned | `hamstrack_deploy_image_pinned > 0` (per `tag`) | 6h | warning |
 | MailDailyVolumeHigh | `sum(increase(hamstrack_email_sent_total{outcome="success"}[24h])) > 500` | 30m | warning |
 | InviteVolumeUnaccepted | 6h invitation acceptance ratio < 10% **and** > 200 invitations sent in 6h | 30m | warning |
@@ -659,6 +694,34 @@ node-exporter with `--collector.textfile.directory` pointed at `./observability/
 Hand-write a `.prom` there — `hamstrack_backup_last_status{stage="dump"} 0`, or a
 `hamstrack_backup_last_success_timestamp_seconds{stage="upload"} 1` for a stale one — wait
 for a scrape, and watch Grafana → Alerting. `*.prom` in that directory is gitignored.
+
+**The same directory is how the three `VolumeSnapshot*` rules are proved without AWS** — an
+EBS snapshot needs an account, a hand-written gauge does not. Write
+`observability/textfile/probe.prom`:
+
+```
+# one line, and VolumeSnapshotStale fires within 15m naming vol-test. `1` is a Unix time in
+# 1970, so this is the "no snapshot exists" case, which is also what a real `0` produces.
+hamstrack_volume_snapshot_newest_timestamp_seconds{volume="vol-test"} 1
+
+# VolumeSnapshotCheckFailing, on the DESCRIBE arm: its summary must name the describe stage
+# and its remedy (the ec2-snapshot-read policy, the region condition, throttling) and NOT the
+# resolve one. Swap the label to "resolve" and the text must change completely — if it does
+# not, the `if/else` in rules.yml lost its branch.
+hamstrack_volume_snapshot_check_status{stage="describe"} 0
+
+# VolumeSnapshotCheckStale: any timestamp more than 3h old. Take `date +%s`, subtract 14400.
+hamstrack_volume_snapshot_check_timestamp_seconds 1757000000
+```
+
+What this would prove and what it would not: the thresholds and the annotation branches, as
+Grafana actually renders them. **The collector's own answer — that it resolves the volume this
+instance is running on, and not a detached one — can only be proved on an EC2 box**, and that
+step is the acceptance test in `docs/ops-prod-hardening.md` §6.9. What is sealed *without*
+either, on every build, is the agreement between the two: `VolumeSnapshotCollectorContractTest`
+compares the `stage` literals the collector emits with the arms
+`VolumeSnapshotCheckFailing`'s summary branches on, and fails when a stage would be described
+as the wrong failure.
 
 **StatementBudgetExceeded is the only way this condition can reach you.** A statement the
 database cancelled at `DB_STATEMENT_TIMEOUT_MS` answers **`422`**, deliberately — it is a

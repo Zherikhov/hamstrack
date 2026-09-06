@@ -3002,6 +3002,97 @@ is then what shows you a timer that has stopped. They stay silent if you never i
 timer, because the metric does not exist. See
 [Observability](observability.md) for the wiring and the metric names.
 
+**If — and only if — you run on EC2, there is a second timer worth installing.**
+[`ops/snapshot/`](../ops/snapshot/) holds a check that asks how old the newest completed EBS
+snapshot of your root volume is, and publishes it the same way, for the three
+`VolumeSnapshot*` rules. It exists because a snapshot **schedule** can run green for days
+while snapshotting the wrong volume — that is what happened to the hosted instance, and only
+an outcome check saw it. Install it like the backup timer (`install` the `.sh`, the
+`.service` and the `.timer`) — but **start the service once and read its result before you
+`systemctl enable --now hamstrack-volume-snapshot.timer`**, for the reason set out under
+"sandboxed" below. It needs **`ec2:DescribeVolumes` and
+`ec2:DescribeSnapshots` on the instance role**, both read-only, and **there are no
+credentials to configure** — the instance role arrives over IMDS — and no volume id either,
+because it resolves your root volume from instance metadata on every run. What it *does* need
+on the host: **AWS CLI v2** (Amazon Linux 2023 ships it; a stock Ubuntu or Debian does not),
+`curl`, `flock` (util-linux), and `/var/lib/node_exporter/textfile_collector` **existing
+before the unit starts** — the unit is `ProtectSystem=strict` with that one `ReadWritePaths=`,
+so systemd refuses to set up the namespace when it is missing and the unit fails before the
+script runs. The install block for the backup timer above already creates it.
+
+**Give yourself the settings file even though there is nothing in it you need to change.**
+Copy `ops/snapshot/snapshot.env.example` to `/etc/hamstrack/snapshot.env`
+(`sudo install -m 0640 -o root -g root …`, and do not overwrite one that already exists). The
+*unit* reads it through `EnvironmentFile=`; the *script* does not source it, so a hand run of
+`/usr/local/bin/hamstrack-volume-snapshot` never sees it. The only setting a working install
+ever needs is the off switch below — but the file is where every setting is explained, and the
+time to have a local copy is before you need one.
+
+**This unit is sandboxed, and it is the first thing in this repo to run the AWS CLI under a
+seccomp filter** — `SystemCallFilter=@system-service`, an empty `CapabilityBoundingSet=`,
+`ProtectSystem=strict`, and a short `RestrictAddressFamilies=` list. That combination was
+exercised on Amazon Linux 2023, and **the evidence does not transfer to your machine**: a
+different distribution means a different glibc and a differently packaged AWS CLI, and the
+filter is what they both have to fit through. `ops/backup/hamstrack-backup.service` has no
+seccomp filter at all, so a working backup timer tells you nothing about this one.
+
+The failure mode is the reason it is worth ten seconds of your time. **A syscall the filter
+does not allow kills the process with `SIGSYS`, and `SIGSYS` runs no exit handler** — so the
+collector publishes nothing at all, the last `.prom` on disk freezes with both stage gauges
+still reading `1`, and nothing fires for about three hours. What fires then is
+`VolumeSnapshotCheckStale`, whose first move is "the timer probably is not installed" — a
+correct guess in general and the wrong one here, which is exactly the misdiagnosis this whole
+check exists to stop. So **start it once by hand and read the result before you enable the
+timer**:
+
+```bash
+sudo systemctl daemon-reload          # you just copied in a .service and a .timer
+sudo systemctl start hamstrack-volume-snapshot.service
+systemctl show -p Result -p ExecMainStatus hamstrack-volume-snapshot.service
+#   Result=success            -> good, arm the timer.
+#   Result=signal, SIGSYS     -> the filter is short something the AWS CLI needs here.
+#   Result=oom-kill           -> raise MemoryMax= (the AWS CLI is a ~150 MB PyInstaller bundle).
+#   ExecMainStatus=203        -> systemd could not EXECUTE ExecStart=. Usually the suffix: the
+#                                script installs without one, as
+#                                /usr/local/bin/hamstrack-volume-snapshot.
+#   ExecMainStatus=226        -> systemd could not set up the NAMESPACE. Usually a missing
+#                                /var/lib/node_exporter/textfile_collector: ProtectSystem=strict
+#                                plus ReadWritePaths= makes it refuse rather than create.
+# Those are the ones a first install hits, not a complete list — read the journal in every
+# case, including a success, where it names the volume that was resolved:
+journalctl -u hamstrack-volume-snapshot -n 30 --no-pager
+
+# Only after Result=success:
+sudo systemctl enable --now hamstrack-volume-snapshot.timer
+```
+
+**If you do get a `SIGSYS`, widen the filter in a drop-in — do not delete the line.**
+`sudo systemctl edit hamstrack-volume-snapshot.service`, then add a
+`SystemCallFilter=@system-service @whatever-was-missing` of your own. Deleting the setting
+takes the sandbox off for everybody who copies your fix, and a drop-in survives the next
+upgrade, which overwrites the unit file. It is also what the config-drift check expects: that
+check compares the *installed* unit byte-for-byte with the copy in the repo, so an edit made in
+place is reported as drift for ever — your own change handed back to you as a fault. The same
+advice covers name resolution: `AF_NETLINK` is deliberately **not** in
+`RestrictAddressFamilies=`, because glibc opens one to probe which address families exist and
+falls back safely when it cannot; if your glibc turns out not to fall back, add it in a
+drop-in and say which lookup failed.
+
+**If you install it and later move off EC2, do not just disable the timer.** Set
+`SNAPSHOT_SOURCE=none` in `/etc/hamstrack/snapshot.env` and run the unit once
+(`systemctl start hamstrack-volume-snapshot.service`): that branch **deletes** the metrics
+file. Disabling the timer deletes nothing, and node-exporter keeps scraping the last file for
+ever — a frozen reading fires `VolumeSnapshotCheckStale` within 3 h and the critical
+`VolumeSnapshotStale` within 30 h, neither of which ever clears. (`snapshot.env` is read by
+the systemd unit, not by the script, so a hand run of `/usr/local/bin/hamstrack-volume-snapshot`
+does not see it — start it through `systemctl`.) **On any other host you do not install it and nothing fires**: the
+three rules are `noDataState: OK`, so a machine that never publishes the series stays silent.
+There is deliberately no auto-detection — a check that stands down quietly when it cannot
+reach the metadata service would make a *broken* EC2 box look exactly like a bare-metal one,
+which is the failure it exists to catch. A host with no EBS volumes has no snapshot age to
+watch, and its durability story is the backup timer above plus whatever its hypervisor
+offers.
+
 ### Verify a restore
 
 Do this when you install the mechanism, before every upgrade, and on a calendar

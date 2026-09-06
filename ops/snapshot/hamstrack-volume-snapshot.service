@@ -1,0 +1,174 @@
+[Unit]
+Description=Hamstrack root-volume snapshot age check (HD-262)
+Documentation=https://github.com/Zherikhov/hamstrack/blob/main/docs/design/root-volume-snapshot-age-proposal.md
+# NO docker.service here, unlike the backup and drift units: this one talks to IMDS and to
+# the EC2 API and to nothing else on the box. It needs the network stack, and nothing more.
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hamstrack-volume-snapshot
+
+# The box's own knobs, and the ONLY supported way to set them for the timer: a shell export
+# reaches a hand run and nothing else, and the timer is what actually publishes the metric.
+# An EnvironmentFile rather than an inline Environment= because THIS FILE IS COMPARED
+# BYTE-FOR-BYTE with the synced copy (hamstrack_config_drift{scope="installed-ops"}):
+# editing the installed unit to add a variable would show as permanent drift — the check
+# reporting your own edit. The leading `-` makes the file optional, so a box that needs
+# nothing sets nothing, which is the normal case here: SNAPSHOT_SOURCE defaults to `ebs` and
+# the volume is resolved from the instance on every run, so there is nothing to configure.
+#
+# Read: SNAPSHOT_SOURCE, SNAPSHOT_REGION, SNAPSHOT_TEXTFILE_DIR — and the two testing seams
+# SNAPSHOT_IMDS_BASE / SNAPSHOT_AWS_BIN, which are not production settings.
+# There is deliberately NO SNAPSHOT_VOLUME_ID: a pinned volume id is the same class of
+# stored fact as the tag whose staleness caused the outage this unit exists to catch.
+EnvironmentFile=-/etc/hamstrack/snapshot.env
+
+# Bounded because it runs hourly beside a production app on a 1909 MB box with no swap.
+# What lives in this cgroup is bash, curl and the AWS CLI — and AWS CLI v2 is a PyInstaller
+# bundle with a 120-180 MB baseline RSS, so these are deliberately NOT the drift unit's
+# 96/128 MB: that ceiling would put the one process that needs memory into continuous
+# reclaim. Exceeding MemoryMax fails the unit, which is loud, contained, and not an outage.
+#
+# THESE TWO NUMBERS ARE A GUESS UNTIL SOMEBODY MEASURES THEM, and the measurement has a trap
+# of its own: `systemctl show -p MemoryPeak` does NOT exist here (the property arrived in
+# systemd 253; Amazon Linux 2023 ships 252, and `show` returns 0 while silently omitting
+# it). Read the cgroup WHILE IT RUNS, the way docs/ops-prod-hardening.md §6.3 step (f)
+# measures the backup unit.
+MemoryHigh=256M
+MemoryMax=384M
+TasksMax=32
+
+# Two Describe calls and three IMDS reads. 120 s is far more than it needs and is there for
+# a wedged API rather than for a slow one: the script publishes its metrics from an EXIT
+# trap and traps SIGTERM like any other exit, so a timeout still leaves a truthful reading
+# rather than yesterday's.
+TimeoutStartSec=120
+
+# Be the first thing to yield — this runs while the product is meant to be serving.
+Nice=10
+CPUWeight=20
+IOWeight=20
+IOSchedulingClass=idle
+
+# UNLIKE THE OTHER TWO OPS UNITS, THIS ONE NEEDS NO DOCKER SOCKET, so the sandbox below is a
+# real reduction in capability rather than only a bound on mistakes. hamstrack-backup.service
+# and hamstrack-config-drift.service both say plainly that their settings cannot reduce an
+# attacker's capability, because anything that can reach the docker socket is root-equivalent
+# by construction. This unit needs no such access: the process may read IMDS, call two
+# read-only EC2 APIs, and write one directory. It holds no credential of its own — the
+# instance role arrives over IMDS — and the two IAM actions it can use are Describe calls
+# that cannot create or delete a snapshot.
+#
+# BUT NEEDING NOTHING IS NOT THE SAME AS REACHING NOTHING, and the difference has to be
+# closed rather than declared. /run/docker.sock is srw-rw---- root:docker and uid 0 is its
+# OWNER, so connect() on it needs no capability and no group membership; ProtectSystem=strict
+# neither hides it nor makes it read-only, because the read-only mount check returns -EROFS
+# only for regular files, directories and symlinks — never for a socket inode. That is the
+# same reason a `:ro` bind-mounted docker.sock still gives a container the full API. AF_UNIX
+# has to stay in RestrictAddressFamilies= (glibc's NSS path opens one), so the socket is
+# taken away BY PATH instead — InaccessiblePaths= below.
+#
+# IT RUNS AS uid 0, AND THAT IS A DECISION RATHER THAN AN OMISSION. `User=` was considered
+# and rejected on ONE cost: the textfile directory. /var/lib/node_exporter/textfile_collector
+# is created root:root 0755 by three separate install steps and written by the backup and
+# drift units as root, so a non-root user here cannot `mv` into it — the publish needs write
+# permission on the DIRECTORY, not on the file. Making it work means a shared group and 0775
+# on a directory two other units own, i.e. a change to the install procedure of all three
+# plus an ownership fact nothing checks. Nothing this script does needs a capability, and
+# both paths it writes are root-owned with owner-write, i.e. plain DAC.
+#
+# WHAT BOUNDS THIS uid 0 IS ProtectSystem=strict AND THE EMPTY BOUNDING SET, doing two
+# different jobs, and NEITHER MAKES IT EQUIVALENT TO A SERVICE USER. The tempting shorthand —
+# "the empty bounding set already removes root's DAC bypass, because that bypass is
+# CAP_DAC_OVERRIDE" — is false: CAP_DAC_OVERRIDE only decides accesses THE OWNER BITS DENY,
+# and uid 0 owns nearly everything under /etc, /usr and /var with owner-write set, so a
+# capability-less uid 0 still reads and writes all of it by ordinary DAC. What actually stops
+# that here is ProtectSystem=strict, which remounts the filesystem read-only and leaves the
+# one ReadWritePaths= directory writable.
+#
+# SO THE RESIDUE IS NAMED RATHER THAN GLOSSED, because capabilities do not gate the kernel's
+# SAME-UID checks at all: signalling other uid-0 processes, PTRACE_MODE_READ against them
+# (which is why /proc/<pid>/environ of the app and of every container — where DB_PASSWORD and
+# JWT_SECRET live — is readable here), and any root-owned socket. InaccessiblePaths= below
+# closes the THIRD of those and only the third. The other two are ACCEPTED, together and for
+# one reason: both are same-uid checks, which no setting on this unit can reach. Same-uid
+# signalling is bounded by what is in the cgroup — bash, curl and the AWS CLI. Same-uid /proc
+# is bounded by nothing here: the ptrace check short-circuits to ALLOW whenever the caller's
+# fsuid matches the target's uid, so no ProtectProc= value keeps this process out of another
+# uid-0 process's /proc (the note on that setting below says why in full). What closes it is
+# the app not running as host uid 0 — HD-286, open — never a line in this file.
+#
+# If the textfile directory ever grows a group of its own, `User=` is the first thing to
+# revisit — that fact is the whole cost the rejection was priced on.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# WHAT THIS BUYS IS OTHER UIDS, AND IT DOES NOT BUY uid 0. `invisible` hides the /proc entries
+# of processes running as a DIFFERENT uid — postgres under `gosu postgres`, node-exporter as
+# `nobody` — because there the same-uid short-circuit does not apply and the empty bounding set
+# then denies CAP_SYS_PTRACE. It does NOT hide other uid-0 processes from this one, and no value
+# of this setting does: hidepid=invisible is enforced through has_pid_permissions() →
+# ptrace_may_access(task, PTRACE_MODE_READ_FSCREDS), and __ptrace_may_access() returns ALLOWED
+# outright when the caller's fsuid/fsgid equal the target's uid/euid/suid and gid/egid/sgid —
+# the ptrace_has_cap() branch is only reached when they differ. `noaccess` and `ptraceable` route
+# through the same check, so neither is an upgrade. Consequence, stated plainly because an
+# earlier version of this comment claimed the opposite: the app's /proc/<pid>/environ, holding
+# JWT_SECRET and DB_PASSWORD, remains readable from this unit for as long as the app runs as
+# host uid 0 — which it does (no USER in the Dockerfile, no user: for app in
+# docker-compose.prod.yml). That is HD-286: a hardening gap rather than a live vulnerability,
+# since reading another root process's environ already requires root on the host, and filed once
+# rather than per unit because one USER change closes this residue for every root-capable unit
+# on the box at once. Revisit this note when it lands — with a non-root app, `invisible` does
+# close what it was once claimed to close.
+# ProcSubset= is deliberately NOT set: `pid` would also hide /proc/meminfo and /proc/cpuinfo,
+# which the PyInstaller-packaged AWS CLI reads, and a sandbox that is too tight does not
+# degrade — it fails the unit. ProtectProc= itself needs
+# systemd 247+ (AL2023 ships 252); an older one logs `Unknown key name` and carries on, so on
+# a Debian 10 or Ubuntu 20.04 box this degrades to a warning and even the other-uid hiding goes
+# away — worth one `journalctl -u` on first start if your distribution is older than that.
+ProtectProc=invisible
+# The socket residue — the one setting on this unit that closes what it names. The leading
+# `-` makes a missing path non-fatal, which is the normal case
+# for the second entry (/var/run is a symlink to /run here) and for any box not running
+# Docker at all. Listed by both names because a distro where /var/run is a real directory
+# would otherwise leave the path open.
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+# curl to a link-local IPv4 address and the AWS CLI to an HTTPS endpoint — nothing else opens
+# a socket. AF_UNIX is IN the list deliberately and is not slack: glibc's NSS path opens one
+# (nscd) during name resolution, and the AWS CLI resolves a hostname on every call.
+# AF_NETLINK is deliberately OUT, and that is a decision rather than an oversight: glibc's
+# __check_pf() opens one for getaddrinfo's AI_ADDRCONFIG, the socket() is refused with EAFNOSUPPORT
+# rather than killing the process (this is RestrictAddressFamilies, not SystemCallFilter), and
+# glibc falls back to assuming both address families are available — which is the correct
+# answer on a box that reaches IMDS over IPv4. Adding it would buy nothing and hand back a
+# family whose kernel-side parsers are a real attack surface. If a host ever turns out to
+# resolve differently for it, add it in a DROP-IN and say which lookup failed.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# @system-service is the documented set for a normal service; SystemCallArchitectures=native
+# is its companion rather than a second idea — without it a filter can be sidestepped through
+# a non-native personality, which is also what LockPersonality above closes.
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+UMask=0022
+# Everything read-only except the one directory this job writes. The path must EXIST before
+# the unit starts or systemd refuses to set up the namespace and the unit fails before the
+# script runs — the install step creates it, and so do the backup and drift installs.
+# /run/lock is /var/lock (the flock file), and always exists.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/node_exporter/textfile_collector /run/lock
+
+# No [Install] section, deliberately — like hamstrack-backup.service and
+# hamstrack-config-drift.service. This unit is started by its .timer; `systemctl enable` on
+# the SERVICE would be a second, boot-time trigger nobody asked for. Enable the timer.

@@ -623,9 +623,13 @@ from an **installed copy** rather than in place, a release ships the new version
 `/opt/hamstrack/ops/` and production keeps running the old one until somebody installs it.
 
 Read that as a **category, not a list**: *a release that changes a file under `ops/` which is
-installed rather than run in place carries a re-install step.* Today that shape covers the
-drift check (`hamstrack-config-drift.sh` and its `.service`/`.timer`) and the backup job; a
-file added tomorrow to either install step belongs here without this paragraph being edited.
+installed rather than run in place carries a re-install step.* Every such file is already
+enumerated by the machine that checks them — `hamstrack_config_drift{scope="installed-ops"}`
+compares every `*.sh`, `*.service` and `*.timer` under `/opt/hamstrack/ops/` with its
+installed copy — so the authoritative list is that scope's own output, and a unit added
+tomorrow belongs here without this paragraph being edited. (It has grown once already: HD-262
+added the root-volume snapshot check beside the drift check and the backup job, and this
+sentence needed no change, which is the property it is written for.)
 
 **Nothing looks wrong afterwards, and one reading actively misleads.** `apply-config.sh` ends
 every deploy by running `$TARGET/ops/drift/hamstrack-config-drift.sh` — the *synced* file — so
