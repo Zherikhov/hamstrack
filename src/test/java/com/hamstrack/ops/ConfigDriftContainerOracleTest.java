@@ -120,8 +120,8 @@ class ConfigDriftContainerOracleTest {
                 answer this with a list of ignorable verbs: `Waiting`/`Healthy` today is one
                 Compose release from being the wrong list, and a wrong allow-list is silent.
 
-              * TWO COMPOSE GENERATIONS, TWO LINE FORMATS, ONE PARSE. v5.1.x prints
-                ` Container p-alpha-1 Running`; v2.27.1 prints
+              * TWO COMPOSE GENERATIONS, TWO LINE FORMATS, ONE RULE -- WRITTEN TWICE. v5.1.x
+                prints ` Container p-alpha-1 Running`; v2.27.1 prints
                 ` DRY-RUN MODE -  Container p-alpha-1  Running` -- measured on the same project on
                 the same day. So the word `Container` is LOCATED in the line and the two fields
                 after it are taken, never `$1`. That is what CI's failure was: the runner ships
@@ -130,6 +130,13 @@ class ConfigDriftContainerOracleTest {
                 Production is v5.1.2, so it was invisible there. The widening is bounded to a
                 field exactly equal to `Container`; the orphan warning ("Found orphan containers",
                 lower-case and plural) is read separately and is byte-identical on both.
+                THE RULE HAS TWO IMPLEMENTATIONS -- the awk in check_containers and
+                verbsByContainer in this class -- and they drifted INSIDE the single commit that
+                created the pair: the script was widened, the Java copy was left positional, and
+                the probe built to prevent a misdiagnosis produced one, blaming a Compose whose
+                plan it was quoting. Edit neither alone; the pair is sealed against one fixture by
+                theTwoImplementationsOfThePlanParseAgreeLineForLine, which is what a second copy
+                is allowed to exist on.
 
               * "A CLEAN TREE IS SILENT" IS A PROPERTY OF THE SCRIPT **AND** OF THE COMPOSE IT RAN
                 AGAINST, so the environment's capability is established before the script is
@@ -621,6 +628,198 @@ class ConfigDriftContainerOracleTest {
         assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
     }
 
+    // --- the two copies of one parse ---------------------------------------------------
+
+    /**
+     * The plan-line fixture both parses are driven with. Every line here has been MEASURED off a
+     * real Compose (v2.27.1/v2.38.2 print the {@code DRY-RUN MODE - } prefix, v5.1.0/v5.1.2 do
+     * not); the verbs are chosen so the script is forced to SAY what it read, which is the only
+     * way its parse is observable from outside.
+     *
+     * <p>Trailing spaces and the doubled space after the v2 prefix are real and are kept: they
+     * are the reason both readings split on whitespace RUNS rather than counting characters.
+     */
+    private static final String PARSE_SEAL_PLAN = String.join("\n",
+            // --- Compose v2: the generation whose prefix broke the Java copy --------------
+            // `alpha` carries no `Running`, so the script must print its verb set back.
+            " DRY-RUN MODE -  Container alpha  Recreate ",
+            " DRY-RUN MODE -  Container alpha  Recreated ",
+            // `delta` is a clean health dependency: three lines, `Running` among them, and the
+            // script is silent about it by design.
+            " DRY-RUN MODE -  Container delta  Running ",
+            " DRY-RUN MODE -  Container delta  Waiting ",
+            " DRY-RUN MODE -  Container delta  Healthy ",
+            // --- Compose v5: the generation the developer's machine and production run -----
+            " Container beta Starting",
+            " Container beta Started",
+            " Container epsilon Running",
+            // --- one container named by BOTH shapes, so neither parse may key off a prefix
+            //     it saw on some earlier line of the same plan ------------------------------
+            " DRY-RUN MODE -  Container gamma  Recreate ",
+            " Container gamma Waiting",
+            // --- lines both parses must DISCARD -------------------------------------------
+            // `netname` is also a declared service below, so a parse that stopped filtering on
+            // the object type would attribute `Created` to its container instead of reporting
+            // that the plan named it nothing — visible on the script side as well as here.
+            " Network netname Created",
+            " Volume some-vol Created",
+            // Truncated: `Container` with a name and no verb. Discarded by awk's `i <= NF - 2`
+            // and by the Java bound that mirrors it.
+            " Container truncated",
+            // Compose's own prose about containers: lower-case and plural, read separately by a
+            // grep, and never a plan line.
+            "level=warning msg=\"Found orphan containers ([parse-seal-ghost-1]) for this project\"",
+            "");
+
+    /**
+     * <strong>The plan parse exists twice — as {@code awk} inside {@code check_containers} and as
+     * {@link #verbsByContainer} here — and the two drifted inside the single commit that created
+     * the pair.</strong> The script was taught to LOCATE the word {@code Container} (Compose v2
+     * prefixes every progress line with {@code DRY-RUN MODE - }); the Java copy was left reading
+     * {@code $1}, while its javadoc kept claiming the two agreed. On CI, where Compose is v2, the
+     * copy returned an empty map for a plan that was entirely readable — and the component it
+     * broke was {@link #requireAReadableOracle}, the probe added so that a blind Compose would not
+     * be misdiagnosed as a broken parse. A guard against a misdiagnosis produced one, on its own
+     * duplicate of the rule it was guarding. About as fast as a mirror can rot.
+     *
+     * <p><strong>So the duplication is sealed rather than trusted.</strong> One fixture goes
+     * through both implementations and the answers must match. A reviewer cannot be the mechanism
+     * here: the divergence above survived review precisely because each half was correct on its
+     * own, and the only environment that could tell them apart (a v2 Compose) is one nobody
+     * developing this runs.
+     *
+     * <p><strong>Why two copies at all, rather than one.</strong> Three ways out were on the
+     * table. <em>Delete the Java copy and express the probe through the script's output</em>: the
+     * script is SILENT about a container whose plan it is happy with, so its output cannot say
+     * what Compose printed for a healthy container — which is the exact question the probe asks,
+     * and it also needs the raw plan for its failure message. <em>Give the script a
+     * {@code --print-plan-verbs} hook and call that</em>: this script's {@code $1} is the target
+     * DIRECTORY ({@code TARGET="${1:-${HAMSTRACK_DIR:-/opt/hamstrack}}"}), so a flag there is a
+     * new argument-shape in a root-run systemd-timer monitor, added for a test's benefit, on a
+     * path where a mis-parse points the check at the wrong tree. <em>Seal the pair</em> costs one
+     * fixture and no production surface, and is what this is. If the hook is ever wanted anyway,
+     * it replaces this test rather than joining it.
+     *
+     * <p>The script's parse is observed through the sentences it logs, which is a dependency on
+     * its MESSAGE format and not a third copy of its LINE format: {@code compose plans '…' for
+     * container <name>} when a container is not named {@code Running}, {@code planned nothing for
+     * <svc>} when the plan named it at all. Those sentences are what an operator reads at 3 a.m.
+     * and several other tests here already assert them.
+     */
+    @Test
+    void theTwoImplementationsOfThePlanParseAgreeLineForLine() throws Exception {
+        assumeBash();
+        var failures = new ArrayList<String>();
+
+        var services = List.of("alpha", "beta", "gamma", "delta", "epsilon", "netname");
+        var run = runStubbed("parse-seal", Map.of(
+                "STUB_SERVICES", String.join(" ", services),
+                "STUB_PLAN", PARSE_SEAL_PLAN));
+        var mine = verbsByContainer(PARSE_SEAL_PLAN);
+        var script = verbSetsQuotedByTheScript(run.result().output());
+
+        // (1) The containers the script is FORCED to describe, because none of them is named
+        //     `Running`: exact set equality, which is the strongest comparison its output
+        //     permits. A positional parse on either side lands here — as an empty set on the
+        //     script's side (`planned nothing`) or a missing key on this side.
+        for (String name : List.of("alpha", "beta", "gamma")) {
+            var here = sortedDistinct(mine.getOrDefault(name, List.of()));
+            var there = script.getOrDefault(name, List.of());
+            expect(failures, "the two parses read the same verbs for " + name
+                            + " — this test's copy says " + here + ", the script says " + there,
+                    !here.isEmpty() && here.equals(there), run.result());
+        }
+
+        // (2) The containers the script says NOTHING about, which is its way of reporting
+        //     `Running`. Silence is only readable as agreement if this copy also found
+        //     `Running` there — and one of the two shapes here is the v2 one that was
+        //     discarded, so a regression cannot hide in the half the script keeps quiet about.
+        for (String name : List.of("delta", "epsilon")) {
+            expect(failures, "the script read `Running` for " + name + " and so said nothing "
+                            + "about it", !run.result().output().contains("act on " + name)
+                            && !run.result().output().contains("planned nothing for " + name),
+                    run.result());
+            expect(failures, "…and this test's copy read `Running` for " + name + " too, rather "
+                            + "than " + mine.getOrDefault(name, List.of()),
+                    mine.getOrDefault(name, List.of()).contains("Running"), run.result());
+        }
+
+        // (3) The lines that are not plan lines. `netname` is declared as a service AND named by
+        //     a ` Network … Created` line, so both sides are checked: the script must report that
+        //     the plan named its container nothing, and this copy must hold no key for it.
+        expect(failures, "the script attributed the ` Network netname Created` line to no "
+                        + "container — a plan line is a `Container` line",
+                run.result().output().contains("planned nothing for netname"), run.result());
+        expect(failures, "…and neither did this test's copy, which also invented nothing out of "
+                        + "the Volume line, the truncated line or the orphan warning (it read: "
+                        + sortedDistinct(List.copyOf(mine.keySet())) + ")",
+                sortedDistinct(List.copyOf(mine.keySet()))
+                        .equals(List.of("alpha", "beta", "delta", "epsilon", "gamma")), run.result());
+
+        // (4) The control: the fixture really did reach the script's parse. Without this the
+        //     three rows above pass on a run where the stub never delivered a plan at all, and
+        //     "agree" would mean "agree about nothing".
+        expect(failures, "the fixture reached the script — it quoted verbs for the containers "
+                        + "that carry none of `Running`", script.keySet().containsAll(
+                        List.of("alpha", "beta", "gamma")), run.result());
+
+        assertThat(failures).withFailMessage(CHECKLIST + """
+
+                THE PLAN PARSE EXISTS TWICE AND THE TWO COPIES DISAGREE. One fixture was read by \
+                the awk in check_containers (ops/drift/hamstrack-config-drift.sh) and by \
+                ConfigDriftContainerOracleTest.verbsByContainer, and they returned different \
+                things.
+
+                Fix BOTH, not the one this message points at. They drifted inside a single commit \
+                once already -- the script learned to LOCATE the word `Container` (Compose v2 \
+                prefixes every progress line with `DRY-RUN MODE - `) and the Java copy kept reading \
+                `$1`, so on CI's v2 Compose the copy discarded a plan the script read perfectly, \
+                and requireAReadableOracle blamed the environment while printing the plan that \
+                proved it innocent.
+
+                The rule, in both languages: split the line on whitespace RUNS, find the first \
+                field exactly equal to `Container`, take the two fields after it as name and verb, \
+                stop. A line with no verb after the name is not a plan line, and neither is a \
+                Network/Volume/Image line or Compose's lower-case "Found orphan containers" \
+                warning (read separately by a grep).
+
+                The fixture:
+                %s
+
+                What the script's own messages reported: %s
+                What ConfigDriftContainerOracleTest.verbsByContainer reported: %s
+
+                The script's whole output:
+                %s
+                Failed: %s""".formatted(PARSE_SEAL_PLAN, script, mine, run.result().output().strip(),
+                failures))
+                .isEmpty();
+    }
+
+    /**
+     * The verb sets the SCRIPT quoted, taken out of the sentence it logs for a container it is
+     * not happy with: {@code compose plans 'Recreate, Recreated' for container alpha}. Sorted and
+     * de-duplicated at the source ({@code LC_ALL=C sort -u}), which is why the comparison side is
+     * normalised the same way.
+     */
+    private static Map<String, List<String>> verbSetsQuotedByTheScript(String output) {
+        var quoted = new LinkedHashMap<String, List<String>>();
+        var sentence = Pattern.compile("compose plans '([^']*)' for container (\\S+)");
+        var m = sentence.matcher(output);
+        while (m.find()) {
+            quoted.put(m.group(2), List.of(m.group(1).split(",\\s*")));
+        }
+        return quoted;
+    }
+
+    /**
+     * ASCII verbs and container names only, so JDK ordering and the script's {@code LC_ALL=C
+     * sort -u} are the same order.
+     */
+    private static List<String> sortedDistinct(List<String> values) {
+        return values.stream().distinct().sorted().toList();
+    }
+
     // --- the monitor stays read-only -------------------------------------------------
 
     /**
@@ -987,18 +1186,45 @@ class ConfigDriftContainerOracleTest {
     }
 
     /**
-     * {@code name -> every verb Compose printed for it}, the same reading the script does:
-     * {@code Container} lines only, whitespace-split, {@code $2} is the name and {@code $3} the
-     * verb. Deliberately keeps DUPLICATES and ORDER out of the question — a container gets
-     * several lines, and which of them arrives first is not something either the script or this
-     * test is allowed to depend on.
+     * {@code name -> every verb Compose printed for it} — a MIRROR of the {@code awk} in
+     * {@code check_containers}: the word {@code Container} is LOCATED in the whitespace-split
+     * line and the two fields AFTER it are taken, never {@code $1} with {@code $2}/{@code $3},
+     * because Compose v2 prefixes every progress line with {@code DRY-RUN MODE - }. Deliberately
+     * keeps DUPLICATES and ORDER out of the question — a container gets several lines, and which
+     * of them arrives first is not something either the script or this test is allowed to depend
+     * on.
+     *
+     * <p><strong>This is a second implementation of one rule in a second language, and the two
+     * drifted inside the single commit that created the pair.</strong> The script was widened to
+     * locate the field; this copy was left positional and its javadoc went on claiming it was
+     * "the same reading the script does". On CI's Compose v2 it therefore discarded every line of
+     * a perfectly readable plan, and {@link #requireAReadableOracle} — the probe added so that a
+     * blind Compose would not be misdiagnosed as a broken parse — read the empty map and
+     * misdiagnosed a readable Compose as blind, quoting in its own failure message the plan that
+     * refutes it.
+     *
+     * <p>It is KEPT rather than re-expressed through the script's output, because the probe needs
+     * two things that output cannot give it: the raw plan, and a per-container verb list to print.
+     * The script says NOTHING about a container it is happy with, so "what did Compose say about
+     * this container" is a question only a parse of the plan can answer — and the probe's whole
+     * job is to answer it for a container the script is, or is not, happy with. What makes the
+     * copy safe is not care (care is what failed) but
+     * {@link #theTwoImplementationsOfThePlanParseAgreeLineForLine}, which drives ONE fixture
+     * through both and fails if they disagree. Neither this method nor the awk may be edited
+     * without it.
      */
     private static Map<String, List<String>> verbsByContainer(String plan) {
         var verbs = new LinkedHashMap<String, List<String>>();
         for (String line : plan.replace("\r", "").lines().toList()) {
             var f = line.strip().split("\\s+");
-            if (f.length >= 3 && f[0].equals("Container")) {
-                verbs.computeIfAbsent(f[1], k -> new ArrayList<>()).add(f[2]);
+            // awk: `for (i = 1; i <= NF - 2; i++) if ($i == "Container") { …; break }`. The bound
+            // is what discards a truncated ` Container <name>` line on both sides; the break is
+            // what makes the FIRST occurrence win on both.
+            for (int i = 0; i + 2 < f.length; i++) {
+                if (f[i].equals("Container")) {
+                    verbs.computeIfAbsent(f[i + 1], k -> new ArrayList<>()).add(f[i + 2]);
+                    break;
+                }
             }
         }
         return verbs;
