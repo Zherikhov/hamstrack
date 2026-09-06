@@ -581,7 +581,7 @@ groups:
       # made this rule quietest during a real incident. The two are told apart by the route tag
       # (the mapped pattern, versus "unmapped" when no handler had been matched yet), not by
       # being present or absent.
-      - uid: hamstrack-db-connection-acquisition-failing
+      - uid: hamstrack-db-acquisition-failing
         title: DatabaseConnectionAcquisitionFailing
         condition: B
         for: 5m
@@ -832,6 +832,56 @@ groups:
               refId: B
               conditions:
                 - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # The gap the rule above cannot see, and the reason the timestamp metric exists at all.
+      # apply-config.sh runs the drift check at the end of EVERY deploy, so the four
+      # hamstrack_config_drift series exist and read 0 on a box where the hourly timer was
+      # never installed — fresh-looking, and only ever as fresh as the last deploy. ConfigDrift
+      # is therefore silent about the one state that makes it meaningless: not running.
+      #
+      # That gap was written down where this rule now sits, in the comment above ConfigDrift,
+      # and nothing was ever pointed at the metric it named. Production proved it: on
+      # 2026-09-06 /usr/local/bin/hamstrack-config-drift and its unit were absent, the timer
+      # had never run, and every drift series was publishing a confident 0 from deploy time.
+      #
+      # 3h, not 2: the timer is hourly, and one missed run on a busy box is not an incident.
+      # noDataState: OK for the same reason as the pair above — an install that runs this
+      # stack without the drift check should stay dormant rather than page. That is also this
+      # rule's own blind spot, and it is deliberate: it can say the check has STOPPED, never
+      # that it was never installed on a box that has also never deployed. The install step is
+      # docs/ops-prod-hardening.md §6.3, and installed-ops cannot report its own absence —
+      # a check that is not installed cannot compare anything, including itself.
+      - uid: hamstrack-config-check-stale
+        title: ConfigDriftCheckStale
+        condition: B
+        for: 1h
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The configuration drift check has not run in over three hours, so every hamstrack_config_drift series is stale and ConfigDrift cannot fire — the box is unwatched for drift, not free of it. Usual cause: the hourly timer was never installed (a deploy places /opt/hamstrack/ops and installs nothing, on purpose), so the only thing publishing these series is the deploy itself. Install it: docs/ops-prod-hardening.md §6.3, then systemctl enable --now hamstrack-config-drift.timer'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'time() - hamstrack_config_check_timestamp_seconds'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [10800] }
                   operator: { type: and }
                   query: { params: [] }
                   reducer: { type: last, params: [] }
@@ -1542,7 +1592,7 @@ groups:
       # noDataState/execErrState stay OK: what this watches is a POSITIVE RATE on a counter
       # Micrometer registers at boot, so an absent series means the app is not being scraped
       # at all - AppDown's job, and this would only arrive as a second copy of that page.
-      - uid: hamstrack-expensive-read-surface-saturated
+      - uid: hamstrack-expensive-read-saturated
         title: ExpensiveReadSurfaceSaturated
         condition: B
         for: 15m
@@ -1604,7 +1654,7 @@ groups:
       # noDataState/execErrState stay OK for the same reason as the rule above: this watches
       # a positive rate on a counter Micrometer registers at boot, so an absent series means
       # nothing is being scraped, which is AppDown's job.
-      - uid: hamstrack-expensive-read-permit-force-released
+      - uid: hamstrack-expensive-read-permit-forced
         title: ExpensiveReadPermitForceReleased
         condition: B
         for: 15m

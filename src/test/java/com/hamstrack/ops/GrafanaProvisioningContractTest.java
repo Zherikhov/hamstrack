@@ -83,6 +83,20 @@ class GrafanaProvisioningContractTest {
     /** A floor on the extraction: fewer rules than the tree has always carried means it stopped seeing them. */
     private static final int MIN_ALERT_RULES = 15;
 
+    /**
+     * Grafana's own bound on a provisioned uid, enforced when it <em>stores</em> the rule. Not a
+     * style rule and not a warning: a longer uid makes the provisioner exit 1, and because the
+     * directory is all-or-nothing that single value is what takes {@code AppDown} and
+     * {@code PostgresDown} with it.
+     */
+    private static final int UID_MAX = 40;
+
+    /**
+     * A floor on the uid scan: the descent still finds uids to measure. Without it "no uid is too
+     * long" is perfectly true of an empty set.
+     */
+    private static final int MIN_UIDS = 15;
+
     /** A floor on the cross-check: each rule contributes its {@code condition} and its expression inputs. */
     private static final int MIN_REFERENCES = 30;
 
@@ -125,6 +139,12 @@ class GrafanaProvisioningContractTest {
               * uid unique - the uid is a rule's identity across restarts and the key everything else \
             references (ops/drift/*, docs/ops-prod-hardening.md, and ApplyConfigPinGuardTest, which \
             names DeployImagePinned). Two rules sharing a uid are one rule.
+
+              * uid at most 40 characters - Grafana's bound, enforced when it STORES the rule. An \
+            over-long uid is not a complaint about one alert: the provisioner exits 1 and the \
+            instance comes up watching nothing. It is also LATENT - provisioning is re-read only on \
+            restart, so a bad value sits inert until something restarts Grafana, and the deploy that \
+            reveals it is not the one that introduced it.
 
               * title unique - the title is what an operator reads in an email and searches for in a \
             runbook, and policies.yml groups notifications BY alertname. Two rules sharing a title \
@@ -188,6 +208,28 @@ class GrafanaProvisioningContractTest {
 
         assertThat(offenders)
                 .withFailMessage(CHECKLIST + "\nRules that are not uniquely identified: " + offenders)
+                .isEmpty();
+    }
+
+    /**
+     * <strong>The bound Grafana enforces, which the seal above walks straight past.</strong> The
+     * uniqueness check reads every uid in this tree and never asks whether Grafana will accept
+     * one, so three over-long uids provisioned green here and crash-looped the instance (HD-182
+     * contributed two, HD-233 a third). Phrased about the category - every uid this tree declares,
+     * wherever it declares it - because a check naming the three that were wrong is already stale
+     * on the day a fourth is written.
+     */
+    @Test
+    void everyUidIsShortEnoughForGrafanaToStore() {
+        var offenders = new ArrayList<String>();
+        for (Uid uid : uids()) {
+            if (uid.value().length() > UID_MAX) {
+                offenders.add(uid.where() + ": uid '" + uid.value() + "' is " + uid.value().length()
+                        + " characters, past Grafana's limit of " + UID_MAX);
+            }
+        }
+        assertThat(offenders)
+                .withFailMessage(CHECKLIST + "\nUids Grafana refuses to store: " + offenders)
                 .isEmpty();
     }
 
@@ -740,6 +782,51 @@ class GrafanaProvisioningContractTest {
             return found;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * Every uid the provisioning tree declares, found by descending rather than by knowing where
+     * uids live: alert rules carry one, contact points carry one, and so will whatever is
+     * provisioned next.
+     */
+    private static List<Uid> uids() {
+        var found = new ArrayList<Uid>();
+        for (Path file : provisionedFiles()) {
+            collectUids(parse(file), file, "", found);
+        }
+        assertThat(found)
+                .withFailMessage("Only %d uid(s) were found under %s - the descent has stopped "
+                        + "seeing them, and every uid assertion in this class would pass on an "
+                        + "empty set", found.size(), PROVISIONING)
+                .hasSizeGreaterThanOrEqualTo(MIN_UIDS);
+        return found;
+    }
+
+    private static void collectUids(Object node, Path file, String path, List<Uid> into) {
+        if (node instanceof Map<?, ?> mapping) {
+            for (Map.Entry<?, ?> entry : mapping.entrySet()) {
+                String key = String.valueOf(entry.getKey());
+                String child = path.isEmpty() ? key : path + "." + key;
+                if ("uid".equals(key)) {
+                    String value = text(entry.getValue());
+                    if (value != null) {
+                        into.add(new Uid(file, child, value));
+                    }
+                } else {
+                    collectUids(entry.getValue(), file, child, into);
+                }
+            }
+        } else if (node instanceof List<?> items) {
+            for (int i = 0; i < items.size(); i++) {
+                collectUids(items.get(i), file, path + "[" + i + "]", into);
+            }
+        }
+    }
+
+    private record Uid(Path file, String path, String value) {
+        String where() {
+            return file + " (" + path + ")";
         }
     }
 

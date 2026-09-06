@@ -643,7 +643,7 @@ installed_path_for() { # $1 = path relative to the target, under ops/
 }
 
 check_installed_ops() {
-  local file installed stale=0
+  local file installed stale=0 present=0
   if [ ! -d "$TARGET/ops" ]; then
     log "installed-ops: $TARGET/ops is absent — nothing has been synced here yet"
     DRIFT_INSTALLED=1
@@ -653,13 +653,27 @@ check_installed_ops() {
   while IFS= read -r file; do
     installed="$(installed_path_for "$file")" || continue
     [ -f "$installed" ] || continue
+    present=$((present + 1))
     if ! cmp -s "$file" "$installed"; then
       log "installed-ops: $installed differs from $file — re-run the install step, the sync cannot do it"
       stale=1
     fi
   done < <(find "$TARGET/ops" -type f \( -name '*.sh' -o -name '*.service' -o -name '*.timer' \) -print | LC_ALL=C sort)
   [ "$stale" = 0 ] || DRIFT_INSTALLED=1
-  [ "$DRIFT_INSTALLED" = 0 ] && log "installed-ops: every installed copy matches the synced one"
+  # "Nothing is installed" and "everything installed is current" are the same 0 and must not
+  # read as the same sentence. Production was found publishing the reassuring one on
+  # 2026-09-06 with the drift timer never installed at all - for how long is not knowable
+  # from the box, which is itself the point - and that is the vacuous-truth
+  # shape this repository keeps paying for: an all-clear over an empty set. This scope
+  # deliberately still reports 0 there — absent is not drift, and a box that installed no
+  # backup timer owes nothing — so the COUNT is what carries the difference, and the
+  # staleness of hamstrack_config_check_timestamp_seconds is what actually catches a drift
+  # check that is not running (alert ConfigDriftCheckStale).
+  if [ "$present" = 0 ]; then
+    log "installed-ops: nothing is installed under $BIN_DIR or $UNIT_DIR — this scope compared no copies, and a 0 here means it found nothing to compare, NOT that the box is current. A drift check that is not installed cannot report its own absence: ConfigDriftCheckStale is what does"
+  elif [ "$DRIFT_INSTALLED" = 0 ]; then
+    log "installed-ops: all $present installed copies match the synced one"
+  fi
   return 0
 }
 
