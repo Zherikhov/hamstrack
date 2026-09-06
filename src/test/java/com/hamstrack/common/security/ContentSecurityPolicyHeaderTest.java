@@ -23,6 +23,16 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  * <p>It also pins the <strong>header name</strong>. {@code Content-Security-Policy} is one word
  * shorter than the name this ticket ships, enforces rather than reports, and is the single way this
  * change could break the product — so its absence is asserted, not assumed.
+ *
+ * <h2>What this class CANNOT see, and where that is covered instead</h2>
+ * Every assertion here reads a response that never left the filter chain, so what it proves is that
+ * the chain <em>sets</em> the header — never that a client <em>receives</em> it (HD-266).
+ * {@code SpaController} answers {@code /} with {@code "forward:/index.html"} and MockMvc does not
+ * perform a forward: {@code MockRequestDispatcher} records {@code forwardedUrl} and returns. So
+ * {@code get("/")} below never reaches the resource handler, never leaves the chain, and would stay
+ * green while every page a user opens shipped bare. That half is sealed over a real servlet
+ * container by {@code SecurityHeadersReachTheBrowserTest}, and it has to be: the failure is not
+ * expressible in this harness, so no amount of care in this file substitutes for it.
  */
 @SpringBootTest(properties = {
         "app.rate-limit.enabled=false",
@@ -58,8 +68,10 @@ class ContentSecurityPolicyHeaderTest {
      */
     @Test
     void everyKindOfResponseCarriesTheExactPolicy() throws Exception {
-        assertPolicyOn("the SPA document — served by Spring's resource handler, not by Caddy, "
-                       + "which is the whole reason the policy can live in the application",
+        // NOT the SPA document: this request stops at the forward MockMvc declines to perform, so
+        // what it covers is the chain's decision on a dotless path, not the bytes index.html goes
+        // out with. SecurityHeadersReachTheBrowserTest covers those, over a real container.
+        assertPolicyOn("a dotless SPA path, as decided by the chain before the forward",
                 mockMvc.perform(get("/")).andReturn().getResponse().getHeader(REPORT_ONLY));
         assertPolicyOn("an unauthenticated 200",
                 mockMvc.perform(get("/api/meta")).andReturn().getResponse().getHeader(REPORT_ONLY));
