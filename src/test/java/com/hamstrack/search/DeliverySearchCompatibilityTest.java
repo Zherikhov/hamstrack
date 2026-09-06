@@ -273,11 +273,13 @@ class DeliverySearchCompatibilityTest extends SprintTestBase {
      * {@link #aTenantsOwnCustomFieldKeyedStoryPointsBeatsTheAlias()} is this test's twin and
      * neither covers the other.
      *
-     * <p>{@code fix_version} is <em>creatable</em> as a custom field key today
-     * ({@code AdminFieldService.requireUnreservedKey} consults only the registry, and an alias
-     * deliberately reserves nothing), so this is a state a real workspace can be in — and the
-     * failure mode of getting it wrong is silent: the query keeps returning 200 and rows, read
-     * out of version links the tenant never made.
+     * <p><strong>A workspace can really be in this state</strong>, which is what makes the
+     * precedence load-bearing rather than theoretical. An alias reserves nothing at resolution
+     * time, so a field already keyed {@code fix_version} — written before HD-275 refused the key
+     * at the admin doors, or by a migration, a seeder or direct SQL, none of which that refusal
+     * reaches — resolves to itself. The field here is inserted through the repository for exactly
+     * that reason. The failure mode of getting the order wrong is silent: the query keeps
+     * returning 200 and rows, read out of version links the tenant never made.
      *
      * <p>The sharpest probe here is a <em>status</em> rather than a row set: a version name
      * nothing carries is a 422 when the alias fires and an ordinary empty 200 when the tenant's

@@ -133,14 +133,37 @@ SELECT id, key, name, scope_workspace_id, scope_project_id
 
 Archived defs are already out of resolution and are harmless. A row with
 `scope_workspace_id IS NULL` is a **global** def: the blast radius is every
-workspace on the instance at once, not one tenant. Nobody's stored filter text
-is ever rewritten, and a field's key is immutable, so the honest remedy for an
-affected tenant is a new field under a different key.
+workspace on the instance at once, not one tenant.
 
-`AdminFieldService` refuses to *create* a field under a claimed key (409, checked
-after slugification — a field called "Project" auto-slugs to `project`). That is
-the whole of its reach: **it covers fields created through the admin service, and
-nothing that reaches `field_defs` by any other route** — not rows that already
+Nobody's stored filter text is ever rewritten. The remedy an affected tenant has
+is a **key rename** (HD-275 / ADR-0036): a taxonomy admin at the field's own scope
+`PATCH`es `…/admin/fields/{id}` with a new `key`, and the field becomes searchable
+again under that name — no value moves, no field-set placement is lost, because a
+field's identity is its UUID. The rename is permitted *only* while a registry name
+shadows the key, which is exactly the population in which it cannot change what any
+saved filter means: the old key resolved to the built-in field before the rename and
+still does after it. A **global** shadowed def can only be renamed by an instance
+admin and changes the key in every workspace at once — treat that as a breaking
+change and put it in the release notes.
+
+The tenant still has to update any saved filter that mentions the old key; nothing
+rewrites one for them.
+
+Two things now report a collision that the release notes should quote:
+
+* `RegisteredSearchNameLedgerTest` fails the build the moment `FieldRegistry`
+  claims a name its ledger does not record, and its failure message is this
+  checklist. That is the only guard that acts *before* the release ships.
+* Every instance names its own live collisions at boot, one WARN per row, prefixed
+  `shadowed-field-def:` — and `GET …/search/schema` reports them per caller in
+  `shadowedFields`, so an affected tenant is no longer told only by an absence.
+  Both derive their watch set from `FieldRegistry` itself, so a newly registered
+  name is covered with no second edit.
+
+`AdminFieldService` refuses a claimed key on both doors that *mint* one — create,
+and a rename's target (409, checked after slugification: a field called "Project"
+auto-slugs to `project`). That is the whole of its reach: **it covers fields created
+through the admin service, and nothing that reaches `field_defs` by any other route** — not rows that already
 exist, and not a row written by a migration, a seeder, or any future path that
 inserts without going through the service. Our own migrations are such a route:
 `V3__system_fields.sql` seeds `labels`, `sprint` and `components`, all three of
@@ -149,6 +172,42 @@ respectively archive each placeholder once the real feature superseded it, and
 archived defs are out of resolution — that is an outcome of those migrations, not
 something the create-time guard could have produced. So the query above is the
 check; the 409 narrows how often it finds anything.
+
+Ready to paste. It carries no lead sentence about a refused boot, because there
+is none to claim: the scan catches `Exception` and degrades to a single WARN, so
+this change cannot stop a container starting.
+
+> **Your instance now names, once per boot, every custom field whose key a built-in
+> search name has taken.** One `WARN` per field, each carrying the stable prefix
+> `shadowed-field-def:`, the field's id, key, name and scope, and the built-in name
+> that took it — plus a summary line. **A healthy instance prints nothing here**, so
+> an upgrade that adds no such line has already told you the answer; the three
+> archived placeholders Hamstrack seeds itself (`labels`, `sprint`, `components`)
+> are deliberately not counted.
+>
+> **What the line is telling you is not new, only newly visible.** A registered
+> search name outranks any workspace's custom field of the same key, in every
+> workspace, permanently. A field in that position keeps working everywhere else in
+> the product — it renders on issues, sits in field sets, comes back from the
+> project-config endpoint — while `key = "…"` in a query answers from the built-in
+> field instead and `/search/schema` omits it. Nothing errors, which is why it could
+> go unnoticed for releases.
+>
+> **The remedy is now a rename, not a rebuild.** A taxonomy admin at the field's own
+> scope changes its key from the admin console (**Settings → Fields**), and the field
+> is searchable again under the new name. No value moves and no field-set placement
+> is lost — a field is identified by its UUID, not by its key. The rename is offered
+> **only** while a built-in name shadows the key, which is exactly the population in
+> which it cannot change what any stored query means. A **global** field is an
+> instance administrator's to rename and changes the key in every workspace at once,
+> so treat that one as a breaking change. Renaming nothing is a valid choice: the
+> field goes on working outside search, and the `WARN` returns at every boot to keep
+> the choice visible.
+>
+> **Saved filters are never rewritten.** Anyone whose stored query mentions the old
+> key edits it themselves; until they do it keeps answering from the built-in field,
+> exactly as it did before the rename. Details:
+> [Shadowed custom field keys from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#shadowed-custom-field-keys-from-0180).
 
 ## Releases that change how a stored value is derived
 

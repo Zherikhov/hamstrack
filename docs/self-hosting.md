@@ -47,6 +47,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [Free text is bounded from 0.18.0](#free-text-is-bounded-from-0180)
   - [Attachment storage is capped per workspace from 0.18.0](#attachment-storage-is-capped-per-workspace-from-0180)
   - [Expensive reads are bounded by concurrency from 0.18.0](#expensive-reads-are-bounded-by-concurrency-from-0180)
+  - [Shadowed custom field keys from 0.18.0](#shadowed-custom-field-keys-from-0180)
 - [Backups](#backups)
   - [By hand](#by-hand)
   - [On a schedule](#on-a-schedule)
@@ -1500,6 +1501,16 @@ planner regression** — the planner stops believing in cache the machine really
 towards sequential scans on large tables. There is no error; things simply get slower, the
 same shape as the 0.17.0 heap cut above. One line in `.env` restores it.
 
+**And the same release starts naming a silence you may have been living with, which needs
+nothing before you pull:**
+[Shadowed custom field keys from 0.18.0](#shadowed-custom-field-keys-from-0180).
+If one of your workspaces ever created a custom field whose key a later release claimed as a
+search name — `labels`, `sprint`, `components` and the rest of the built-in vocabulary — that
+field has been unreachable from search ever since, answering nothing and erroring nothing. From
+0.18.0 the instance prints one WARN per such field at every boot, and the affected tenant can
+rename the key from the admin console instead of rebuilding the field. **A healthy instance
+prints nothing here**, so an upgrade that adds no line to your log has told you the answer.
+
 **Also new in 0.17.0, and this one wants a check before you pull rather than after:**
 [Notifications are scoped to a workspace](#notifications-are-scoped-to-a-workspace-from-0170).
 The upgrade attributes every existing notification to a workspace and deletes any it cannot
@@ -2783,6 +2794,66 @@ so if you do it, watch `hamstrack_expensive_read_in_flight` and Hikari's `pendin
 alert with `max()`, never `sum()`. The rule `ExpensiveReadSurfaceSaturated` fires on a sustained
 rate of `EXPENSIVE_SURFACE_BUSY` refusals, which means the instance is under-provisioned for its
 traffic rather than that anything is broken.
+
+### Shadowed custom field keys from 0.18.0
+
+**What you will see.** From 0.18.0 your instance names, once per boot, every custom field
+definition whose key a built-in search name has taken:
+
+```
+WARN  shadowed-field-def: custom field 'Team labels' (key 'labels', id 0192…, scope workspace 0192…)
+      is shadowed by the built-in search field 'label'. HQL `labels = …` answers from the built-in
+      field, not from this one, and it is not offered in /search/schema. A taxonomy admin at that
+      scope can rename its key (PATCH …/fields/0192…); see
+      docs/self-hosting.md#shadowed-custom-field-keys-from-0180.
+```
+
+plus one summary line. **A healthy instance prints nothing here** — the three archived
+placeholders Hamstrack seeds itself (`labels`, `sprint`, `components`) are deliberately not
+counted. If you see no such line, there is nothing to do.
+
+**What it means.** Hamstrack's search language reserves its field names: a registered name
+outranks any workspace's custom field of the same key, in every workspace, permanently. When a
+release registers a name that one of your tenants already used as a custom field key, that field
+keeps working everywhere in the product — it still renders on issues, still sits in field sets,
+still comes back from the project-config endpoint — but it becomes **unreachable from search**,
+and `key = "…"` starts answering from the built-in field instead. Nothing errors. That silence is
+the reason this WARN exists.
+
+**Finding them yourself**, at any time:
+
+```sql
+SELECT id, key, name, scope_workspace_id, scope_project_id
+  FROM field_defs
+ WHERE archived_at IS NULL
+   AND lower(key) IN ('label','labels','component','components','sprint','sprints',
+                      'status','type','priority','project','assignee','reporter','parent',
+                      'text','created','updated','due','closed','closedat',
+                      'fixversion','affectsversion','storypoints','points');
+```
+
+(The WARN is authoritative; this list is the same one the application derives from its own
+registry, written out for a DBA who wants to run the query between restarts.)
+
+**The remedy: rename the key.** From 0.18.0 a field's key can be changed *exactly while* a
+built-in name shadows it. Nothing else moves — values, field-set placements and history all
+reference the field's UUID, not its key — and the field becomes searchable again under the new
+name straight away.
+
+- A **workspace**-scoped field (`scope_workspace_id` set): a workspace admin with
+  *Manage taxonomy* renames it in **Settings → Fields**.
+- A **project**-scoped field (`scope_project_id` set): a project admin, in that project's
+  field settings.
+- A **global** field (both null): only an instance administrator, in **System administration →
+  Fields** — and the key changes for **every workspace on the instance at once**, so treat it as
+  a breaking change and announce it first.
+
+After the rename, anyone whose **saved filter** used the old key must edit it to the new one.
+Hamstrack never rewrites the text of a stored query, so those filters keep running and keep
+answering from the built-in field until their owner updates them.
+
+**If you would rather not rename**, nothing breaks: the field goes on working outside search
+indefinitely. The WARN repeats on every boot so the choice stays visible.
 
 ## Backups
 

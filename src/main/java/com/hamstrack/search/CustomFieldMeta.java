@@ -14,10 +14,14 @@ import java.util.UUID;
  * {@link HqlValidator} (allowed operators per type) and {@link HqlCompiler} (the
  * correlated {@code EXISTS} subquery over {@code issue_field_values}).
  *
- * <p>The HQL field name for a custom field is its immutable {@code key}. Lookup
- * precedence is <strong>system field first</strong> (see {@link FieldRegistry}); a
- * key that is neither a system field nor a visible custom field is "unknown field".
- * A custom field a caller cannot see is never leaked — it simply isn't in the map.
+ * <p>The HQL field name for a custom field is its {@code key}, which is fixed once
+ * created <em>except</em> while a built-in search name has taken it — the shadowed
+ * tenant's exit, and the one case where a key may change under a live field (ADR-0036,
+ * HD-275). Nothing here caches across requests, so a renamed key is simply the key the
+ * next {@link ResolutionContextFactory} build reads. Lookup precedence is <strong>system
+ * field first</strong> (see {@link FieldRegistry}); a key that is neither a system field
+ * nor a visible custom field is "unknown field". A custom field a caller cannot see is
+ * never leaked — it simply isn't in the map.
  *
  * @param fieldId     the {@code field_defs} id, bound as {@code v.field.id = :fid}
  * @param key         the field's machine key (== the HQL field name)

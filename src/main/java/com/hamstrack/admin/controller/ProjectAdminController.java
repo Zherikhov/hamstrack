@@ -348,7 +348,7 @@ public class ProjectAdminController {
     public AdminFieldResponse updateField(@AuthenticationPrincipal User actor,
                                           @PathVariable UUID workspaceId, @PathVariable UUID projectId,
                                           @PathVariable UUID id, @Valid @RequestBody UpsertFieldRequest req) {
-        return fieldService.updateField(scope(actor, workspaceId, projectId), id, req);
+        return fieldService.updateField(actor, scope(actor, workspaceId, projectId), id, req);
     }
 
     @PostMapping("/fields/{id}/archive")

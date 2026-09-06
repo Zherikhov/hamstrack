@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { EyeOff, Trash2 } from 'lucide-react'
+import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react'
 import type { UpsertFieldPayload } from '../../api'
-import type { AdminField, AdminFieldSet, FieldType } from '../../types'
+import type { AdminField, AdminFieldSet, AdminScopeTag, FieldType } from '../../types'
 import { FIELD_TYPE_LABELS } from '../../components/fields'
 import { Button, Checkbox, Input, Select } from '../../components/ui'
 import { AdminTable, ArchivedBadge, ArchivedToggle, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
@@ -55,6 +55,7 @@ export default function AdminFieldsPage() {
                 <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>{f.key}</span>
                 {f.archived && <ArchivedBadge />}
               </span>
+              <ShadowedKeyWarning field={f} ownTag={ownTag} />
             </td>
             <td className="px-3 py-2.5">
               <span className="text-xs px-2 py-0.5 rounded"
@@ -168,6 +169,50 @@ export default function AdminFieldsPage() {
 }
 
 /**
+ * HD-275 — the row-level end of the silence.
+ *
+ * A field whose key a built-in HQL name has taken keeps working everywhere
+ * except the query surface: `labels = "x"` answers from the built-in `label`
+ * field, with 200 and plausible rows the tenant never set. Nothing said so, and
+ * the only symptom was the field's *absence* from `/search/schema`.
+ *
+ * **Shown only while the field is live.** An archived definition is out of
+ * resolution entirely, so warning about one would mean every Hamstrack instance
+ * warning about V3's own archived `labels`/`sprint`/`components` seed rows on
+ * every visit — a signal dead on arrival (proposal §2). The rename affordance
+ * in `FieldForm` uses the *other* predicate and is offered for an archived row;
+ * the two look alike on purpose and are not the same.
+ *
+ * The remedy names someone the reader can actually reach, and no more than
+ * that: a console that cannot perform the rename says which administrator can,
+ * and never identifies the workspace (that would be a scope the project admin
+ * was not shown).
+ */
+function ShadowedKeyWarning({ field, ownTag }: { field: AdminField; ownTag: AdminScopeTag }) {
+  if (!field.shadowedBy || field.archived) return null
+  const remedy = field.scope === ownTag
+    ? 'Edit the field to rename its key.'
+    : field.scope === 'GLOBAL'
+      ? 'An instance administrator can rename its key.'
+      : 'A workspace administrator can rename its key.'
+  return (
+    <span className="mt-1.5 flex items-start gap-1.5 text-xs rounded-md px-2 py-1"
+          style={{
+            background: 'color-mix(in srgb, var(--color-warning) 12%, white)',
+            border: '1px solid color-mix(in srgb, var(--color-warning) 34%, white)',
+            color: 'var(--color-warning-ink)',
+            maxWidth: 460,
+          }}>
+      <AlertTriangle size={12} style={{ marginTop: 2, flexShrink: 0 }} aria-hidden="true" />
+      <span>
+        Not searchable — “{field.key}” is a built-in search name. A query for it answers from the
+        built-in “{field.shadowedBy}” field, not from this one. {remedy}
+      </span>
+    </span>
+  )
+}
+
+/**
  * Field values have no meaningful remap across arbitrary shapes, so unlike
  * statuses/priorities the delete dialog offers "drop the values" instead of a
  * replacement select — or archiving, which keeps history intact.
@@ -225,8 +270,21 @@ function slugify(s: string) {
 function FieldForm({ field, onClose, onSaved }: {
   field: AdminField | null; onClose: () => void; onSaved: () => void
 }) {
-  const { api } = useAdminApi()
+  const { api, scope } = useAdminApi()
   const isNew = field === null
+  /**
+   * HD-275 §6.2 — the key stops being immutable *exactly while* a built-in
+   * search name shadows it, which is the only population where the rename
+   * cannot change what any stored filter means. Three conditions, each of which
+   * the server also enforces: the field must be shadowed (422 otherwise), owned
+   * by this console (404 — a project cannot rename a field it inherits), and
+   * not a system definition (409 — `DemoDataService` resolves those by key).
+   *
+   * Deliberately NOT conditioned on `archived`: an archived shadowed field is
+   * the one this affordance matters most for, because archiving it is what a
+   * curator does when it stops working. Rename, then unarchive.
+   */
+  const canRename = !!field && !!field.shadowedBy && field.scope === ownScopeTag(scope) && !field.isSystem
   const [name, setName] = useState(field?.name ?? '')
   const [key, setKey] = useState(field?.key ?? '')
   const [type, setType] = useState<FieldType>(field?.type ?? 'TEXT')
@@ -245,9 +303,25 @@ function FieldForm({ field, onClose, onSaved }: {
 
   const save = useMutation({
     mutationFn: () => {
+      const trimmedKey = key.trim()
+      /**
+       * **Send `key` only when it actually changed.** On update the server reads
+       * a `key` as a *rename request* and refuses one with 422 on a field that
+       * is not shadowed — so echoing the unchanged key here (which this form
+       * used to do on every save) would make every ordinary field edit, name
+       * only, start failing. The server's own trigger is difference rather than
+       * presence for exactly that reason; the client states the same intent
+       * rather than relying on it.
+       *
+       * Compared case-insensitively because the server lower-cases and compares
+       * the same way — `Labels` typed over `labels` is not a rename.
+       */
+      const renaming = !!field
+        && trimmedKey !== ''
+        && trimmedKey.toLowerCase() !== field.key.toLowerCase()
       const payload: UpsertFieldPayload = {
         name: name.trim(),
-        key: key.trim() || undefined,
+        key: field ? (renaming ? trimmedKey : undefined) : (trimmedKey || undefined),
         type,
         description: description.trim() || undefined,
         config: isSelect
@@ -279,6 +353,31 @@ function FieldForm({ field, onClose, onSaved }: {
                 <option key={t} value={t}>{FIELD_TYPE_LABELS[t]}</option>
               ))}
             </Select>
+          </>
+        ) : canRename ? (
+          <>
+            <Input label="Key" value={key} placeholder={field.key}
+                   onChange={e => setKey(e.target.value)} />
+            {/* The remedy is stated in full because the reader is about to perform
+                it. No count of affected saved filters is shown, and none can be:
+                for a global definition the candidate set spans workspaces this
+                admin cannot see, and in the shadowed population the number of
+                filters that actually break is zero — a figure here would invite
+                the reader to believe something does. */}
+            <p className="text-xs rounded-md px-2.5 py-2"
+               style={{
+                 background: 'color-mix(in srgb, var(--color-warning) 12%, white)',
+                 border: '1px solid color-mix(in srgb, var(--color-warning) 34%, white)',
+                 color: 'var(--color-warning-ink)',
+               }}>
+              “{field.key}” is a built-in search name, so searching for it answers from the built-in
+              “{field.shadowedBy}” field and not from this one. Renaming the key here makes this field
+              searchable again under the new name. Issue values are not affected. Saved filters are not
+              rewritten — anyone using the old key will need to update their filter to the new one.
+            </p>
+            <p className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
+              {FIELD_TYPE_LABELS[field.type]} — the type is fixed once created
+            </p>
           </>
         ) : (
           <p className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>

@@ -189,7 +189,7 @@ class FieldResolutionParityTest extends ComponentTestBase {
                 workspaceAccess, resolutionContextFactory,
                 new HqlValidator(resolver),
                 new HqlCompiler(entityManager, resolver, valueResolver, parentResolver, searchScope),
-                reserving, resolver,
+                reserving, new ShadowedFields(reserving), resolver,
                 issueService, labelService, componentService, versionService, entityManager);
 
         assertThat(reservingSearch.schema(actor, ctx.wsId()).fields())
@@ -198,6 +198,31 @@ class FieldResolutionParityTest extends ComponentTestBase {
                     + "that key is not queryable — advertising it offers a name every query "
                     + "against it refuses")
                 .doesNotContain(RESERVED);
+
+        // HD-275: absent from `fields` is right, and silent about WHY was the defect. The field
+        // is reported in its own list, with the built-in name that took the key.
+        //
+        // This also pins two properties at once, and neither is about `preview` in particular:
+        //
+        //   * A RESERVED-BUT-UNAVAILABLE name claims its key exactly like an available one.
+        //     Registration is what claims a name; availability only says when it starts
+        //     answering. Reading it any other way would leave this workspace's field advertised
+        //     as queryable while every query against it 422s.
+        //   * The watch set is DERIVED from the registry. Nothing was added to any list to make
+        //     this pass — ReservingRegistry adds one name and the report follows, which is the
+        //     durability property HD-275 §9.1 claims for every name registered in the future.
+        assertThat(reservingSearch.schema(actor, ctx.wsId()).shadowedFields())
+                .as("a shadowed field must be REPORTED, not silently dropped — the silence is "
+                    + "the defect, and a reserved-but-unavailable name shadows just as firmly")
+                .singleElement()
+                .satisfies(shadowed -> {
+                    assertThat(shadowed.key()).isEqualTo(RESERVED);
+                    assertThat(shadowed.name()).startsWith("Preview (tenant)");
+                    assertThat(shadowed.shadowedBy())
+                            .as("the CANONICAL registry name claiming the key — the field whose "
+                                + "rows a query against it would actually answer from")
+                            .isEqualTo(RESERVED);
+                });
 
         assertThatThrownBy(() -> reservingSearch.suggest(actor, ctx.wsId(), RESERVED, ""))
                 .as("suggesting values for a name a query refuses is the divergence; the refusal "
@@ -212,6 +237,11 @@ class FieldResolutionParityTest extends ComponentTestBase {
         assertThat(searchService.schema(actor, ctx.wsId()).fields())
                 .extracting(SearchSchemaResponse.Field::name)
                 .contains(RESERVED);
+        assertThat(searchService.schema(actor, ctx.wsId()).shadowedFields())
+                .as("unreserved, the same fixture is an ordinary queryable field and there is "
+                    + "nothing to warn about — otherwise the report above could be firing on "
+                    + "something other than the reservation")
+                .isEmpty();
         assertThat(searchService.suggest(actor, ctx.wsId(), RESERVED, "").suggestions())
                 .as("the fixture is a user-valued field, so unreserved it answers with members")
                 .isNotEmpty();
@@ -279,6 +309,19 @@ class FieldResolutionParityTest extends ComponentTestBase {
         public Optional<FieldDescriptor> find(String name) {
             if (RESERVED.equalsIgnoreCase(name)) return Optional.of(STUB);
             return super.find(name);
+        }
+
+        /**
+         * Overridden so the double is faithful in <em>both</em> directions a real registration is
+         * (HD-275): a registered name is findable AND claimed, and a double that answered only the
+         * first would let a surface reading the claimed set look correct while being blind to the
+         * very name the test added.
+         */
+        @Override
+        public Set<String> claimedKeys() {
+            var all = new java.util.LinkedHashSet<>(super.claimedKeys());
+            all.add(RESERVED);
+            return Set.copyOf(all);
         }
     }
 

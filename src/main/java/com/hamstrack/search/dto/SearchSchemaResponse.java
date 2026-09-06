@@ -17,13 +17,39 @@ import java.util.Map;
  * @param insights what the Insights panel on this page may be asked for (HD-140 R6) —
  *                 published here rather than hardcoded in the SPA because it is
  *                 CAPABILITY-NARROWED, on exactly the same terms as {@code fields}
+ * @param shadowedFields the caller's own custom fields whose key a built-in search name has
+ *                 taken (HD-275). Sorted by key, {@code []} when there are none — see
+ *                 {@link ShadowedField} for why it is a list of its own and not an entry in
+ *                 {@code fields}
  */
 public record SearchSchemaResponse(
         List<Field> fields,
         List<String> keywords,
         Map<String, List<ValueOption>> values,
-        Insights insights
+        Insights insights,
+        List<ShadowedField> shadowedFields
 ) {
+    /**
+     * <strong>A custom field this caller owns whose key the product's own vocabulary has taken</strong>
+     * (HD-275 §6.1). Writing that key in HQL answers from the built-in field, not from this one,
+     * and until this list existed {@code /schema} simply dropped the field with no reason given —
+     * the tenant could notice only an absence, while every query kept answering confidently.
+     *
+     * <p><strong>These are deliberately NOT entries in {@code fields}, and that is the
+     * load-bearing half.</strong> Every entry in {@code fields} is a name the caller may write and
+     * that means what the entry says it means. Putting a shadowed key there would have the SPA
+     * offer it in autocomplete and then answer it from the built-in field's rows — the exact harm
+     * this ticket is about, now with the product's own suggestion behind it.
+     *
+     * <p>No {@code reason} discriminator: the list's <em>name</em> is the reason, and a second
+     * reason later gets its own list rather than a column every client must switch on.
+     *
+     * @param key        the custom field's key — the name that does NOT reach it
+     * @param name       the custom field's display name, so a human can tell which field is meant
+     * @param shadowedBy the CANONICAL built-in name claiming the key (a key of {@code labels}
+     *                   reports {@code label}) — the field whose data the query would answer from
+     */
+    public record ShadowedField(String key, String name, String shadowedBy) {}
     /**
      * The Insights panel's vocabulary: the measures and grouping dimensions worth OFFERING to
      * this caller (reports-proposal §2.6).

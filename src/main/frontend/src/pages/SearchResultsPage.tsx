@@ -16,6 +16,7 @@ import HqlInput from '../components/HqlInput'
 import SavedFiltersPanel from '../components/SavedFiltersPanel'
 import SaveFilterDialog from '../components/SaveFilterDialog'
 import IssueSidePanel from './IssueSidePanel'
+import ShadowedFieldsNotice from './search/ShadowedFieldsNotice'
 import { readInsightsState, writeInsightsParams, type InsightsState } from './search/insights'
 import type { ProjectConfig, SearchResultRow } from '../types'
 
@@ -210,6 +211,12 @@ export default function SearchResultsPage() {
   return (
     <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* HD-275 — above the input, because it is a standing property of this
+            workspace's vocabulary and not a verdict on the query just run. It
+            renders nothing when the list is empty and nothing when a server
+            that predates the field omits it entirely. */}
+        <ShadowedFieldsNotice fields={schema?.shadowedFields} />
+
         {/* Query bar */}
         <div
           className="flex items-center gap-2 px-5 py-3 border-b flex-shrink-0"

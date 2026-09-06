@@ -3,21 +3,30 @@ package com.hamstrack.admin.controller;
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
 import com.hamstrack.admin.service.AdminFieldService;
+import com.hamstrack.auth.entity.User;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
 
 /**
- * Custom field catalog and field sets for the system administrator. Field
- * type and key are immutable after creation (stored values depend on them);
- * deleting a field with values requires the explicit {@code dropValues=true}
- * confirmation. Creating a field also refuses (409) a key already claimed by
- * {@link com.hamstrack.search.FieldRegistry}, checked after slugification and on
- * create only. Guarded by hasRole(ADMIN) in SecurityConfig.
+ * Custom field catalog and field sets for the system administrator. A field's type is
+ * immutable after creation; its key is fixed too, <strong>except while a built-in
+ * {@link com.hamstrack.search.FieldRegistry} search name has taken it</strong>, in which case
+ * {@code PATCH} renames it (ADR-0036 / HD-275 — the exit from a key the product shadowed).
+ * Deleting a field with values requires the explicit {@code dropValues=true} confirmation.
+ * Minting a key — on create, and as a rename's target — refuses (409) one the registry has
+ * claimed, checked after slugification. Guarded by hasRole(ADMIN) in SecurityConfig.
+ *
+ * <p><strong>A rename here reaches global rows, which means every workspace on the instance at
+ * once.</strong> {@code ScopeContext.global()} resolves only rows stamped with no scope, so a
+ * delegated admin cannot touch them and this console cannot touch a tenant's; the flip side is
+ * that a global key change is a breaking change for every tenant querying it, and belongs in the
+ * release notes on the same terms {@code RetiredFieldAliases} states for a retired global def.
  *
  * <p><strong>Two refusal families, and which one a rule lands in is a property of the
  * rule: 409 is a collision with something that already exists, 422 is everything the
@@ -50,8 +59,9 @@ public class AdminFieldController {
     }
 
     @PatchMapping("/fields/{id}")
-    public AdminFieldResponse updateField(@PathVariable UUID id, @Valid @RequestBody UpsertFieldRequest req) {
-        return fieldService.updateField(SCOPE, id, req);
+    public AdminFieldResponse updateField(@AuthenticationPrincipal User actor,
+                                          @PathVariable UUID id, @Valid @RequestBody UpsertFieldRequest req) {
+        return fieldService.updateField(actor, SCOPE, id, req);
     }
 
     @PostMapping("/fields/{id}/archive")

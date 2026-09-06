@@ -640,6 +640,24 @@ export interface AdminField {
   scope: AdminScopeTag;
   // Absent on fields nested inside a set response
   usage: UsageInfo | null;
+  /**
+   * A seeded definition the product owns (V3's `severity`/`environment`
+   * placeholders and friends). It can be edited but never renamed — the server
+   * answers 409 — because code resolves those defs by key.
+   */
+  isSystem?: boolean;
+  /**
+   * HD-275 — the built-in HQL search name that has taken this field's key, or
+   * null. A registry name outranks every tenant's custom field of the same key
+   * (`FieldResolver`), so while this is set the field still renders everywhere
+   * but `key = …` in a query answers from the built-in field instead.
+   *
+   * **Populated whether or not the field is archived**, deliberately: the
+   * warning is suppressed for an archived row (it is out of resolution, so
+   * there is nothing to warn about) but the rename affordance is offered for
+   * one, so the two conditions are not the same predicate.
+   */
+  shadowedBy?: string | null;
 }
 
 export interface AdminFieldSet {
@@ -1105,6 +1123,24 @@ export interface SearchField {
   functions: string[];
 }
 
+/**
+ * HD-275 — a custom field the caller owns whose key a built-in search name has
+ * taken. `shadowedBy` is the built-in's canonical name (a key of `labels`
+ * reports `label`).
+ *
+ * It is deliberately **not** an entry in `fields`: every name in `fields` is one
+ * the caller may write and that means what the entry says it means. Writing
+ * this key in HQL answers from the built-in field, so offering it in
+ * autocomplete would suggest a name that lies — with the product's own
+ * suggestion behind it. Merging the two lists is the exact harm this exists to
+ * end; keep them apart.
+ */
+export interface ShadowedSearchField {
+  key: string;
+  name: string;
+  shadowedBy: string;
+}
+
 export interface SearchSchema {
   fields: SearchField[];
   keywords: string[];
@@ -1116,6 +1152,11 @@ export interface SearchSchema {
   // unrelated request was thin is the same mistake as inferring a capability
   // from data.
   insights?: SearchSchemaInsights;
+  // The caller's own custom fields whose keys a built-in search name has taken
+  // (HD-275). Optional so a server that predates the field is readable — absent
+  // means "nothing to warn about", never "hide the search box", the same rule
+  // `insights?` follows. Sorted by key; `[]` when there are none.
+  shadowedFields?: ShadowedSearchField[];
 }
 
 // A saved, workspace-scoped HQL data source (own + shared). `mine` is

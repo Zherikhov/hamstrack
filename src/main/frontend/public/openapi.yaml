@@ -3252,28 +3252,42 @@ paths:
       tags: [Admin]
       summary: List catalog custom fields (admin)
       description: |
-        POST creates a field (`key` blank = derived from the name; key and
-        type are immutable afterwards — stored values depend on them), PATCH
-        `/{id}` updates name/config/description, POST `/{id}/archive` and
+        POST creates a field (`key` blank = derived from the name). The type
+        is immutable afterwards; the key is fixed too, **except while a
+        built-in search name has taken it** — the one population
+        `PATCH /admin/fields/{id}` renames out of, documented in full on that
+        operation. PATCH `/{id}` updates name/config/description and, under
+        that guard only, `key`; POST `/{id}/archive` and
         `/{id}/unarchive` hide a field from forms without touching values.
         POST also refuses (409) a `key` that the HQL search vocabulary has
         claimed — a name the vocabulary itself registers, its spelling aliases
         (`labels`, `points`, …) included, so the reserved set is slightly wider
         than what `GET …/search/schema` advertises (that endpoint lists each
-        field once, under its canonical name, and is capability-narrowed). It is
-        **not** as wide as the set of names a query resolves: a key a release
-        retired resolves to the field that replaced it without being claimed
-        here, so a custom field can be created under one and then outranks that
-        compatibility fallback (see the retired-key rule on
-        `POST /workspaces/{workspaceId}/search`) — unless the retired key is
-        also a registered spelling, which is then reserved like any other.
+        field once, under its canonical name, and is capability-narrowed).
+        A key a release **retired** is refused too, by a rule of its own and
+        with its own sentence. It is not claimed by the vocabulary and the
+        mechanism is the reverse one: a retired key resolves **last**, so a
+        custom field minted under it is not shadowed but *wins* — the
+        compatibility fallback stops firing for everyone that field is visible
+        to, and every saved filter written before the retirement quietly starts
+        matching a custom field instead of the built-in that replaced it (for a
+        global definition, in every workspace on the instance at once). See the
+        retired-key rule on `POST /workspaces/{workspaceId}/search`. A retired
+        key that is *also* a registered spelling — `labels`, `components` —
+        meets the reserved rule first. Both refusals are 409, they say
+        different true things, and neither implies the other.
         A registered search name always outranks a custom field of the same key: such a
-        field would work everywhere in the product except search, where it
-        would be silently omitted from the vocabulary. The check runs **after**
+        field works everywhere in the product except search, where the name
+        means the built-in field. A field that already sits under such a key is
+        reported by `GET …/search/schema` in its own `shadowedFields` list
+        (never in `fields`), and carries `shadowedBy` in this catalog. The
+        check runs **after**
         the blank-`key` slugification, so a field merely *named* "Project" is
-        refused too. **Create only** — a key is immutable on update, so
-        enforcing it there would strand an existing field, and this guard is
-        never retroactive. The same refusal applies wherever a custom field is
+        refused too. It guards every door that **mints** a key — create, and a
+        rename's target on `PATCH /{id}` — and is **never retroactive**: rows
+        that predate a registration are exactly the shadowed population the
+        rename exists to let out, so refusing them here would refuse the exit
+        too. The same refusal applies wherever a custom field is
         created, including the delegated
         `/workspaces/{workspaceId}/admin/fields` and
         `/workspaces/{workspaceId}/projects/{projectId}/admin/fields` mirrors.
@@ -3315,6 +3329,20 @@ paths:
             vocabulary has claimed — `detail` says which. A reserved key reads
             `'project' is a reserved search field name — pick a different key
             (a custom field with this key would not be searchable)`.
+            A **retired** search name (`story_points`, `fix_version`) is
+            refused too, with a sentence of its own: it is not claimed and is
+            resolved last, so a custom field under it wins rather than being
+            shadowed — which stops the compatibility fallback and silently
+            changes what every filter written before that key was retired
+            matches.
+            A concurrent writer that took the name or the key between the check
+            and the insert lands on the same `409` rather than a `500`, with
+            one message for both unique constraints — `That key or name was
+            taken by another change — reload and try again.` — because the
+            caller's action is "reload" either way and every non-racing path has
+            already answered with the precise message above. Only a duplicate
+            key is translated that way: a truncation or a foreign-key violation
+            keeps the status its own handler gives it.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -3332,6 +3360,150 @@ paths:
             offending option's `id` and the shape wanted. The same refusals
             apply on `PATCH /admin/fields/{id}` and on the delegated
             workspace- and project-scoped mirrors.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+
+  /admin/fields/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update a custom field, and rename its key out of a shadowing (admin)
+      description: |
+        Updates `name`, `config` and `description`. It also accepts `key`,
+        which is a **rename request** — and the trigger is *difference*, never
+        presence: a `key` that is absent, `null`, blank, or equal to the
+        field's current key (compared case-insensitively) renames nothing and
+        **refuses nothing**, so a client that echoes the current key back on
+        every save keeps getting `200`. Blank on update never means "re-derive
+        from the name" either; deriving would rename a field silently whenever
+        somebody edited its display label.
+
+        A key may be changed **only while a built-in HQL search name has taken
+        it** — the shadowed population reported by `GET …/search/schema`'s
+        `shadowedFields` and by this catalog's `shadowedBy`. Outside it the key
+        is fixed, because saved filters are stored as text and refer to fields
+        by key, so a rename would silently change what they match. Inside it
+        nothing any stored query means can change: the shadowed key resolved to
+        the built-in field before the rename and still does after, since the
+        registry still claims it.
+
+        A rename **moves no rows**. Values live in `issue_field_values` keyed
+        by field id, field-set membership is keyed by field id, and issue
+        history records the display *name*, so the values, the set placements
+        and the history of a renamed field are untouched. What moves with the
+        key is the HQL name that reaches the field, its `/search/schema` entry
+        (it leaves `shadowedFields` and enters `fields`), its `CUSTOM:<key>`
+        value-suggest token, and the `key` in project configuration. What never
+        moves is **saved filter text** — nothing rewrites it, so anyone still
+        querying the old key has to edit their filter to the new one.
+
+        After the rename the key is fixed again: the field is no longer
+        shadowed, so renaming it back is refused with `422`.
+
+        The refusals are evaluated in this order, and the order is deliberate —
+        the common mistake must be answered by the rule that explains itself,
+        not by a message about the target key:
+
+        1. `400` — `key` fails `[a-z0-9_]*` or exceeds 50 characters. This is
+           also the door an upper-case key hits: the pattern is matched whole,
+           so `Team_Labels` is a bean-validation `400`, never a `409`.
+        2. `404` — the field is not resolvable at the caller's scope. On the
+           delegated mirrors this also covers an unknown workspace/project and
+           a caller who is not a workspace member. A workspace admin reaching
+           for a **global** shadowed field gets `404` (not `403`): the row is
+           not at their scope, and only a system admin can rename it.
+        3. `403` — a proven workspace member without
+           `workspace.taxonomy.manage` / `project.taxonomy.manage` (delegated
+           mirrors only; this global console is gated by `hasRole(ADMIN)`).
+        4. `409` — the field is a system field (`isSystem: true`), with
+           `System fields cannot be renamed.` Checked before the shadowing
+           rule, so a claimed-key system field is never told it may rename.
+        5. `422` — the field is **not** shadowed. Renaming is offered only as
+           an escape from shadowing, so this answers every rename request from
+           outside that population.
+        6. `409` — the new key is itself claimed by the HQL vocabulary
+           (`labels` → `components` would walk out of one shadow into another),
+           with the reserved-search-name message create uses verbatim.
+        7. `409` — the new key is a **retired** search name (`story_points`,
+           `fix_version`), with a sentence of its own. A retired key is not
+           claimed, and the mechanism is the reverse one: it resolves last, so
+           a custom field under it is not shadowed but wins, the compatibility
+           fallback stops firing, and every filter written before that key was
+           retired quietly starts matching a different field. Create refuses it
+           identically.
+        8. `409` — the new key already exists or is inherited at this scope.
+           The check is deliberately **wider than the scope** — global ∪
+           ancestor workspace ∪ own project, the same reach create uses. The
+           widening is **upward only**: at workspace scope a *project*-scoped
+           row inside that workspace matches none of those disjuncts, so a
+           rename onto a key one of its own projects uses currently succeeds
+           and that project then sees two definitions under one key. Known, and
+           tracked as **HD-284**; create has the same reach, which is why it is
+           not narrowed here alone.
+        9. `409` — a concurrent writer took the key (or the name) first: the
+           lost race on the unique constraint is translated, not a `500`, and
+           only a duplicate-key violation is translated — a truncation or a
+           foreign-key violation keeps its own status.
+        10. `200` — renamed, or no rename requested. The body is the updated
+           field, carrying its new `key` and a `shadowedBy` that is now `null`.
+
+        All of it applies identically on the delegated
+        `/workspaces/{workspaceId}/admin/fields/{id}` and
+        `/workspaces/{workspaceId}/projects/{projectId}/admin/fields/{id}`
+        mirrors, where a rename reaches only rows stamped with that workspace
+        resp. that project. A rename on **this** console reaches a global row,
+        which changes the key in every workspace on the instance at once —
+        treat it as a breaking change and put it in the release notes.
+
+        An **archived** field can be renamed: `shadowedBy` is populated for
+        archived rows too (it asks only whether the key is claimed), while the
+        warning surfaces — `/search/schema`'s `shadowedFields`, the startup log
+        scan and the console's warning chip — use the narrower "live only"
+        predicate, so a clean instance never warns about its own archived seed
+        placeholders. Rename-then-unarchive is the recovery path for a field
+        somebody archived *because* it had stopped working.
+
+        The `config` and select-option `422`s documented on
+        `POST /admin/fields` apply here unchanged.
+      operationId: adminUpdateField
+      parameters: [ { $ref: '#/components/parameters/adminId' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpsertField' }
+      responses:
+        '200':
+          description: Updated (with or without a rename)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminField' }
+        '400':
+          description: >-
+            `key` fails `[a-z0-9_]*` (an upper-case key included) or exceeds
+            50 characters, or the body is unreadable — ordinary bean validation
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: >-
+            A collision with something that already exists: the field is a
+            system field (`System fields cannot be renamed.`); the new key is a
+            reserved search name; the new key or the new name already exists or
+            is inherited at this scope; or a concurrent writer took one of them
+            first (`That key or name was taken by another change — reload and
+            try again.`). `detail` says which.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ProblemDetail' }
+        '422':
+          description: >-
+            A rename was requested on a field that is **not** shadowed — a
+            field's key is fixed once created and may only change while a
+            built-in search name has taken it. Also the existing `config` /
+            select-option refusals.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -7601,13 +7773,20 @@ paths:
           the name as the caller wrote it — and a retired key whose replacement
           has no value list of its own declines in exactly the words the
           replacement would. So a client holding a retired key can keep using it
-          for typeahead as well as for filtering. It also means a retired key is
-          normally **not** a reserved key: `POST …/admin/fields` will create a
-          custom field under one, which is exactly how a workspace comes to own
-          it. The exception is a retired key that is *also* a live built-in
-          spelling — `labels` and `components` are the plural aliases of
-          `label`/`component` — which is reserved like any other search name and
-          refused with `409`.
+          for typeahead as well as for filtering. What it no longer means is
+          that a retired key is free to take. Since 0.18.0 every door that
+          **mints** a key — `POST …/admin/fields`, and a key rename on
+          `PATCH …/admin/fields/{id}` — refuses one with `409`, because a new
+          custom field under a retired key is not shadowed by the fallback but
+          *takes the name over* from it, and every filter written before the
+          retirement then silently matches something else. Two rules reach these
+          keys with two different sentences: `labels` and `components` are
+          *also* live built-in spellings (the plural aliases of
+          `label`/`component`) and are refused as **reserved** search names,
+          while `story_points` and `fix_version` are refused as **retired**
+          ones. **Neither refusal is retroactive** — a workspace that already
+          owns such a field keeps it and keeps resolving to it, exactly as
+          above, which is how the workspaces that own one came to.
 
         **Delivery capabilities never gate this endpoint.** `sprint`,
         `fixVersion`, `affectsVersion` and `storyPoints` parse, compile and run
@@ -7743,6 +7922,29 @@ paths:
         so a saved panel state cannot break because a curator flipped a project
         toggle. It is published here rather than hardcoded in a client precisely
         because it is capability-narrowed.
+
+
+        **`shadowedFields` — the fields this endpoint used to drop in silence.**
+        A registered search name outranks a custom field of the same key, so a
+        workspace that owns a field keyed `labels` cannot reach it from HQL:
+        `labels = "x"` answers from the built-in `label` field. Such a field is
+        now listed in `shadowedFields` as `{key, name, shadowedBy}` — sorted by
+        key, `[]` when there are none — where `shadowedBy` is the canonical
+        built-in name claiming the key (a key of `labels` reports `label`).
+        It is a **separate list and deliberately not part of `fields`**: every
+        entry in `fields` is a name that means what the entry says it means, and
+        putting a shadowed key there would have clients autocomplete a name that
+        answers from the built-in field's data rather than from the custom field.
+        Only the caller's own visible fields appear (it is built from the same
+        resolution context the rest of the response is, with no extra query and no
+        cross-tenant read), archived definitions never do, and nothing about the
+        status codes changes: this endpoint is `200`, or `404` for an unknown
+        workspace or a non-member, exactly as before. The exit is a key rename on
+        `PATCH …/admin/fields/{id}`, which is permitted exactly while the field is
+        listed here; after it, the field leaves `shadowedFields` and enters
+        `fields` under its new key, while the old key keeps meaning the built-in
+        field — saved filters are never rewritten, so a filter on the old key has
+        to be edited by hand.
       operationId: searchSchema
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -11243,19 +11445,57 @@ components:
       type: object
       required: [name, type]
       properties:
-        name: { type: string, maxLength: 100 }
+        name:
+          type: string
+          maxLength: 100
+          description: >-
+            A single line. A line terminator (LF, CR, TAB, NEL, LINE/PARAGRAPH
+            SEPARATOR) or any invisible or reordering character — zero-width,
+            bidi mark or override, interlinear annotation, Unicode tag — is
+            refused with `400` `Name must not contain control characters`, at
+            this door and on `PATCH /admin/fields/{id}` alike. The display name
+            is written to the server log by the shadowed-field startup report,
+            where a newline would forge a second line under a prefix operators
+            alert on. `description` keeps its line breaks but is not otherwise
+            exempt — see its own entry.
         key:
           type: string
           pattern: '[a-z0-9_]*'
           maxLength: 50
           description: >-
-            Blank on create = derived from the name; immutable afterwards. On
-            create it may not be a key the HQL search vocabulary has claimed
-            (409) — the check runs after that derivation, so naming a field
-            "Project" is refused just as spelling `key: project` is.
+            Blank on create = derived from the name. Afterwards it is fixed —
+            but not unconditionally: on `PATCH /admin/fields/{id}` a key that
+            **differs** from the current one is a rename request, granted only
+            while a built-in search name has taken the field's key and refused
+            `422` otherwise. The trigger is difference, never presence: absent,
+            null, blank or equal (any casing) renames nothing and refuses
+            nothing, so echoing the current key back on every save is safe. A
+            newly minted key — on create, and as a rename's target — may not be
+            one the HQL search vocabulary has claimed (409); the check runs
+            after the blank-key derivation, so naming a field "Project" is
+            refused just as spelling `key: project` is. A value outside
+            `[a-z0-9_]*` (an upper-case letter included) or longer than 50
+            characters is a bean-validation `400` at either door. A **retired**
+            search name (`story_points`, `fix_version`) is refused at both doors
+            too, with its own message: it is not claimed, but a custom field
+            under it wins over the compatibility fallback and silently changes
+            what pre-retirement saved filters match.
         type: { $ref: '#/components/schemas/FieldType' }
         config: { $ref: '#/components/schemas/FieldConfig' }
-        description: { type: string, maxLength: 500, nullable: true, description: Shown as a hint in issue forms }
+        description:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: >-
+            Shown as a hint in issue forms. Prose, so unlike `name` it keeps its
+            line breaks: it takes exactly `name`'s character class **minus** TAB,
+            LF and CR. Everything invisible or reordering — zero-width
+            characters, bidi marks and overrides, interlinear annotation,
+            Unicode tag characters — is still refused, with `400`
+            `Description must not contain control characters`. NEL and
+            LINE/PARAGRAPH SEPARATOR stay refused too: no keyboard emits them
+            and only some readers treat them as line breaks, which is the
+            asymmetry that lets a second line hide inside one field.
 
     AdminField:
       type: object
@@ -11270,6 +11510,23 @@ components:
         isSystem: { type: boolean, description: "Built-in system field — can only be archived, not deleted" }
         usage: { $ref: '#/components/schemas/UsageInfo' }
         scope: { $ref: '#/components/schemas/AdminScope' }
+        shadowedBy:
+          type: string
+          nullable: true
+          example: label
+          description: >-
+            The canonical built-in HQL search name that has taken this field's
+            `key`, or null. A search name always outranks a custom field of the
+            same key, so while this is set the field works everywhere in the
+            product except search, where `key = …` answers from the built-in
+            field's data — and `GET …/search/schema` reports it under
+            `shadowedFields` rather than in `fields`. It is also what makes the
+            `key` renameable on `PATCH /admin/fields/{id}`. **Populated for
+            archived rows too** — it asks only whether the key is claimed,
+            because the rename affordance has to be offered for an archived row
+            as well. Every warning surface uses the narrower "live only"
+            predicate instead (`shadowedBy != null && !archived`), so a clean
+            instance never warns about its own archived seed placeholders.
 
     AdminFieldSet:
       type: object
@@ -12946,6 +13203,18 @@ components:
             (`POST …/search/insights`) — capability-narrowed on exactly the
             same terms as `fields`, and suggestion-only in exactly the same
             way: a dimension omitted here still resolves if it is requested.
+        shadowedFields:
+          type: array
+          description: >-
+            The caller's own custom fields whose `key` a built-in search name
+            has taken — sorted by key, `[]` when there are none. A **separate
+            list, deliberately not part of `fields`**: every entry in `fields`
+            is a name that means what the entry says it means, so a shadowed key
+            listed there would have clients autocomplete a name that answers
+            from the built-in field's data rather than from the custom field.
+            An empty list is absent-shaped, not error-shaped, and this endpoint
+            still answers `200`/`404` exactly as before.
+          items: { $ref: '#/components/schemas/SearchShadowedField' }
 
     InsightsMeasure:
       type: string
@@ -13367,6 +13636,21 @@ components:
           description: Zero-arg functions offered for this field
           items: { type: string }
           example: ['currentUser()']
+
+    SearchShadowedField:
+      type: object
+      description: >-
+        A custom field the caller owns whose key the product's own search
+        vocabulary has taken. Writing that key in HQL answers from the built-in
+        field and not from this one; until this list existed the field was simply
+        dropped from `/search/schema` with no reason given. The remedy is a key
+        rename on `PATCH …/admin/fields/{id}`, which is permitted exactly while
+        the field appears here. There is no `reason` discriminator: the list's
+        name is the reason.
+      properties:
+        key: { type: string, example: labels, description: "The custom field's key — the name that does NOT reach it" }
+        name: { type: string, example: Team labels, description: "The custom field's display name, so a human can tell which field is meant" }
+        shadowedBy: { type: string, example: label, description: "The CANONICAL built-in name claiming the key (a key of `labels` reports `label`) — the field whose data a query on that key answers from" }
 
     SearchValueOption:
       type: object

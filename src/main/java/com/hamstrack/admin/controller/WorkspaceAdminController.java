@@ -341,7 +341,7 @@ public class WorkspaceAdminController {
     public AdminFieldResponse updateField(@AuthenticationPrincipal User actor,
                                           @PathVariable UUID workspaceId, @PathVariable UUID id,
                                           @Valid @RequestBody UpsertFieldRequest req) {
-        return fieldService.updateField(scope(actor, workspaceId), id, req);
+        return fieldService.updateField(actor, scope(actor, workspaceId), id, req);
     }
 
     @PostMapping("/fields/{id}/archive")

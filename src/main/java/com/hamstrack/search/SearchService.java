@@ -54,6 +54,8 @@ public class SearchService {
     private final HqlValidator validator;
     private final HqlCompiler compiler;
     private final FieldRegistry registry;
+    /** "Has a built-in name taken this key" — the one component that answers it (HD-275 §5). */
+    private final ShadowedFields shadowedFields;
     private final FieldResolver fieldResolver;
     private final IssueService issueService;
     private final LabelService labelService;
@@ -192,16 +194,33 @@ public class SearchService {
         // Custom fields (HD-52): append after the system fields, hidden system-name
         // collisions aside. SELECT/MULTI_SELECT publish their options under a per-field
         // value key so autocomplete offers the labels; USER fields reuse /suggest.
+        var shadowed = new ArrayList<SearchSchemaResponse.ShadowedField>();
         for (CustomFieldMeta meta : ctx.customFieldsByKey().values()) {
             // A key the registry has claimed is a system name, so a query against it means the
-            // system field and not this workspace's — advertising it here would offer a name
-            // whose answers come from somewhere else. Registration is what claims a name;
+            // system field and not this workspace's — advertising it in `fields` would offer a
+            // name whose answers come from somewhere else. Registration is what claims a name;
             // availability only says WHEN it starts answering (see FieldResolver), so a
             // reserved-but-not-yet-queryable entry claims its key just as firmly, and reading
-            // that any other way puts a key in this list that every query against it refuses.
-            // Vocabulary omits rather than refuses: /schema is a list of what exists, so a
-            // claimed key is simply absent here and the refusal is the query's to give.
-            if (registry.find(meta.key()).isPresent()) continue;
+            // that any other way puts a key in that list which every query against it refuses.
+            //
+            // HD-275: it is REPORTED rather than dropped. Omitting it was the silent half of the
+            // defect — the tenant's field vanished from the vocabulary with no error, no log line
+            // and no affordance, while every query kept answering confidently from the built-in
+            // field's rows. It goes in its own list, never in `fields`, so autocomplete cannot
+            // suggest a name that lies.
+            //
+            // This is the SHADOWING predicate even though the call spells claimedBy: a
+            // CustomFieldMeta has no archived flag to ask about because ResolutionContextFactory
+            // already dropped every archived def before building this map, so the "and it is
+            // live" half is satisfied by construction rather than re-tested. That is what keeps a
+            // clean instance quiet — its only claimed-key rows are V3's three archived
+            // placeholders (labels/sprint/components), which never reach this loop.
+            var claimed = shadowedFields.claimedBy(meta.key());
+            if (claimed.isPresent()) {
+                shadowed.add(new SearchSchemaResponse.ShadowedField(
+                        meta.key(), meta.name(), claimed.get()));
+                continue;
+            }
             String valueSuggest = customValueSuggest(meta);
             fields.add(new SearchSchemaResponse.Field(
                     meta.key(), meta.type().name(), customOperatorTokens(meta),
@@ -212,7 +231,12 @@ public class SearchService {
             }
         }
 
-        return new SearchSchemaResponse(fields, keywords(), values, insights(ctx));
+        // Sorted by key, case-insensitively: customFieldsByKey is a LinkedHashMap in
+        // visible-project iteration order, which is not stable between requests, and a list whose
+        // order changes under a client that is diffing it is a list that looks like it changed.
+        shadowed.sort(Comparator.comparing(SearchSchemaResponse.ShadowedField::key,
+                String.CASE_INSENSITIVE_ORDER));
+        return new SearchSchemaResponse(fields, keywords(), values, insights(ctx), shadowed);
     }
 
     /**

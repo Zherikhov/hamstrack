@@ -2,18 +2,26 @@ package com.hamstrack.admin.service;
 
 import com.hamstrack.admin.dto.*;
 import com.hamstrack.admin.scope.ScopeContext;
+import com.hamstrack.auth.entity.User;
 import com.hamstrack.common.util.ColorFormat;
 import com.hamstrack.issue.entity.FieldDef;
 import com.hamstrack.issue.entity.FieldSet;
 import com.hamstrack.issue.entity.FieldSetItem;
 import com.hamstrack.issue.entity.FieldType;
 import com.hamstrack.issue.repository.*;
+import com.hamstrack.search.RetiredFieldAliases;
+import com.hamstrack.search.ShadowedFields;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.hibernate.JDBCException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
@@ -29,6 +37,7 @@ import java.util.UUID;
  * id — the UI warns about it.
  */
 @Service
+@Slf4j
 @RequiredArgsConstructor
 public class AdminFieldService {
 
@@ -37,8 +46,19 @@ public class AdminFieldService {
     private final FieldSetItemRepository fieldSetItemRepository;
     private final IssueFieldValueRepository valueRepository;
     private final ProjectCountService projectCountService;
-    /** The HQL vocabulary, consulted only to refuse a key it has claimed — see requireUnreservedKey. */
-    private final com.hamstrack.search.FieldRegistry fieldRegistry;
+    /**
+     * The one answer to "has a built-in search name claimed this key" (HD-275 §5). Injected in
+     * place of {@code FieldRegistry} so that create's refusal, the rename's permission and the
+     * {@code shadowedBy} this service publishes are the same predicate — three surfaces that must
+     * agree, and only had to be one before this ticket.
+     */
+    private final ShadowedFields shadowedFields;
+    /**
+     * The compatibility table for keys a release <em>retired</em> — consulted here, and only here
+     * in this service, so that {@link #requireUnreservedKey} refuses a retired key by rule rather
+     * than by the accident of a seeded placeholder happening to occupy it (HD-275 review §5).
+     */
+    private final RetiredFieldAliases retiredAliases;
 
     /**
      * Options in one SELECT/MULTI_SELECT field — a ceiling on a picker, not on content
@@ -79,7 +99,7 @@ public class AdminFieldService {
         var rows = scope.isGlobal()
                 ? fieldDefRepository.findAllAtScope(null, null)
                 : fieldDefRepository.findAllVisibleTo(scope.visibleWorkspaceId(), scope.visibleProjectId());
-        return rows.stream().map(f -> AdminFieldResponse.of(f, fieldUsage(scope, f))).toList();
+        return rows.stream().map(f -> AdminFieldResponse.of(f, fieldUsage(scope, f), shadowedBy(f))).toList();
     }
 
     @Transactional
@@ -103,13 +123,33 @@ public class AdminFieldService {
         f.setType(req.type());
         f.setConfig(req.config());
         f.setDescription(req.description());
-        fieldDefRepository.save(f);
-        return AdminFieldResponse.of(f, new UsageInfo(0, 0, 0, 0));
+        persist(f);
+        return AdminFieldResponse.of(f, new UsageInfo(0, 0, 0, 0), shadowedBy(f));
     }
 
-    /** Type and key are immutable — stored values depend on both. */
+    /**
+     * Edit a field definition. <strong>The type is immutable; the key is fixed once created
+     * <em>except</em> while a built-in search name has taken it</strong> (ADR-0036, HD-275 §6.2).
+     *
+     * <p>The old javadoc here said "type and key are immutable — stored values depend on both",
+     * which was true of the type and false of the key: values live in {@code issue_field_values}
+     * keyed by {@code field_id}, set membership by {@code field_id}, history records the display
+     * <em>name</em>, and {@code FieldValueService} never reads the key. <strong>A rename moves no
+     * rows.</strong> The real dependency is the text of saved filters — HQL is stored verbatim,
+     * resolved at read time and never rewritten by anybody — which is exactly why the rename is
+     * confined to the shadowed population: see {@link #renameTo}.
+     *
+     * <p><strong>The rename is triggered by DIFFERENCE, never by presence.</strong> Any client
+     * that echoes the stored key back on save — as this console did until HD-275, and as a
+     * round-tripping third-party client naturally would — would otherwise have every ordinary edit
+     * of every unshadowed custom field answered 422, for changing nothing. The trigger is a
+     * property of the request rather than of one caller's habits, so it holds for the next client
+     * too.
+     *
+     * <p>Reads first, mutations last, then {@code saveAndFlush} — see {@link #persist}.
+     */
     @Transactional
-    public AdminFieldResponse updateField(ScopeContext scope, UUID id, UpsertFieldRequest req) {
+    public AdminFieldResponse updateField(User actor, ScopeContext scope, UUID id, UpsertFieldRequest req) {
         var f = requireField(scope, id);
         if (!f.getName().equals(req.name())
                 && fieldDefRepository.existsVisibleToAndName(scope.visibleWorkspaceId(), scope.visibleProjectId(), req.name())) {
@@ -122,11 +162,167 @@ public class AdminFieldService {
         }
         requireConfigSize(req);
         requireSelectOptions(f.getType(), req);
+        // Every refusal, including the rename's, is decided before anything is mutated: a field
+        // set before a repository query would make Hibernate AUTO-flush write the row twice.
+        String newKey = renameTo(scope, f, req.key());
+        String oldKey = f.getKey();
+
         f.setName(req.name());
         f.setConfig(req.config());
         f.setDescription(req.description());
-        fieldDefRepository.save(f);
-        return AdminFieldResponse.of(f, fieldUsage(scope, f));
+        if (newKey != null) f.setKey(newKey);
+        persist(f);
+        if (newKey != null) {
+            // The only record a rename leaves. There is no taxonomy audit table today and building
+            // one is a separate ticket (HD-275 §15 Q1); one INFO costs a line and is the difference
+            // between "the key changed at some point" and an answer.
+            log.info("field-key-rename: field {} renamed from '{}' to '{}' at scope {} by user {}",
+                    f.getId(), oldKey, newKey, f.scopeLabel(), actor == null ? null : actor.getId());
+        }
+        return AdminFieldResponse.of(f, fieldUsage(scope, f), shadowedBy(f));
+    }
+
+    /**
+     * Decide whether this update renames the field, and to what — <strong>every refusal in
+     * {@link #updateField}'s rename family lives here, in the order the spec fixes</strong>
+     * (HD-275 §6.2 R8). The order is load-bearing: the common mistake must be answered by the rule
+     * that explains itself, not by a message about the target key.
+     *
+     * @return the new key to write, or {@code null} when this update renames nothing
+     */
+    private String renameTo(ScopeContext scope, FieldDef f, String requested) {
+        // Absent, null, blank or equal (any casing) → not a rename, and not a refusal either.
+        // Blank never means "re-derive from the display name": deriving would silently rename a
+        // field every time a curator edited its label.
+        if (requested == null || requested.isBlank()) return null;
+        String key = requested.toLowerCase(Locale.ROOT);
+        if (key.equalsIgnoreCase(f.getKey())) return null;
+
+        // A system field's key is resolved BY KEY at runtime — DemoDataService looks up the global
+        // `severity`/`environment` defs that way, and every V3 placeholder is a system def. 409
+        // rather than 422 for the same reason deleteField answers 409: it is a collision with what
+        // the row already is, not a rule about the request. Checked before the shadowing rule
+        // because a claimed-key system field would otherwise be told it may rename.
+        if (f.isSystem()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "System fields cannot be renamed.");
+        }
+        // The permission. claimedBy, not shadowing: an ARCHIVED claimed-key field may be renamed
+        // too, because it is out of resolution entirely and so the licensing invariant holds even
+        // harder for it — rename-then-unarchive is the recovery path for a field somebody archived
+        // because it had stopped working.
+        if (shadowedFields.claimedBy(f.getKey()).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.UNPROCESSABLE_CONTENT,
+                    "A field's key is fixed once created — saved filters are stored as text and refer "
+                    + "to fields by key, so renaming one would silently change what they match. This "
+                    + "key can only be changed while a built-in search name has taken it.");
+        }
+        // The target gets exactly the checks a create gets. Reserved first (§7.4): renaming
+        // `labels` → `components` walks out of one shadow into another and would still be
+        // shadowed, so the tenant could repeat it forever without ever escaping — the message must
+        // name that, not the target's occupancy.
+        requireUnreservedKey(key);
+        // Wider than this scope ON PURPOSE (§7.2), and the widening is UPWARD only: the predicate
+        // matches global rows, this scope's workspace and this scope's project, which is exactly
+        // the reach create uses. Nothing BELOW the renaming scope is looked at, so a rename can
+        // always land on a key some narrower row already holds, at every scope this endpoint is
+        // mounted at — known, left as it is, and tracked as HD-284 (the downward occupancy check,
+        // which both minting doors share and which cannot be widened here without changing what
+        // create means). Two instances of that one shape, and the second is the larger:
+        //  - WORKSPACE scope: visibleProjectId() is null, so a PROJECT-scoped row inside that very
+        //    workspace matches no disjunct and the target key reads as free. One tenant's problem.
+        //  - GLOBAL scope: both visible ids are null, so the predicate collapses to global rows
+        //    alone and every workspace- and project-scoped row on the instance is invisible to it.
+        //    An instance admin renaming a global shadowed field onto a key any tenant already uses
+        //    therefore succeeds too — the same first-wins ambiguity, in every workspace at once.
+        // The consequence worth writing down, and it is the same one at both scopes: after such a
+        // collision a saved filter naming that key can begin resolving to a DIFFERENT field_defs
+        // row, because ResolutionContextFactory.addCustomField is first-wins over visible-project
+        // iteration order. Pinned as today's behaviour by ShadowedFieldKeyRenameTest so the next
+        // change to it is a decision.
+        if (fieldDefRepository.existsVisibleToAndKey(scope.visibleWorkspaceId(), scope.visibleProjectId(), key)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "A field with key '" + key + "' already exists or is inherited — reuse it instead of duplicating");
+        }
+        return key;
+    }
+
+    /**
+     * <strong>{@code saveAndFlush}, and the catch that only works because of it</strong> (HD-275
+     * §7.3). Spring Data's {@code save} merely queues the INSERT/UPDATE; Hibernate flushes at
+     * commit, <em>after</em> this {@code @Transactional} method has returned, so a
+     * {@code DataIntegrityViolationException} raised then is outside every {@code try} in the
+     * service and the constraint violation stays a 500 with no way to translate it. Flushing here
+     * brings the violation inside the frame that has a sentence for it.
+     *
+     * <p>{@code existsVisibleToAndKey}/{@code existsVisibleToAndName} are check-then-act, so two
+     * admins renaming two fields onto the same key inside one scope both pass and one loses at
+     * {@code field_defs_scope_key_key}. That loser gets a 409 rather than a 500.
+     *
+     * <p><strong>One message for both constraints</strong> ({@code _key_key} and {@code _name_key})
+     * deliberately: telling them apart means string-matching a message the database owns, and the
+     * caller's action is "reload" either way. Every non-racing path already answered the precise
+     * message before reaching here.
+     *
+     * <p><strong>But only for a UNIQUE violation.</strong> {@link DataIntegrityViolationException}
+     * is Spring's translation for the whole integrity family, so catching it flat would answer
+     * "that key or name was taken — reload and try again" to a {@code 22001} string truncation
+     * (which {@code GlobalExceptionHandler} deliberately answers <strong>400</strong> for, HD-171)
+     * and to a {@code 23503} foreign-key violation — advice its reader cannot act on, in a loop,
+     * with the diagnostic swallowed. Everything that is not {@code 23505} is rethrown untouched
+     * and keeps the status its own handler gives it. Not reachable through this service's own
+     * doors today; it is a class this repository has already paid for once.
+     */
+    private void persist(FieldDef f) {
+        try {
+            fieldDefRepository.saveAndFlush(f);
+        } catch (DataIntegrityViolationException e) {
+            if (!isUniqueViolation(e)) throw e;
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "That key or name was taken by another change — reload and try again.", e);
+        }
+    }
+
+    /**
+     * Is this integrity violation a <strong>duplicate key</strong>, and nothing else?
+     *
+     * <p><strong>SQLSTATE, never the message.</strong> PostgreSQL's text is localisable, names the
+     * constraint and belongs to the database rather than to us; a {@code contains("duplicate")}
+     * couples this service to a string nobody here controls and starts matching the wrong things
+     * the first time one is reworded. {@code GlobalExceptionHandler.sqlStateOf} answers the same
+     * question for the same reason — this is the local, single-state form of it, kept private
+     * because it decides one refusal rather than a family of them.
+     *
+     * <p>The chain is <em>walked</em> rather than inspected at one level: the shape here is
+     * {@code DataIntegrityViolationException → org.hibernate.exception.ConstraintViolationException
+     * → SQLException}, and either of the last two can be the one carrying the state depending on
+     * how the translator built it. {@link org.springframework.dao.DuplicateKeyException} short-
+     * circuits it: when the translator has already made that judgement there is nothing to
+     * re-derive.
+     */
+    private static boolean isUniqueViolation(DataIntegrityViolationException e) {
+        if (e instanceof DuplicateKeyException) return true;
+        Throwable t = e;
+        // Bounded rather than merely self-reference-guarded, for the reason sqlStateOf is: a
+        // re-wrapping framework can produce A -> B -> A, and this runs while a write is failing.
+        //
+        // The 20 is deliberately a SECOND bound and not GlobalExceptionHandler.MAX_CAUSE_DEPTH
+        // shared. The two walks answer different questions and stop on different rules: that one
+        // returns the FIRST SQLSTATE it meets and stops, because it classifies a failure it has
+        // never seen; this one keeps walking until it finds 23505 anywhere, because it is asking
+        // whether one specific state is present. Sharing the number would publish a common policy
+        // that does not exist and would leave the difference that actually matters untouched — and
+        // the number is a runaway guard, not a contract, so the two drifting apart costs nothing.
+        // Both are far past any real chain, so neither is reachable in practice.
+        for (int depth = 0; t != null && depth < 20; t = t.getCause(), depth++) {
+            if (t instanceof SQLException se && "23505".equals(se.getSQLState())) return true;
+            if (t instanceof JDBCException je && "23505".equals(je.getSQLState())) return true;
+        }
+        return false;
+    }
+
+    /** The built-in search name claiming this field's key, or null — see {@link AdminFieldResponse}. */
+    private String shadowedBy(FieldDef f) {
+        return shadowedFields.claimedBy(f.getKey()).orElse(null);
     }
 
     @Transactional
@@ -450,7 +646,11 @@ public class AdminFieldService {
     private AdminFieldSetResponse toSetResponse(ScopeContext scope, FieldSet set) {
         var items = fieldSetItemRepository.findAllBySetOrderByPosition(set).stream()
                 .map(i -> new AdminFieldSetResponse.Item(
-                        AdminFieldResponse.of(i.getField(), null),
+                        // usage is null here (a set listing does not compute it), but shadowedBy is
+                        // NOT: the console renders these nested field rows too, and a field that
+                        // is warned about in one list and silent in another is the silence this
+                        // ticket exists to end.
+                        AdminFieldResponse.of(i.getField(), null, shadowedBy(i.getField())),
                         i.isRequired(), i.isShowOnCreate()))
                 .toList();
         return new AdminFieldSetResponse(set.getId(), set.getName(), set.isSystemDefault(),
@@ -468,19 +668,42 @@ public class AdminFieldService {
      * would work everywhere in the product except search, where the name means the system field
      * and {@code /schema} silently omits the tenant's — no error, no log line, no affordance.
      *
-     * <p><strong>Checked after slugification, and on create only.</strong> After, because the key
-     * is derived from the display name when omitted, so a field a curator simply calls "Project"
-     * walks straight past a check placed before it — which is exactly how this collision arises
-     * without anybody choosing it. Create-only, because the key is immutable on update and
-     * because this must never reject or migrate a row that already exists: it stops recurrence,
-     * it is not retroactive.
+     * <p><strong>Checked after slugification.</strong> The key is derived from the display name
+     * when omitted, so a field a curator simply calls "Project" walks straight past a check placed
+     * before it — which is exactly how this collision arises without anybody choosing it.
+     *
+     * <p><strong>Still never retroactive.</strong> It guards the two doors that MINT a key — create,
+     * and the rename's target (HD-275) — and it must never reject or migrate a row that already
+     * exists. Rows that predate a registration are exactly the shadowed population this endpoint's
+     * rename now offers an exit to; refusing them here would refuse the exit as well.
+     *
+     * <h4>A RETIRED key is refused too, by its own rule and with its own sentence</h4>
+     * A {@link com.hamstrack.search.RetiredFieldAliases} entry is not a registry name: it is
+     * consulted <em>last</em>, so a tenant that mints a custom field keyed {@code story_points} or
+     * {@code fix_version} is not shadowed — the opposite happens. Their field wins, the alias stops
+     * firing for everyone the field is visible to, and <strong>every saved filter written before
+     * that key was retired silently changes what it matches</strong>, from the native column to a
+     * custom field somebody just created. For a GLOBAL def that is the whole instance at once.
+     *
+     * <p><strong>This was a protection somebody could delete without noticing.</strong> Both keys
+     * already answered 409, but only because V1/V3 seeded global placeholders under them and
+     * {@code existsVisibleToAndKey} counts archived rows — an accident of seed data doing the work
+     * of a rule. A future retirement of a key that never had a placeholder would have opened
+     * silently. It is a rule now, so the guarantee survives the row.
      */
     private void requireUnreservedKey(String key) {
-        if (fieldRegistry.find(key).isPresent()) {
+        if (shadowedFields.claimedBy(key).isPresent()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "'" + key + "' is a reserved search field name — pick a different key "
                             + "(a custom field with this key would not be searchable)");
         }
+        retiredAliases.canonicalName(key).ifPresent(canonical -> {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "'" + key + "' is a retired search field name — pick a different key (saved "
+                            + "filters written before it was retired still resolve it, to the "
+                            + "built-in '" + canonical + "' field, and a custom field with this key "
+                            + "would take that name over and change what they match)");
+        });
     }
 
     private FieldDef requireField(ScopeContext scope, UUID id) {

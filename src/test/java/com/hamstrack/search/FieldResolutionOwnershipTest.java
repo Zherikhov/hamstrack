@@ -1,5 +1,6 @@
 package com.hamstrack.search;
 
+import com.hamstrack.admin.service.AdminFieldService;
 import org.junit.jupiter.api.Test;
 
 import java.io.File;
@@ -53,8 +54,26 @@ class FieldResolutionOwnershipTest {
      * new type wants to know what a name means, it should <em>ask</em> {@code FieldResolver}
      * instead of holding the alias table and placing the step itself — that is the entire
      * reason the resolver exists, and the reason this list is short.
+     *
+     * <p><strong>{@code AdminFieldService} is here because it does not resolve a name — it
+     * refuses a key</strong> (HD-275). {@code requireUnreservedKey} guards the two doors that
+     * MINT a key (create, and a rename's target) and asks the raw mapping one question only: is
+     * this key one a release retired? It never places the alias step, never orders it against
+     * anything, and never answers what a name means; the hazard this test exists for cannot
+     * arise from a call that has no resolution to order.
+     *
+     * <p>What it is protecting is the mirror image of that hazard and needs the raw table to
+     * state: a custom field minted under a retired key is <em>not</em> shadowed — it wins, being
+     * resolved before the alias — so the compatibility fallback stops firing and every saved
+     * filter written before the retirement quietly matches something else. Asking the resolver
+     * cannot express that question: the resolver answers "what does this name mean here", which
+     * for a would-be key is a name that does not exist yet. It is also deliberately NOT folded
+     * into {@link ShadowedFields}, whose {@code claimedBy} grants the rename permission — a
+     * retired key that reported as claimed would make a field keyed {@code story_points}
+     * renameable, which is a different rule with a different licence.
      */
-    private static final Set<Class<?>> PERMITTED_HOLDERS = Set.of(FieldResolver.class);
+    private static final Set<Class<?>> PERMITTED_HOLDERS =
+            Set.of(FieldResolver.class, AdminFieldService.class);
 
     @Test
     void onlyTheResolverHoldsTheRetiredKeyAliases() throws Exception {

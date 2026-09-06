@@ -1018,7 +1018,18 @@ function prioritySetGroup(base: string) {
 
 export interface UpsertFieldPayload {
   name: string
-  key?: string                        // blank on create = derived from name; immutable afterwards
+  /**
+   * Blank on create = derived from the name.
+   *
+   * On **update** this is a rename request, and the server refuses one with
+   * **422** unless a built-in search name currently shadows the field
+   * (HD-275 §6.2). The trigger is *difference*, never presence: a `key` equal
+   * to the stored one (any casing), or absent/blank, is a no-op rather than a
+   * refusal. So a caller must send it **only when it actually changed** — a
+   * form that echoes the unchanged key on every save turns every ordinary
+   * field edit into a 422.
+   */
+  key?: string
   type: FieldType                     // immutable after creation
   config?: FieldConfig | null
   description?: string

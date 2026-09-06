@@ -307,6 +307,26 @@ public class FieldRegistry {
         byName.put(alias.toLowerCase(Locale.ROOT), d);
     }
 
+    /**
+     * <strong>Every name this registry has claimed</strong> — canonical names and aliases alike,
+     * lowercased, available or not (HD-275 §8, §9.1).
+     *
+     * <p>The watch set for the shadowed-key surfaces is <em>derived from here</em> rather than
+     * restated as a constant anywhere, so a name registered tomorrow is scanned, reported and
+     * warned about with no second edit. That is the half of the durability guarantee which cannot
+     * go partially adopted: there is no list to forget. The half that <em>is</em> a deliberate
+     * human act — checking existing instances for tenant fields the new name would shadow — is
+     * {@code RegisteredSearchNameLedgerTest}, which fails the build the moment this set changes
+     * and whose failure message is the propagation checklist.
+     *
+     * <p>Aliases are included on purpose: a key is shadowed by whatever the <em>lookup</em>
+     * answers, not by the canonical spelling, so {@code labels} claims its key exactly as firmly
+     * as {@code label} does.
+     */
+    public Set<String> claimedKeys() {
+        return Set.copyOf(byName.keySet());
+    }
+
     /** Case-insensitive lookup. Includes not-yet-available stubs. */
     public Optional<FieldDescriptor> find(String name) {
         if (name == null) return Optional.empty();

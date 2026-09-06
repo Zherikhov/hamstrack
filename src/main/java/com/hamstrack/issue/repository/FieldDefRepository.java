@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -23,6 +24,26 @@ public interface FieldDefRepository extends JpaRepository<FieldDef, UUID> {
     boolean existsByScopeWorkspaceIdIsNullAndKey(String key);
 
     boolean existsByScopeWorkspaceIdIsNullAndName(String name);
+
+    /**
+     * Every LIVE definition whose key is one of the given (lowercased) keys, across all tenants
+     * — the startup shadowed-key scan's one read (HD-275 §8).
+     *
+     * <p><strong>Deliberately unscoped, and that is not an oversight.</strong> It has exactly one
+     * caller, {@code ShadowedFieldStartupScan}, which is a process rather than a request: it runs
+     * as the operator on the operator's own instance and emits ids, keys, names and scope ids to
+     * the application log — never issue data and never field values. Nothing request-scoped may
+     * call it; every request-scoped surface builds its shadowed list from the caller's own
+     * {@code ResolutionContext} instead, which costs no query and cannot cross a tenant boundary.
+     *
+     * <p>Archived defs are excluded here rather than at the caller because they are out of
+     * resolution entirely and therefore not shadowed — {@code ShadowedFields.shadowing} says the
+     * same thing about a single row. Every clean instance has three archived claimed-key rows
+     * (V3's {@code labels}/{@code sprint}/{@code components} placeholders, archived by V8/V11/V9),
+     * so a scan that forgot this predicate would warn on every boot of every instance.
+     */
+    @Query("select f from FieldDef f where f.archivedAt is null and lower(f.key) in :keys")
+    List<FieldDef> findAllLiveByKeyIn(@Param("keys") Collection<String> keys);
 
     // ---- exact-scope queries for the delegated field console ----
 

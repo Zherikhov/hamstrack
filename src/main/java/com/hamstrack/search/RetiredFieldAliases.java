@@ -69,9 +69,22 @@ import java.util.Optional;
  * {@code labels}/{@code components} (409) and any workspace that already had one — creatable
  * before V8/V9 registered the plural, since that check is create-time and not retroactive — is
  * shadowed: {@code key = "…"} answers from the native field and {@code /search/schema} omits
- * their field entirely, with no error anywhere. Whereas {@code story_points} and
- * {@code fix_version}, which live only in this table, stay creatable and stay the tenant's own.
- * That difference is a property of registering a name, not of retiring one; see
+ * their field entirely, with no error anywhere. Whereas a workspace that already owns a
+ * {@code story_points} or {@code fix_version} field keeps it and keeps <em>resolving to it</em>:
+ * a key that lives only in this table reserves nothing at resolution time, so the tenant's own
+ * field wins and the alias simply stops firing for them. That difference — in what a key MEANS —
+ * is a property of registering a name, not of retiring one.
+ *
+ * <p><strong>Minting one is nevertheless refused</strong> (HD-275):
+ * {@code AdminFieldService.requireUnreservedKey} answers 409 for a retired key at both doors that
+ * mint one, with a message of its own, precisely because the tenant's field would win — the
+ * fallback stops firing for everyone that field is visible to, and every filter written before
+ * the retirement quietly starts matching something else. That is a rule about creating a key, not
+ * about resolving one, and it changes nothing above: rows that already exist are untouched, and
+ * every other route into {@code field_defs} (a migration, a seeder, direct SQL) reaches none of
+ * it. Before HD-275 both keys were refused only by accident — V1/V3 seeded global placeholders
+ * under them and the occupancy check counts archived rows — which is a protection somebody could
+ * have deleted. See
  * {@link FieldResolver}, and {@code docs/release-checklist.md} → "Releases that register a new
  * HQL field name" for the runbook and the detection SQL that finds affected tenants.
  *
@@ -102,10 +115,12 @@ import java.util.Optional;
  * <p><strong>Caveat — that precedence is not purely a per-tenant decision.</strong>
  * {@code FieldDef.scopeWorkspaceId} is nullable, so a <em>global</em> field def is
  * reachable by every project of every workspace and enters
- * {@code ResolutionContext.customFieldsByKey} for all tenants at once. If an instance
- * admin ever creates a global custom field under a retired key, the alias stops
+ * {@code ResolutionContext.customFieldsByKey} for all tenants at once. If a global custom field
+ * ever appears under a retired key, the alias stops
  * firing in <em>every</em> workspace simultaneously and that key changes meaning
- * everywhere, not in one tenant. No data crosses a workspace boundary
+ * everywhere, not in one tenant. That instance-wide blast radius is why minting such a key is
+ * refused at the admin doors (above); the caveat stands because a refusal on two doors is not a
+ * property of the table, and a migration or a hand-written INSERT still produces the row. No data crosses a workspace boundary
  * when that happens — values stay per-issue JSONB behind the scope predicate — but the
  * blast radius is the whole instance, so a global def that reuses a retired key must
  * be treated as a breaking change rather than a local one.
