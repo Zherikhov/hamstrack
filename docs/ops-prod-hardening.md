@@ -1859,6 +1859,97 @@ your own healthy containers as orphans — under a message that says a deploy's
 `up -d --remove-orphans` would delete them, which for that box is false. The deploy side is
 `docs/self-hosting.md` → *Applying repository configuration*.
 
+**The unit's own sandbox was never exercised until 2026-09-07, and the first thing it did was
+fail.** Past tense with the date, the way §6.1's gap log records an outage. The timer above had
+never been installed on this box: from HD-199 until that morning the only thing that ever ran
+the drift check was `apply-config.sh` at the tail of a deploy — plain root, no namespace — so
+the `containers` scope had **never once executed under the unit that is supposed to run it
+hourly**. Installing the timer is what exercised it, and the first run published:
+
+```
+containers: 'docker compose up -d --dry-run' exited 1 — this check could not ask whether the box
+            matches its files, which is not the same as an answer of no:
+mkdir /root/.docker: read-only file system
+```
+
+The box was clean — the same command by hand printed all ten containers `Running` and exited 0.
+`ProtectHome=yes` replaces `/root` with an empty read-only mount, so the docker CLI could not
+see the real `/root/.docker` (which does exist here, `drwx------ root root`, created 2026-08-30)
+and tried to create it, on a read-only filesystem. Left armed that fires `ConfigDrift`
+(critical, `for: 30m`) permanently against a healthy box, which is the failure HD-221 fixed
+once, returning through the sandbox instead of through the oracle. **The timer was disabled on
+the box that morning** and is off pending the install below — the past tense stops here,
+because everything after it has not happened yet.
+
+The repair is in the unit and adds one writable path: `RuntimeDirectory=hamstrack-config-drift`
++ `RuntimeDirectoryMode=0700` + `Environment=DOCKER_CONFIG=/run/hamstrack-config-drift` — a 0700
+tmpfs directory systemd creates before the run and **deletes when the unit stops**. Nothing
+under `/root` is un-hidden and no persistent path becomes writable. (The path is written out
+rather than as `%t/…`: systemd copies an *unknown* specifier through verbatim, which on an
+older build would hand the CLI a relative path and quietly create a directory named `%t` at
+the filesystem root. This is a system unit, so `%t` is always `/run`.) Because the unit file
+changed, **re-run the three `install` commands above** — and this release also changed
+`hamstrack-backup.service`, so re-run **§6.3's install step for that unit too**, or
+`installed-ops` goes to 1 within the hour and `ConfigDrift` fires on the box you have just
+repaired. Then walk it in this order — the timer is re-armed last, after the metric has been
+seen at 0:
+
+```bash
+sudo systemctl daemon-reload
+systemctl show -p Environment hamstrack-config-drift.service   # pre-flight, see below
+sudo systemctl restart hamstrack-config-drift.service    # the sandbox — NOT a hand run
+journalctl -u hamstrack-config-drift.service -n 40 --no-pager
+grep 'scope="containers"' /var/lib/node_exporter/textfile_collector/hamstrack_config.prom
+sudo systemctl enable --now hamstrack-config-drift.timer
+```
+
+The `show` line costs a second and answers before the run what the journal would otherwise
+answer after it: it prints the value this unit will actually export. It must read
+`Environment=DOCKER_CONFIG=/run/hamstrack-config-drift` — an absolute path (nothing was left
+unexpanded) that `/etc/hamstrack/drift.env` did not override, since an `EnvironmentFile=`
+always wins over `Environment=`.
+
+**What it is expected to look like when it works** (a prediction until the run above is done;
+the measured line replaces this): the journal carries `containers: 'docker compose up -d
+--remove-orphans' would act on nothing — every declared service runs the definition on disk…`
+and the textfile reads `hamstrack_config_drift{scope="containers"} 0`. **Still broken has two
+shapes, and they are different strings.** The `mkdir /root/.docker` line above, unchanged,
+means the repair did not reach the unit that ran — daemon-reload or the install step. A
+*different* line, `containers: docker compose could not resolve the box's configuration — that
+is itself a drift:` followed by *"'compose' is not a docker command"*, means the compose
+plugin on that host lives in `~/.docker/cli-plugins` (Docker's own documented manual install),
+which `ProtectHome=yes` hides and which `DOCKER_CONFIG` no longer points at: install the
+plugin into a system `cli-plugins` directory. That is not this box — here the plugin resolves
+from a system directory, which is why the failure was the `mkdir` — but it is the shape a
+self-hoster gets, and `docs/self-hosting.md` says so beside the `containers` scope.
+
+**`sudo /usr/local/bin/hamstrack-config-drift` does not test this, and never did** — a hand run
+has the real `/root`, which is exactly how the defect survived from HD-199 to 2026-09-07.
+Starting it through systemd — `systemctl restart`, as above — is the only form that puts the
+script inside the namespace. The repository half is sealed by `OpsUnitDockerConfigGuardTest`,
+which asks the question of **every** unit under `ops/` whose commands reach a `docker` call
+(all of them: `ExecStart=` is not the only directive that runs one), and makes a unit that
+declines the fix say so in writing; the namespace half can only be proved by the run above, on
+the box.
+
+**`hamstrack-backup.service` was checked at the same time and deliberately left alone.** It
+also runs the docker CLI — `docker compose -f … ps -q` as well as `docker exec` — but under
+`ProtectHome=read-only`, where `/root/.docker` is *visible*: the CLI is satisfied by a
+directory that already exists, and this unit has run that way since 2026-08-27, including the
+days before `/root/.docker` existed at all. Copying the fix there would cost something the
+drift unit does not pay — `DOCKER_CONFIG` also moves the CLI's per-user plugin directory
+(`$DOCKER_CONFIG/cli-plugins`), so on a box where `docker compose` was installed into
+`~/.docker/cli-plugins` the redirect turns a working backup into *"'compose' is not a docker
+command"*. **The residue is named rather than closed, in the unit itself:** if that job ever
+fails with a write under `/root`, that note has come true and §6.3 gains the drift unit's three
+lines — after one check on that host, which asks the CLI rather than guessing at directories:
+`sudo DOCKER_CONFIG="$(mktemp -d)" docker compose version` must print a version. That rehearses
+the redirect itself; an `ls` of a couple of system `cli-plugins` paths cannot, because there
+are at least four of them and a list that misses one answers "not there" about a plugin that
+is. Its bytes did change all the same — the finding is written into the unit as a
+comment — so §6.3's install step needs re-running like any other change under `ops/`, because
+`installed-ops` compares bytes and does not care that a line is a comment.
+
 ### The two-address probe
 
 The one check that cannot be made from a single machine, because the property is about

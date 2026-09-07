@@ -1637,6 +1637,16 @@ that cannot be read rather than a box that is clean"*), never as health. So if y
 sentence, the check is telling you it could not ask its question on your machine — not that
 your box has drifted.
 
+**It also depends on WHERE your Compose plugin lives.** The unit runs under `ProtectHome=yes`
+and points the docker CLI at its own runtime directory, so a plugin installed the manual way
+into `~/.docker/cli-plugins` — which is Docker's own documented install — is invisible to it:
+the hourly check reports `containers` drift with *"'compose' is not a docker command"* while
+the very same command by hand works, because a hand run has your home directory. Install the
+plugin into a system directory instead (`/usr/local/lib/docker/cli-plugins`), and verify with
+`sudo DOCKER_CONFIG="$(mktemp -d)" docker compose version`, which is exactly the question the
+unit asks. The backup unit keeps a read-only `$HOME` and is not affected, so on such a host
+the two units disagree about whether Compose can be found.
+
 This is a measurement rather than a supported-versions list, because the list would be a
 promise about versions nobody has run: **the check itself is the authority on your box**, and
 it says so in that line. What has actually been measured (2026-09-05) is two Compose

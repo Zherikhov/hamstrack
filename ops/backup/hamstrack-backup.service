@@ -78,6 +78,43 @@ PrivateTmp=yes
 # role comes from IMDS) and fatal for a self-hoster using MinIO/B2 keys — and a hand-run
 # outside systemd would still work, which is the worst diagnostic shape there is.
 ProtectHome=read-only
+# THE DOCKER CONFIG DIRECTORY IS THE OTHER HALF OF THAT LINE, and this unit deliberately does
+# NOT do what hamstrack-config-drift.service had to do (measured 2026-09-07). That unit runs
+# under ProtectHome=YES, where /root is replaced by an empty inaccessible mount, so the CLI's
+# `mkdir /root/.docker` was EROFS every time and `docker compose up -d --dry-run` could never
+# run at all; it now points DOCKER_CONFIG at a RuntimeDirectory. Read-only is a different
+# state, and the difference is what decides this file:
+#   * this script does invoke the CLI in ways that consult that directory — `docker compose
+#     -f … ps -q` as well as `docker exec` — so the question is real here too;
+#   * under read-only, /root/.docker is VISIBLE, and `MkdirAll` on a directory that already
+#     exists succeeds without writing — so once it is there the CLI is satisfied by what it
+#     finds, whichever verb consults it (`up` is the one that wanted to WRITE it, and this
+#     script never runs `up`). That covers today. What covers the days before it existed is a
+#     NEGATIVE RESULT, and it is bounded rather than general: this unit ran on 2026-08-27,
+#     08-28 and 08-29 with /root/.docker absent (it was created 08-30) and NO RUN HAS EVER
+#     FAILED THAT WAY — three nights, on whatever docker CLI and Compose those days' box
+#     carried, which nothing recorded (its Compose generation is first written down as of
+#     2026-09-05). It is not a claim about every code path in every version, which is why the
+#     residue below is named rather than closed;
+#   * and DOCKER_CONFIG is not a free redirect: it also moves the CLI's per-user plugin
+#     directory ($DOCKER_CONFIG/cli-plugins). On a box where `docker compose` was installed
+#     the manual way — into ~/.docker/cli-plugins, which nothing in our docs forbids —
+#     setting it here turns a working backup into "'compose' is not a docker command". The
+#     drift unit pays none of that cost because ProtectHome=yes had already emptied that
+#     directory; this one would pay all of it, and the price would be A BACKUP THAT DOES NOT
+#     HAPPEN.
+# SO THE RESIDUE IS NAMED RATHER THAN CLOSED: correctness here is contingent on the host's
+# /root/.docker, not guaranteed by this file. If this unit ever fails with a write under
+# /root — `mkdir /root/.docker: read-only file system` or the same on a file inside it — that
+# is this note coming true, and the repair is the drift unit's (RuntimeDirectory= +
+# Environment=DOCKER_CONFIG=/run/…) plus one check first — ask the CLI the question you mean
+# rather than guessing at directories:
+#     sudo DOCKER_CONFIG="$(mktemp -d)" docker compose version
+# must print a version. That is the redirect itself, rehearsed: it proves the plugin resolves
+# with the per-user directory pointed away. An `ls` of a couple of system cli-plugins paths
+# does not — there are at least four (/usr/libexec, /usr/local/libexec, /usr/lib,
+# /usr/local/lib .../docker/cli-plugins) and a list that misses one answers "not there" about a
+# plugin that is.
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 UMask=0077

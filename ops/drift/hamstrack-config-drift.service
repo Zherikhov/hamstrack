@@ -60,6 +60,83 @@ UMask=0022
 ProtectSystem=strict
 ReadWritePaths=/var/lib/node_exporter/textfile_collector
 
+# THE DOCKER CLI NEEDS A CONFIG DIRECTORY IT CAN WRITE, AND UNDER THIS SANDBOX $HOME/.docker
+# IS NOT ONE. ProtectHome=yes above replaces /root with an empty, inaccessible mount and
+# ProtectSystem=strict makes what is left read-only, so the `containers` scope's whole
+# question — `docker compose up -d --dry-run` — died before it was asked:
+#     mkdir /root/.docker: read-only file system
+# and the scope published "this check could not ask", which ConfigDrift reports as critical
+# after 30 m. It did that against a HEALTHY box: the same command by hand printed all ten
+# containers Running and exited 0, because a hand run has the real /root. Measured
+# 2026-09-07, the morning the timer was first installed — until then the only thing that had
+# ever run this check was apply-config.sh at the tail of a deploy, as plain root with no
+# sandbox, so the `containers` scope had never once executed under the unit that is supposed
+# to run it hourly. A CHECK THAT CANNOT CLEAR GETS MUTED, which is the failure HD-221 fixed
+# once already, arriving here through the sandbox instead of through the oracle.
+#
+# WHAT THIS ADDS TO THE WRITABLE SURFACE IS ONE TMPFS DIRECTORY: /run/hamstrack-config-drift,
+# 0700 root, created by systemd before the run and DELETED when the unit stops. Nothing under
+# /root is unhidden and no persistent path becomes writable. The CLI sees exactly what
+# ProtectHome=yes already gave it — an empty config directory — except that it can now write
+# in it, so this is the smallest thing that answers the error: it takes nothing away and
+# leaves nothing behind. `docker compose` itself is unaffected, and that is a property of the
+# empty directory rather than of luck: the plugin resolves from a SYSTEM cli-plugins
+# directory here. That is measured rather than argued: this script asks Compose to resolve the
+# configuration (`docker compose … config --services`, hamstrack-config-drift.sh:436) BEFORE it
+# asks for the plan (:456), and a failure there returns early under a DIFFERENT journal line
+# (:437). What production published was the line-481 message, so `config --services` had
+# already exited 0 inside this namespace, with an empty /root and no per-user cli-plugins
+# directory for the plugin to have come from.
+#
+# THE SHORTER FIXES, ALL REJECTED:
+#   * ProtectHome=read-only (what hamstrack-backup.service uses) hands this unit — which
+#     holds the DOCKER SOCKET, i.e. root-equivalence, see the note above — the whole of
+#     /root as well: /root/.aws, any ssh key, any operator history. And it does not reliably
+#     fix it: a read-only /root works only while /root/.docker ALREADY EXISTS (on this box it
+#     does, drwx------ root root, created 2026-08-30 by nothing that manages it) and fails
+#     with the identical EROFS the first time the CLI has to create or write it. A repair
+#     whose correctness rests on an unmanaged host directory is the shape of the defect, not
+#     of the fix.
+#   * ReadWritePaths=/root/.docker makes a PERSISTENT root-owned host directory writable to
+#     the socket holder, and — see the note on ProtectSystem below — every path listed there
+#     must EXIST before the unit starts or systemd refuses to set up the namespace and the
+#     unit fails before the script runs. That makes the unit's ability to START depend on a
+#     directory no install step creates. (It is also inert while ProtectHome=yes overmounts
+#     /root, so in practice it is the rejected line above plus a persistent write.)
+#   * DOCKER_CONFIG under PrivateTmp's /tmp needs no new mount at all, and was rejected for
+#     being invisible: that /tmp is mode 1777 and shared with everything else in the cgroup,
+#     and it would tie this unit's correctness to PrivateTmp= staying on with nothing saying
+#     so.
+#   * Setting DOCKER_CONFIG inside the SCRIPT was rejected because it would follow the script
+#     to the hand-run and deploy paths, where /root IS available and redirecting the CLI away
+#     from the operator's own config and docker context would be a regression — and because
+#     the next author of a unit like this one copies the unit, not the script.
+#
+# An inline Environment= rather than drift.env above, which does not contradict the note
+# there: what belongs in that file is a BOX's setting, and this is the unit's own, shipped
+# with it and identical everywhere. An operator who must point the CLI elsewhere (a docker
+# context of their own) can still do it from drift.env — an EnvironmentFile always overrides
+# Environment= — but only at A TARGET OUTSIDE $HOME, which then owes a ReadWritePaths=
+# drop-in. A target under /root cannot be reached from here at all: ProtectHome=yes overmounts
+# it, which is what makes a ReadWritePaths= for it inert (the rejected line above).
+#
+# THE PATH IS SPELLED OUT INSTEAD OF %t/… ON PURPOSE. systemd copies an UNKNOWN specifier
+# through verbatim, so on a build that does not know %t the CLI is handed the RELATIVE path
+# `%t/hamstrack-config-drift`, resolved against WorkingDirectory (unset → /) — and a build that
+# old does not honour ProtectSystem=strict either, so / is writable and the mkdir SUCCEEDS: the
+# check goes green while creating a directory literally named `%t` at the root of the host,
+# which nothing ever removes. This is a system unit (no [Install], uid 0), so %t is always /run and
+# the literal is exact — and it removes a silent failure for free.
+#
+# THE FLOOR THIS LEANS ON IS SYSTEMD 235 — not the age of RuntimeDirectory= or of
+# ProtectSystem=strict, but the ExecDirectory rework that makes RuntimeDirectory= paths EXEMPT
+# from ProtectSystem=strict, i.e. mounted writable inside the namespace. Below it this unit
+# starts and the directory is read-only, which is the original error at a new path. Amazon
+# Linux 2023 ships systemd 252.
+RuntimeDirectory=hamstrack-config-drift
+RuntimeDirectoryMode=0700
+Environment=DOCKER_CONFIG=/run/hamstrack-config-drift
+
 # No [Install] section, deliberately — like hamstrack-backup.service. This unit is started
 # by its .timer; `systemctl enable` on the SERVICE would be a second, boot-time trigger
 # nobody asked for. Enable the timer.
