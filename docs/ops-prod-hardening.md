@@ -1878,8 +1878,8 @@ see the real `/root/.docker` (which does exist here, `drwx------ root root`, cre
 and tried to create it, on a read-only filesystem. Left armed that fires `ConfigDrift`
 (critical, `for: 30m`) permanently against a healthy box, which is the failure HD-221 fixed
 once, returning through the sandbox instead of through the oracle. **The timer was disabled on
-the box that morning** and is off pending the install below — the past tense stops here,
-because everything after it has not happened yet.
+the box that morning**, the repair shipped as `4c09b6a`, and both units were re-installed and
+the timer re-armed the same day.
 
 The repair is in the unit and adds one writable path: `RuntimeDirectory=hamstrack-config-drift`
 + `RuntimeDirectoryMode=0700` + `Environment=DOCKER_CONFIG=/run/hamstrack-config-drift` — a 0700
@@ -1909,9 +1909,16 @@ answer after it: it prints the value this unit will actually export. It must rea
 unexpanded) that `/etc/hamstrack/drift.env` did not override, since an `EnvironmentFile=`
 always wins over `Environment=`.
 
-**What it is expected to look like when it works** (a prediction until the run above is done;
-the measured line replaces this): the journal carries `containers: 'docker compose up -d
---remove-orphans' would act on nothing — every declared service runs the definition on disk…`
+**What it looks like when it works**, measured on this box at 11:03:46 UTC on 2026-09-07 — the
+first SCHEDULED run after the repair, which is the path that had never worked, rather than the
+hand-run that always did:
+
+```
+containers: 'docker compose up -d --remove-orphans' would act on nothing — every declared
+            service runs the definition on disk, and nothing runs that no file declares
+drift: files=0 containers=0 installed-ops=0 edge-body-limit=0 sha=4c09b6a…
+```
+
 and the textfile reads `hamstrack_config_drift{scope="containers"} 0`. **Still broken has two
 shapes, and they are different strings.** The `mkdir /root/.docker` line above, unchanged,
 means the repair did not reach the unit that ran — daemon-reload or the install step. A
