@@ -243,7 +243,9 @@ When a gate returns findings:
 
 ---
 
-## 9. Agent curation recommendation
+## 9. Agent curation recommendation — executed 2026-09-07 (HD-293)
+
+> **Executed on 2026-09-07:** all 28 imported agents were deleted (zero use in 292 tickets, 24 of them able to write code) and two project-native agents were added, `ops-reviewer` and `browser-qa`. Evidence and per-agent verdicts: `docs/retro/2026-09-subagent-audit.md`. The text below is the original recommendation, kept for history; where it differs from what was executed (it proposed keeping an advisory bench), the audit's measured usage decided.
 
 On autopilot, every extra generic agent is a **mis-routing surface** — the model can pick a generic implementer that skips the tenancy rule. The 9 project-native (★) agents are the spine; the 34 imported agents should be **pruned to a small advisory bench** and the rest removed so auto-dispatch can't reach them. Recommendation:
 
@@ -292,3 +294,38 @@ The pipeline is "working" when, for a representative feature task run on autopil
 5. **Anti-gaming strength.** Is marker-based enforcement + CI backstop enough, or do you want the hook to independently re-derive `areas` from `git diff` (so the orchestrator can't under-declare touched areas)? **Recommended: have the hook recompute `areas` from `git diff --name-only` and compare against the declared set — cheap and closes the biggest gaming hole.**
 6. **Where the orchestrator instruction lives.** A dedicated `.claude/skills/feature-pipeline` skill vs a `## Dev pipeline` block in `CLAUDE.md`. **Recommended: a skill (invocable, self-contained), with a one-line pointer from `CLAUDE.md`.**
 7. **Frontend gate coverage.** There is no native "frontend-reviewer" — FE correctness rides on `frontend-builder` + `test-runner` + optional `accessibility-tester`. Accept that, or add a FE review gate later? **Recommended: accept for now; revisit if FE regressions recur.**
+
+---
+
+## 12. Revision of 2026-09-07 (HD-293) — what the quality retrospective changed
+
+Source: `docs/retro/2026-09-bug-rca.md` (three roots), `2026-09-bug-actions.md` (actions X1–X6 and the per-cluster items), `2026-09-bug-priorities.md` (waves), `2026-09-subagent-audit.md`, `2026-09-agent-models.md`. This section supersedes §4 (role catalog), §5 (phases), §6.2 (gate file) and §8 (fix loop) where they differ; the skill file is the operative text.
+
+### 12.1 Bench
+Eleven project-native agents, each with explicit `model:` / `effort:` frontmatter (never override per call): builders `backend-builder` (fable/high), `frontend-builder` (opus/xhigh); reviewers `tenancy-reviewer`, `security-officer`, `ops-reviewer` (fable/xhigh), `dc-cloud-guard`, `migration-reviewer` (opus/high); verifiers `test-runner` (opus/xhigh), `browser-qa` (sonnet/medium); `systems-analyst` (fable/xhigh); `api-docs-sync` (sonnet/high). No imported or generic agents exist; the routing invariant now holds by construction.
+
+### 12.2 Areas and gates derived by the hook
+| Area | Files | Gate | Agent |
+|---|---|---|---|
+| backend | `src/main/java/**` | `tenancy` | tenancy-reviewer |
+| api | controllers / `dto/` | `api_docs` | api-docs-sync |
+| migration | `db/migration/**` (+ `@Entity`, new `FieldRegistry` names by instruction) | `migration` | migration-reviewer |
+| config | `*.properties`, `docker-compose*`, `.env*.example`, `Caddyfile` | `dc_cloud` | dc-cloud-guard |
+| **ops** | `ops/**`, `observability/**`, `.github/workflows/**`, `Dockerfile`, `Caddyfile`, `pom.xml`, `docker-compose*`, `ops/CHANGELOG-console.md` | **`ops_witness`** (+ `tests`) | ops-reviewer |
+| **frontend_ui** | `src/main/frontend/src/{pages,components}/**`, `index.css`, `DESIGN.md` | **`ui_qa`** | browser-qa |
+| **tests** | `src/test/**`, `**/*.test.*`, `vitest.config.*` | `tests` | test-runner |
+Class-mandated gates (`spec`, `security`, `tests` for feature; `tests` for light) cannot be `n/a`; conditional gates may be `n/a` only when the diff did not arm them.
+
+### 12.3 New fields in `run.json`
+- **`category`** (X1): `{ "rule", "members": [...], "sealedBy" }` or `{ "n/a": "<reason>" }`. The hook refuses a missing block, a one-member category when the diff adds a bound/guard/rule (`@Size/@Min/@Max/@NotBlank/@Pattern/@Email/@Scheduled`, `Locale.ROOT`, `requireAndRecord`, `PerPrincipalMinuteBudget`, `AfterCommit`, `require(Permission.`, `mem_limit`, `@Column(length`), and a `sealedBy` that names no existing test.
+- **`gates.tests`** (X2): `{ "status": "pass", "negativeControl": "seen: <test> red against <what was planted or reverted>" }` or `"n/a: <reason>"`; a bare `"pass"` without `run.negativeControl` is refused.
+
+### 12.4 Policies
+- **Evidence labels (X6):** every claim in a spec, report or ticket is measured / read / inferred; each review contains at least one measured item; the builder's first report is the measured premise.
+- **Deferral (X5):** in-category findings go to the fix loop; a follow-up from a gate names its category and seal (or `no-seal`) and carries `deferred-from-gate`; closing budget **10 open per epic**.
+- **Finalize:** "which agent checklist grows from this ticket, or why none" is mandatory; a framework trap adds an observation test under `common/framework/` together with any CLAUDE.md pointer.
+- **Prose budget:** failure messages ≤ 25 lines naming the action; history in javadoc on the constant.
+- **Tracker:** English for everything; backlog searched before filing and recorded; console actions logged in `ops/CHANGELOG-console.md` with the read-back.
+
+### 12.5 Measures
+The eight measures and their 2026-09-07 baselines are in `docs/retro/2026-09-bug-priorities.md` §6.4 and re-counted monthly; model/effort changes are dated in `docs/retro/README.md` so the measures can be split before/after.

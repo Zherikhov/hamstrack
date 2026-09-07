@@ -1,94 +1,118 @@
 ---
 name: feature-pipeline
-description: "Orchestrate a task through the Hamstrack dev-team pipeline — classify size, delegate to the project-native subagents, run the mandatory review gates (analyst/tenancy/security/tests) and conditional ones (migration/dc-cloud/api-docs), and only finish when all required gates are green. Use for any non-trivial feature or change; the Stop hook enforces the gates. Full spec: docs/design/dev-team-pipeline.md."
+description: "Orchestrate a task through the Hamstrack dev-team pipeline — classify size, delegate to the eleven project-native subagents, run the mandatory review gates (analyst/tenancy/security/tests) and the conditional ones (migration/dc-cloud/api-docs/ops-witness/ui-qa), fill the category block, collect the negative control, and only finish when all required gates are green. Use for any non-trivial feature or change; the Stop hook enforces the gates. Full spec: docs/design/dev-team-pipeline.md (2026-09-07 revision)."
 ---
 
 # Feature pipeline (dev-team orchestrator)
 
-You (the main session) are the **orchestrator** — the only node that can dispatch subagents
-(a subagent cannot spawn another). Drive a task through the phases below. The `Stop` hook
-(`.claude/pipeline/check-gates.mjs`) will refuse to let you finish while a required gate is
-unmet, so keep `.claude/pipeline/run.json` truthful. Full rationale: `docs/design/dev-team-pipeline.md`.
+You (the main session) are the **orchestrator** — the only node that can dispatch subagents (a subagent cannot
+spawn another). Drive a task through the phases below. The `Stop` hook (`.claude/pipeline/check-gates.mjs`)
+refuses to let you finish while a required gate, the `category` block or the negative control is missing, so
+keep `.claude/pipeline/run.json` truthful. Rationale for every rule here: `docs/retro/2026-09-bug-rca.md`.
 
-## Routing invariant (never violate)
-Only **`backend-builder`** and **`frontend-builder`** write Hamstrack code / config / schema / API.
-The general/specialist agents are **read/advise only** — dispatching a generic agent to *implement*
-is a defect (it skips the tenancy + Boot 4/Hibernate/Jackson rules). The 7 generic implementers were
-removed for exactly this reason; don't reintroduce that pattern.
+## The bench (eleven agents, nothing else)
+Builders **`backend-builder`**, **`frontend-builder`** — the only agents that write Hamstrack code / config / schema /
+API. Reviewers `tenancy-reviewer`, `security-officer`, `dc-cloud-guard`, `migration-reviewer`, `ops-reviewer`
+(read-only). Verifiers `test-runner`, `browser-qa`. Analyst `systems-analyst`. Docs `api-docs-sync`. Each carries its
+own `model:` / `effort:` (`docs/retro/2026-09-agent-models.md`) — never override them per call. There are no imported
+or generic agents any more; do not dispatch built-in general-purpose agents to implement anything.
 
-Context is cold for every spoke: hand each one the **diff / absolute changed-file paths / spec path /
-the specific question** — never "review the changes" with nothing attached. Reviewers re-open files.
+Context is cold for every spoke: hand each one the **diff / absolute changed-file paths / spec path / the specific
+question**. Reviewers are told to leave the diff for the siblings; give them the category, not just the change.
+
+## Three rules that apply to every phase
+- **Category, not instance (X1).** A rule, bound, guard, normalisation or shape change is applied to every member of
+  its category in the same change, or the change ships the category test that enumerates the members. The builder
+  writes the `category` block; a reviewer verifies the member list against the code; the hook refuses a one-member
+  category with a new bound in the diff.
+- **Evidence labels (X6).** Every claim in a ticket, a spec, a builder report or a review is **measured** (executed,
+  output quoted), **read** (file:line) or **inferred**. A ticket premise marked *inferred* is checked by the builder
+  before code. Each review contains at least one *measured* item.
+- **Prose budget.** A failure message is ≤ 25 lines and names the action; history goes into javadoc on the constant.
+  A ticket carries the evidence and the acceptance criteria, not the argument. Everything in the tracker is English.
 
 ## Phase 0 — Classify (no dispatch)
-Pick a tier and write `.claude/pipeline/run.json` (see schema below):
-- **feature** — new/changed entity, migration, endpoint, DTO, `*.properties`/env toggle, auth/upload/admin
-  surface, or >~5 files / >2 layers. → full pipeline.
-- **light** — localized 1–2 file fix, no new surface. → skip the spec; still run tenancy (if backend) + tests.
-- **trivial** — typo/comment/formatting/doc-only, no logic. → edit directly, no gate file, no dispatch.
+Search the backlog first and record it in the ticket ("searched: …, no match / related: HD-…"). Pick a tier and write
+`run.json`:
+- **feature** — new/changed entity, migration, endpoint, DTO, property/env toggle, auth/upload/admin surface, ops
+  artefact, or >~5 files / >2 layers → full pipeline.
+- **light** — localized 1–2 file fix, no new surface → skip the spec; still run tenancy (backend), tests, and any
+  conditional gate the diff arms.
+- **trivial** — typo/comment/formatting/doc-only, no logic → edit directly, no gate file. The hook blocks a "trivial"
+  run whose diff touches code, config, ops or tests.
+When unsure, pick the heavier tier. **Escalate on discovery**, never downgrade an armed gate.
 
-When unsure, pick the heavier tier. **Escalate on discovery:** if a light change turns out to touch a
-workspace-scoped query, a migration, or the API, upgrade `class` in `run.json` (never downgrade an armed gate).
-The hook recomputes areas from the real `git diff`, so under-declaring won't get past it.
-
-## Phase 1 — Analysis  [gate: spec]  *(feature only)*
-Dispatch **`systems-analyst`** → spec in `docs/design/{feature}-proposal.md` (scope, actors, rules, edge
-cases, acceptance criteria, open questions). Record the path + set `gates.spec="pass"`.
-**Autopilot policy (user choice): auto-proceed, no approval pause** — the user vetoes after. Extract the
-acceptance criteria for later phases.
+## Phase 1 — Analysis [gate: spec] *(feature only)*
+Dispatch **`systems-analyst`** → `docs/design/{feature}-proposal.md`. It must contain the category members, acceptance
+criteria phrased over the category, the observability contract (§13) and evidence labels on every premise. Autopilot
+policy: proceed without an approval pause; the owner vetoes after. Extract the acceptance criteria and the member list.
 
 ## Phase 2 — Implement
-Dispatch **`backend-builder`** and/or **`frontend-builder`** per the spec. Run them in parallel only when
-the spec pins a shared DTO/endpoint contract; otherwise backend → frontend. Capture the changed absolute
-paths into `run.json.changed`. **Implementation is only ever these two agents.**
+Dispatch **`backend-builder`** and/or **`frontend-builder`** (parallel only when the spec pins the shared contract). The
+builder's **first report is the measured premise** — any discrepancy with the ticket stops the work until resolved.
+Capture the changed absolute paths into `run.json.changed` and the builder's `category` block into `run.json.category`.
 
-## Phase 3 — Conditional reviews (parallel)  [gate: migration, dc_cloud, api_docs]
-Dispatch by what the diff touched:
-- `migration-reviewer` — `src/main/resources/db/migration/**` or an `@Entity` change.
-- `dc-cloud-guard` — `*.properties` / profile / `docker-compose*` / `.env*.example` / new toggle.
-- `api-docs-sync` — REST surface changed (new/changed endpoint, DTO, status). *May edit* `openapi.yaml` + `docs/api-*.md`.
-Un-triggered ones → set their gate to `"n/a"`.
+## Phase 3 — Conditional reviews (parallel) [gates: migration, dc_cloud, api_docs, ops_witness, ui_qa]
+The hook derives these from the real diff:
+- `migration-reviewer` — `db/migration/**`, an `@Entity` change, or a new `FieldRegistry` name.
+- `dc-cloud-guard` — `*.properties` / profile / `docker-compose*` / `.env*.example` / `Caddyfile` / a new toggle.
+- `api-docs-sync` — REST surface changed. *May edit* the spec, both references, controller javadoc.
+- **`ops-reviewer`** — `ops/**`, `observability/**`, `.github/workflows/**`, `Dockerfile`, `Caddyfile`, `pom.xml`,
+  `docker-compose*`, `ops/CHANGELOG-console.md` (gate `ops_witness`): what observes it in production, was the effect
+  read back from the running system, was the fix verified through the path that failed.
+- **`browser-qa`** — a frontend diff touching `src/pages/**`, `src/components/**`, `index.css` or `DESIGN.md`
+  (gate `ui_qa`): measured render / dialog / contrast / font-scale facts against the dev app.
+Un-triggered ones → `"n/a"`. Console actions (AWS, Cloudflare, Resend) are recorded in `ops/CHANGELOG-console.md`
+with the read-back that proved the effect, which arms `ops_witness`.
 
-## Phase 4 — Mandatory security gates (parallel)  [gate: tenancy, security]
-- `tenancy-reviewer` — whenever Phase 2 produced a **backend** diff (unscoped queries / missing membership /
-  403-instead-of-404 / parent re-verification). Feed it the diff + paths.
-- `security-officer` — every feature (authn/JWT, authz, reset flows, rate limiting, upload, injection, secrets).
-Both read-only → parallel with each other and Phase 3. Findings → Phase 6 before proceeding.
+## Phase 4 — Mandatory security gates (parallel) [gates: tenancy, security]
+- `tenancy-reviewer` — whenever Phase 2 produced a **backend** diff.
+- `security-officer` — every feature.
+Both ask the four questions (category, silence, claims, observed-or-remembered) and execute at least one probe.
 
-## Phase 5 — Tests  [gate: tests]  *(never skipped on feature/light)*
-Dispatch **`test-runner`**: author/adjust tests, run the suite green (creds `hamstrack`/`hamstrack`, port 15432;
-`-Dfrontend.skip=true` for backend-only). Set `gates.tests="pass"` only with real green surefire output.
+## Phase 5 — Tests [gate: tests] *(never skipped on feature/light; also armed by any `src/test` or `*.test.*` change)*
+Dispatch **`test-runner`**: it owns surefire **and** vitest. `gates.tests` is written as
+`{"status": "pass", "negativeControl": "seen: <test> red against <what was planted/reverted>"}` — the red line is pasted
+before the green one, with the class count and the vitest file/test counts. `"n/a: <reason>"` is legal only with the
+reason. The hook refuses a tests gate without it.
 
-## Phase 6 — Fix loop
-A gate with findings → route the **verbatim finding + paths + violated spec section** back to the **owning
-builder** (backend/frontend; migration issues also go to `backend-builder` — reviewers are read-only). Then
-**re-run only the failed gate** (plus `test-runner` if code changed). **Cap: 3 rounds per gate** — after that,
-stop and escalate to the user with the finding and what was tried. Conflicts resolve in favor of the
-project-native mandatory reviewer. Environmental test failures (DB down) → fix env and re-run, don't bounce to a builder.
+## Phase 6 — Fix loop and deferral policy (X5)
+A finding **inside the category the diff touches** (a sibling door, a copy, a missing witness on a path the change
+added) goes back to the owning builder and the gate is re-run — it is **not** deferrable. A finding **outside** the
+category may be filed as a follow-up only if the ticket (a) names the category and (b) names an existing category test
+that will catch the next instance, or carries the label `no-seal`. Every follow-up filed from a gate carries the label
+`deferred-from-gate`. **Closing budget: no more than 10 open `deferred-from-gate` items per epic** before the next audit
+or review sweep on that epic starts; if the budget is full, the finding is fixed now. Cap: 3 rounds per gate, then
+escalate to the owner with the finding and what was tried. Reviewer conflicts resolve in favour of the project-native
+mandatory reviewer. Environmental test failures → fix the environment, don't bounce to a builder.
 
 ## Phase 7 — Finalize
-All required gates `pass`/`n/a` ⇒ the hook allows stop. Summarize what shipped + changed files + any deferred
-open questions. **Do not offer to commit** (the user commits themselves).
-
-**ADR self-check (soft — no gate, judgment call).** Ask: *did this task settle a significant, hard-to-reverse
-architectural fork* — a new data-model / tenancy / auth / DC-Cloud / storage pattern, or a choice a future
-contributor would ask "why?" about? If **yes**: ensure `docs/adr/` records it — flip the `systems-analyst`'s
-drafted `Proposed` ADR to `Accepted`, or (if none was drafted) write one now following the format of the existing
-files there and add its row to `docs/adr/README.md`. If **no** (routine feature mechanics), do nothing — most
-tasks are not ADR-worthy. Record only verified reasoning; never invent a decision date (use the record date).
+All required gates `pass` (or `n/a` for conditionals) and the hook allows stop. Summarize what shipped, the changed
+files, the `category` block, the negative control, and any deferred items with their labels. Then two mandatory lines:
+1. **Which agent checklist grows from this ticket, or why none** — a lesson lives in the agent that needs it (and,
+   for a framework trap, in an observation test under `common/framework/`); CLAUDE.md gets a one-line pointer at most.
+2. **ADR self-check** — did this settle a hard-to-reverse fork? Flip the analyst's `Proposed` ADR to `Accepted` or
+   write one; otherwise say "no ADR".
+Do not offer to commit — the owner commits.
 
 ## `run.json` schema
 ```jsonc
 {
-  "task": "issue-labels",
-  "class": "feature",                 // feature | light | trivial
-  "spec": "docs/design/issue-labels-proposal.md",
+  "task": "HD-123 short name",
+  "class": "feature",                      // feature | light | trivial
+  "spec": "docs/design/x-proposal.md",
   "changed": ["<absolute changed paths>"],
-  "areas": { "backend": true, "frontend": false, "migration": true, "config": false, "api": true },
-  "gates": {                          // pass | fail | pending | n/a
+  "category": {                            // X1 — or {"n/a": "<why this change adds no rule>"}
+    "rule": "every request-reachable text field is bounded to its column",
+    "members": ["RegisterRequest.email", "InviteMemberRequest.email", "..."],
+    "sealedBy": "RequestFieldLengthBoundTest"
+  },
+  "gates": {                               // pass | fail | pending | n/a
     "spec": "pass", "tenancy": "pass", "security": "pass",
-    "migration": "pass", "dc_cloud": "n/a", "api_docs": "pass", "tests": "pass"
+    "migration": "n/a", "dc_cloud": "n/a", "api_docs": "pass", "ops_witness": "n/a", "ui_qa": "n/a",
+    "tests": { "status": "pass", "negativeControl": "seen: RequestFieldLengthBoundTest red with @Size removed from InviteMemberRequest" }
   }
 }
 ```
-Write a gate `"pass"` only after you've read the agent's verdict. The hook derives the *required* set from the
-real diff, so a forgotten `tenancy`/`tests` still blocks the finish. `run.json` is gitignored transient state.
+Write a gate `"pass"` only after reading the agent's verdict. The hook derives the required set from the real diff, so a
+forgotten gate still blocks the finish. `run.json` is gitignored transient state.
