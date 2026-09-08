@@ -1,0 +1,9 @@
+{
+  "task": "HD-913 feature without a category block",
+  "class": "feature",
+  "gates": {
+    "spec": "pass",
+    "security": "pass",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" }
+  }
+}

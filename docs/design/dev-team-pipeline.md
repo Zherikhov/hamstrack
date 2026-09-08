@@ -329,3 +329,42 @@ Class-mandated gates (`spec`, `security`, `tests` for feature; `tests` for light
 
 ### 12.5 Measures
 The eight measures and their 2026-09-07 baselines are in `docs/retro/2026-09-bug-priorities.md` §6.4 and re-counted monthly; model/effort changes are dated in `docs/retro/README.md` so the measures can be split before/after.
+
+### 12.6 Two-week checkpoint (HD-303, 2026-09-08)
+Every allowed finish of the Stop hook appends one line to `.claude/pipeline/history.jsonl` (gitignored, append-only,
+never edited or truncated): `{schema, ts, task, class, head, touched, gates, category, negativeControl, verdict, runHash}`.
+`verdict` is `pass`, or `escaped` when the Stop that follows a block (`stop_hook_active`) would have been blocked
+again — under that flag the hook evaluates and records but never blocks, because that Stop is also how a session
+yields to a background agent. A fixture run (any `HAMSTRACK_*` override) records nothing unless it names its own
+`HAMSTRACK_HISTORY`, and says so on stderr. One line per distinct `(runHash, verdict)` — a re-finish of the same
+`run.json` bytes keeps the first line, so `head`, `touched` and `unmet` are those of the first identical finish. The
+`gates` object travels verbatim into the monthly attachment on HD-294, which is the permitted place for open-defect
+prose. The hook's exits and what each records are sealed by `.claude/pipeline/check-gates.test.mjs`
+(`node --test .claude/pipeline/check-gates.test.mjs`). Phase 7 of the skill runs the hook by hand
+(`node .claude/pipeline/check-gates.mjs </dev/null` — silence is the receipt), so a finish is recorded even when the
+session rolls straight into the next task without a Stop in between.
+
+**The ritual.** Every 14 days from 2026-09-07 — **first run 2026-09-21**, then 2026-10-05, 2026-10-19, … — the owner or
+the orchestrator runs
+
+```
+node .claude/pipeline/checkpoint.mjs            # add --dry-run to look without recording
+```
+
+It reads the whole history, takes the window since the previous checkpoint (`.claude/pipeline/checkpoints.jsonl`,
+gitignored; `--since <sha>` restores a lost file; the first window starts after 5c2adfe, the last commit made before
+the history existed), keeps the **last** record per
+task, and prints three numbers, each **flagged at ≥ 50 %** (a tie is a flag; a zero denominator prints `no data`):
+
+- **N1 category n/a** — feature/light passes whose `category` block is an `{"n/a": …}` text, over all feature/light passes.
+- **N2 negative control missing or n/a** — the same passes whose tests gate carries no `seen:` line.
+- **N3 uncovered commits** — commits since the last checkpoint that carry an `HD-nnn` key, are not merges and not
+  release tags, and share no key with any `pass` record in the entire history; listed by `sha7  subject`. Commits
+  covered only by a trivial-class run, merges and tags, and unkeyed commits are listed apart and never counted.
+  `escaped` records cover nothing; tasks whose last record is `escaped` are listed.
+
+Exit code 1 iff any flag. The **reaction rule**: a flag opens one ticket under HD-294 naming the runs or commits it
+lists — never a silent threshold change. **Monthly export**: on the first checkpoint of each month, attach
+`history.jsonl` and the checkpoint output to HD-294, and add the row to the local `docs/retro/README.md` table
+"Two-week checkpoints". The ritual itself has no automated witness by design — the README's last row older than
+14 days is the alert, and the owner's calendar carries the date.

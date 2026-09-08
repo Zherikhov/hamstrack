@@ -1,0 +1,6 @@
+{
+  "task": "HD-916 tests gate passed without a negative control",
+  "class": "feature",
+  "category": { "n/a": "fixture" },
+  "gates": { "spec": "pass", "security": "pass", "tests": "pass" }
+}

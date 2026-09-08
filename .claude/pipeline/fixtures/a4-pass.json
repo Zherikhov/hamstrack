@@ -1,0 +1,10 @@
+{
+  "task": "HD-904 feature with every gate satisfied",
+  "class": "feature",
+  "category": { "n/a": "fixture: the change adds no rule" },
+  "gates": {
+    "spec": "pass",
+    "security": "pass",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red with the guard commented out" }
+  }
+}

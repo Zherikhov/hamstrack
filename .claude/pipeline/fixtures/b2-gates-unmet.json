@@ -1,0 +1,6 @@
+{
+  "task": "HD-912 feature with gates still pending",
+  "class": "feature",
+  "category": { "n/a": "fixture" },
+  "gates": { "spec": "pass", "security": "pending", "tests": "pending" }
+}

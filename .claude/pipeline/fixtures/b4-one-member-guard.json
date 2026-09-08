@@ -1,0 +1,11 @@
+{
+  "task": "HD-914 one-member category with a new bound in the diff",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["FooRequest.name"], "sealedBy": ".claude/pipeline/check-gates.test.mjs" },
+  "gates": {
+    "spec": "pass",
+    "security": "pass",
+    "tenancy": "pass",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "task": "HD-915 category sealed by a test that does not exist",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"], "sealedBy": "NoSuchTestAnywhereInThisTree" },
+  "gates": {
+    "spec": "pass",
+    "security": "pass",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" }
+  }
+}

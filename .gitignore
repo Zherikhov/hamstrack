@@ -3,6 +3,8 @@ target/
 
 ### Dev pipeline transient run state (see docs/design/dev-team-pipeline.md) ###
 .claude/pipeline/run.json
+.claude/pipeline/history.jsonl
+.claude/pipeline/checkpoints.jsonl
 
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

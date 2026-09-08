@@ -30,6 +30,8 @@ question**. Reviewers are told to leave the diff for the siblings; give them the
   before code. Each review contains at least one *measured* item.
 - **Prose budget.** A failure message is ≤ 25 lines and names the action; history goes into javadoc on the constant.
   A ticket carries the evidence and the acceptance criteria, not the argument. Everything in the tracker is English.
+- **History (HD-303).** Every allowed finish is appended by the hook to `.claude/pipeline/history.jsonl`; never edit or
+  truncate it — `dev-team-pipeline.md` §12.6 reads it every 14 days (`node .claude/pipeline/checkpoint.mjs`).
 
 ## Phase 0 — Classify (no dispatch)
 Search the backlog first and record it in the ticket ("searched: …, no match / related: HD-…"). Pick a tier and write
@@ -87,7 +89,9 @@ escalate to the owner with the finding and what was tried. Reviewer conflicts re
 mandatory reviewer. Environmental test failures → fix the environment, don't bounce to a builder.
 
 ## Phase 7 — Finalize
-All required gates `pass` (or `n/a` for conditionals) and the hook allows stop. Summarize what shipped, the changed
+All required gates `pass` (or `n/a` for conditionals). Run the hook by hand — `node .claude/pipeline/check-gates.mjs </dev/null`
+— silence is the receipt and the `history.jsonl` line is the record (a session that rolls straight into the next task never
+Stops in between, so this is the only finish the checkpoint would see). Summarize what shipped, the changed
 files, the `category` block, the negative control, and any deferred items with their labels. Then two mandatory lines:
 1. **Which agent checklist grows from this ticket, or why none** — a lesson lives in the agent that needs it (and,
    for a framework trap, in an observation test under `common/framework/`); CLAUDE.md gets a one-line pointer at most.
