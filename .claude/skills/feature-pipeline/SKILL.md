@@ -55,6 +55,8 @@ builder's **first report is the measured premise** — any discrepancy with the 
 Capture the changed absolute paths into `run.json.changed` and the builder's `category` block into `run.json.category`.
 
 ## Phase 3 — Conditional reviews (parallel) [gates: migration, dc_cloud, api_docs, ops_witness, ui_qa]
+Agents that run in parallel share one scratchpad: tell each to work in a private subdirectory of it, or one agent's
+`rm -rf` mid-drill becomes another's false measurement (it happened on HD-304).
 The hook derives these from the real diff:
 - `migration-reviewer` — `db/migration/**`, an `@Entity` change, or a new `FieldRegistry` name.
 - `dc-cloud-guard` — `*.properties` / profile / `docker-compose*` / `.env*.example` / `Caddyfile` / a new toggle.
@@ -95,6 +97,7 @@ Stops in between, so this is the only finish the checkpoint would see). Summariz
 files, the `category` block, the negative control, and any deferred items with their labels. Then two mandatory lines:
 1. **Which agent checklist grows from this ticket, or why none** — a lesson lives in the agent that needs it (and,
    for a framework trap, in an observation test under `common/framework/`); CLAUDE.md gets a one-line pointer at most.
+   Answering "none" for two months is what `AgentChecklistFreshnessTest` turns into a red build (HD-304).
 2. **ADR self-check** — did this settle a hard-to-reverse fork? Flip the analyst's `Proposed` ADR to `Accepted` or
    write one; otherwise say "no ADR".
 Do not offer to commit — the owner commits.

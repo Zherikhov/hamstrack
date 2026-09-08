@@ -435,32 +435,114 @@ public final class PublishedCredentials {
     }
 
     /**
+     * One run of {@code git}: its exit status, its stdout and its stderr, <strong>kept apart</strong>.
+     * A process that could not be started at all — no {@code git} on {@code PATH}, no such directory
+     * — is reported as status {@link #NOT_STARTED} with an empty stdout and the exception text as its
+     * {@link #error()}, because a caller asking <em>"can history be read here?"</em> needs that as an
+     * answer rather than as a throw. Callers that need history refuse on it; {@link #git(String...)}
+     * is the one that throws.
+     *
+     * <p><strong>Why not one merged stream.</strong> This ran with {@code redirectErrorStream(true)},
+     * and git writes plenty to stderr that is not an error: progress, advice, and — measured on this
+     * work tree — the whole of {@code GIT_TRACE=1}. So {@code git rev-parse --is-inside-work-tree}
+     * exited 0 having printed {@code true}, and the merged reading of it was
+     * {@code "13:40:10.370453 exec-cmd.c:266 trace: resolved executable dir: …"}: not {@code true},
+     * therefore "not a git work tree", therefore {@code Skipped: 2} and two contract assertions lost
+     * to an environment variable. A parser is entitled to stdout; a diagnosis is entitled to stderr;
+     * merging them lets the second corrupt the first. Every reader here parses {@link #output()} and
+     * quotes {@link #error()} only in the refusal.
+     */
+    public record GitResult(int status, String output, String error) {
+
+        /** Status for "the process never ran" — outside git's own 0..255 range on purpose. */
+        public static final int NOT_STARTED = -1;
+
+        public boolean ok() {
+            return status == 0;
+        }
+
+        /**
+         * What this run said, for a refusal message: stdout always, stderr only when there is any.
+         * Both bounded, because {@code GIT_TRACE=1} produces thousands of stderr lines and a failure
+         * message is bound to 25.
+         */
+        public String detail() {
+            String said = "stdout `" + abbreviate(output) + "`";
+            return error.isBlank() ? said : said + ", stderr `" + abbreviate(error) + "`";
+        }
+
+        private static String abbreviate(String text) {
+            String trimmed = text.strip();
+            return trimmed.length() <= 200
+                    ? trimmed
+                    : trimmed.substring(0, 200) + "… (" + trimmed.length() + " chars)";
+        }
+    }
+
+    /**
+     * Runs {@code git} in {@code directory} and never throws on a git-level failure.
+     *
+     * <p>This is the repository's only {@code git} invocation: {@link #trackedFiles()} (HD-200) and
+     * {@code common.docs.RepositoryHistory} (HD-304) both go through it, so a checkout that cannot
+     * answer produces one diagnosis rather than two that can drift apart.
+     *
+     * <p>stderr is drained on a second thread rather than merged or left unread: a pipe nobody reads
+     * fills and blocks the child forever, which is the deadlock the merged stream used to avoid.
+     */
+    public static GitResult runGit(Path directory, String... args) {
+        var command = new ArrayList<String>(args.length + 1);
+        command.add("git");
+        command.addAll(List.of(args));
+        try {
+            var process = new ProcessBuilder(command)
+                    .directory(directory.toFile())
+                    .start();
+            var errors = new String[1];
+            var drain = new Thread(() -> {
+                try {
+                    errors[0] = new String(process.getErrorStream().readAllBytes(), StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    errors[0] = "could not read stderr: " + e.getMessage();
+                }
+            }, "git-stderr");
+            drain.setDaemon(true);
+            drain.start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int status = process.waitFor();
+            drain.join(); // also the happens-before that publishes errors[0] to this thread
+            return new GitResult(status, output, errors[0] == null ? "" : errors[0]);
+        } catch (IOException e) {
+            return new GitResult(GitResult.NOT_STARTED, "", String.valueOf(e.getMessage()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * Runs {@code git} at {@link #REPO_ROOT} and returns its stdout, refusing anything that is not
+     * a clean exit with the command and what the run said quoted.
+     */
+    public static String git(String... args) {
+        var result = runGit(REPO_ROOT, args);
+        if (!result.ok()) {
+            throw new IllegalStateException("`git " + String.join(" ", args) + "` exited "
+                    + result.status() + ", " + result.detail());
+        }
+        return result.output();
+    }
+
+    /**
      * The files this repository publishes, read from the index rather than from the working
      * tree: an untracked local file is not something anybody else can read, and letting one
      * take part would mean a checkout could pass or fail on files that are not in it.
      */
     public static List<Path> trackedFiles() {
         var out = new ArrayList<Path>();
-        try {
-            var process = new ProcessBuilder("git", "ls-files", "-z")
-                    .directory(REPO_ROOT.toFile())
-                    .redirectErrorStream(true)
-                    .start();
-            String listing = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            int status = process.waitFor();
-            if (status != 0) {
-                throw new IllegalStateException("`git ls-files` exited " + status + ": " + listing);
+        for (String entry : git("ls-files", "-z").split("\0")) {
+            if (!entry.isBlank()) {
+                out.add(REPO_ROOT.resolve(entry).normalize());
             }
-            for (String entry : listing.split("\0")) {
-                if (!entry.isBlank()) {
-                    out.add(REPO_ROOT.resolve(entry).normalize());
-                }
-            }
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException(e);
         }
         if (out.isEmpty()) {
             throw new IllegalStateException("`git ls-files` listed nothing - this test reads the repository's "
