@@ -7,6 +7,7 @@ import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
+import com.hamstrack.common.testsupport.Doors;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.repository.ProjectMemberRepository;
@@ -27,29 +28,22 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import org.springframework.web.bind.annotation.PatchMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMethod;
 import org.springframework.web.bind.annotation.RequestParam;
 
-import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -84,12 +78,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * <ol>
  *   <li>{@link #MIN_ROWS} — a row that stops running is a door with no guarantee while the suite
  *       stays green.</li>
- *   <li><strong>the category claim</strong>: a source scan of every {@code @PostMapping},
- *       {@code @PutMapping} and {@code @PatchMapping} under {@code src/main/java}, reduced to those
- *       that actually accept free text (decided by reflection over the handler's
- *       {@code @RequestBody} type and {@code @RequestParam String}s, never by a list), asserting each
- *       is covered by a row, by a row on the <em>same request DTO</em>, or by a declared exclusion.
- *       That is what makes a new write endpoint a deliberate edit rather than an omission.</li>
+ *   <li><strong>the category claim</strong>: every write handler the runtime routes —
+ *       {@code Doors.writeHandlers()}, POST/PUT/PATCH/DELETE, held equal to the handler mapping by
+ *       {@code DoorsHandlerMappingParityTest} — reduced to those that actually accept free text
+ *       (decided by reflection over the handler's {@code @RequestBody} type and
+ *       {@code @RequestParam String}s, never by a list), asserting each is covered by a row, by a row
+ *       on the <em>same request DTO</em>, or by a declared exclusion. That is what makes a new write
+ *       endpoint a deliberate edit rather than an omission.</li>
  * </ol>
  *
  * <p><strong>Coverage is by DTO, and that is a decision rather than a shortcut.</strong> A length
@@ -127,10 +122,13 @@ class RequestFieldLengthBoundTest {
      */
     private static final int MIN_ROWS = 45;
 
-    private static final Path MAIN_SOURCES = Path.of("src", "main", "java");
-
-    private static final Pattern WRITE_MAPPING =
-            Pattern.compile("@(Post|Put|Patch)Mapping\\b");
+    /**
+     * The verbs the scan covered before it read {@code Doors}. The category is now all four write
+     * verbs; this filter keeps the old floor as proof that the migration is no narrower than the
+     * source scan it replaced.
+     */
+    private static final Set<RequestMethod> BODY_VERBS =
+            Set.of(RequestMethod.POST, RequestMethod.PUT, RequestMethod.PATCH);
 
     /**
      * Free-text write endpoints deliberately <strong>not</strong> exercised, each with the reason it
@@ -157,9 +155,6 @@ class RequestFieldLengthBoundTest {
     private final ObjectMapper json = new ObjectMapper();
 
     private Fixture fixture;
-
-    /** Cached across cases: the scan reads every production source file. */
-    private Map<String, Method> writeMappings;
 
     // =================================================================== the table
 
@@ -401,39 +396,37 @@ class RequestFieldLengthBoundTest {
     // =================================================================== the category claim
 
     /**
-     * <strong>The tripwire that makes this a category and not a list.</strong> It reads every write
-     * mapping in production source, asks (by reflection, not by list) whether the handler accepts
-     * free text at all, and requires each one that does to be covered by a row, by a row on the same
-     * request DTO, or by a declared exclusion.
+     * <strong>The tripwire that makes this a category and not a list.</strong> It takes every write
+     * handler from {@code Doors} (all four verbs — a {@code DELETE} with a {@code @RequestParam String}
+     * is a write door that accepts caller text), asks (by reflection, not by list) whether the handler
+     * accepts free text at all, and requires each one that does to be covered by a row, by a row on
+     * the same request DTO, or by a declared exclusion.
      */
     @Test
-    void everyWriteEndpointThatAcceptsFreeTextIsCoveredOrDeclaredAnException() throws Exception {
-        var files = javaSources();
-        assertThat(files)
-                .as("scanned %s — if this is empty the working directory is not the project root",
-                        MAIN_SOURCES.toAbsolutePath())
-                .hasSizeGreaterThan(100);
+    void everyWriteEndpointThatAcceptsFreeTextIsCoveredOrDeclaredAnException() {
+        var writeHandlers = Doors.writeHandlers().floor(150);
+        // The floor this test carried when it scanned POST/PUT/PATCH itself, kept on the same subset:
+        // a migration that made the population smaller would fail here, not pass quietly. writeVerbs(),
+        // not verbs(): an unconditioned mapping answers every verb and counts here exactly as it
+        // counts on the population (none exists today, so the two read the same number).
+        writeHandlers.filter("POST/PUT/PATCH only", h -> h.writeVerbs().stream().anyMatch(BODY_VERBS::contains))
+                .floor(130);
+
+        var scanned = new LinkedHashMap<String, Method>();
+        for (var handler : writeHandlers) {
+            scanned.put(handler.id(), handler.method());
+        }
 
         var covered = new HashSet<String>();
         var coveredDtos = new HashSet<Type>();
         for (var row : rows()) {
             var id = row.id().replaceAll("\\[.*]$", "");
             covered.add(id);
-            var handler = writeMappings().get(id);
+            var handler = scanned.get(id);
             if (handler != null) {
                 requestBodyType(handler).ifPresent(coveredDtos::add);
             }
         }
-
-        var scanned = writeMappings();
-
-        assertThat(scanned)
-                .as("""
-                        the scan found %d write mappings, far fewer than this application has. A \
-                        scanner that has stopped seeing declarations certifies nothing while \
-                        staying green — find out what changed rather than lowering this.""",
-                        scanned.size())
-                .hasSizeGreaterThanOrEqualTo(130);
 
         var uncovered = new LinkedHashSet<String>();
         var freeText = 0;
@@ -487,34 +480,7 @@ class RequestFieldLengthBoundTest {
                 .isEmpty();
     }
 
-    // ------------------------------------------------------------------ scanning & reflection
-
-    private void scanWriteMappings(Path file, Map<String, Method> into) {
-        String source;
-        try {
-            source = stripComments(Files.readString(file, StandardCharsets.UTF_8));
-        } catch (IOException e) {
-            throw new AssertionError("cannot read " + file, e);
-        }
-        if (!WRITE_MAPPING.matcher(source).find()) {
-            return;
-        }
-        var className = classNameOf(file);
-        Class<?> type;
-        try {
-            type = Class.forName(className);
-        } catch (ClassNotFoundException e) {
-            throw new AssertionError("scanned " + file + " but could not load " + className
-                                     + " — the scan and the classpath disagree", e);
-        }
-        for (var method : type.getDeclaredMethods()) {
-            if (method.isAnnotationPresent(PostMapping.class)
-                || method.isAnnotationPresent(PutMapping.class)
-                || method.isAnnotationPresent(PatchMapping.class)) {
-                into.put(type.getSimpleName() + "#" + method.getName(), method);
-            }
-        }
-    }
+    // ------------------------------------------------------------------ reflection
 
     /** A handler accepts free text if any body it binds, or any String param, can carry one. */
     private static boolean acceptsFreeText(Method method) {
@@ -569,67 +535,8 @@ class RequestFieldLengthBoundTest {
         return java.util.Optional.empty();
     }
 
-    /** Scanned once: the walk reads every production source file, and every row asks for it. */
-    private Map<String, Method> writeMappings() throws IOException {
-        if (writeMappings == null) {
-            var scanned = new LinkedHashMap<String, Method>();
-            for (var file : javaSources()) {
-                scanWriteMappings(file, scanned);
-            }
-            writeMappings = scanned;
-        }
-        return writeMappings;
-    }
-
     private static String typeName(Type type) {
         return type instanceof Class<?> raw ? raw.getSimpleName() : type.getTypeName();
-    }
-
-    private static String classNameOf(Path file) {
-        var relative = MAIN_SOURCES.relativize(file).toString();
-        return relative.replace(".java", "").replace('\\', '.').replace('/', '.');
-    }
-
-    private static List<Path> javaSources() throws IOException {
-        try (Stream<Path> walk = Files.walk(MAIN_SOURCES)) {
-            return walk.filter(Files::isRegularFile)
-                    .filter(p -> p.toString().endsWith(".java"))
-                    .toList();
-        }
-    }
-
-    /** Blanks comment content so prose about {@code @PostMapping} is not read as a mapping. */
-    private static String stripComments(String src) {
-        var out = new StringBuilder(src.length());
-        int i = 0;
-        int n = src.length();
-        while (i < n) {
-            char c = src.charAt(i);
-            char next = i + 1 < n ? src.charAt(i + 1) : '\0';
-            if (c == '/' && next == '/') {
-                while (i < n && src.charAt(i) != '\n') {
-                    out.append(' ');
-                    i++;
-                }
-                continue;
-            }
-            if (c == '/' && next == '*') {
-                out.append("  ");
-                i += 2;
-                while (i < n && !(src.charAt(i) == '*' && i + 1 < n && src.charAt(i + 1) == '/')) {
-                    out.append(src.charAt(i) == '\n' ? '\n' : ' ');
-                    i++;
-                }
-                if (i < n) {
-                    out.append("  ");
-                    i += 2;
-                }
-                continue;
-            }
-            out.append(c);
-            i++;
-        }
-        return out.toString();
     }
 
     // =================================================================== fixture

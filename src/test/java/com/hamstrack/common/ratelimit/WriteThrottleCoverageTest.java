@@ -1,18 +1,19 @@
 package com.hamstrack.common.ratelimit;
 
+import com.hamstrack.common.testsupport.Doors;
+import com.hamstrack.common.testsupport.Population;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.mock.web.MockHttpServletRequest;
-import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 import org.springframework.web.util.ServletRequestPathUtils;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,9 +34,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * assertion would report an interceptor "in front of" a {@code GET} that it never spends anything
  * on, which is coverage that is not coverage.
  *
- * <p>So this file inverts the axis from PATH to METHOD: it enumerates every
- * {@code POST}/{@code PUT}/{@code PATCH}/{@code DELETE} handler in the workspace-scoped API and
- * asks each one whether the throttle in front of it — if any — would actually charge that verb.
+ * <p>So this file inverts the axis from PATH to METHOD: it takes every
+ * {@code POST}/{@code PUT}/{@code PATCH}/{@code DELETE} handler in the workspace-scoped API from
+ * {@code Doors.writeHandlers()} (held equal to the runtime's handler map by
+ * {@code DoorsHandlerMappingParityTest}) and asks each one whether the throttle in front of it — if
+ * any — would actually charge that verb. The interceptor chain is a runtime fact, so the class
+ * keeps its Spring context for that half.
  *
  * <h2>The exemptions are by CATEGORY, and each carries its own sentence</h2>
  * A list of individual controllers would be a list somebody maintains by remembering it exists.
@@ -54,9 +58,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @AutoConfigureMockMvc
 class WriteThrottleCoverageTest {
-
-    /** The verbs a write budget exists for. */
-    private static final Set<String> MUTATING = Set.of("POST", "PUT", "PATCH", "DELETE");
 
     /** Everything under here is in scope — the tenant-scoped API, which is all of the product's own writes. */
     private static final String SCOPE = "/api/workspaces";
@@ -137,8 +138,8 @@ class WriteThrottleCoverageTest {
 
     /**
      * What may be unthrottled, and why — keyed either by {@code ControllerSimpleName} (the whole
-     * type) or by {@code ControllerSimpleName.methodName} (one endpoint), with the method key
-     * winning.
+     * type) or by {@code ControllerSimpleName#methodName} (one endpoint — {@code Doors.Handler#id()},
+     * the one spelling every category test keys on), with the method key winning.
      *
      * <p><strong>Two granularities, because the exemptions are genuinely of two kinds.</strong>
      * {@code AuthMailDoorsTest} seals to the method and argues that a file is not the unit at which
@@ -163,23 +164,23 @@ class WriteThrottleCoverageTest {
      */
     private static final java.util.Map<String, String> EXEMPT = java.util.Map.ofEntries(
             // --- mixed-category controllers: keyed per endpoint ---
-            java.util.Map.entry("WorkspaceController.create", WORKSPACE_CREATION),
-            java.util.Map.entry("WorkspaceController.update", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("WorkspaceController.previewProjectAccess", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("WorkspaceController.invite", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("WorkspaceController.revokeInvite", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("WorkspaceController.acceptInvite", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("WorkspaceController.updateMember", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("WorkspaceController.removeMember", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#create", WORKSPACE_CREATION),
+            java.util.Map.entry("WorkspaceController#update", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("WorkspaceController#previewProjectAccess", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("WorkspaceController#invite", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#revokeInvite", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#acceptInvite", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#updateMember", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#removeMember", MEMBERSHIP_AND_INVITES),
 
-            java.util.Map.entry("ProjectController.create", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("ProjectController.update", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("ProjectController.archive", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("ProjectController.unarchive", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("ProjectController.setDefaultRole", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("ProjectController.addMember", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("ProjectController.updateMember", MEMBERSHIP_AND_INVITES),
-            java.util.Map.entry("ProjectController.removeMember", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("ProjectController#create", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("ProjectController#update", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("ProjectController#archive", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("ProjectController#unarchive", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("ProjectController#setDefaultRole", ADMIN_AND_TAXONOMY),
+            java.util.Map.entry("ProjectController#addMember", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("ProjectController#updateMember", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("ProjectController#removeMember", MEMBERSHIP_AND_INVITES),
 
             // --- single-category controllers: keyed by type ---
             java.util.Map.entry("WorkspaceAdminController", ADMIN_AND_TAXONOMY),
@@ -230,32 +231,76 @@ class WriteThrottleCoverageTest {
     @Autowired
     RequestMappingHandlerMapping handlerMapping;
 
+    /**
+     * The other outcome, which is not "unbudgeted": {@code Doors} counts classes and this class
+     * checks beans, so a handler on a {@code @Conditional}-meta class whose property this context
+     * does not set has no chain at all. Reporting that as unbudgeted would hand the maintainer
+     * {@link #WHAT_TO_DO}'s two moves, neither of which is the fix.
+     */
+    private static final String NOT_ROUTED = """
+
+            A CONDITIONAL HANDLER THIS CONTEXT DOES NOT ROUTE, SO ITS BUDGET WAS NOT CHECKED.
+
+            %s
+
+            Doors counts classes, not beans: a handler on a @Conditional-meta class is a member \
+            (marked [conditional]) whether or not the property that instantiates it is set, and \
+            this test's Spring context never registered the handlers above. An absent chain is \
+            not "unbudgeted" and it is not coverage either — it is a door this test did not look \
+            at. Two correct moves: enable its property in this class's @SpringBootTest property \
+            set (DoorsHandlerMappingParityTest carries the set with every condition on), or add \
+            it to EXEMPT with a reason that survives the question in WHAT_TO_DO.
+            """;
+
+    /** What the runtime says about one (verb, URI): a budget charges it, a chain exists but nothing charges it, or nothing routes it. */
+    private enum Budget { CHARGED, NOT_CHARGED, NOT_ROUTED }
+
     @Test
     void everyMutatingWorkspaceHandlerIsBudgetedOrExemptWithAReason() throws Exception {
         var probed = new ArrayList<String>();
         var unbudgeted = new LinkedHashSet<String>();
+        var notRouted = new LinkedHashSet<String>();
 
-        for (var entry : handlerMapping.getHandlerMethods().entrySet()) {
-            var patterns = entry.getKey().getPathPatternsCondition();
-            if (patterns == null) {
-                continue;
-            }
-            var handler = entry.getValue();
-            var type = handler.getBeanType().getSimpleName();
-            var name = type + "." + handler.getMethod().getName();
-            for (var pattern : patterns.getPatterns()) {
-                var path = pattern.getPatternString();
+        var tenantWrites = Doors.writeHandlers().floor(150)
+                .filter("tenant API", h -> h.paths().stream().anyMatch(p -> p.startsWith(SCOPE)));
+        for (var handler : tenantWrites) {
+            var type = handler.bean().getSimpleName();
+            var name = handler.id();
+            for (var path : handler.paths()) {
                 if (!path.startsWith(SCOPE)) {
                     continue;
                 }
-                for (var method : mutatingMethods(entry.getKey().getMethodsCondition().getMethods())) {
+                // Handler.writeVerbs(): the mutating verbs, all four when the mapping has no
+                // method condition — the rule lives on the population, not in this file.
+                for (var verb : handler.writeVerbs()) {
+                    var method = verb.name();
                     probed.add(method + " " + path);
                     // The method key wins, so a mixed-category controller can name one endpoint
                     // without the type key covering the rest.
                     if (EXEMPT.containsKey(name) || EXEMPT.containsKey(type)) {
                         continue;
                     }
-                    if (!budgeted(method, concrete(path))) {
+                    Budget budget;
+                    try {
+                        budget = budget(method, concrete(path));
+                    } catch (HttpRequestMethodNotSupportedException notThisVerb) {
+                        // "Not routed" has a second runtime shape: SpaController's catch-all GET forward
+                        // matches every dotless path, so a verb nobody registered answers 405 from
+                        // getHandler rather than a null chain (measured with SCOPE widened to /api).
+                        // For a non-conditional handler that is a Doors⇄runtime disagreement the
+                        // parity test owns, and it propagates exactly as it always did.
+                        if (!handler.conditional()) {
+                            throw notThisVerb;
+                        }
+                        budget = Budget.NOT_ROUTED;
+                    }
+                    if (budget == Budget.NOT_ROUTED && handler.conditional()) {
+                        notRouted.add(method + " " + path + "  — this context does not route `" + name
+                                      + "` — Doors counts classes (`[conditional]`); enable its property in this "
+                                      + "test's property set or exempt it with the reason");
+                    } else if (budget != Budget.CHARGED) {
+                        // A non-conditional handler nothing routes is a Doors⇄runtime disagreement the
+                        // parity test owns; here it stays what it always was — a write with no budget.
                         unbudgeted.add(method + " " + path + "  (" + name + ")");
                     }
                 }
@@ -270,6 +315,7 @@ class WriteThrottleCoverageTest {
                     + "controllers did")
                 .hasSizeGreaterThan(30);
 
+        assertThat(notRouted).as(NOT_ROUTED, String.join("\n", notRouted)).isEmpty();
         assertThat(unbudgeted).as(WHAT_TO_DO).isEmpty();
     }
 
@@ -281,52 +327,41 @@ class WriteThrottleCoverageTest {
      */
     @Test
     void everyExemptionNamesALiveHandler() {
-        var live = new java.util.HashSet<String>();
-        handlerMapping.getHandlerMethods().values().forEach(h -> {
-            live.add(h.getBeanType().getSimpleName());
-            live.add(h.getBeanType().getSimpleName() + "." + h.getMethod().getName());
-        });
-
-        assertThat(EXEMPT.keySet())
-                .as("""
-                    AN EXEMPTION FOR A HANDLER THAT NO LONGER EXISTS.
-
-                    An entry here is a written decision that one endpoint may be unbudgeted. When \
-                    the endpoint is renamed or deleted the decision outlives its subject, and the \
-                    next handler that happens to take that name inherits a reason nobody wrote \
-                    about it. Delete the entry, or update it to the new name in the same commit \
-                    that renamed the method.""")
-                .allMatch(live::contains, "is a live controller type or handler method");
-    }
-
-    private static List<String> mutatingMethods(Set<RequestMethod> methods) {
-        // A mapping with no method condition answers every verb, including the mutating ones.
-        if (methods.isEmpty()) {
-            return List.copyOf(MUTATING);
+        var live = new LinkedHashSet<String>();
+        for (var handler : Doors.handlers().floor(250)) {
+            live.add(handler.bean().getSimpleName());
+            live.add(handler.id());
         }
-        return methods.stream().map(Enum::name).filter(MUTATING::contains).toList();
+
+        // Population.excluding is the assertion: it refuses, naming the key and saying what to do
+        // with it, any exemption whose subject is not a live controller type or handler id.
+        var remaining = Population.of("controller types and handler ids (Doors.handlers())", List.copyOf(live))
+                .excluding("EXEMPT in WriteThrottleCoverageTest", EXEMPT.keySet());
+        assertThat(remaining.size()).isEqualTo(live.size() - EXEMPT.size());
     }
 
     /**
      * Whether the real handler chain for this URI carries a {@link PrincipalThrottleInterceptor}
-     * that <strong>applies to this verb</strong>.
+     * that <strong>applies to this verb</strong> — or no chain at all, which the caller tells
+     * apart from "a chain nothing charges" for a conditional handler.
      *
-     * <p>The second half is the whole reason this file exists: a method-conditioned interceptor is
-     * present in the chain of a {@code GET} it never charges, so {@code instanceof} alone would
-     * report coverage that does not exist.
+     * <p>The applies-to-verb half is the whole reason this file exists: a method-conditioned
+     * interceptor is present in the chain of a {@code GET} it never charges, so {@code instanceof}
+     * alone would report coverage that does not exist.
      */
-    private boolean budgeted(String method, String uri) throws Exception {
+    private Budget budget(String method, String uri) throws Exception {
         var request = new MockHttpServletRequest(method, uri);
         request.setRequestURI(uri);
         ServletRequestPathUtils.parseAndCache(request);
         var chain = handlerMapping.getHandler(request);
         if (chain == null) {
-            return false;
+            return Budget.NOT_ROUTED;
         }
-        return chain.getInterceptorList().stream()
+        var charged = chain.getInterceptorList().stream()
                 .filter(PrincipalThrottleInterceptor.class::isInstance)
                 .map(PrincipalThrottleInterceptor.class::cast)
                 .anyMatch(i -> i.appliesTo(method));
+        return charged ? Budget.CHARGED : Budget.NOT_CHARGED;
     }
 
     /** A concrete URI for a mapped pattern: every {@code {var}} becomes a UUID. */
