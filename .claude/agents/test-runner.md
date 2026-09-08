@@ -18,14 +18,14 @@ Backend (bash):
 DB_URL="jdbc:postgresql://localhost:15432/hamstrack" DB_USERNAME="hamstrack" DB_PASSWORD="hamstrack" JWT_SECRET="dev-only-jwt-secret-hamstrack-0123456789abcdef" ./mvnw.cmd -q test -Dfrontend.skip=true
 ```
 PowerShell: same env vars, then `.\mvnw.cmd --% test -Dfrontend.skip=true` (prefix `-D` args with `--%`). `-Dfrontend.skip=true` skips the SPA build **and** the `npm-test` execution (HD-94, HD-242) — use it for a backend-only loop; drop it when the change touches the frontend. Single class/method: `-Dtest=ClassName` / `-Dtest=ClassName#method` (the suite-coverage guard disarms for filtered runs and says so).
-Frontend: `cd src/main/frontend && npx tsc -b && npx vitest run` (never `tsc --noEmit` — it checks nothing). On Windows, stop the Vite dev server before any Maven build that includes the frontend.
+Frontend: `cd src/main/frontend && npm run typecheck && npx vitest run` (`typecheck` = `tsc -b`; never `tsc --noEmit` — it checks nothing). On Windows, stop the Vite dev server before any Maven build that includes the frontend.
 
 ## The bar: red before green
 1. **A test that has not been seen failing is a belief.** Before you report green for any test that guards a defect or a rule: plant the defect, revert the fix, or substitute the constant — run — paste the **red** line; then run again and paste the green line. Both go into the report and into the pipeline's `negativeControl` field. `n/a` is legal only with the reason.
 2. **Every population scan asserts a floor.** A test that walks classes, files, endpoints, rules or DOM nodes fails when the population is smaller than expected (`floor(n)`, `hasSizeGreaterThan`); a scan that can pass over an empty set is a defect (HD-178, HD-283).
 3. **Counts are part of every report.** `Tests run:` with the **class count** (the antrun `test-tree-coverage-guard` fails an unfiltered run that executed fewer classes than the tree holds — quote its line), and for vitest the file and test counts. A green number nobody compared once hid 28 unexecuted classes.
 4. **Category tests over member tests.** When a rule must hold on N doors, write one test that enumerates the doors (`common.testsupport.Doors` where it exists; otherwise reflection over annotations, `git ls-files`, or the rules file) rather than N assertions; put the propagation checklist in the failure message, ≤ 25 lines, naming the action.
-5. **No bare `assert`**, no `@Disabled` / `it.skip` without an `HD-` reference, no timing bound without margin (the vitest suite went red under load at 77–94% of the default bound), no fixture that leaves rows behind, no fence on a global snapshot in a suite that runs in parallel.
+5. **No bare `assert`**, no `@Disabled` / `it.skip` / `.only` without an `HD-` reference on the same line (both sealed by `VacuousVerificationRulesTest`, HD-295), no timing bound without margin (the vitest suite went red under load at 77–94% of the default bound), no fixture that leaves rows behind, no fence on a global snapshot in a suite that runs in parallel.
 
 ## Boot 4 quirks
 - `@AutoConfigureMockMvc` is in `org.springframework.boot.webmvc.test.autoconfigure`.

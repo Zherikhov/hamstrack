@@ -33,6 +33,6 @@ Before adding a rule, limit, gate, aria attribute or shape change to one compone
 ## Workflow
 1. Read neighbouring components/pages/stores; measure any premise the ticket states (a page exists, a link works, a count) before coding and report a discrepancy first.
 2. Enumerate the category; implement; keep `api.ts` / `types.ts` in sync with the backend DTOs.
-3. Verify with the commands that actually check something: `npx tsc -b` (never `tsc --noEmit` — it type-checks nothing here), `npx eslint .` once the rule set lands, `npx vitest run` and report the **file and test counts**. On Windows, stop the Vite dev server before any Maven build that includes the frontend.
+3. Verify with the commands that actually check something: `npm run typecheck` (= `tsc -b`; never `tsc --noEmit` — it type-checks nothing here, and `VacuousVerificationRulesTest` refuses a script that invokes `tsc` without `-b`), `npx eslint .` once the rule set lands, `npx vitest run` and report the **file and test counts**. On Windows, stop the Vite dev server before any Maven build that includes the frontend.
 4. Never `git checkout --` / `git restore` on a dirty tree — ask the orchestrator.
 5. Report: changed paths, the `category` block, the probe output, `tsc -b` / vitest results with counts. Label claims **measured** / **read** / **inferred**. Note when `openapi.yaml` or a backend DTO must move. Don't commit — the user commits.

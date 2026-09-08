@@ -1,0 +1,63 @@
+// R1 fixture, backend side. Not a test and not compiled: it sits outside src/test/java by
+// directory AND by extension, so the real population never sees it (HD-295 §5). Each case line
+// carries a sentinel the positive control reads its expectation from; see the javadoc of
+// VacuousVerificationRulesTest for what the two sentinels mean.
+class DisabledCases {
+
+    @Disabled                                        // EXPECT-REPORT: no ticket on this line
+    void skippedWithNoTicketAnywhere() {
+    }
+
+    @Disabled                                        // EXPECT-REPORT: the ticket is on the NEXT line
+    // HD-301 — a reference one line up detaches on the first reorder, so it does not count
+    void ticketOnTheLineBelow() {
+    }
+
+    @Disabled("HD-301: parked until the sequence race is fixed")   // EXPECT-CLEAN
+    void ticketInTheReasonString() {
+    }
+
+    @Disabled // HD-301 — a trailing comment carries it too       EXPECT-CLEAN
+    void ticketInATrailingComment() {
+    }
+
+    @Disabled("hd-301 — lowercase")                  // EXPECT-REPORT: case is the format
+    void ticketWithTheWrongCase() {
+    }
+
+    @Disabled("HD301 — no hyphen")                   // EXPECT-REPORT: the hyphen is the format
+    void ticketWithNoHyphen() {
+    }
+
+    @DisabledOnOs(OS.WINDOWS)                        // EXPECT-CLEAN: a condition is its own reason
+    void conditionalGateIsNotASkip() {
+    }
+
+    @DisabledIfEnvironmentVariable(named = "CI", matches = "true")   // EXPECT-CLEAN
+    void conditionalGateIsNotASkipEither() {
+    }
+
+    // The same annotation written without the import. Nothing forces the short form, and a
+    // marker that only counts when somebody imported it is a marker with an opt-out.
+    @org.junit.jupiter.api.Disabled                  // EXPECT-REPORT: qualified, same skip
+    void fullyQualifiedWithNoTicket() {
+    }
+
+    @org.junit.jupiter.api.Disabled("HD-301: qualified, and excused the same way")  // EXPECT-CLEAN
+    void fullyQualifiedWithATicket() {
+    }
+
+    @org.junit.jupiter.api.DisabledOnOs(OS.WINDOWS)  // EXPECT-CLEAN: qualified condition, still a condition
+    void fullyQualifiedConditionalGate() {
+    }
+
+    // @Disabled — written inside a comment          EXPECT-CLEAN
+    void markerNamedInAComment() {
+    }
+
+    String prose = "@Disabled is the marker this rule looks for";   // EXPECT-CLEAN: a literal
+
+    String block = """
+            @Disabled inside a text block is prose as well
+            """;                                     // EXPECT-CLEAN
+}

@@ -1,0 +1,16 @@
+// R2 fixture, backend side. Not a test and not compiled — outside src/test/java by directory
+// AND by extension (HD-295 §5). Sentinels as in the sibling fixture.
+class AssertCases {
+
+    void statements(int x, String name) {
+        assert x > 0;                                // EXPECT-REPORT: inert without -ea
+        assert (x > 0);                              // EXPECT-REPORT: parenthesised, same statement
+        assert name != null : "with a message";      // EXPECT-REPORT: a message does not execute it
+        assertThat(x).isPositive();                  // EXPECT-CLEAN: AssertJ, not the statement
+        assertTrue(x > 0);                           // EXPECT-CLEAN
+        Assertions.assertThat(name).isNotBlank();    // EXPECT-CLEAN
+        var asserted = x;                            // EXPECT-CLEAN: a prefix is not the word
+        // assert x > 0;  written inside a comment   EXPECT-CLEAN
+        String prose = "assert is a reserved word";  // EXPECT-CLEAN: a literal
+    }
+}

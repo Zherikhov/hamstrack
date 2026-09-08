@@ -1,0 +1,47 @@
+// R1 fixture, frontend side. Not a test and not collected by vitest: it sits outside
+// src/main/frontend/src by directory AND fails the include glob by extension (HD-295 §5).
+// Sentinels as in the backend fixtures.
+describe('the marker family', () => {
+  it.skip('no ticket', () => {})                     // EXPECT-REPORT
+  test.skip('no ticket either', () => {})            // EXPECT-REPORT
+  describe.skip('a whole file, silently', () => {})  // EXPECT-REPORT
+  it.only('leaves every sibling unexecuted', () => {})        // EXPECT-REPORT
+  describe.only('same, one level up', () => {})      // EXPECT-REPORT
+  test.todo('a placeholder that reads as a pass')    // EXPECT-REPORT
+
+  // Jest-style aliases, not vitest — vitest 3.2.7 defines none of the three, and under
+  // globals:true they throw ReferenceError rather than skipping. Refused all the same, so a
+  // file pasted in from a Jest project cannot read as a pass on its way to being ported.
+  xit('the x prefix', () => {})                      // EXPECT-REPORT
+  xtest('the x prefix on test', () => {})            // EXPECT-REPORT
+  xdescribe('the x prefix on describe', () => {})    // EXPECT-REPORT
+
+  it.skip('HD-301 — the ticket rides in the name', () => {})  // EXPECT-CLEAN
+  it.skip('the ticket rides in a comment', () => {})          // HD-301   EXPECT-CLEAN
+  it.skipIf(isWindows)('a condition is its own reason', () => {})   // EXPECT-CLEAN
+  it.runIf(hasDatabase)('same', () => {})            // EXPECT-CLEAN
+  it('an ordinary test', () => {})                   // EXPECT-CLEAN
+  describe('an ordinary suite', () => {})            // EXPECT-CLEAN
+
+  // it.skip('named inside a comment', () => {})     EXPECT-CLEAN
+  const prose = 'it.skip is the marker this rule looks for'   // EXPECT-CLEAN: a literal
+  const template = `describe.only inside a template literal`  // EXPECT-CLEAN
+  const interpolated = `${xit} inside an interpolation`       // EXPECT-CLEAN: §11, accepted
+
+  // The other spellings of the same skip: `suite` is an exported alias of `describe`, and
+  // both chainables take a modifier BEFORE the terminal word.
+  suite.skip('the alias vitest also exports', () => {})       // EXPECT-REPORT
+  it.concurrent.skip('a modifier ahead of the skip', () => {})   // EXPECT-REPORT
+  describe.sequential.only('and one level up', () => {})      // EXPECT-REPORT
+  it.concurrent('a modifier on its own is not a skip', () => {})  // EXPECT-CLEAN
+  suite('an ordinary suite under its other name', () => {})   // EXPECT-CLEAN
+
+  // A backslash-newline is a line continuation: the two physical lines below are ONE line of
+  // source. A stripper that eats that newline shortens the stripped text by a line and every
+  // report under it names the line above the one it means — silently, because the marker it
+  // then reads a ticket for is a different line's.
+  const continued = 'one string, two physical lines, \
+and every line number below this one rides on the stripper keeping the break'  // EXPECT-CLEAN
+  it.skip('HD-301 — the first skip after the continuation', () => {})  // EXPECT-CLEAN
+  it.skip('the second one, which the shift used to hide', () => {})    // EXPECT-REPORT
+})
