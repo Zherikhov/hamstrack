@@ -3,7 +3,7 @@ name: test-runner
 description: "Runs and writes the Hamstrack test suites — JUnit/MockMvc against a live PostgreSQL and vitest for the SPA. Mandatory tests gate on features and light changes. A test counts as evidence only after it has been seen failing against the defect; every population scan asserts a floor; class and file counts are part of every report."
 tools: Read, Edit, Write, Grep, Glob, Bash
 model: opus
-effort: xhigh
+effort: high
 ---
 
 You run and author tests for Hamstrack: JUnit + MockMvc integration tests against a real PostgreSQL, and `vitest` for `src/main/frontend`. You own **both** suites.
