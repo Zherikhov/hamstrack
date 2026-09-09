@@ -74,16 +74,18 @@ public interface IssueRepository extends JpaRepository<Issue, UUID> {
                                @Param("wsId") UUID wsId, @Param("projectId") UUID projectId);
 
     // Bulk remaps for admin delete-with-remap; clearAutomatically so stale
-    // entities don't linger in the persistence context (see CLAUDE.md gotchas)
-    @Modifying(clearAutomatically = true)
+    // entities don't linger in the persistence context, flushAutomatically so a dirty
+    // Issue loaded earlier is written before the clear instead of discarded by it
+    // (see CLAUDE.md gotchas; ArchitectureRulesTest#clearAutomaticallyFlushes)
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update Issue i set i.status = :to where i.status = :from")
     int remapStatus(@Param("from") Status from, @Param("to") Status to);
 
-    @Modifying(clearAutomatically = true)
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update Issue i set i.priority = :to where i.priority = :from")
     int remapPriority(@Param("from") Priority from, @Param("to") Priority to);
 
-    @Modifying(clearAutomatically = true)
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update Issue i set i.type = :to where i.type = :from")
     int remapType(@Param("from") IssueType from, @Param("to") IssueType to);
 

@@ -1,11 +1,15 @@
 package com.hamstrack.issue.service;
 
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
+
 import java.text.Normalizer;
 import java.util.regex.Pattern;
 
 /**
  * Server-side name normalization shared by every classification primitive of the
- * HD-6 epic — labels (HD-30), components (HD-31) and versions (HD-32). One
+ * HD-6 epic — labels (HD-30), components (HD-31) and versions (HD-32) — and by every
+ * other door that stores a user-supplied display name (sprints, saved filters). One
  * implementation on purpose: the rules below are a display-spoofing defence, and two
  * copies would eventually drift.
  *
@@ -27,8 +31,21 @@ import java.util.regex.Pattern;
  * BEFORE strip</strong>: the separators are folded to plain U+0020 first, so the
  * strip only ever has ASCII spaces left to remove.
  *
- * <p>Callers enforce their own length limit <em>after</em> normalization (the limit
- * is per-primitive: 60 for labels, 80 for components).
+ * <h2>The length limit is measured AFTER normalization, and {@link #requireValidName} is
+ * where every writing door measures it</h2>
+ * NFC is not length-preserving in the shrinking direction only: a character on the
+ * Unicode <em>composition exclusion</em> list decomposes and is never recomposed, so
+ * U+0958 becomes two code points, U+FB2C three — 120 of them canonicalize to 240 or 360
+ * characters. A {@code @Size} on the request record bounds the <em>raw</em> text and the
+ * column bounds the <em>stored</em> text, so a door that normalizes between the two and
+ * measures nothing lets a member drive the commit into SQLSTATE 22001 on demand (the
+ * saved-filter door did exactly that until HD-297 — the HD-171 "derived value has no DTO
+ * to annotate" shape, once more). The limit is per door (60 for labels, 80 for components,
+ * 60 for versions and sprints, 120 for saved filters), and the door passes its own
+ * {@code MAX_NAME_LENGTH} — an ADR-0017 repeated literal equal to its {@code @Size} and its
+ * {@code @Column(length)}. {@code RequestFieldLengthBoundTest} enumerates every production
+ * class that calls into this class (or {@link SearchNames}, or {@link Normalizer}) and
+ * requires each writing one to refuse a name that only grows under NFC.
  */
 public final class ClassificationNames {
 
@@ -56,5 +73,36 @@ public final class ClassificationNames {
         String nfc = Normalizer.normalize(raw, Normalizer.Form.NFC);
         String stripped = INVISIBLES.matcher(nfc).replaceAll("");
         return SEPARATOR_RUN.matcher(stripped).replaceAll(" ").strip();
+    }
+
+    /**
+     * The one write-side gate: {@link #normalize} the name, refuse it when nothing is left
+     * (whitespace, or only the invisible characters {@code @NotBlank} cannot see), refuse it
+     * when the <em>normalized</em> form is longer than {@code maxLength}, and return the
+     * canonical form to store. Both refusals are 400 and name the noun and, for the length,
+     * the limit; when the raw text was within the limit and normalization pushed it over,
+     * the message says so, because "at most 120 characters" is otherwise a lie to someone
+     * who typed 120. Every door that stores a display name calls this rather than
+     * measuring on its own — five copies of this method drifted once, and the fifth had no
+     * length check at all.
+     *
+     * @param raw       the caller's text, {@code null} allowed
+     * @param maxLength the door's post-normalization limit, equal to its column width
+     * @param noun      what is being named, capitalised, for the message ("Label", "Filter")
+     */
+    public static String requireValidName(String raw, int maxLength, String noun) {
+        String name = normalize(raw);
+        if (name.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, noun + " name must not be blank");
+        }
+        if (name.length() > maxLength) {
+            String grew = raw.length() <= maxLength
+                    ? " once normalized (Unicode normalization turned its " + raw.length()
+                      + " characters into " + name.length() + ") — use a shorter name"
+                    : "";
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    noun + " name must be at most " + maxLength + " characters" + grew);
+        }
+        return name;
     }
 }

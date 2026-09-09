@@ -170,7 +170,8 @@ class ParameterConstraintSweepTest extends LabelTestBase {
                         controller class: it makes HandlerMethod.shouldValidateArguments() return \
                         false, so the AOP proxy validates instead and raises \
                         jakarta.validation.ConstraintViolationException. That is HD-214 exactly, and \
-                        WebBeanValidatedRuleTest should have caught it one step earlier.
+                        ArchitectureRulesTest#noWebBeanCarriesValidated should have caught it one \
+                        step earlier.
 
                         A 2xx means the annotation is decorative — nothing is reading it. Check that \
                         the parameter carries a real @RequestParam/@PathVariable binding and that \

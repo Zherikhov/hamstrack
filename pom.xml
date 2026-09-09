@@ -183,6 +183,16 @@
             <artifactId>junit-platform-launcher</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- HD-297. Core ArchUnit only, no engine: the rules in ArchitectureRulesTest are plain Jupiter
+             @Test methods calling rule.check(...), so the JUnit-6 question never arises (archunit-junit5
+             cannot run under the JUnit 6 this Boot pins; the engine artifact for it would be
+             archunit-junit6, never -junit5). Version is NOT managed by the Boot BOM, hence the literal. -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit</artifactId>
+            <version>1.5.0</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

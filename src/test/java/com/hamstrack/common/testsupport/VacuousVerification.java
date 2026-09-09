@@ -159,7 +159,10 @@ public final class VacuousVerification {
         return language == Language.JAVA ? stripJava(source) : stripTypeScript(source);
     }
 
-    /** The {@code LocaleIndependentFoldingTest} shape: comments, text blocks, strings, chars. */
+    /**
+     * The HD-120 stripper shape — comments, text blocks, strings, chars — now living only here:
+     * the locale-fold scan it was written for moved to bytecode in HD-297 ({@code ArchitectureRulesTest}).
+     */
     private static String stripJava(String src) {
         var out = new StringBuilder(src.length());
         int i = 0;

@@ -178,8 +178,9 @@ Four rules follow from this, and they are the content of the decision:
   rejected as unsound. You cannot walk DTO → service → entity → column without type resolution, and the
   project has no infrastructure for that; and, decisively, **a perfect such scanner would put a green
   tick over both of the real bugs**, because they have no annotatable field. The scans that work in this
-  tree (`EmailLengthBoundTest`, `DisplayTextTest`, `LocaleIndependentFoldingTest`) work only because
-  their pattern is local within a single declaration.
+  tree (`EmailLengthBoundTest`, `DisplayTextTest`, and the HD-120 locale-fold scan — since HD-297 an
+  ArchUnit rule in `ArchitectureRulesTest`) work only because their pattern is local within a single
+  declaration.
 - **Leave it as is and tighten review discipline** — rejected: that is exactly the state before HD-120,
   and `CreateUserRequest` proved how it breaks — the rule was understood, written down in javadoc and
   applied on one door out of six.

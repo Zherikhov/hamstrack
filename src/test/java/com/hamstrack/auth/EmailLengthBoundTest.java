@@ -305,9 +305,9 @@ class EmailLengthBoundTest {
      * prose, not a declaration — and several of the records this scan covers now carry
      * exactly such a paragraph, explaining why the bound is there.
      *
-     * <p>String literals are left alone, unlike the sibling scan in
-     * {@code LocaleIndependentFoldingTest}: no literal in this codebase contains
-     * {@code "@Email"} followed by {@code String}, and the two scanners are kept independent
+     * <p>String literals are left alone, unlike the Java stripper in
+     * {@code VacuousVerification}: no literal in this codebase contains
+     * {@code "@Email"} followed by {@code String}, and the two strippers are kept independent
      * rather than sharing a helper so that neither can be broken by a change made for the
      * other's benefit.
      */

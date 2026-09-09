@@ -58,9 +58,11 @@ import java.util.UUID;
  *   <li><strong>The remap runs BEFORE the delete</strong>, as an immediate bulk
  *       {@code UPDATE} rather than a queued action, so the wire order is {@code UPDATE} then
  *       {@code DELETE} regardless of Hibernate's flush ordering. Do not move it.
- *       {@code @Modifying(clearAutomatically = true)} on the remaps is likewise deliberate:
- *       it is what stops a stale {@code Issue} loaded earlier in the transaction from
- *       flushing the old id back over the remap.</li>
+ *       {@code @Modifying(clearAutomatically = true, flushAutomatically = true)} on the
+ *       remaps is likewise deliberate: the clear is what stops a stale {@code Issue} loaded
+ *       earlier in the transaction from flushing the old id back over the remap, and the
+ *       flush writes such an {@code Issue}'s other pending changes first instead of
+ *       discarding them with the clear (HD-297).</li>
  * </ul>
  *
  * <p>The foreign keys buy integrity and <strong>not tenancy</strong> — they are

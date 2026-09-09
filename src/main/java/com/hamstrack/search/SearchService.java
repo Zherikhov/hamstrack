@@ -334,7 +334,7 @@ public class SearchService {
 
     /** The bounded member typeahead behind every user-valued field, whoever defined the field. */
     private SuggestResponse members(String fieldName, String q, ResolutionContext ctx) {
-        String prefix = q == null ? "" : q.trim().toLowerCase(Locale.ROOT);
+        String prefix = SearchNames.key(q);
 
         var suggestions = ctx.members().stream()
                 .filter(m -> prefix.isEmpty()
@@ -358,7 +358,7 @@ public class SearchService {
      * name in the language would cost a wrong result set.
      */
     private SuggestResponse projects(String fieldName, String q, ResolutionContext ctx) {
-        String prefix = q == null ? "" : q.trim().toLowerCase(Locale.ROOT);
+        String prefix = SearchNames.key(q);
         var suggestions = ctx.projects().stream()
                 .filter(p -> prefix.isEmpty()
                         || p.key().toLowerCase(Locale.ROOT).startsWith(prefix)

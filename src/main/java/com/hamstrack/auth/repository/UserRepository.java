@@ -154,7 +154,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     // Atomic claim: only one concurrent authentication wins the right to seed
     // demo data. Returns 0 when already seeded (or claimed in parallel).
-    @Modifying(clearAutomatically = true)
+    // clearAutomatically because the caller re-reads the row in the same transaction;
+    // flushAutomatically is a no-op here (nothing is pending — this runs first) and is the
+    // belt every clearing @Modifying wears (ArchitectureRulesTest#clearAutomaticallyFlushes).
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("update User u set u.demoSeededAt = :now where u.id = :id and u.demoSeededAt is null")
     int claimDemoSeed(@Param("id") UUID id, @Param("now") Instant now);
 

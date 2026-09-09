@@ -1,14 +1,15 @@
 package com.hamstrack.search.filter.service;
 
 import com.hamstrack.auth.entity.User;
+import com.hamstrack.issue.service.ClassificationNames;
 import com.hamstrack.search.HqlValidator;
 import com.hamstrack.search.ResolutionContextFactory;
+import com.hamstrack.search.SearchNames;
 import com.hamstrack.search.filter.dto.CreateSavedFilterRequest;
 import com.hamstrack.search.filter.dto.SavedFilterResponse;
 import com.hamstrack.search.filter.dto.SavedFilterUsageResponse;
 import com.hamstrack.search.filter.dto.UpdateSavedFilterRequest;
 import com.hamstrack.search.filter.entity.SavedFilter;
-import com.hamstrack.search.filter.exception.SavedFilterNameBlankException;
 import com.hamstrack.search.filter.exception.SavedFilterNameConflictException;
 import com.hamstrack.search.filter.exception.SavedFilterNotFoundException;
 import com.hamstrack.search.filter.repository.SavedFilterRepository;
@@ -51,6 +52,17 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class SavedFilterService {
 
+    /**
+     * Post-canonicalisation bound on a saved-filter name — an ADR-0017 repeated literal, equal to
+     * {@code @Size(max = 120)} on {@link CreateSavedFilterRequest} / {@link UpdateSavedFilterRequest}
+     * (the raw text) and to {@code @Column(length = 120)} on {@link SavedFilter} /
+     * {@code saved_filters.name VARCHAR(120)} (V5). The three are kept equal by hand:
+     * {@code ddl-auto=validate} does not compare widths, and the entity annotation never
+     * reaches the request record. A name that is within 120 raw and over 120 canonical is the
+     * case only this constant catches.
+     */
+    static final int MAX_NAME_LENGTH = 120;
+
     private final WorkspaceAccessService workspaceAccess;
     private final SavedFilterRepository savedFilterRepository;
     private final HqlValidator validator;
@@ -79,14 +91,15 @@ public class SavedFilterService {
         // bad query, same ProblemDetail shape as search.
         validateHql(actor, ws, req.hqlOrEmpty());
 
-        if (savedFilterRepository.existsByWorkspaceAndOwnerAndName(ws, actor, req.name())) {
-            throw new SavedFilterNameConflictException(req.name());
+        String name = canonicalName(req.name());
+        if (savedFilterRepository.existsByWorkspaceAndOwnerAndName(ws, actor, name)) {
+            throw new SavedFilterNameConflictException(name);
         }
 
         var filter = new SavedFilter();
         filter.setWorkspace(ws);
         filter.setOwner(actor);
-        filter.setName(req.name());
+        filter.setName(name);
         filter.setHql(req.hqlOrEmpty());
         filter.setShared(req.shared() != null && req.shared());
 
@@ -106,10 +119,7 @@ public class SavedFilterService {
 
         // Name change → re-check (workspace, owner) uniqueness (present, non-blank, changed).
         if (req.name() != null) {
-            String name = req.name().trim();
-            if (name.isEmpty()) {
-                throw new SavedFilterNameBlankException();
-            }
+            String name = canonicalName(req.name());
             if (!name.equals(filter.getName())
                     && savedFilterRepository.existsByWorkspaceAndOwnerAndName(ws, actor, name)) {
                 throw new SavedFilterNameConflictException(name);
@@ -125,6 +135,25 @@ public class SavedFilterService {
 
         var saved = savedFilterRepository.save(filter);
         return SavedFilterResponse.of(saved, actor.getId());
+    }
+
+    /**
+     * The one canonical form of a saved-filter name, on both doors that write it (HD-297), and
+     * the one place its length is measured. {@link ClassificationNames#requireValidName} is the
+     * label/component/version/sprint write-side gate — {@link SearchNames#canonical}'s
+     * normalisation (NFC, invisible characters dropped, separator runs collapsed to one space,
+     * stripped), then the blank refusal, then the length refusal on the <em>canonical</em> form —
+     * so the {@code (workspace, owner, name)} uniqueness check and the stored value agree with
+     * each other and with what search compares against. Until HD-297 {@code create} stored the
+     * raw name and {@code update} a {@code trim()}med one — the two doors disagreed — and the
+     * first fix of that measured nothing after canonicalising: {@code @Size(max = 120)} bounds
+     * the raw text, NFC lengthens composition-exclusion characters (120 × U+0958 → 240), and
+     * the {@code VARCHAR(120)} refused the commit with a 22001 that the global handler answers
+     * 400 and logs at ERROR — an on-demand ERROR-log generator for any member. Both refusals are
+     * 400 (plain input validation, not the HQL 422 envelope) and name the noun and the limit.
+     */
+    private static String canonicalName(String raw) {
+        return ClassificationNames.requireValidName(raw, MAX_NAME_LENGTH, "Filter");
     }
 
     /**

@@ -58,7 +58,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * resolvers and advice ordering as production traffic. None of them carries {@code @Validated} on a
  * controller: the backstop is forced through a {@code @Validated} <em>collaborator</em>, which is
  * what a future accident would most likely look like anyway, and which keeps the probe from being
- * the very thing {@link com.hamstrack.common.validation.WebBeanValidatedRuleTest} forbids.
+ * the very thing {@link com.hamstrack.common.architecture.ArchitectureRulesTest} forbids.
  */
 @SpringBootTest(properties = {
         "app.rate-limit.enabled=false",

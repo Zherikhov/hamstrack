@@ -318,7 +318,8 @@ public final class Doors {
     /**
      * Every class carrying a web stereotype (P1): {@code @Controller}, {@code @RestController},
      * {@code @ControllerAdvice}, {@code @RestControllerAdvice} or a type-level {@code @RequestMapping},
-     * meta-annotation aware — the {@code WebBeanValidatedRuleTest} predicate, moved here.
+     * meta-annotation aware — the HD-214 predicate, and the one definition of "web bean" the
+     * ADR-0018 rule in {@code ArchitectureRulesTest} reads (HD-297).
      *
      * <p><strong>Not included:</strong> a functional endpoint ({@code RouterFunction}); a bean Spring
      * instantiates without a stereotype. Conversely a stereotype on a class Spring never

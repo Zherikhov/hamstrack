@@ -52,10 +52,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code --noEmit} type-check in P3 — each watched red, each reverted, and the class watched
  * green afterwards. The red lines are in the ticket.
  *
- * <p>Until HD-297 lands this class is authoritative for R2 as well; if that ticket
- * re-implements the bare-{@code assert} rule in ArchUnit, the regex here is deleted in the
- * same commit. Two rules for one thing diverge, and the one nobody watches is the one that
- * matters.
+ * <p>This class stays authoritative for R2 after HD-297: the ArchUnit rule set in
+ * {@code ArchitectureRulesTest} imports production bytecode only ({@code DoNotIncludeTests}),
+ * and a second import over the test tree would have split this rule from R1/R3, which cannot
+ * move (they read TypeScript and {@code package.json}). Two rules for one thing diverge, and
+ * the one nobody watches is the one that matters — so there is one, here.
  */
 class VacuousVerificationRulesTest {
 

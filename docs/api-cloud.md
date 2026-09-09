@@ -3142,7 +3142,7 @@ Reusable, workspace-scoped [HQL](#search-hql) data sources. Every user can save 
 
 **Create** — the body is `{"name", "hql?", "shared?"}`:
 
-- `name` is required, non-blank, max 120 chars, and **unique per (workspace, owner)** — a duplicate returns `409`. Different owners may reuse a name.
+- `name` is required, max 120 chars, and **canonicalized server-side** before it is stored or compared — NFC, invisible control/format characters dropped, whitespace collapsed and trimmed. A name that canonicalizes to empty (whitespace-only or invisible-characters-only) returns `400`. The 120 is measured on the **canonical** form too: Unicode normalization can lengthen a name (a composition-exclusion character such as U+0958 becomes two under NFC, so 120 of them canonicalize to 240), and a name that canonicalizes to more than 120 characters returns `400` naming the limit — it never reaches storage. It is **unique per (workspace, owner) comparing canonical names** (case-sensitive) — a duplicate returns `409`. Different owners may reuse a name.
 - `hql` is the HQL string to store (max 2000 chars; may be empty = "all issues"). It is **validated at save time** (parse + structural checks against the field schema) but never executed here — value resolution (`currentUser()`, status-name→id, …) is deferred to run time, so a later-archived catalog row won't permanently break a saved query. An invalid query returns `422` with the same anchor shape as [search](#search-hql) (`errorType` `PARSE_ERROR`/`SEMANTIC_ERROR` plus `position`/`length`/`token`/`field`). Save-time validation resolves field names exactly as a query does, [retired keys](#search-hql) included, so a filter written against a key an old release retired both saves and runs.
 - `shared` defaults to `false`.
 
@@ -3164,7 +3164,7 @@ The response (also returned by `GET` and `PATCH`) is a `SavedFilterResponse`. `m
   "createdAt": "2026-08-12T10:00:00Z", "updatedAt": "2026-08-12T10:00:00Z" }
 ```
 
-**Update** — `PATCH` takes `{"name?", "hql?", "shared?"}`; every field is optional and a `null`/omitted field is a no-op. A changed `name` is re-checked for `(workspace, owner)` uniqueness (`409` on a dup, `400` if blank); a changed `hql` is re-validated (`422` on a bad query). Only the owner may update — a non-owner gets `404`.
+**Update** — `PATCH` takes `{"name?", "hql?", "shared?"}`; every field is optional and a `null`/omitted field is a no-op. A changed `name` is canonicalized the same way as create (`400` if it canonicalizes to empty, or to more than 120 characters) and re-checked for `(workspace, owner)` uniqueness on the canonical form (`409` on a dup); a changed `hql` is re-validated (`422` on a bad query). Only the owner may update — a non-owner gets `404`.
 
 **Usage** — `GET …/usage` is a forward-looking delete-warning hook so clients can show a "Used by N places — delete anyway?" confirmation. In the current release nothing consumes a saved filter yet, so `usages` is **always empty**:
 

@@ -32,7 +32,11 @@ import java.util.Locale;
  *
  * <p>It delegates to {@link ClassificationNames} on purpose — that class documents the
  * spoofing defence the rules exist for, and a second copy of the regexes would
- * eventually drift from the write path.
+ * eventually drift from the write path. {@link #canonical} is also the form a saved
+ * filter's name is stored and compared in, and the form the number literal parser and
+ * the typeahead prefixes read (HD-297): under {@code com.hamstrack.search..} nothing
+ * calls a bare JDK {@code trim()}/{@code strip()} — {@code ArchitectureRulesTest}
+ * refuses it — so every operand and identifier there is cleaned by exactly one function.
  *
  * <h2>Which of the two, and why it is not "is this a machine identifier?"</h2>
  * The discriminator is <strong>where the match happens</strong>. An earlier version of

@@ -8,10 +8,25 @@ import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.common.security.RoleScope;
 import com.hamstrack.common.testsupport.Doors;
+import com.hamstrack.common.testsupport.Population;
+import com.hamstrack.common.testsupport.ProductionBytecode;
+import com.hamstrack.issue.service.ClassificationNames;
+import com.hamstrack.issue.service.ComponentService;
+import com.hamstrack.issue.service.LabelService;
+import com.hamstrack.issue.service.SprintService;
+import com.hamstrack.issue.service.VersionService;
 import com.hamstrack.project.entity.Project;
 import com.hamstrack.project.entity.ProjectMember;
 import com.hamstrack.project.repository.ProjectMemberRepository;
 import com.hamstrack.project.repository.ProjectRepository;
+import com.hamstrack.report.service.InsightsService;
+import com.hamstrack.search.CustomFieldMeta;
+import com.hamstrack.search.HqlParentResolver;
+import com.hamstrack.search.HqlValueResolver;
+import com.hamstrack.search.ResolutionContextFactory;
+import com.hamstrack.search.SearchNames;
+import com.hamstrack.search.SearchService;
+import com.hamstrack.search.filter.service.SavedFilterService;
 import com.hamstrack.workspace.entity.Workspace;
 import com.hamstrack.workspace.entity.WorkspaceMember;
 import com.hamstrack.workspace.repository.WorkspaceMemberRepository;
@@ -25,6 +40,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -35,6 +51,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import java.lang.reflect.Method;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -73,6 +90,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * refused by {@code @Size(max = 255)} at the edge and never reaches {@code generateSlug} — so the row
  * that would have caught the slug bug submits a <strong>101-character name</strong>: valid input,
  * invalid slug. Rows of that shape are written per §3.2 finding, not by filling everything with X.
+ *
+ * <p><strong>A canonicalised name is a derived value too (HD-297).</strong> Every door that stores a
+ * display name runs it through {@code ClassificationNames.normalize} first, and NFC is not
+ * length-preserving: a composition-exclusion character decomposes and is never recomposed, so
+ * 120 × U+0958 passes {@code @Size(max = 120)} and canonicalises to 240 characters. The
+ * {@code [nfc]} rows send exactly the door's limit in such characters — <em>within</em> the bound raw,
+ * over it canonical — so only a bound measured <em>after</em> canonicalisation can refuse them; and
+ * because the 22001 backstop in {@code GlobalExceptionHandler} also answers 400 (while logging at
+ * ERROR), those rows additionally require that the refusal <strong>names the limit</strong> and does
+ * <strong>not</strong> carry the backstop's {@code errorType}. The saved-filter door answered the
+ * backstop's 400 to such a name until this row existed. The members are enumerated from bytecode, not
+ * typed: {@link #everyDoorThatCanonicalisesANameMeasuresItsBoundAfterCanonicalisation()}.
  *
  * <h2>The two tripwires, because every assertion here is "nothing offends"</h2>
  * <ol>
@@ -115,6 +144,60 @@ class RequestFieldLengthBoundTest {
 
     /** Valid input whose <em>derived</em> value overflows: 101 slug characters into a VARCHAR(100). */
     private static final String NAME_101 = "n".repeat(101);
+
+    /**
+     * U+0958 DEVANAGARI LETTER QA — on the Unicode composition-exclusion list, so NFC decomposes it to
+     * U+0915 U+093C and never recomposes it: every one of these becomes two characters after
+     * {@code ClassificationNames.normalize}. {@code limit} of them are within a {@code @Size(max = limit)}
+     * and {@code 2 × limit} once canonical (measured: 120 → 240; U+FB2C → 360, U+2ADC → 240).
+     */
+    private static final String GROWS_UNDER_NFC = "क़";
+
+    /**
+     * The 22001 backstop's signature ({@code GlobalExceptionHandler.VALUE_TOO_LONG_ERROR_TYPE}): a 400
+     * carrying it means the value REACHED THE COLUMN and the database refused it — an ERROR line in
+     * the log and a bound that does not exist. A row that expects a post-canonicalisation bound
+     * fails on it, however clean the status looks.
+     */
+    private static final String BACKSTOP_ERROR_TYPE = "VALUE_TOO_LONG";
+
+    /**
+     * Production classes that call the canonicalisation family ({@code ClassificationNames},
+     * {@code SearchNames}, {@code java.text.Normalizer}) on 2026-09-09: 13 — the two helpers, six
+     * read-side users and the five writing doors. Under 10 the bytecode walk is not seeing the callers.
+     */
+    private static final int CANONICALISER_CALLER_FLOOR = 10;
+
+    /** Writing doors among those callers on 2026-09-09: 5 (label, component, version, sprint, saved filter). */
+    private static final int CANONICALISING_DOOR_FLOOR = 4;
+
+    /**
+     * The canonicalisation helpers: classes whose whole job is to normalise on behalf of a caller.
+     * <strong>One constant, two uses, on purpose</strong> — it is what {@link ProductionBytecode#callersOf}
+     * walks <em>through</em> (a caller of a helper is a member exactly as a caller of
+     * {@code ClassificationNames} is) and what the claim then excludes as "the helper itself". A future
+     * {@code XNames.clean()} that merely delegates to {@code normalize} is therefore never a hiding
+     * place: left out of this set it is a writing member with no row; put into it, the walk continues to
+     * whatever calls it. Real class references, so a rename fails to compile rather than leaving a
+     * stale name behind.
+     */
+    private static final Set<String> CANONICALISATION_HELPERS = Set.of(
+            ClassificationNames.class.getName(),
+            SearchNames.class.getName());
+
+    /**
+     * Callers of the canonicalisation family that STORE nothing — each canonicalises an HQL operand, a
+     * typeahead prefix or a lookup key and compares it. {@link Population#excluding} refuses an entry
+     * that is no longer a caller, so a reader that stops canonicalising is removed from here in the
+     * same change.
+     */
+    private static final Set<String> READ_SIDE_CANONICALISERS = Set.of(
+            HqlParentResolver.class.getName(),
+            HqlValueResolver.class.getName(),
+            CustomFieldMeta.class.getName(),
+            ResolutionContextFactory.class.getName(),
+            SearchService.class.getName(),
+            InsightsService.class.getName());
 
     /**
      * The tripwire under the row table. Do <strong>not</strong> lower it to make a run pass: a row
@@ -165,13 +248,33 @@ class RequestFieldLengthBoundTest {
      * {@link #REFUSED} — the payload is over every bound this door could have, so a 4xx is required.
      * {@link #ACCEPTED_OR_REFUSED} — valid input whose derived value is the thing at risk; refusing
      * and truncating are both correct, and only a 5xx is a failure.
+     * {@link #REFUSED_AFTER_CANONICALISATION} — the payload is within the raw bound and over it once
+     * canonical, so the answer must be a 400/422 <em>from the bound</em>: naming the limit, and not the
+     * 22001 backstop's {@link #BACKSTOP_ERROR_TYPE}. A 404/409 fails too — the row never reached the
+     * bound and proves nothing about it.
      */
-    private enum Expect { REFUSED, ACCEPTED_OR_REFUSED }
+    private enum Expect { REFUSED, ACCEPTED_OR_REFUSED, REFUSED_AFTER_CANONICALISATION }
 
+    /**
+     * @param door  for a {@link Expect#REFUSED_AFTER_CANONICALISATION} row, the service whose
+     *              post-canonicalisation bound the row exercises — the member of the caller-set claim
+     * @param limit that door's limit; the row sends exactly this many {@link #GROWS_UNDER_NFC}
+     */
     private record Row(String id, String method, Function<Fixture, String> path,
-                       Function<Fixture, String> body, As as, Expect expect) {
+                       Function<Fixture, String> body, As as, Expect expect, Class<?> door, int limit) {
         Row(String id, String method, Function<Fixture, String> path, Function<Fixture, String> body, As as) {
             this(id, method, path, body, as, Expect.REFUSED);
+        }
+
+        Row(String id, String method, Function<Fixture, String> path, Function<Fixture, String> body, As as,
+            Expect expect) {
+            this(id, method, path, body, as, expect, null, 0);
+        }
+
+        /** A POST of {@code {"name": limit × U+0958}} as the member, against {@code door}'s bound. */
+        static Row growsUnderNfc(String id, Function<Fixture, String> path, Class<?> door, int limit) {
+            return new Row(id, "POST", path, f -> "{\"name\":\"" + GROWS_UNDER_NFC.repeat(limit) + "\"}",
+                    As.MEMBER, Expect.REFUSED_AFTER_CANONICALISATION, door, limit);
         }
     }
 
@@ -253,6 +356,16 @@ class RequestFieldLengthBoundTest {
                 new Row("VersionController#update", "PATCH",
                         f -> f.project() + "/versions/" + UUID.randomUUID(),
                         f -> "{\"name\":\"" + LONG + "\"}", As.MEMBER),
+                // THE CANONICALISATION ROWS (HD-297): exactly the door's limit in a character NFC
+                // doubles — within @Size raw, over the column canonical. Each literal is the door's
+                // MAX_NAME_LENGTH (ADR-0017: repeated, never imported — a row that reads the constant
+                // it is testing agrees with any value it takes).
+                Row.growsUnderNfc("LabelController#create[nfc]",
+                        f -> "/api/workspaces/" + f.wsId + "/labels", LabelService.class, 60),
+                Row.growsUnderNfc("ComponentController#create[nfc]",
+                        f -> f.project() + "/components", ComponentService.class, 80),
+                Row.growsUnderNfc("VersionController#create[nfc]",
+                        f -> f.project() + "/versions", VersionService.class, 60),
 
                 // ---- sprints
                 new Row("SprintController#create", "POST", f -> f.project() + "/sprints",
@@ -263,6 +376,8 @@ class RequestFieldLengthBoundTest {
                 new Row("SprintController#start", "POST",
                         f -> f.project() + "/sprints/" + UUID.randomUUID() + "/start",
                         f -> "{\"goal\":\"" + LONG + "\"}", As.MEMBER),
+                Row.growsUnderNfc("SprintController#create[nfc]",
+                        f -> f.project() + "/sprints", SprintService.class, 60),
 
                 // ---- search, filters, roles
                 new Row("SavedFilterController#create", "POST", f -> "/api/workspaces/" + f.wsId + "/filters",
@@ -270,6 +385,10 @@ class RequestFieldLengthBoundTest {
                 new Row("SavedFilterController#update", "PATCH",
                         f -> "/api/workspaces/" + f.wsId + "/filters/" + UUID.randomUUID(),
                         f -> "{\"name\":\"" + LONG + "\"}", As.MEMBER),
+                // The door that had no post-canonicalisation bound: 120 × U+0958 passed @Size(120),
+                // canonicalised to 240 and reached saved_filters.name VARCHAR(120) — the backstop's 400.
+                Row.growsUnderNfc("SavedFilterController#create[nfc]",
+                        f -> "/api/workspaces/" + f.wsId + "/filters", SavedFilterService.class, 120),
                 new Row("SearchController#search[row]", "POST", f -> "/api/workspaces/" + f.wsId + "/search",
                         f -> "{\"query\":\"" + LONG + "\"}", As.MEMBER),
                 new Row("InsightsController#insights", "POST",
@@ -333,7 +452,12 @@ class RequestFieldLengthBoundTest {
         var offenders = new ArrayList<String>();
 
         for (var row : rows) {
-            var status = perform(row);
+            var response = perform(row);
+            var status = response.getStatus();
+            if (row.expect() == Expect.REFUSED_AFTER_CANONICALISATION) {
+                judgeCanonicalisationRow(row, response).ifPresent(offenders::add);
+                continue;
+            }
             if (status >= 500) {
                 offenders.add(row.id() + " → " + status + " (a server error)");
             } else if (row.expect() == Expect.REFUSED && status < 400) {
@@ -371,7 +495,41 @@ class RequestFieldLengthBoundTest {
                 .isEmpty();
     }
 
-    private int perform(Row row) throws Exception {
+    /**
+     * The verdict on a {@link Expect#REFUSED_AFTER_CANONICALISATION} row, or empty when the door held.
+     * Three things can be wrong and each is named: the status is not a validation refusal (a 2xx
+     * accepted a name the column cannot hold; a 404/409 never reached the bound; a 5xx is the column
+     * refusing); the body carries the 22001 backstop's {@code errorType} (the column refused it and
+     * the log has an ERROR line — the exact defect, wearing a 400); or the detail does not name the
+     * limit (a refusal that prescribes nothing).
+     */
+    private java.util.Optional<String> judgeCanonicalisationRow(Row row, MockHttpServletResponse response)
+            throws Exception {
+        int status = response.getStatus();
+        if (status != 400 && status != 422) {
+            return java.util.Optional.of(row.id() + " → " + status + " (expected 400/422 from " + row.door().getSimpleName()
+                    + "'s post-canonicalisation bound: " + row.limit() + " × U+0958 is within @Size raw and "
+                    + 2 * row.limit() + " characters canonical — a 2xx means no bound after canonicalisation, a "
+                    + "404/409 means the row never reached it, a 5xx means the column refused it)");
+        }
+        String content = response.getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        JsonNode body = content.isBlank() ? json.nullNode() : json.readTree(content);
+        String errorType = body.path("errorType").asText(null);
+        if (BACKSTOP_ERROR_TYPE.equals(errorType)) {
+            return java.util.Optional.of(row.id() + " → " + status + " errorType=" + errorType + " (the 22001 backstop answered: "
+                    + row.door().getSimpleName() + " let " + 2 * row.limit() + " canonical characters reach a "
+                    + row.limit() + "-wide column, and GlobalExceptionHandler logged it at ERROR — measure the "
+                    + "length AFTER ClassificationNames.normalize, i.e. call ClassificationNames.requireValidName)");
+        }
+        String detail = body.path("detail").asText("");
+        if (!detail.contains(String.valueOf(row.limit()))) {
+            return java.util.Optional.of(row.id() + " → " + status + " detail=\"" + detail + "\" (refused, but without naming "
+                    + "the limit " + row.limit() + " — a refusal must prescribe an action its reader can perform)");
+        }
+        return java.util.Optional.empty();
+    }
+
+    private MockHttpServletResponse perform(Row row) throws Exception {
         var path = row.path().apply(fixture);
         MockHttpServletRequestBuilder request = switch (row.method()) {
             case "POST" -> post(path);
@@ -390,7 +548,83 @@ class RequestFieldLengthBoundTest {
         if (token != null) {
             request = request.header("Authorization", "Bearer " + token);
         }
-        return mockMvc.perform(request).andReturn().getResponse().getStatus();
+        return mockMvc.perform(request).andReturn().getResponse();
+    }
+
+    // =================================================================== the caller-set claim
+
+    /**
+     * <strong>Every production class that canonicalises a name and stores it has an {@code [nfc]}
+     * row, and every {@code [nfc]} row names a class that still canonicalises.</strong> The members
+     * come from bytecode — {@link ProductionBytecode#callersOf} over {@code java.text.Normalizer} and
+     * the two helpers, walked <em>through</em> the helpers ({@link #CANONICALISATION_HELPERS}) — so a
+     * sixth door is a member the day its call compiles, whether it reaches for {@code Normalizer},
+     * {@code ClassificationNames}, {@code SearchNames} or a future delegator declared a helper, and
+     * cannot be left out by not being listed. The helpers and the read-side callers are declared out
+     * with a reason and checked live ({@link Population#excluding}); the writing doors that remain
+     * must each be the {@code door} of a row whose payload only grows under NFC. The blind spot,
+     * stated: a door that normalises with a regex of its own and no NFC call is outside this graph —
+     * inside {@code com.hamstrack.search..} {@code ArchitectureRulesTest} refuses a bare trimmer,
+     * elsewhere that is what review is for.
+     */
+    @Test
+    void everyDoorThatCanonicalisesANameMeasuresItsBoundAfterCanonicalisation() {
+        var callers = Population.of("production classes calling java.text.Normalizer / ClassificationNames / SearchNames "
+                                    + "(walked through the helpers)",
+                        ProductionBytecode.callersOf(CANONICALISATION_HELPERS,
+                                        Normalizer.class, ClassificationNames.class, SearchNames.class)
+                                .stream().map(c -> c.getName()).toList())
+                .floor(CANONICALISER_CALLER_FLOOR);
+        var doors = callers
+                .excluding("the helper itself — its callers were followed, so nothing behind it is lost",
+                        CANONICALISATION_HELPERS)
+                .excluding("reads only: canonicalises an operand, a typeahead prefix or a map key and stores nothing",
+                        READ_SIDE_CANONICALISERS)
+                .floor(CANONICALISING_DOOR_FLOOR);
+
+        var rowsByDoor = new LinkedHashMap<String, List<String>>();
+        for (var row : rows()) {
+            if (row.expect() == Expect.REFUSED_AFTER_CANONICALISATION) {
+                rowsByDoor.computeIfAbsent(row.door().getName(), k -> new ArrayList<>()).add(row.id());
+            }
+        }
+
+        var offenders = new ArrayList<String>();
+        for (var door : doors) {
+            if (!rowsByDoor.containsKey(door)) {
+                offenders.add(door + ": canonicalises a name and has no [nfc] row");
+            }
+        }
+        for (var entry : rowsByDoor.entrySet()) {
+            if (!callers.members().contains(entry.getKey())) {
+                offenders.add(entry.getKey() + ": named by " + entry.getValue()
+                              + " but no longer calls the canonicalisation family — the row is stale");
+            }
+        }
+
+        assertThat(offenders)
+                .as("""
+                        A DOOR CANONICALISES A DISPLAY NAME AND NOTHING PROVES ITS LENGTH IS MEASURED AFTERWARDS.
+
+                        %s
+
+                        NFC lengthens composition-exclusion characters (120 x U+0958 -> 240), so a @Size on the \
+                        request record bounds the raw text and not what is stored; the column then refuses the \
+                        commit with a 22001 that the global handler answers 400 and LOGS AT ERROR. For each class \
+                        above, do ONE of these:
+
+                        1. it stores the name: route it through ClassificationNames.requireValidName(raw, MAX, noun) \
+                           and add Row.growsUnderNfc(...) to rows() with its MAX as the literal;
+                        2. it only reads (an operand, a prefix, a map key): add it to READ_SIDE_CANONICALISERS \
+                           with that reason — the entry is checked live and must go when the call goes; \
+                           if it is a new normalising helper other doors call, add it to \
+                           CANONICALISATION_HELPERS instead — the walk then continues to its callers;
+                        3. a stale row: the class stopped canonicalising — remove the row, or the change that \
+                           stopped it is the defect.
+
+                        %s / %s — do not lower either floor to pass.""",
+                        String.join("\n", offenders), callers.describe(), doors.describe())
+                .isEmpty();
     }
 
     // =================================================================== the category claim

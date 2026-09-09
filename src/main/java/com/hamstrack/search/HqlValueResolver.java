@@ -285,7 +285,7 @@ public class HqlValueResolver {
         };
         java.math.BigDecimal parsed;
         try {
-            parsed = new java.math.BigDecimal(raw.trim());
+            parsed = new java.math.BigDecimal(SearchNames.canonical(raw));
         } catch (NumberFormatException e) {
             throw new HqlSemanticException(
                     "Field '" + field.name() + "' expects a number", field.name());

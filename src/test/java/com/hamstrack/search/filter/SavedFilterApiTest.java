@@ -58,6 +58,12 @@ class SavedFilterApiTest {
 
     private static final String VALID_HQL = "assignee = currentUser() AND status = \"In Progress\"";
 
+    /** Two U+200B ZERO WIDTH SPACE: passes {@code @NotBlank}, canonicalises to nothing. */
+    private static final String INVISIBLE_ONLY = "​​";
+
+    /** 120 × U+0958: passes {@code @Size(max = 120)}, canonicalises to 240 characters. */
+    private static final String GROWS_TO_240 = "क़".repeat(120);
+
     // ============================================================ create + validation
 
     @Test
@@ -169,6 +175,28 @@ class SavedFilterApiTest {
                 .andExpect(jsonPath("$.shared").value(true));
     }
 
+    /**
+     * HD-297 (AC3): both name doors run the one canonical helper. Create stores the canonical
+     * form, a canonically-equal second create is the 409 the uniqueness check promises, and an
+     * update to a differently-spaced spelling of the same name is a no-op rename, not a conflict.
+     */
+    @Test
+    void filterNameIsCanonicalOnCreateAndUpdate() throws Exception {
+        var ws = newWorkspace();
+        var id = createId(ws, ws.ownerToken, "Foo   bar ", VALID_HQL, false);
+
+        getFilter(ws.wsId, id, ws.ownerToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("Foo bar"));
+
+        create(ws, ws.ownerToken, "Foo bar", VALID_HQL, false)
+                .andExpect(status().isConflict());
+
+        update(ws.wsId, id, ws.ownerToken, "{\"name\":\"  Foo bar\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("Foo bar"));
+    }
+
     @Test
     void updateWithInvalidHqlReturns422() throws Exception {
         var ws = newWorkspace();
@@ -189,6 +217,56 @@ class SavedFilterApiTest {
         update(ws.wsId, id, ws.ownerToken, "{\"name\":\"   \"}")
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.errorType").doesNotExist());
+    }
+
+    /**
+     * Two zero-width spaces: {@code @NotBlank} (and {@code String.trim()}, which strips only
+     * {@code <= U+0020}) let them through, the canonical form drops them, so this is the blank the
+     * SERVICE must refuse — on the create door, where {@code @NotBlank} catches every other blank
+     * first and had hidden the missing test, as much as on the update door (HD-297).
+     */
+    @Test
+    void invisibleOnlyNameIsRefusedAsBlankOnBothDoors() throws Exception {
+        var ws = newWorkspace();
+
+        create(ws, ws.ownerToken, INVISIBLE_ONLY, VALID_HQL, false)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorType").doesNotExist())
+                .andExpect(jsonPath("$.detail", containsString("blank")));
+
+        var id = createId(ws, ws.ownerToken, "orig", VALID_HQL, false);
+        update(ws.wsId, id, ws.ownerToken, "{\"name\":" + json.writeValueAsString(INVISIBLE_ONLY) + "}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorType").doesNotExist());
+        getFilter(ws.wsId, id, ws.ownerToken)
+                .andExpect(jsonPath("$.name").value("orig"));
+    }
+
+    /**
+     * 120 × U+0958 is within {@code @Size(max = 120)} and 240 characters once canonical (U+0958 is a
+     * composition exclusion: NFC decomposes it and never recomposes it). Until HD-297's fix loop this
+     * reached {@code saved_filters.name VARCHAR(120)}, and the 22001 backstop answered 400 with
+     * {@code errorType: VALUE_TOO_LONG} while logging at ERROR — an on-demand ERROR-log generator for
+     * any member. The refusal must come from the bound: 400, naming the limit and the canonical
+     * length, and never the backstop's {@code errorType}; and the update door must leave the stored
+     * name untouched.
+     */
+    @Test
+    void nameThatGrowsPastTheBoundUnderCanonicalisationIsRefusedOnBothDoors() throws Exception {
+        var ws = newWorkspace();
+
+        create(ws, ws.ownerToken, GROWS_TO_240, VALID_HQL, false)
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorType").doesNotExist())
+                .andExpect(jsonPath("$.detail", allOf(containsString("120"), containsString("240"))));
+
+        var id = createId(ws, ws.ownerToken, "orig", VALID_HQL, false);
+        update(ws.wsId, id, ws.ownerToken, "{\"name\":" + json.writeValueAsString(GROWS_TO_240) + "}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.errorType").doesNotExist())
+                .andExpect(jsonPath("$.detail", allOf(containsString("120"), containsString("240"))));
+        getFilter(ws.wsId, id, ws.ownerToken)
+                .andExpect(jsonPath("$.name").value("orig"));
     }
 
     @Test
@@ -260,6 +338,21 @@ class SavedFilterApiTest {
         create(ws, outsider, "x", VALID_HQL, false).andExpect(status().isNotFound());
         update(ws.wsId, id, outsider, "{\"name\":\"x\"}").andExpect(status().isNotFound());
         deleteFilter(ws.wsId, id, outsider).andExpect(status().isNotFound());
+    }
+
+    /**
+     * Membership before validation, pinned on the create door (HD-297): a name that only the SERVICE
+     * can refuse (bean validation passes it) still answers 404 to a non-member, never the 400 — a 400
+     * would tell an outsider the workspace exists and what its rules are. Both service-side refusals
+     * are tried: the invisible-only blank and the name that grows past the bound under canonicalisation.
+     */
+    @Test
+    void nonMemberIsRefusedBeforeTheNameIsLookedAt() throws Exception {
+        var ws = newWorkspace();
+        var outsider = login(user());
+
+        create(ws, outsider, INVISIBLE_ONLY, VALID_HQL, false).andExpect(status().isNotFound());
+        create(ws, outsider, GROWS_TO_240, VALID_HQL, false).andExpect(status().isNotFound());
     }
 
     @Test

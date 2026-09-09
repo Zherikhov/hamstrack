@@ -8250,7 +8250,9 @@ paths:
         Create a saved filter owned by the caller. The stored HQL is validated at
         save time (parse + structural registry validation) but never executed
         here; value resolution (`currentUser()`, status-name→id, …) is deferred to
-        run time. `name` is unique per `(workspace, owner)`. Workspace members only.
+        run time. `name` is canonicalized before it is stored or compared (see
+        the `CreateSavedFilterRequest.name` schema) and is unique per
+        `(workspace, owner)`. Workspace members only.
       operationId: createSavedFilter
       parameters:
         - $ref: '#/components/parameters/workspaceId'
@@ -8268,7 +8270,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: A filter with that name already exists for this owner in the workspace
+          description: A filter with the same canonical name already exists for this owner in the workspace
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -8328,7 +8330,7 @@ paths:
         '400': { $ref: '#/components/responses/ValidationError' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: A filter with the new name already exists for this owner in the workspace
+          description: A filter with the same canonical name already exists for this owner in the workspace
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/ProblemDetail' }
@@ -13704,7 +13706,18 @@ components:
         name:
           type: string
           maxLength: 120
-          description: Required, non-blank; unique per `(workspace, owner)` — `409` on a dup.
+          description: >-
+            Required, non-blank after canonicalization (NFC, invisible
+            control/format characters dropped, whitespace collapsed and
+            trimmed) — a name that canonicalizes to empty (e.g. whitespace-only
+            or invisible-characters-only) is `400`. The `maxLength` of 120 is
+            measured on the CANONICAL form as well as the raw one: Unicode
+            normalization can lengthen a name (a composition-exclusion character
+            such as U+0958 becomes two characters under NFC, so 120 of them
+            canonicalize to 240), and a name that canonicalizes to more than 120
+            characters is `400` naming the limit — it never reaches storage.
+            Unique per `(workspace, owner)` comparing canonical names,
+            case-sensitive — `409` on a dup.
           example: My open bugs
         hql:
           type: string
@@ -13727,7 +13740,7 @@ components:
         Body of `PATCH /workspaces/{workspaceId}/filters/{filterId}` — a partial
         update; every field is optional and `null`/omitted is a no-op. Owner only.
       properties:
-        name: { type: string, maxLength: 120, description: 'New name if present; re-checked for `(workspace, owner)` uniqueness (`409` on dup, `400` if blank).' }
+        name: { type: string, maxLength: 120, description: 'New name if present; canonicalized the same way as create (`400` if it canonicalizes to empty, or to more than 120 characters — NFC can lengthen a name), re-checked for `(workspace, owner)` uniqueness on the canonical form (`409` on dup).' }
         hql: { type: string, maxLength: 2000, description: 'New HQL if present; re-validated at save time (`422` on a bad query).' }
         shared: { type: boolean, description: 'New sharing flag if present.' }
 

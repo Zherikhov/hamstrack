@@ -1057,15 +1057,7 @@ public class SprintService {
      * AFTER normalization.
      */
     private String requireValidName(String raw) {
-        String name = ClassificationNames.normalize(raw);
-        if (name.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Sprint name must not be blank");
-        }
-        if (name.length() > MAX_NAME_LENGTH) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Sprint name must be at most " + MAX_NAME_LENGTH + " characters");
-        }
-        return name;
+        return ClassificationNames.requireValidName(raw, MAX_NAME_LENGTH, "Sprint");
     }
 
     /** {@code number} out of an {@code (id, number)} projection row. */

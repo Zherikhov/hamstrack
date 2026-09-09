@@ -615,15 +615,7 @@ public class LabelService {
      * leading U+00A0 would even sneak past the blank check.
      */
     private String requireValidName(String raw) {
-        String name = normalizeName(raw);
-        if (name.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Label name must not be blank");
-        }
-        if (name.length() > MAX_NAME_LENGTH) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Label name must be at most " + MAX_NAME_LENGTH + " characters");
-        }
-        return name;
+        return ClassificationNames.requireValidName(raw, MAX_NAME_LENGTH, "Label");
     }
 
     /**
@@ -661,15 +653,6 @@ public class LabelService {
             if (t instanceof ConstraintViolationException cve) return cve.getConstraintName();
         }
         return null;
-    }
-
-    /**
-     * Delegates to {@link ClassificationNames#normalize} — the ONE implementation
-     * shared with components (HD-31) and versions (HD-32), so the anti-spoofing rules
-     * can't drift between the three primitives. Behavior is unchanged.
-     */
-    static String normalizeName(String raw) {
-        return ClassificationNames.normalize(raw);
     }
 
     /**

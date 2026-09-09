@@ -3,7 +3,7 @@
 Record date: 2026-08-28
 Status: Accepted
 Source: `docs/design/search-input-refusals-proposal.md` §4 (HD-214, HD-163);
-`src/main/java/com/hamstrack/search/SearchController.java` — at the time of the decision the only controller with `@Validated`; the annotation was removed by this same ticket, and the prohibition is now held by `WebBeanValidatedRuleTest`, not by the absence of violators;
+`src/main/java/com/hamstrack/search/SearchController.java` — at the time of the decision the only controller with `@Validated`; the annotation was removed by this same ticket, and the prohibition is held by an executable rule over the category — a reflection scan from HD-214 to HD-297, since then `ArchitectureRulesTest#noWebBeanCarriesValidated` (ArchUnit, over `Doors.webBeans()`) — not by the absence of violators;
 `src/main/java/com/hamstrack/auth/controller/AuthController.java` (the comment "NO @Validated ON THIS
 CLASS, deliberately") and `src/main/java/com/hamstrack/workspace/controller/WorkspaceController.java`
 ("Do not add it.") — the same reasoning, already written down by HD-171 on two doors out of three;
