@@ -6,19 +6,13 @@ import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import com.hamstrack.common.observability.ProductMetrics.RateLimitKind;
 import com.hamstrack.common.persistence.LockTimeout;
+import com.hamstrack.common.testsupport.SourceCallSites;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
-import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -308,7 +302,7 @@ class AuthMailDoorsTest {
 
     /**
      * {@code Class.method} for every place under {@code src/main/java} that CALLS {@code needle},
-     * excluding the declaring class itself.
+     * excluding the declaring class itself (its own javadoc and guards mention the name).
      *
      * <p><strong>Method granularity, not file.</strong> The seal used to compare file names, and
      * all three anonymous auth flows are methods of one file — so moving the disclosing call out of
@@ -319,46 +313,13 @@ class AuthMailDoorsTest {
      *
      * <p>Read out of the source tree rather than by reflection for the reason the test above gives:
      * a call site is a fact about code, not about bytecode this test can enumerate. The parser is
-     * deliberately crude — the last line before the call that looks like a method declaration —
-     * because it only has to be right about the shape this codebase actually writes, and it is
-     * wrapped in an assertion that fails loudly if it finds nothing at all.
+     * {@link SourceCallSites}, shared with {@code AttachmentDoorsTest} — this test carried its own
+     * copy until a rewrapped two-line call inside {@code register} parsed as a declaration and the
+     * seal named a method the door is never called from (HD-298). One entry per call LINE, so a
+     * second call inside {@code register} would also show up here and be answered by the checklist.
      */
     private static List<String> enclosingMethodsCalling(String needle) throws IOException {
-        // Exactly four spaces of indentation, which in this codebase is method level: a control
-        // statement is nested deeper, and without that anchor "if (...)" parsed as a declaration
-        // named "if" and the seal reported AuthService.if. The keyword guard below is the belt to
-        // that brace - a method may legitimately sit at four spaces inside a nested class.
-        var declaration = Pattern.compile(
-                "^ {4}(?:public|protected|private)?\\s*(?:static\\s+)?"
-                + "(?:final\\s+)?[\\w.<>\\[\\],?\\s]+\\s(\\w+)\\s*\\([^;]*$");
-        var notAMethodName = Set.of("if", "for", "while", "switch", "catch", "return", "new",
-                "synchronized", "assert", "throw", "else", "do", "try");
-        var hits = new ArrayList<String>();
-        try (Stream<Path> paths = Files.walk(Path.of("src", "main", "java"))) {
-            for (var path : paths.filter(p -> p.toString().endsWith(".java")).toList()) {
-                var file = path.getFileName().toString();
-                if (file.equals("RecipientMailThrottle.java")) {
-                    continue;  // the declaring class; its own javadoc and guards mention the name
-                }
-                var lines = Files.readAllLines(path, StandardCharsets.UTF_8);
-                var type = file.substring(0, file.length() - ".java".length());
-                var enclosing = "<file scope>";
-                for (var line : lines) {
-                    var matcher = declaration.matcher(line);
-                    if (matcher.find() && !line.trim().startsWith("*")
-                        && !notAMethodName.contains(matcher.group(1))) {
-                        enclosing = matcher.group(1);
-                    }
-                    // A javadoc/comment mention is not a call site. Anything else that carries the
-                    // name is treated as one - over-reporting here fails the seal, which is the
-                    // safe direction.
-                    var code = line.trim();
-                    if (code.contains(needle) && !code.startsWith("*") && !code.startsWith("//")) {
-                        hits.add(type + "." + enclosing);
-                    }
-                }
-            }
-        }
+        var hits = SourceCallSites.callers(needle, "RecipientMailThrottle.java");
         assertThat(hits)
                 .as("no source file calls %s at all, so this seal is guarding an empty set — "
                     + "the method was renamed and this test did not move with it", needle)

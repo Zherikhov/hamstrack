@@ -538,16 +538,48 @@ public final class PublishedCredentials {
      * take part would mean a checkout could pass or fail on files that are not in it.
      */
     public static List<Path> trackedFiles() {
-        var out = new ArrayList<Path>();
-        for (String entry : git("ls-files", "-z").split("\0")) {
-            if (!entry.isBlank()) {
-                out.add(REPO_ROOT.resolve(entry).normalize());
-            }
-        }
+        var out = lsFiles("--cached");
         if (out.isEmpty()) {
             throw new IllegalStateException("`git ls-files` listed nothing - this test reads the repository's "
                     + "own contents and must run from a checkout, at the module root (working directory was "
                     + REPO_ROOT.toAbsolutePath() + ")");
+        }
+        return out;
+    }
+
+    /**
+     * The files under {@code pathspec} that a commit from this checkout <em>could</em> publish: the
+     * index plus the untracked files no ignore rule covers — the union {@code .claude/pipeline/check-gates.mjs}
+     * diffs. This is the source side for a check about <em>this checkout and the compile it came
+     * from</em> (HD-298: {@code DoorsHarnessTest} compared {@code target/classes} against
+     * {@link #trackedFiles()} alone, so a freshly written class was reported as a stale class file and
+     * told to {@code mvnw clean}). Use {@link #trackedFiles()} for a claim about what other people can
+     * read today.
+     */
+    public static List<Path> publishableFiles(String pathspec) {
+        return lsFiles("--cached", "--others", "--exclude-standard", "--", pathspec);
+    }
+
+    /**
+     * The files under {@code pathspec} that an ignore rule keeps out of every commit — empty on a
+     * healthy checkout, which is why this does not refuse an empty answer the way {@link #trackedFiles()}
+     * does. A production source in here compiles and answers a scan while no clone will ever hold it.
+     */
+    public static List<Path> ignoredFiles(String pathspec) {
+        return lsFiles("--others", "--ignored", "--exclude-standard", "--", pathspec);
+    }
+
+    /** One parse of {@code git ls-files -z <flags>}: NUL-separated repository-relative entries, resolved at {@link #REPO_ROOT}. */
+    private static List<Path> lsFiles(String... flags) {
+        var args = new ArrayList<String>(flags.length + 2);
+        args.add("ls-files");
+        args.add("-z");
+        args.addAll(List.of(flags));
+        var out = new ArrayList<Path>();
+        for (String entry : git(args.toArray(String[]::new)).split("\0")) {
+            if (!entry.isBlank()) {
+                out.add(REPO_ROOT.resolve(entry).normalize());
+            }
         }
         return out;
     }

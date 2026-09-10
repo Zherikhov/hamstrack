@@ -1,5 +1,6 @@
 package com.hamstrack.issue;
 
+import com.hamstrack.common.testsupport.SourceCallSites;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -11,7 +12,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -238,63 +238,17 @@ class AttachmentDoorsTest {
      *
      * <p>Read out of the source tree rather than by reflection, for {@code AuthMailDoorsTest}'s
      * reason: a call site is a fact about code, not about bytecode this test can enumerate. The
-     * parser is the same deliberately crude one — the last line before the call that looks like a
-     * method declaration at four spaces of indentation — because it only has to be right about the
-     * shape this codebase actually writes, and it is wrapped in an assertion that fails loudly if
-     * it finds nothing at all.
+     * parser is {@link SourceCallSites}, shared with that test — this class carried its own copy,
+     * fixed the deeper-indentation false positive in it (a {@code return new ReservedAttachment(}
+     * twelve spaces in swallowed the rest of {@code upload()}) and documented the sibling as still
+     * deficient instead of sharing the fix; the sibling then bit on the same defect (HD-298). The
+     * shapes that fooled both copies are planted in {@code SourceCallSitesTest}.
      *
      * <p>Lambda bodies attribute to their enclosing method, which is exactly right here: the quota
      * reservation legitimately lives inside the {@code txTemplate.execute(...)} lambda of the same
      * method that later calls {@code store}.
      */
     private static Map<String, String> enclosingMethodsCalling(String needle) throws IOException {
-        // EXACTLY four spaces, asserted with a lookahead rather than left to the `^ {4}` prefix.
-        // AuthMailDoorsTest's copy of this pattern relies on a keyword deny-list instead, and that
-        // is not enough here: its character class contains \s, so a line indented DEEPER still
-        // matches with the extra indentation absorbed — which made `return new
-        // ReservedAttachment(...)`, twelve spaces in and seven lines above the store call, parse as
-        // a method declaration and swallow the rest of upload(). The deny-list cannot catch that,
-        // because the name it captures is a real type name and not a keyword. Indentation is what
-        // actually distinguishes a declaration from a call in this codebase's style, so it is
-        // asserted directly; the deny-list stays as the belt for a method legitimately sitting at
-        // four spaces inside a nested class.
-        var declaration = Pattern.compile(
-                "^ {4}(?=\\S)(?:public|protected|private)?\\s*(?:static\\s+)?"
-                + "(?:final\\s+)?[\\w.<>\\[\\],?\\s]+\\s(\\w+)\\s*\\([^;]*$");
-        var notAMethodName = Set.of("if", "for", "while", "switch", "catch", "return", "new",
-                "synchronized", "assert", "throw", "else", "do", "try");
-
-        var bodies = new LinkedHashMap<String, StringBuilder>();
-        var hits = new LinkedHashMap<String, String>();
-        try (Stream<Path> paths = Files.walk(Path.of("src", "main", "java"))) {
-            for (var path : paths.filter(p -> p.toString().endsWith(".java")).toList()) {
-                var file = path.getFileName().toString();
-                var type = file.substring(0, file.length() - ".java".length());
-                var enclosing = "<file scope>";
-                bodies.clear();
-                for (var line : Files.readAllLines(path, StandardCharsets.UTF_8)) {
-                    var matcher = declaration.matcher(line);
-                    if (matcher.find() && !line.trim().startsWith("*")
-                        && !notAMethodName.contains(matcher.group(1))) {
-                        enclosing = matcher.group(1);
-                    }
-                    var code = line.trim();
-                    // A javadoc/comment mention is not a call site. Anything else carrying the name
-                    // is treated as one — over-reporting fails the seal, which is the safe
-                    // direction.
-                    if (code.startsWith("*") || code.startsWith("//")) {
-                        continue;
-                    }
-                    bodies.computeIfAbsent(type + "." + enclosing, k -> new StringBuilder())
-                            .append(code).append('\n');
-                }
-                bodies.forEach((name, body) -> {
-                    if (body.indexOf(needle) >= 0) {
-                        hits.put(name, body.toString());
-                    }
-                });
-            }
-        }
-        return hits;
+        return SourceCallSites.callerBodies(needle);
     }
 }

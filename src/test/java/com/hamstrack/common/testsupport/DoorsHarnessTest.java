@@ -34,9 +34,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * it holds (its by-name half re-finds a record the closure dropped), so it also gets an exact
  * witness: its reachability half is derived a second way from the body parameters and held equal.
  *
- * <p>The other three things this class holds: the compiled tree Doors scans is the tracked source
- * tree (D5 — a class only on the compiled side is a stale {@code target/classes}, one only on the
- * source side is a compile the scan is not looking at); the {@link Population} primitives do what
+ * <p>The other three things this class holds: the compiled tree Doors scans is the source tree git
+ * would publish from this checkout, tracked and untracked alike (D5 — a class only on the compiled
+ * side is a stale {@code target/classes}, one only on the source side is a compile the scan is not
+ * looking at, and a source an ignore rule covers is named as its own fault); the {@link Population} primitives do what
  * their javadoc says (a permanent positive control for {@code floor}, the parent count in
  * {@code filter}, the refusal in {@code excluding}); and every population method states its blind
  * spots under a fixed {@code Not included:} marker, checked against the source of {@code Doors.java}
@@ -247,12 +248,25 @@ class DoorsHarnessTest {
         return className.substring(className.lastIndexOf('.') + 1);
     }
 
-    // ------------------------------------------------------------------ D5: compiled ⇄ tracked
+    // ------------------------------------------------------------------ D5: compiled ⇄ publishable source
+
+    private static final String PRODUCTION_SOURCE_ROOT = "src/main/java";
 
     /**
-     * The compiled tree Doors scans is exactly the tracked source tree: top-level class names on the
-     * compiled side equal {@code git ls-files src/main/java/**&#47;*.java} mapped to FQCNs
+     * The compiled tree Doors scans is exactly the source tree git would publish from this checkout:
+     * top-level class names on the compiled side equal {@code src/main/java/**&#47;*.java} as
+     * {@link PublishedCredentials#publishableFiles} lists it — the index <em>plus</em> untracked files
+     * no ignore rule covers, the union {@code check-gates.mjs} diffs — mapped to FQCNs
      * ({@code package-info} excluded on both sides).
+     *
+     * <p>Three faults, three remedies, never folded into one another (HD-298 — the first version read
+     * {@code git ls-files} alone, so a class written minutes earlier was "a stale class file; run
+     * {@code mvnw clean}", advice that teaches a reader either to distrust the check or to
+     * {@code git add} in order to pass it): a class with no source anywhere is a stale
+     * {@code target/classes} and {@code mvnw clean} is still the whole remedy; a source no class was
+     * compiled from is one the scan is not looking at; and a source an ignore rule covers is reported
+     * by name — it compiles and answers every population here while no clone will ever hold it, so it
+     * counts on neither side and must not pass quietly.
      */
     @Test
     void compiledTreeMatchesTrackedSources() {
@@ -261,39 +275,54 @@ class DoorsHarnessTest {
                 .map(Class::getName)
                 .collect(Collectors.toCollection(TreeSet::new));
 
-        var tracked = new TreeSet<String>();
-        var trackedFiles = 0;
-        for (var file : PublishedCredentials.trackedFiles()) {
-            var path = PublishedCredentials.repositoryPath(file);
-            if (!path.startsWith("src/main/java/") || !path.endsWith(".java")) {
-                continue;
-            }
-            trackedFiles++;
-            var name = path.substring("src/main/java/".length(), path.length() - ".java".length()).replace('/', '.');
-            if (!name.endsWith("package-info") && !name.endsWith("module-info")) {
-                tracked.add(name);
-            }
-        }
-        assertThat(trackedFiles)
+        var sources = productionClassNames(PublishedCredentials.publishableFiles(PRODUCTION_SOURCE_ROOT));
+        var ignored = productionClassNames(PublishedCredentials.ignoredFiles(PRODUCTION_SOURCE_ROOT));
+        assertThat(sources)
                 .as("git ls-files listed almost no production sources — this test must run from a checkout at the module root")
-                .isGreaterThan(250);
+                .hasSizeGreaterThan(250);
 
         var onlyCompiled = new TreeSet<>(compiled);
-        onlyCompiled.removeAll(tracked);
-        var onlyTracked = new TreeSet<>(tracked);
-        onlyTracked.removeAll(compiled);
+        onlyCompiled.removeAll(sources);
+        onlyCompiled.removeAll(ignored);
+        var onlySource = new TreeSet<>(sources);
+        onlySource.removeAll(compiled);
 
         var report = new ArrayList<String>();
-        onlyCompiled.forEach(c -> report.add("only compiled: " + c + " — a stale class file; run mvnw clean"));
-        onlyTracked.forEach(t -> report.add("only tracked: src/main/java/" + t.replace('.', '/')
-                                            + ".java — this class is not in the tree Doors scans"));
+        onlyCompiled.forEach(c -> report.add("only compiled: " + c + " — no source anywhere under " + PRODUCTION_SOURCE_ROOT
+                                             + ": a stale class file; run mvnw clean"));
+        onlySource.forEach(s -> report.add("only source: " + sourcePath(s) + " — this class is not in the tree Doors scans"));
+        ignored.forEach(i -> report.add("ignored source: " + sourcePath(i) + " — an ignore rule keeps it out of every commit "
+                                        + "(`git check-ignore -v " + sourcePath(i) + "` names the rule); a production class "
+                                        + "only this checkout has is not a door: move the file or narrow the rule, never "
+                                        + "`git add -f`"));
         assertThat(report)
                 .as("""
-                        The compiled tree Doors scans and the tracked source tree disagree. A class only on the \
-                        compiled side is a phantom door (its source is gone; `mvnw clean` removes it); a class only on \
-                        the source side is one the scan is not looking at (a compile that did not run, or a code-source \
-                        root that moved). Every population inherits whichever side is wrong.""")
+                        The compiled tree Doors scans and the source tree git would publish disagree. A class only on \
+                        the compiled side is a phantom door (its source is gone; `mvnw clean` removes it); a class only \
+                        on the source side is one the scan is not looking at (a compile that did not run, or a \
+                        code-source root that moved); an ignored source is one that compiles here and exists in no clone. \
+                        Every population inherits whichever side is wrong. Each line above names its own remedy.""")
                 .isEmpty();
+    }
+
+    /** {@code src/main/java/**&#47;*.java} entries of a git listing as FQCNs, {@code package-info} / {@code module-info} dropped. */
+    private static TreeSet<String> productionClassNames(List<Path> files) {
+        var names = new TreeSet<String>();
+        for (var file : files) {
+            var path = PublishedCredentials.repositoryPath(file);
+            if (!path.startsWith(PRODUCTION_SOURCE_ROOT + "/") || !path.endsWith(".java")) {
+                continue;
+            }
+            var name = path.substring(PRODUCTION_SOURCE_ROOT.length() + 1, path.length() - ".java".length()).replace('/', '.');
+            if (!name.endsWith("package-info") && !name.endsWith("module-info")) {
+                names.add(name);
+            }
+        }
+        return names;
+    }
+
+    private static String sourcePath(String className) {
+        return PRODUCTION_SOURCE_ROOT + "/" + className.replace('.', '/') + ".java";
     }
 
     // ------------------------------------------------------------------ the Population primitives

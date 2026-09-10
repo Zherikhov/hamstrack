@@ -4,6 +4,7 @@ import com.hamstrack.common.config.MailAsyncProperties;
 import com.hamstrack.common.mail.MailRejectedException;
 import com.hamstrack.common.mail.UndeliverableMail;
 import com.hamstrack.common.mail.UndeliverableMail.Reason;
+import com.hamstrack.common.observability.ProductMetrics;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.TaskExecutor;
@@ -84,9 +85,10 @@ public class AsyncConfig {
      *                      rather than tidy.
      */
     @Bean("mailExecutor")
-    public TaskExecutor mailExecutor(MailAsyncProperties properties, UndeliverableMail undeliverable) {
+    public TaskExecutor mailExecutor(MailAsyncProperties properties, UndeliverableMail undeliverable,
+                                     ProductMetrics metrics) {
         var async = properties.async();
-        var executor = new MailTaskExecutor(undeliverable, async.shutdownDrainSeconds());
+        var executor = new MailTaskExecutor(undeliverable, metrics, async.shutdownDrainSeconds());
         executor.setCorePoolSize(async.corePoolSize());
         executor.setMaxPoolSize(async.maxPoolSize());
         executor.setQueueCapacity(async.queueCapacity());

@@ -3,6 +3,7 @@ package com.hamstrack.common.mail;
 import com.hamstrack.common.config.MailAsyncProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailOutcome;
+import com.hamstrack.common.observability.ProductMetrics.MailDropReason;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -92,6 +93,12 @@ import java.util.List;
  * still holding a connection, so a write attempted while other threads are already queued for one
  * would join — and lengthen — a queue that stalls the whole instance, not just mail. All three
  * degrade the loss from durable to loud, never to silent.
+ *
+ * <p><strong>Every branch that ends without a row counts why</strong> (HD-234):
+ * {@code hamstrack.mail.dead_letter_skipped{reason}}, emitted inside the branch that decided it, so
+ * the counter and the log line cannot disagree about what happened. {@code OpsWitnessContractTest}
+ * scans these branches for the call; {@code MailDeadLetterSkipped} fires on any reason but
+ * {@code best_effort}.
  */
 @Slf4j
 @Component
@@ -182,6 +189,7 @@ public class UndeliverableMail {
         metrics.emailSent(task.type(), EmailOutcome.FAILURE);
 
         if (!MailService.isCritical(task.type())) {
+            metrics.mailDropped(MailDropReason.BEST_EFFORT);
             log.warn("Best-effort {} email to a {} address was not sent: {}",
                     task.type(), MailAddresses.domainOf(task.recipient()), reason.detail());
             return false;
@@ -203,11 +211,13 @@ public class UndeliverableMail {
             // be handed a free connection immediately, so the honest statement is that somebody is
             // in the acquisition path — see FailedEmailWriter#poolIsStarved for why over-reading
             // it is the cheap side of the trade here and would not be somewhere else.
+            metrics.mailDropped(MailDropReason.POOL_CONTENDED);
             refusal = "NOT dead-lettered: the database connection pool is contended (another thread "
                       + "is already acquiring a connection), and this write would take a SECOND one "
                       + "while holding the committing thread's first (see FailedEmailWriter). So "
                       + "this line is the only record of it";
         } else if (!claimNeverAttemptedRow()) {
+            metrics.mailDropped(MailDropReason.HOURLY_CAP);
             refusal = "NOT dead-lettered: this instance is over its cap of "
                       + mailAsyncProperties.deadLetter().maxNeverAttemptedPerHour()
                       + " never-attempted rows an hour "
@@ -224,6 +234,7 @@ public class UndeliverableMail {
             failedEmailWriter.write(row(task, reason));
             return true;
         } catch (RuntimeException e) {
+            metrics.mailDropped(MailDropReason.WRITE_FAILED);
             log.error("Failed to persist never-attempted dead-letter row for {} email to a {} "
                       + "address", task.type(), MailAddresses.domainOf(task.recipient()), e);
             return false;
@@ -250,6 +261,7 @@ public class UndeliverableMail {
             if (MailService.isCritical(task.type())) {
                 critical.add(row(task, reason));
             } else {
+                metrics.mailDropped(MailDropReason.BEST_EFFORT);
                 log.warn("Best-effort {} email to a {} address was not sent: {}",
                         task.type(), MailAddresses.domainOf(task.recipient()), reason.detail());
             }
@@ -263,6 +275,7 @@ public class UndeliverableMail {
                     critical.size(), reason.detail());
             return critical.size();
         } catch (RuntimeException e) {
+            metrics.mailDropped(MailDropReason.WRITE_FAILED, critical.size());
             log.error("Failed to persist {} never-attempted dead-letter row(s) — those emails are "
                       + "lost with only this line to say so: {}",
                     critical.size(), reason.detail(), e);

@@ -1905,3 +1905,175 @@ groups:
                   query: { params: [] }
                   reducer: { type: last, params: [] }
                   type: query
+
+      # ────────────────────────────────────────────────────────────────────────────────
+      # SCHEDULED-JOB HEARTBEAT (HD-298, epic HD-294)
+      #
+      # Every in-process scheduled task - the limiter sweeps, the two mail retention sweeps,
+      # the mail-concentration refresh, the storage reconciler - publishes
+      # hamstrack_scheduled_job_last_run_timestamp_seconds{task} (seeded with process start,
+      # never zero) and hamstrack_scheduled_job_period_seconds{task}, stamped by
+      # ScheduledJobHeartbeat from Boot's tasks.scheduled.execution observation, so no job
+      # carries a gauge of its own.
+      #
+      # THE BOUND is min(3 x period + 900, period + 4500) seconds, then for: 15m. The first
+      # term is the timer rule's shape: one missed run is silence (a deploy, a slow pool), a
+      # stopped job pages within a few of its periods, and 900 s is the deploy allowance
+      # MailConcentrationGaugeStale uses. Alone it never fires for a daily task: 3 x 86400 is
+      # ~72 h, and a deploy re-seeds last_run with process start (30 deploy days in the last
+      # 45, longest gap 5), so FailedEmailRetention#sweep or WorkspaceStorageReconciler could
+      # stop for good and be re-seeded before they ever aged past it (HD-298 review). The
+      # second term caps the bound at one period plus 75 minutes - the StorageDriftGaugeStale
+      # precedent (25 h on a daily cron). Written as p + 900 + 2 * clamp_max(p, 1800) because
+      # PromQL's clamp_max takes a scalar ceiling, not a vector; the two are the same
+      # function of p (the crossover is p = 1800, and clamp_max(p, 1800) is what min(p, 1800)
+      # spells in PromQL). Per period, bound then + for:
+      #   0 s (unreadable trigger)  ->    900 s  = 15 min      (unchanged)
+      #   30 s                      ->    990 s  = 16 min 30 s (unchanged)
+      #   300 s                     ->  1 800 s  = 30 min      (unchanged)
+      #   600 s (the ten limiters)  ->  2 700 s  = 45 min      (unchanged)
+      #   3 600 s (hourly sweeps)   ->  8 100 s  = 2 h 15 min  (was 3 h 15 min)
+      #   86 400 s (daily)          -> 90 900 s  = 25 h 15 min (was 72 h 15 min)
+      # Up to a 30-minute period the clamp changes nothing. Verified with promtool test rules
+      # against synthetic series at each of those periods (HD-298 fix loop).
+      #
+      # The label is `task`, not `job`: Prometheus owns `job` on every scraped series and
+      # renames an exported one to exported_job (honor_labels is off in both scrape configs).
+      #
+      # noDataState: Alerting, not the file's usual OK, and Alerting rather than the NoData
+      # of the three gauge-stale rules above: absence of the series IS the finding (the
+      # heartbeat lost its hook, or no replica is up), and Alerting fires THIS rule with this
+      # summary rather than a DatasourceNoData alert with a generic body. A whole column of
+      # tasks stale at once is the scheduler pool or the observation hook, not one job.
+      - uid: hamstrack-scheduled-job-stale
+        title: ScheduledJobStale
+        condition: B
+        for: 15m
+        noDataState: Alerting
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Scheduled task {{ $labels.task }} has not completed a run in over three of its periods plus fifteen minutes (capped at one period plus 75 minutes, so an hourly task pages after 2 h 15 min and a daily one after 25 h 15 min, not 72 h) - or, if this arrived as NoData, no replica is publishing the heartbeat at all. The work is silently not happening: a limiter map is not being swept, mail retention is not deleting, or the storage reconciler is not checking. First move: docker compose logs app and search for the class name before the hash - Spring logs the exception a scheduled run threw and then swallows it. Every task stale at once is the scheduler pool wedged (spring.task.scheduling.pool.size) or the tasks.scheduled.execution observation gone after a Boot upgrade, not one job; see docs/observability.md and ScheduledJobHeartbeat'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'max by (task) ((time() - hamstrack_scheduled_job_last_run_timestamp_seconds) / (hamstrack_scheduled_job_period_seconds + 900 + 2 * clamp_max(hamstrack_scheduled_job_period_seconds, 1800)))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # A run that threw. Spring's TaskUtils logs it at ERROR and reschedules, so a job that
+      # fails every time looks, from every other signal, like a job that runs every time -
+      # and ScheduledJobStale will NOT fire for it, because last_run advances on a failed run
+      # too (deliberately: "ran and threw" and "did not run" have different first moves).
+      # This rule is the failed half. for: 0m and > 0 like EmailFailures: one is worth a line.
+      - uid: hamstrack-scheduled-job-failing
+        title: ScheduledJobFailing
+        condition: B
+        for: 0m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Scheduled task {{ $labels.task }} threw at least once in the last hour. Spring logs the exception at ERROR and swallows it, and the task keeps being scheduled, so nothing else notices: its work is not being done while every other signal reads normal. docker compose logs app and search for the class name before the hash for the stack trace; a limiter sweep failing leaves a map growing, a retention sweep failing leaves a table growing, the reconciler failing leaves the storage gauges frozen (StorageDriftGaugeStale will follow)'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum by (task) (increase(hamstrack_scheduled_job_failures_total[1h]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
+      # ────────────────────────────────────────────────────────────────────────────────
+      # DEAD-LETTER SKIPS (HD-234)
+      #
+      # EmailFailures counts the LOSS of a message; this counts the loss of its RECORD. Every
+      # branch in the mail package that ends without a failed_email row - in MailService
+      # (retries exhausted, dead-letter INSERT failed), UndeliverableMail (never attempted)
+      # and the pool's shutdown drain - increments hamstrack_mail_dead_letter_skipped_total
+      # {reason}; the hourly cap in particular used to be one ERROR per hour and no number,
+      # and the two MailService branches were WARN/ERROR-only until the HD-298 fix loop.
+      # best_effort is excluded: an invite gets no row by design (ADR-0021) and the inviter's
+      # loss is already an ERROR naming the workspace.
+      #
+      # WHAT THIS RULE CAN SEE, which is not every reason. The management port is the only
+      # scrape target (prometheus.yml), and Boot closes that child context on
+      # ContextClosedEvent, which AbstractApplicationContext.doClose publishes - and runs
+      # LifecycleProcessor.onClose for - BEFORE destroyBeans (spring-context 7.0.8, read from
+      # the bytecode in the HD-298 fix loop). The drain runs in destroyBeans. So the reasons
+      # it counts - in_flight_interrupted, foreign_task, and recordAll's best_effort and
+      # write_failed - go into a registry that is never scraped again; those series do not
+      # exist on any scrape interval and this rule never fires for them. They are counted
+      # for symmetry with the category; their witness in effect is the log line beside each
+      # count, and these are the Loki search strings: "shutdown drain expired" (both drain
+      # WARNs), "were not MailTasks" (the foreign-task ERROR), "never-attempted dead-letter
+      # row" (the residue INSERT failed; UndeliverableMail.recordAll's line is the one saying
+      # "those emails are lost", and the same words also hit a running instance's single-row
+      # write failure and the hourly-cap summary). "NOT dead-lettered" is NOT a drain string:
+      # it is a running instance's refusal in UndeliverableMail.record (pool_contended /
+      # hourly_cap), i.e. two of the reasons this rule already sees.
+      # No rule in this file is log-backed yet (MailConcentrationGaugeStale says so)
+      # and adding one is a separate decision, not this rule's. What this rule DOES see:
+      # pool_contended, hourly_cap, and write_failed from a running instance
+      # (UndeliverableMail.record and MailService.deadLetter).
+      - uid: hamstrack-mail-dead-letter-skipped
+        title: MailDeadLetterSkipped
+        condition: B
+        for: 0m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: warning
+        annotations:
+          summary: 'At least one account-critical email that will never be sent got NO failed_email row in the last hour, so an ERROR line in the app log is the only record of its recipient. The reason label says which branch: pool_contended - the connection pool was already queued and FailedEmailWriter refused a second connection (look at hikaricp_connections_pending); hourly_cap - app.mail.dead-letter.max-never-attempted-per-hour was reached, which means the mail queue is saturated, so look at the pool and at SMTP before raising the cap; write_failed - the dead-letter INSERT itself failed on a running instance (UndeliverableMail.record, or MailService after the retries were exhausted), so look at the database. Those three are the only reasons this rule can see: in_flight_interrupted, foreign_task and the shutdown drain''s own best_effort / write_failed are counted after the management port has closed and never reach Prometheus, so for a deploy that landed on a backlog search the app log for "shutdown drain expired", "were not MailTasks" and "never-attempted dead-letter row" (the residue INSERT failed). Re-drive a running instance''s refusals from the log: search it for "will NEVER be sent" and "NOT dead-lettered"'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'sum(increase(hamstrack_mail_dead_letter_skipped_total{reason!="best_effort"}[1h]))'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query

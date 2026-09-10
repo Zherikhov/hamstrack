@@ -78,7 +78,7 @@ management.info.env.enabled=false
 | `hamstrack.auth.email_verified` | Counter | — | `AuthService.verifyEmail` after status→ACTIVE |
 | `hamstrack.auth.password_reset` | Counter | `phase`(requested/completed) | `AuthService.forgotPassword` (only when user found) / `resetPassword` |
 | `hamstrack.ratelimit.hit` | Counter | `kind`(ip_window/login_backoff) | `RateLimitService` where `RateLimitedException` is thrown in `checkAuthRequestAllowed` / `checkLoginAllowed` |
-| `hamstrack.workspaces.created` | Counter | `source`(user/onboarding/demo) | `WorkspaceService.create(actor,req,completesOnboarding)` — derive from flag (demo seeder passes false) |
+| `hamstrack.workspaces.created` | Counter | `source`(user/demo — an `onboarding` value was declared, never emitted, and deleted by HD-298) | `WorkspaceService.create(actor,req,completesOnboarding)` — derive from flag (demo seeder passes false) |
 | `hamstrack.projects.created` | Counter | — | `ProjectService.create` |
 | `hamstrack.issues.created` | Counter | `type`=issue-type name (bounded catalog) | `IssueService.create` after save |
 | `hamstrack.invites.sent` | Counter | — | `WorkspaceService.inviteMember` after `inviteRepository.save` |

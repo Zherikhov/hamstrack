@@ -13,6 +13,7 @@ import com.hamstrack.common.observability.ProductMetrics.EmailType;
 import com.hamstrack.common.observability.ProductMetrics.LoginOutcome;
 import com.hamstrack.common.observability.ProductMetrics.LoginReason;
 import com.hamstrack.common.observability.ProductMetrics.PasswordResetPhase;
+import com.hamstrack.common.observability.ProductMetrics.SignupRefusal;
 import com.hamstrack.common.ratelimit.RateLimitService;
 import com.hamstrack.common.ratelimit.RecipientMailThrottle;
 import com.hamstrack.common.seed.DataSeeder;
@@ -69,14 +70,23 @@ public class AuthService {
         // When public signup is off (DC default), self-registration is fully
         // closed — no first-user bootstrap. Accounts are created by the system
         // admin (Admin console → Users); the initial admin comes from SEED_ADMIN_*.
+        // Both refusals count before they throw (HD-261): a closed door answered 403 for months
+        // with no witness at all, and the DC default is closed. The status codes are unchanged.
         if (!appProperties.registration().publicSignupEnabled()) {
+            metrics.signupRefused(SignupRefusal.SIGNUP_CLOSED);
             throw new RegistrationDisabledException();
         }
         if (appProperties.legal().termsAcceptanceRequired() && !req.hasAcceptedTerms()) {
+            metrics.signupRefused(SignupRefusal.TERMS_NOT_ACCEPTED);
             throw new TermsNotAcceptedException();
         }
-        rejectPublishedPassword(req.password());
-        rejectUnencodablePassword(req.password());
+        // The other two refusals before the address is read (HD-298 review). Both helpers are
+        // shared with resetPassword, so the count is REGISTER'S, made here and not in the helper:
+        // a reset is not a signup, and a counter named signup_refused must not move for one.
+        rejectPublishedPassword(req.password(),
+                () -> metrics.signupRefused(SignupRefusal.PUBLISHED_PASSWORD));
+        rejectUnencodablePassword(req.password(),
+                () -> metrics.signupRefused(SignupRefusal.UNENCODABLE_PASSWORD));
         // Locale.ROOT, never the JVM default. This fold IS the account identity: users.email
         // carries a byte-exact UNIQUE and every lookup is an exact match, so a fold that varies
         // with the container locale varies which address a person owns - a Turkish JVM stores
@@ -364,8 +374,8 @@ public class AuthService {
 
     @Transactional
     public void resetPassword(ResetPasswordRequest req) {
-        rejectPublishedPassword(req.newPassword());
-        rejectUnencodablePassword(req.newPassword());
+        rejectPublishedPassword(req.newPassword(), NOT_A_SIGNUP);
+        rejectUnencodablePassword(req.newPassword(), NOT_A_SIGNUP);
         var hash = sha256(req.token());
         var reset = passwordResetRepository.findByTokenHash(hash)
                 .orElseThrow(InvalidTokenException::new);
@@ -416,12 +426,20 @@ public class AuthService {
      *
      * <p>Refused before the reset token is marked used, so a caller who hits this can retry
      * on the same link.
+     *
+     * @param refused runs before the throw — the caller's witness. Register counts a
+     *                {@link SignupRefusal} there; reset passes {@link #NOT_A_SIGNUP}. The
+     *                predicate stays in this one place either way.
      */
-    private void rejectPublishedPassword(String password) {
+    private void rejectPublishedPassword(String password, Runnable refused) {
         if (DataSeeder.isPublishedPassword(password)) {
+            refused.run();
             throw new PublishedPasswordException();
         }
     }
+
+    /** The reset door's witness for the two shared password refusals: it is not a signup. */
+    private static final Runnable NOT_A_SIGNUP = () -> { };
 
     /**
      * <strong>The same two doors, refusing what the encoder cannot hash</strong> (HD-171 §4.4).
@@ -445,8 +463,9 @@ public class AuthService {
      * partial write — {@code encode} precedes the INSERT — but the reset path is only safe because
      * this runs first.)
      */
-    private void rejectUnencodablePassword(String password) {
+    private void rejectUnencodablePassword(String password, Runnable refused) {
         if (PasswordLimits.exceedsEncoderLimit(password)) {
+            refused.run();
             throw new PasswordTooLongException(PasswordLimits.byteLength(password));
         }
     }

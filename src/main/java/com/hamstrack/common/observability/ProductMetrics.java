@@ -155,8 +155,14 @@ public class ProductMetrics {
         RateLimitKind(String tag) { this.tag = tag; }
     }
 
+    /**
+     * Who created a workspace. Two constants, not three: an {@code ONBOARDING} value sat here
+     * "reserved for future use and not emitted" until HD-298's constant scan
+     * ({@code OpsWitnessContractTest}) refused it — a label value nobody emits is read as "never
+     * happened", and onboarding creates no workspace of its own ({@code WorkspaceService}).
+     */
     public enum WorkspaceSource {
-        USER("user"), ONBOARDING("onboarding"), DEMO("demo");
+        USER("user"), DEMO("demo");
         final String tag;
         WorkspaceSource(String tag) { this.tag = tag; }
     }
@@ -319,6 +325,100 @@ public class ProductMetrics {
 
         public String tag() { return tag; }
     }
+
+    /**
+     * Why a message this instance will never send got <strong>no</strong> {@code failed_email}
+     * row — the degradation from <em>durable</em> to <em>loud</em> that HD-234 found uncounted.
+     *
+     * <p>{@code hamstrack.email.sent{outcome="failure"}} already counts the <em>loss</em>; this
+     * counts the loss of the <em>record</em>. The category is <strong>every branch in the mail
+     * package that ends without a row</strong> — a send that exhausted its attempts, a message that
+     * never reached one, a dead-letter INSERT that failed, a drain that abandoned a worker —
+     * whichever class the branch happens to sit in; {@code OpsWitnessContractTest.DROP_SITES}
+     * names each and scans it for the call. (Phrased over the class names once, and the two
+     * branches in {@code MailService} stayed uncounted for a review round because of it.)
+     * {@link #BEST_EFFORT} is the one that is by design (ADR-0021) and the alert
+     * {@code MailDeadLetterSkipped} excludes it.
+     *
+     * <p><strong>Which of these the alert can actually see.</strong> The management port is the
+     * only scrape target, and Boot closes its child context on {@code ContextClosedEvent} — which
+     * {@code AbstractApplicationContext.doClose} publishes <em>before</em> {@code destroyBeans}
+     * (spring-context 7.0.8, read from the bytecode). So a reason counted only during bean
+     * destruction — {@link #IN_FLIGHT_INTERRUPTED}, {@link #FOREIGN_TASK}, and the
+     * {@link #BEST_EFFORT} / {@link #WRITE_FAILED} of the drain's {@code recordAll} — is never
+     * scraped; it is counted for symmetry, and its witness in effect is the log line beside it.
+     * The alert sees {@link #POOL_CONTENDED}, {@link #HOURLY_CAP} and the {@link #WRITE_FAILED} of
+     * a running instance.
+     */
+    public enum MailDropReason {
+        /** Best-effort mail (an invite) earns no row; the caller is told and logs the loss. */
+        BEST_EFFORT("best_effort"),
+        /** {@code FailedEmailWriter.poolIsStarved()} refused to take a second connection. */
+        POOL_CONTENDED("pool_contended"),
+        /** {@code app.mail.dead-letter.max-never-attempted-per-hour} was reached. */
+        HOURLY_CAP("hourly_cap"),
+        /** The row's INSERT itself failed — the database may already be gone at shutdown. */
+        WRITE_FAILED("write_failed"),
+        /** A send a worker was already inside when the drain expired; no row is possible. */
+        IN_FLIGHT_INTERRUPTED("in_flight_interrupted"),
+        /** Something on the mail pool that was not a {@code MailTask} — see {@code AsyncConfig}. */
+        FOREIGN_TASK("foreign_task");
+
+        final String tag;
+        MailDropReason(String tag) { this.tag = tag; }
+
+        public String tag() { return tag; }
+    }
+
+    /**
+     * Why {@code POST /api/auth/register} refused before it looked at the address (HD-261). A
+     * knock on a closed door is information, not an incident — there is deliberately no alert
+     * rule; the counter and its row in {@code docs/observability.md} are the witness. Status codes
+     * are unchanged: a counter is not an oracle, the door still answers what it answers.
+     *
+     * <p>The category is every refusal {@code AuthService.register} makes before
+     * {@code req.email()} is read, and it has four members, not the two it shipped with (HD-298
+     * review): the two password refusals below are shared with the reset door, so the counter is
+     * emitted by register at its call site, never inside the shared helper — reset is not a signup.
+     */
+    public enum SignupRefusal {
+        /** {@code app.registration.public-signup-enabled=false} — the DC default. */
+        SIGNUP_CLOSED("signup_closed"),
+        /** Terms acceptance is required and the request did not carry it. */
+        TERMS_NOT_ACCEPTED("terms_not_accepted"),
+        /**
+         * The password is one this repository publishes ({@code DataSeeder.PUBLISHED_PASSWORDS})
+         * — the member with security value: somebody is trying a credential they read here.
+         */
+        PUBLISHED_PASSWORD("published_password"),
+        /** Over {@code PasswordLimits.MAX_PASSWORD_BYTES} in UTF-8 — BCrypt could not hash it. */
+        UNENCODABLE_PASSWORD("unencodable_password");
+
+        final String tag;
+        SignupRefusal(String tag) { this.tag = tag; }
+
+        public String tag() { return tag; }
+    }
+
+    // --- scheduled-job heartbeat (HD-298) — names here, state in ScheduledJobHeartbeat ---
+
+    /** Epoch seconds of the last completed run (success or failure) of one scheduled task. */
+    public static final String SCHEDULED_JOB_LAST_RUN = "hamstrack.scheduled_job.last_run_timestamp_seconds";
+
+    /** The task's own period in seconds, so a rule can compare age against schedule per task. */
+    public static final String SCHEDULED_JOB_PERIOD = "hamstrack.scheduled_job.period_seconds";
+
+    /** Runs that ended in an exception — Spring logs and swallows those, nothing else counts them. */
+    public static final String SCHEDULED_JOB_FAILURES = "hamstrack.scheduled_job.failures";
+
+    /**
+     * The one label on the three meters above: {@code Class#method}, bounded by the number of
+     * scheduled tasks in the tree (a dozen or so). <strong>Not {@code job}</strong>: Prometheus
+     * attaches its own {@code job} label to every scraped series and, with the default
+     * {@code honor_labels: false} both scrape configs use, renames an exported {@code job} to
+     * {@code exported_job} — so a rule written against {@code job} would match nothing.
+     */
+    public static final String SCHEDULED_JOB_TAG = "task";
 
     private final MeterRegistry registry;
 
@@ -554,6 +654,16 @@ public class ProductMetrics {
         registry.counter("hamstrack.auth.password_reset", "phase", phase.tag).increment();
     }
 
+    /**
+     * {@code hamstrack.auth.signup_refused{reason}} — at every refusal {@code AuthService.register}
+     * makes before it reads the address (HD-261; the {@link SignupRefusal} javadoc holds the
+     * members). Emitted before the throw; the transaction that follows rolls back, which a counter
+     * does not (header rule).
+     */
+    public void signupRefused(SignupRefusal reason) {
+        registry.counter("hamstrack.auth.signup_refused", "reason", reason.tag).increment();
+    }
+
     // --- rate limiting ---
 
     /** {@code hamstrack.ratelimit.hit{kind}} — at each RateLimitedException throw. */
@@ -770,6 +880,65 @@ public class ProductMetrics {
     public void emailSent(EmailType type, EmailOutcome outcome) {
         registry.counter("hamstrack.email.sent",
                 "type", type.tag, "outcome", outcome.tag).increment();
+    }
+
+    /**
+     * {@code hamstrack.mail.dead_letter_skipped{reason}} — one message that will never be sent got
+     * no {@code failed_email} row, and this is why (HD-234).
+     *
+     * <p>Sits beside {@link #emailSent}'s {@code failure}, never instead of it: that meter says a
+     * message was lost, this one says the durable record of the loss was lost too, leaving an ERROR
+     * line as the only trace of the recipient. {@code MailDeadLetterSkipped} fires on any reason but
+     * {@link MailDropReason#BEST_EFFORT}.
+     */
+    public void mailDropped(MailDropReason reason) {
+        mailDropped(reason, 1);
+    }
+
+    /** {@link #mailDropped(MailDropReason)} for a batch — the shutdown residue, or the in-flight count. */
+    public void mailDropped(MailDropReason reason, int count) {
+        registry.counter("hamstrack.mail.dead_letter_skipped", "reason", reason.tag).increment(count);
+    }
+
+    // --- scheduled jobs (HD-298) ---
+
+    /**
+     * Registers the heartbeat of one scheduled task <em>before it first runs</em>: the
+     * {@link #SCHEDULED_JOB_LAST_RUN} gauge over {@code lastRunEpochMillis} (seeded by the caller
+     * with process start — the {@link #anonymousMailConcentrationRefreshedAt} rule, never zero and
+     * never a sentinel), the {@link #SCHEDULED_JOB_PERIOD} gauge, and the
+     * {@link #SCHEDULED_JOB_FAILURES} counter at zero so {@code increase()} sees the first failure
+     * rather than a series that appears mid-window.
+     *
+     * <p>A registration method rather than fields, for {@link #registerExpensiveReadInFlight}'s
+     * reason: the state lives in {@code ScheduledJobHeartbeat}, the NAMES live here. Per replica —
+     * a rule reads {@code max by (task)}, never {@code sum}.
+     */
+    public void registerScheduledJob(String task, AtomicLong lastRunEpochMillis, long periodSeconds) {
+        Gauge.builder(SCHEDULED_JOB_LAST_RUN, lastRunEpochMillis, at -> at.get() / 1000.0)
+                .tag(SCHEDULED_JOB_TAG, task)
+                .description("Epoch seconds of the last completed run of this scheduled task, success "
+                             + "or failure; seeded with process start, so a task that never runs "
+                             + "still ages. Per replica: alert with max by (task), never sum")
+                .strongReference(true)
+                .register(registry);
+        Gauge.builder(SCHEDULED_JOB_PERIOD, () -> periodSeconds)
+                .tag(SCHEDULED_JOB_TAG, task)
+                .description("This scheduled task's own period in seconds (fixed delay/rate, or the "
+                             + "gap between two cron fires); 0 when the trigger is not one the "
+                             + "heartbeat can read, which makes ScheduledJobStale fire early rather "
+                             + "than never")
+                .register(registry);
+        Counter.builder(SCHEDULED_JOB_FAILURES)
+                .tag(SCHEDULED_JOB_TAG, task)
+                .description("Runs of this scheduled task that ended in an exception — Spring logs "
+                             + "and swallows those, and the task keeps being scheduled")
+                .register(registry);
+    }
+
+    /** {@code hamstrack.scheduled_job.failures{task}} — a run that threw. */
+    public void scheduledJobFailed(String task) {
+        registry.counter(SCHEDULED_JOB_FAILURES, SCHEDULED_JOB_TAG, task).increment();
     }
 
     // --- authorization ---

@@ -1,6 +1,7 @@
 package com.hamstrack.auth;
 
 import com.hamstrack.auth.repository.UserRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -35,6 +36,7 @@ class RegistrationLockdownTest {
 
     @Autowired MockMvc mockMvc;
     @Autowired UserRepository userRepository;
+    @Autowired MeterRegistry registry;
 
     @MockitoBean JavaMailSender mailSender;
 
@@ -42,6 +44,7 @@ class RegistrationLockdownTest {
     void registerIsForbiddenWhenPublicSignupDisabled() throws Exception {
         var email = ("u-" + System.nanoTime() + "-" + UUID.randomUUID().toString().substring(0, 6)
                 + "@example.com").toLowerCase();
+        double refusedBefore = signupClosedRefusals();
 
         mockMvc.perform(post("/api/auth/register")
                         .contentType(APPLICATION_JSON)
@@ -50,5 +53,14 @@ class RegistrationLockdownTest {
                 .andExpect(status().isForbidden());
 
         assertThat(userRepository.findByEmail(email)).as("a blocked registration must not create a user").isEmpty();
+        // HD-261: the closed door is the DC default and had no witness at all; the 403 is unchanged.
+        assertThat(signupClosedRefusals())
+                .as("hamstrack.auth.signup_refused{reason=signup_closed} counts the refusal")
+                .isEqualTo(refusedBefore + 1);
+    }
+
+    private double signupClosedRefusals() {
+        var counter = registry.find("hamstrack.auth.signup_refused").tag("reason", "signup_closed").counter();
+        return counter == null ? 0 : counter.count();
     }
 }

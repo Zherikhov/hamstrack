@@ -3,6 +3,8 @@ package com.hamstrack.common.async;
 import com.hamstrack.common.mail.MailTask;
 import com.hamstrack.common.mail.UndeliverableMail;
 import com.hamstrack.common.mail.UndeliverableMail.Reason;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.observability.ProductMetrics.MailDropReason;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
@@ -79,7 +81,27 @@ import java.util.Objects;
  * dead-letter what is still in that set alongside the queue's residue, with no extra waiting at
  * all. It costs a set operation per send and one more failure mode at shutdown, and it is a
  * separate ticket rather than a thing this class quietly cannot do. Until it exists, the WARN
- * below is genuinely their only record.
+ * below is genuinely their only record (HD-234).
+ *
+ * <p><strong>The counters this method bumps are never scraped, and no alert sees them</strong>
+ * (HD-298 review, read from the bytecode of spring-context 7.0.8). This method runs during bean
+ * destruction; {@code AbstractApplicationContext.doClose} publishes {@code ContextClosedEvent} and
+ * runs {@code LifecycleProcessor.onClose} <em>before</em> {@code destroyBeans}, and Boot's
+ * {@code ChildManagementContextInitializer} closes the management child context — the only scrape
+ * target — on that event. So {@code in_flight_interrupted}, {@code foreign_task} and whatever
+ * {@link UndeliverableMail#recordAll} counts here increment a registry nobody will read again. They
+ * stay because {@code OpsWitnessContractTest.DROP_SITES} holds the rule "every drop counts" over the
+ * whole category and an exemption would be the first hole in it; but the honest witness for a drain
+ * that landed on a backlog is the log, and these are the Loki search strings for it:
+ * {@code "shutdown drain expired"} (both WARNs below), {@code "were not MailTasks"} (the
+ * foreign-task ERROR) and {@code "never-attempted dead-letter row"} (the residue INSERT failed —
+ * {@link UndeliverableMail#recordAll}'s line is the one saying {@code "those emails are lost"};
+ * the same words also hit a running instance's single-row write failure and the hourly-cap
+ * summary). {@code "NOT dead-lettered"} is <em>not</em> a drain string: it is a running instance's
+ * refusal in {@link UndeliverableMail#record} ({@code pool_contended} / {@code hourly_cap}), i.e.
+ * two of the reasons the rule already sees. {@code MailDeadLetterSkipped}
+ * sees {@code pool_contended}, {@code hourly_cap} and a running instance's {@code write_failed};
+ * there is no log-backed rule yet (the file says so at {@code MailConcentrationGaugeStale}).
  */
 @Slf4j
 public class MailTaskExecutor extends ThreadPoolTaskExecutor {
@@ -89,11 +111,14 @@ public class MailTaskExecutor extends ThreadPoolTaskExecutor {
 
     private final transient UndeliverableMail undeliverable;
 
+    private final transient ProductMetrics metrics;
+
     /** Kept alongside {@code setAwaitTerminationSeconds} only so the warning below can name it. */
     private final int drainSeconds;
 
-    public MailTaskExecutor(UndeliverableMail undeliverable, int drainSeconds) {
+    public MailTaskExecutor(UndeliverableMail undeliverable, ProductMetrics metrics, int drainSeconds) {
         this.undeliverable = Objects.requireNonNull(undeliverable);
+        this.metrics = Objects.requireNonNull(metrics);
         this.drainSeconds = drainSeconds;
         // Flush in-flight mail on graceful shutdown, bounded so shutdown never hangs. NOT a promise
         // that the queue drains — what it does not reach is dead-lettered below.
@@ -129,16 +154,19 @@ public class MailTaskExecutor extends ThreadPoolTaskExecutor {
         } catch (IllegalStateException notInitialized) {
             return;
         }
+        if (inFlight > 0) {
+            // No row is possible for these — shutdownNow() does not hand back what a worker is
+            // already inside — so the counter and this line are their entire record. See the
+            // class javadoc. Counted whether or not the queue behind them was empty: the two
+            // populations are independent, and this used to be logged only alongside the queue's.
+            metrics.mailDropped(MailDropReason.IN_FLIGHT_INTERRUPTED, inFlight);
+            log.warn("mailExecutor's {}s shutdown drain expired with up to {} send(s) still in "
+                     + "progress. Those are interrupted, cannot be identified from here and get no "
+                     + "failed_email row; a critical one among them may write its own on the way "
+                     + "out, or may not, depending on whether the datasource is still open.",
+                    drainSeconds, inFlight);
+        }
         if (residue.isEmpty()) {
-            if (inFlight > 0) {
-                // No row is possible for these — shutdownNow() does not hand back what a worker is
-                // already inside — so this line is their entire record. See the class javadoc.
-                log.warn("mailExecutor's {}s shutdown drain expired with an empty queue but up to "
-                         + "{} send(s) still in progress. Those are interrupted, cannot be "
-                         + "identified from here and get no failed_email row; a critical one among "
-                         + "them may write its own on the way out, or may not, depending on whether "
-                         + "the datasource is still open.", drainSeconds, inFlight);
-            }
             return;
         }
 
@@ -147,12 +175,10 @@ public class MailTaskExecutor extends ThreadPoolTaskExecutor {
         // entire record. "Up to 100" was the old warning's real content; this one is a number an
         // operator can act on.
         log.warn("mailExecutor's {}s shutdown drain expired with {} email(s) still queued and now "
-                 + "abandoned, plus up to {} more already in progress and now interrupted. Their "
-                 + "database rows are COMMITTED and their users have already been told the mail "
-                 + "was sent; account-critical QUEUED ones are being dead-lettered to failed_email "
-                 + "below. The in-progress ones cannot be — shutdownNow() does not return what a "
-                 + "worker is already inside — so for those this line is the record.",
-                drainSeconds, residue.size(), inFlight);
+                 + "abandoned. Their database rows are COMMITTED and their users have already been "
+                 + "told the mail was sent; account-critical ones are being dead-lettered to "
+                 + "failed_email below.",
+                drainSeconds, residue.size());
 
         var mail = residue.stream()
                 .filter(MailTask.class::isInstance)
@@ -162,7 +188,8 @@ public class MailTaskExecutor extends ThreadPoolTaskExecutor {
         if (foreign > 0) {
             // Something reached this pool without going through MailDispatcher — an unqualified
             // @Async is the way that happens, and AsyncConfig's javadoc says why it lands here.
-            // Nothing can be recorded about it beyond that it existed.
+            // Nothing can be recorded about it beyond that it existed — so that much is counted.
+            metrics.mailDropped(MailDropReason.FOREIGN_TASK, foreign);
             log.error("{} abandoned task(s) on mailExecutor were not MailTasks and cannot be "
                       + "identified or dead-lettered. Something is dispatching to this pool "
                       + "without going through MailDispatcher — see AsyncConfig.", foreign);

@@ -1,5 +1,6 @@
 package com.hamstrack.common.mail;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -47,6 +48,7 @@ class MailDurabilityTest {
 
     @Autowired MailService mailService;
     @Autowired FailedEmailRepository failedEmailRepository;
+    @Autowired MeterRegistry registry;
 
     @MockitoBean JavaMailSender mailSender;
 
@@ -104,6 +106,7 @@ class MailDurabilityTest {
 
     @Test
     void bestEffortInviteFailureWritesNoRow() {
+        double droppedBefore = bestEffortDrops();
         mailService.sendWorkspaceInviteEmail("invitee@example.com", "Acme", "invite-token-123");
 
         // Invite is best-effort: a single attempt (no retry), so wait for that one
@@ -112,6 +115,16 @@ class MailDurabilityTest {
         // Give any (erroneous) async dead-letter a moment to appear; it must not.
         await().during(Duration.ofMillis(500)).atMost(Duration.ofSeconds(2))
                 .until(() -> failedEmailRepository.count() == 0);
+        // ...and "no row" is counted, not just logged (HD-298 fix loop): the branch that ends a
+        // best-effort send without a row is a member of the same category UndeliverableMail counts.
+        await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertThat(bestEffortDrops())
+                .as("hamstrack.mail.dead_letter_skipped{reason=best_effort} counts the exhausted best-effort send")
+                .isEqualTo(droppedBefore + 1));
+    }
+
+    private double bestEffortDrops() {
+        var counter = registry.find("hamstrack.mail.dead_letter_skipped").tag("reason", "best_effort").counter();
+        return counter == null ? 0 : counter.count();
     }
 
     // ============================================================ helpers

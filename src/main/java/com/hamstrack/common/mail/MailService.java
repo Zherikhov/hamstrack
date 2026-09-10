@@ -5,6 +5,7 @@ import com.hamstrack.common.config.MailAsyncProperties;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailOutcome;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
+import com.hamstrack.common.observability.ProductMetrics.MailDropReason;
 import jakarta.mail.MessagingException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -265,6 +266,11 @@ public class MailService {
                     type, MailAddresses.domainOf(to), maxAttempts, last);
             deadLetter(type, to, subject, maxAttempts, last);
         } else {
+            // No row by design (ADR-0021), and counted for the same reason UndeliverableMail counts
+            // its best-effort branch: every branch in the mail package that ends without a row says
+            // so on hamstrack.mail.dead_letter_skipped{reason}, and OpsWitnessContractTest scans
+            // this one for the call (HD-298 review — it was WARN-only).
+            metrics.mailDropped(MailDropReason.BEST_EFFORT);
             log.warn("Best-effort {} email to a {} address failed",
                     type, MailAddresses.domainOf(to), last);
         }
@@ -286,8 +292,13 @@ public class MailService {
             // catch below to say so.
             failedEmailWriter.write(row);
         } catch (RuntimeException persistError) {
-            // A dead-letter write failure must not propagate onto the async executor
-            // (nothing awaits it); the ERROR log above + metric already captured it.
+            // A dead-letter write failure must not propagate onto the async executor (nothing
+            // awaits it). The ERROR above and hamstrack_email_sent_total{outcome="failure"} recorded
+            // the MAIL's failure; they say nothing about the loss of its RECORD, which is the event
+            // MailDeadLetterSkipped exists to page on — so this branch counts write_failed like the
+            // two in UndeliverableMail do (HD-298 review: the comment here used to claim the metric
+            // "already captured it", and the alert slept through the case it was written for).
+            metrics.mailDropped(MailDropReason.WRITE_FAILED);
             log.error("Failed to persist dead-letter row for {} email to a {} address",
                     type, MailAddresses.domainOf(to), persistError);
         }

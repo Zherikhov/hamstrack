@@ -367,6 +367,57 @@ To debug Loki/Prometheus directly, forward their ports the same way (they don't
 bind a host port, so use `AWS-StartPortForwardingSessionToRemoteHost` targeting the
 container, or query them from inside Grafana).
 
+### 4.1 Alert delivery drill log
+
+Every alert rule in `observability/grafana/provisioning/alerting/` delivers to a contact point,
+and the address behind it (`OBS_ALERT_EMAIL_TO`) lives **outside the repository** — so does the
+SMTP credential and Grafana's own health. Nothing in the tree can prove the inbox is real; the
+contact-point file once mailed an undeliverable domain for months with every test green. The only
+proof is **a message that arrived**, and `OpsWitnessContractTest` is red for every contact point
+some rule routes to that has no row below dated within the last **60 days** (two monthly
+checkpoints; on age alone, because the failures this catches leave the file unchanged).
+
+**That red is a deploy freeze, and it is meant to be one** (owner decision 2026-09-09: keep the
+60 days *and* keep the freeze). `OpsWitnessContractTest` runs in `build-and-test`; `build-and-push`
+`needs:` that job, and `deploy.yml` fires only on a Build whose conclusion is `success` — so once
+the newest row for a reached contact point is older than 60 days, `build-and-test` is red and
+**nothing reaches production, a hotfix included, until a new drill is recorded**. The unblock is the
+five-minute procedure below, not an edit to the test. The number lives in the test
+(`MAX_DRILL_AGE_DAYS`) and the test is its source of truth; this paragraph only repeats it.
+
+Procedure: in Grafana (§4 above) go to **Alerting → Contact points → the contact point → Test**
+and send the test notification, **or** fire a real rule on purpose (a `docker stop` of an exporter
+raises its `*Down` rule within its `for:`), then watch the inbox behind `OBS_ALERT_EMAIL_TO` — or,
+for a drill from a machine that cannot reach that inbox, the contact point's own delivery record:
+**Alerting → Contact points → `email` → last delivery attempt / error** (Grafana 11's alerting nav
+is Alert rules / Contact points / Notification policies / Silences / Alert groups / Settings —
+there is no "Notifications" page; measured in `grafana:11.5.2`), or the same read back over the API
+from the box:
+
+```bash
+curl -su admin:$GF_SECURITY_ADMIN_PASSWORD \
+  localhost:3000/api/alertmanager/grafana/config/api/v1/receivers
+# each integration reports lastNotifyAttempt and lastNotifyAttemptDuration, and adds
+# lastNotifyAttemptError ONLY when the last attempt failed - on success Grafana omits the
+# key entirely (measured on grafana:11.5.2), so do not wait for an empty one. A fresh
+# timestamp with no lastNotifyAttemptError key at all is a message handed to SMTP. It is
+# still not proof the inbox got it; that is what "by whom" is for.
+```
+
+Append a row **after** it arrived, in the **past tense, with the date it arrived**: ISO date first,
+the contact point name in backticks second, exactly as the header says. A row dated in the future,
+or written before the message was seen, is not a row.
+
+**Name a role and initials, never an address.** This repository is public, and the alert address
+is the one thing every rule delivers to — a row carrying it hands anyone the inbox to flood and a
+scanner the target for the mail bomb HD-202 closed; a person's address is the same leak with a
+name on it. Write "the `OBS_ALERT_EMAIL_TO` inbox" and the reader's initials.
+`OpsWitnessContractTest` refuses any cell in this table shaped like an address.
+
+| Date | Contact point | Triggered by | Received where (role, e.g. the `OBS_ALERT_EMAIL_TO` inbox) / by whom (initials) | Delay | Notes |
+|---|---|---|---|---|---|
+| 2026-09-10 | `email` | Test button (Alerting → Contact points → `email` → Test) | the `OBS_ALERT_EMAIL_TO` inbox, read by the owner (VZ) | immediate | Grafana's test payload reported `Observed 0s before this notification was delivered`. First drill; the log had no row before it. |
+
 ## 5. Memory: what the box has, and what the app is allowed
 
 **Re-measured on the running instance 2026-08-28 (HD-189)** — `i-019fe684b25ad831f`,

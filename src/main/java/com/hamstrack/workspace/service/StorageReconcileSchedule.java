@@ -1,6 +1,7 @@
 package com.hamstrack.workspace.service;
 
 import com.hamstrack.common.config.StorageQuotaProperties;
+import com.hamstrack.common.observability.ScheduledJobHeartbeat;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
@@ -31,6 +32,13 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
  *
  * <p>An INVALID cron still fails the boot, and should: a typo is not a decision, and the failure
  * arrives at deploy time instead of as a reconciler that never ran.
+ *
+ * <p><strong>The task is registered through {@link ScheduledJobHeartbeat#wrap}</strong> (HD-298):
+ * a runnable handed to the registrar bypasses the {@code tasks.scheduled.execution} observation
+ * every {@code @Scheduled} method gets for free, so without the wrap this is the one job in the
+ * process with no {@code hamstrack_scheduled_job_last_run_timestamp_seconds} — and
+ * {@code ScheduledJobHeartbeatTest} refuses a registered task that is neither annotated nor wrapped.
+ * The age gauge above stays: it means "succeeded", the heartbeat means "ran".
  */
 @Slf4j
 @Configuration
@@ -39,6 +47,7 @@ public class StorageReconcileSchedule implements SchedulingConfigurer {
 
     private final StorageQuotaProperties properties;
     private final WorkspaceStorageReconciler reconciler;
+    private final ScheduledJobHeartbeat heartbeat;
 
     @Override
     public void configureTasks(ScheduledTaskRegistrar registrar) {
@@ -51,6 +60,8 @@ public class StorageReconcileSchedule implements SchedulingConfigurer {
                      + "StorageDriftGaugeStale will fire, which is the intended signal");
             return;
         }
-        registrar.addCronTask(reconciler::reconcile, cron.trim());
+        registrar.addCronTask(heartbeat.wrap(
+                ScheduledJobHeartbeat.id(WorkspaceStorageReconciler.class, "reconcile"),
+                reconciler::reconcile, cron.trim()));
     }
 }

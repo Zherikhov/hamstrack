@@ -117,9 +117,10 @@ public class WorkspaceService {
         // completesOnboarding flag. The demo seeder is the single caller that
         // passes false, so false => demo and true => a real user-initiated
         // creation. There is no distinct "onboarding" workspace-creation call
-        // site today (OnboardingController completes onboarding + demo-seeds but
-        // creates no workspace of its own), so WorkspaceSource.ONBOARDING is
-        // reserved for future use and not emitted here.
+        // site (OnboardingController completes onboarding + demo-seeds but
+        // creates no workspace of its own); a reserved ONBOARDING constant that
+        // nothing emitted was deleted by HD-298 — OpsWitnessContractTest refuses
+        // a label value no production line names.
         metrics.workspaceCreated(completesOnboarding ? WorkspaceSource.USER : WorkspaceSource.DEMO);
 
         if (completesOnboarding) {
