@@ -10,7 +10,7 @@
 # host it demonstrably does not:
 #
 #   declared ceilings   app 1024 + postgres 512 + caddy 128
-#                       + observability 1024 (that file's seven services)  = 2688 MiB
+#                       + observability 1024 (every mem_limit in that file) = 2688 MiB
 #   host                t3.small, 1909 MiB
 #
 # 2688 MiB of ceilings on 1909 MiB of RAM. Ceilings summing past RAM is ordinary —

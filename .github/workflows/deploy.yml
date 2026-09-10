@@ -45,12 +45,31 @@ jobs:
       && !contains(github.event.workflow_run.head_branch, '-')
     runs-on: ubuntu-latest
 
-    # AWS instance ids are not secret (useless without credentials), so it's
-    # pinned literally. This also avoids a subtle failure mode: a mistyped
-    # secret is masked as *** in logs, so a wrong value looks correct, yet 403s
-    # the SSM call against the exact-match IAM policy.
+    # An AWS instance id is not a credential — it is useless without one — so it was written
+    # here literally, and the reasoning was that a SECRET would be masked as *** in the log,
+    # making a mistyped value look correct while it 403s against the exact-match IAM policy.
+    # That reasoning is still right about `secrets.`, and it is an argument against a secret,
+    # not an argument for a literal in a PUBLIC file. `vars.` is the third option and it has
+    # neither problem: repository variables are NOT masked, so a wrong value is still visible
+    # in the log, and a fork or a second environment becomes a variable change rather than a
+    # patch to this file. THAT IS THE WHOLE ARGUMENT. It is deliberately NOT "the id stops
+    # being published": this repository is public and the id is in the tree in several places
+    # (and this workflow echoes it in its own remedies), so a sentence claiming the move
+    # conceals it would be a claim nothing holds — and the next reader would trust it.
+    #
+    # SETUP is a MANUAL STEP an operator must take once, and it is written down where setup
+    # steps live rather than only in the file that changes: docs/ops-prod-hardening.md section 3
+    # (beside the IAM user and the two secrets it is set up with) and docs/release-checklist.md
+    # ("Releases that add a setting the deployment must set by hand"), which is the list somebody
+    # reads before a deploy rather than after one fails. Not docs/self-hosting.md: a self-hoster
+    # does not deploy from THIS repository's Actions, and a pointer into a page with no such
+    # section is a pointer nothing holds.
+    # Settings -> Secrets and variables -> Actions -> Variables:
+    #   INSTANCE_ID = <the target EC2 instance id>
+    # THERE IS NO FALLBACK, on purpose: the step below refuses by name on an empty value, which
+    # is a better failure than a default that silently deploys to the wrong machine.
     env:
-      INSTANCE_ID: i-019fe684b25ad831f
+      INSTANCE_ID: ${{ vars.INSTANCE_ID }}
 
     steps:
       - name: Configure AWS credentials
@@ -104,48 +123,300 @@ jobs:
           HEAD_REF: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          # EXPECTED_APP_VERSION is what the applier's verify step (HD-299) compares
+          # /api/meta against. It is derived from the ref name ONLY when that name is a
+          # release tag in the one shape build.yml stamps (`v1.2.3` / `1.2.3`, then without
+          # the `v`); `main` passes nothing and the verify step falls back to the sha; any
+          # other shape fails HERE, before send-command — a ref name never reaches the box's
+          # shell unvalidated, and the character set that passes cannot express a
+          # metacharacter, which is the only reason it may be spliced into the command below.
+          #
+          # `[[ =~ ]]`, NOT `grep -Eq`, AND THE COMMENT ABOVE USED TO NAME THE WRONG HOLDER.
+          # grep matches PER LINE, so `^v?[0-9]+(\.[0-9]+)+$` accepts a multi-line value whose
+          # FIRST line is `1.2.3` and whose second is anything at all — including a newline
+          # followed by a quote, which is exactly the metacharacter the comment says cannot
+          # get through. What actually stops that today is git: a ref name may not contain a
+          # control character (git-check-ref-format), so `head_branch` cannot carry a newline
+          # in the first place. That is a real holder, but it is git's rule and not this
+          # line's, and a comment that credits the wrong mechanism is a comment that survives
+          # the mechanism being replaced. `[[ =~ ]]` matches the WHOLE string, so the
+          # guarantee is now local: it holds whatever the upstream does.
+          case "$HEAD_REF" in
+            main) EXPECTED_APP_VERSION='' ;;
+            *)
+              if [[ "$HEAD_REF" =~ ^v?[0-9]+(\.[0-9]+)+$ ]]; then
+                EXPECTED_APP_VERSION="${HEAD_REF#v}"
+              else
+                echo "refusing to deploy ref '$HEAD_REF': neither main nor a release tag of the shape v1.2.3 / 1.2.3"
+                exit 1
+              fi ;;
+          esac
+          echo "Expected app version: ${EXPECTED_APP_VERSION:-<none: main build, verified by sha>}"
+          # Fail here, naming the variable, rather than at send-command with an empty
+          # --instance-ids and an AWS error that names nothing a reader can act on.
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "INSTANCE_ID is empty: set the repository variable INSTANCE_ID (Settings -> Secrets and variables -> Actions -> Variables) to the target EC2 instance id. It is a variable and not a secret on purpose — a masked value would make a typo look correct in this log."
+            exit 1
+          fi
+          # --timeout-seconds IS A DELIVERY BOUND, NOT AN EXECUTION ONE, and the difference
+          # matters because a wrong belief here reads as a safety net that is not there.
+          # Measured 2026-09-10 from the bundled AWS service model
+          # (botocore ssm/2014-11-06/service-2.json, SendCommandRequest.TimeoutSeconds):
+          # "If this time is reached and the command hasn't already started running, it won't
+          # run." Once the agent HAS started the script, nothing in this call stops it — SSM
+          # does not kill it at 1500 s. So: 1500 s is how long a busy instance may take to
+          # PICK THE COMMAND UP (generous on purpose: a queued deploy may hold the agent);
+          # what bounds the work itself is the applier's own budgets (pull + up + 180 s app +
+          # 90 s grafana + 20 s settle) plus the AWS-RunShellScript document's own execution
+          # timeout, which this command does not set; and what bounds THIS JOB is the poll
+          # below, which exceeds THIS INVOCATION'S budgets — not the applier's worst case,
+          # which is a different number: the three verify knobs are validated against ranges
+          # that permit 1800 + 1800 + 600 = 4200 s of verify alone, so a hand run with raised
+          # budgets can outlive any poll this job could reasonably set. The 1500 s delivery
+          # bound, the 1200 s poll and the three verify budgets are one family and nothing
+          # derives one from another; they agree because they were chosen together. Passing the document's
+          # `executionTimeout` parameter would add a real kill switch and is the other honest
+          # option — it is not taken here because it cannot be measured from this repository.
           CMD_ID=$(aws ssm send-command \
             --instance-ids "$INSTANCE_ID" \
             --document-name AWS-RunShellScript \
             --comment "hamstrack deploy $HEAD_REF $HEAD_SHA" \
+            --timeout-seconds 1500 \
             --parameters 'commands=["set -euo pipefail",
           "cd /opt/hamstrack",
           "find /opt/hamstrack -maxdepth 1 -name \".sync-*\" -mtime +1 -exec rm -rf {} +",
           "SYNC=$(mktemp -d /opt/hamstrack/.sync-XXXXXX)",
           "curl -fsSL --proto =https --tlsv1.2 https://codeload.github.com/${{ github.repository }}/tar.gz/${{ github.event.workflow_run.head_sha }} | tar xz -C $SYNC --strip-components=1",
-          "bash $SYNC/ops/deploy/apply-config.sh $SYNC /opt/hamstrack ${{ github.event.workflow_run.head_sha }}",
+          "EXPECTED_APP_VERSION='"$EXPECTED_APP_VERSION"' bash $SYNC/ops/deploy/apply-config.sh $SYNC /opt/hamstrack ${{ github.event.workflow_run.head_sha }}",
           "rm -rf $SYNC"]' \
             --query 'Command.CommandId' --output text)
           echo "Command: $CMD_ID"
-          # `wait` polls until the command finishes; it exits non-zero on failure
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" || FAILED=1
+          # ONE PLACE THAT ASKS SSM FOR ONE FIELD OF THIS INVOCATION, and the reason it is a
+          # function is that four calls used to swallow their own failure with `2>/dev/null ||
+          # <something cheerful>`. "The API answered X" and "the API did not answer" are
+          # DIFFERENT FACTS, and every one of the four printed a conclusion the second one
+          # cannot support: the poll turned expired credentials, a throttle, a network error and
+          # a wrong command id all into the word `Pending` and then waited 20 minutes on a
+          # status it had invented, and the two body reads turned an unreachable API into "the
+          # box printed nothing". The exit code is kept here and branched on at every call site.
+          SSM_ERR="${RUNNER_TEMP:-/tmp}/ssm-error.txt"
+          ssm_field() {   # $1 = invocation field; prints it, non-zero when the API did not answer
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
+              --query "$1" --output text 2>"$SSM_ERR"
+          }
+          # A LENGTH BOUND, AND HERE THAT IS THE RIGHT ONE. Every other place this deploy
+          # re-publishes text it did not write now publishes a SHAPE instead (apply-config.sh's
+          # hold_foreign), because that text is Compose's, Docker's or Grafana's and quotes
+          # whatever it was handed, including the box's .env. $SSM_ERR is not that text: it
+          # receives the stderr of an `aws ssm` invocation and nothing else, so it carries the
+          # CLI's own diagnostic — `Unable to locate credentials`, a throttle, an unknown command
+          # id — and naming which one is the entire reason this function exists. What holds the
+          # "and nothing else" is a scan, not this sentence:
+          # ApplyConfigVerifyPhaseTest#theWorkflowWaitsLongerThanVerifyCanTakeValidatesTheRefAndTellsRunningFromFailed.
+          ssm_error() {   # the CLI's own last error, on one line and bounded
+            tr '\n' ' ' < "$SSM_ERR" 2>/dev/null | cut -c1-300
+          }
+          # NOT `aws ssm wait command-executed`. That waiter is 20 attempts x 5 s = 100 s
+          # (botocore's ssm waiters-2.json, measured 2026-09-10), so any deploy longer than
+          # that was red REGARDLESS of outcome — and the verify step alone may legitimately
+          # spend several minutes polling a starting app. This polls the same call the waiter
+          # polls, bounded at 20 min, and tells RUNNING apart from FAILED apart from NOT ASKED
+          # in the log: a line every minute while the command is still in flight, the terminal
+          # status once, and a named refusal when the API stops answering.
+          #
+          # `InvocationDoesNotExist` is the one CLI failure that IS an answer — SSM has not
+          # registered the invocation yet — and it is "not yet" only for the first minute after
+          # send-command. Past that it means the id names nothing, which is a finding and not a
+          # thing to keep waiting for. Every other failure is counted, and six consecutive ones
+          # (a minute of silence) stop the wait: a repeated failure to reach the API is itself
+          # reportable, and continuing would mean asserting the box's state from nothing.
+          DEADLINE=$(( SECONDS + 1200 ))
+          NEXT_NOTE=60
+          UNANSWERED=0
+          STATUS=Pending
+          LAST_KNOWN_STATUS=none
+          while :; do
+            if SSM_REPLY=$(ssm_field 'Status'); then
+              STATUS="$SSM_REPLY"
+              LAST_KNOWN_STATUS="$SSM_REPLY"
+              UNANSWERED=0
+            else
+              API_ERROR=$(ssm_error)
+              case "$API_ERROR" in
+                *InvocationDoesNotExist*)
+                  if [ "$SECONDS" -lt 60 ]; then
+                    STATUS=Pending
+                    UNANSWERED=0
+                  else
+                    echo "SSM says command $CMD_ID does not exist on instance $INSTANCE_ID, ${SECONDS}s after send-command accepted it. This job cannot tell you what the box is doing. Check the command id and the instance in the SSM console, or re-run this deploy."
+                    STATUS=InvocationDoesNotExist
+                    break
+                  fi ;;
+                *)
+                  UNANSWERED=$(( UNANSWERED + 1 ))
+                  echo "SSM did not answer (attempt $UNANSWERED of 6, ${SECONDS}s in): $API_ERROR"
+                  if [ "$UNANSWERED" -ge 6 ]; then
+                    echo "SSM has not answered for six consecutive polls. This job stops waiting and reports NOTHING about the box: the last status the API actually returned was '$LAST_KNOWN_STATUS', which says nothing about now, and the command may still be running (--timeout-seconds bounds DELIVERY only). Fix the access — expired credentials and a throttled region are the two shapes that produce this — and read the invocation with: aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INSTANCE_ID"
+                    STATUS=ApiUnreachable
+                    break
+                  fi ;;
+              esac
+            fi
+            case "$STATUS" in
+              Pending|InProgress|Delayed) ;;
+              *) break ;;
+            esac
+            if [ "$SECONDS" -ge "$DEADLINE" ]; then
+              echo "the last status SSM returned was '$LAST_KNOWN_STATUS' and 20 min have passed, so this job stops waiting. It does NOT follow that the command is still running: that was true when the reply was taken and nothing here has looked since. Nothing bounds how long it may run once it has started (--timeout-seconds bounds DELIVERY only). Read it now with: aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INSTANCE_ID"
+              STATUS=WaitTimedOut
+              break
+            fi
+            if [ "$SECONDS" -ge "$NEXT_NOTE" ]; then
+              # THE MINUTE LINE REPORTS A READING, NOT A BELIEF. After an unanswered poll
+              # $STATUS still holds whatever the last successful reply said, which may be
+              # minutes old — printing that as `still running` would be the same fabrication,
+              # one line down, that this loop was rewritten to remove.
+              if [ "$UNANSWERED" -eq 0 ]; then
+                echo "still running: Status=$STATUS after ${SECONDS}s"
+              else
+                echo "still waiting after ${SECONDS}s: the last $UNANSWERED poll(s) went unanswered, so the newest status this job actually holds is '$LAST_KNOWN_STATUS' and it is not current"
+              fi
+              NEXT_NOTE=$(( NEXT_NOTE + 60 ))
+            fi
+            sleep 10
+          done
           # THIS LOG IS PUBLIC. The repository is public, so Actions logs are world-readable,
           # and root's stdout/stderr from the box is a continuous feed of production
           # filesystem state: the /opt/hamstrack layout, backup timestamps, the names of
           # drifted files. No secret is in that set today, and keeping it that way would
-          # depend on every future line of two scripts printing only names — so on SUCCESS
-          # this prints the status and nothing else. On FAILURE the bodies are printed,
-          # because a red deploy nobody can read is a worse trade.
-          STATUS=$(aws ssm get-command-invocation \
-            --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-            --query 'Status' --output text)
+          # depend on every future line of two scripts printing only names. On FAILURE the
+          # applier's OWN lines are printed, because a red deploy nobody can read is a worse
+          # trade — as TEXT, in two calls, so the applier's refusal reads as the lines it was
+          # written as rather than as one JSON string with every newline escaped. Everything the
+          # applier did not write is withheld with a count and a command (see the allow-list
+          # below): those lines are Docker's, Compose's and AWS's, and their contents are not
+          # something this repository can promise anything about.
+          #
+          # ON SUCCESS: the status, plus EXACTLY ONE LINE from the box, selected BY ANCHOR and
+          # never by substring. The ticket asks for the verify result to be visible here, and
+          # the tempting implementation — print the lines containing "verify:" — would publish
+          # `verify: WARN drift-fresh: edge-body-limit=1`, a live weakness of the production
+          # edge, into a world-readable log. So apply-config.sh emits one line designed to be
+          # public (counts, service counts, the sha, the app version — nothing read from .env,
+          # no path, no finding) and this anchor matches that line and nothing else: a WARN
+          # line cannot satisfy it. It is read from stderr because the applier mirrors it there
+          # (stdout is truncated at 24 000 characters by SSM, stderr at 8 000 and near-empty),
+          # falling back to stdout, then to a line saying the API could not be asked, then to a
+          # line saying the box was quiet — which are different facts.
+          # ApplyConfigVerifyPhaseTest holds both halves: that the applier emits the line, and
+          # that this anchor cannot match a WARN.
+          #
+          # PASS OR PARTIAL. The applier says PARTIAL when it read fewer than the declared
+          # checks, so `PASS n/n` can no longer be printed over a box that skipped four of five
+          # — and the anchor has to admit both words or the one run whose narrowness matters
+          # most is the one whose summary never reaches this log. A WARN line still cannot
+          # satisfy it: the words and the `ran=<n>/<n> skipped=` shape are the applier's own
+          # summary literal and nothing else's.
+          VERIFY_SUMMARY_ANCHOR='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z verify: (PASS|PARTIAL) ran=[0-9]+/[0-9]+ skipped='
           echo "Status: $STATUS"
-          if [ -n "${FAILED:-}" ]; then
-            aws ssm get-command-invocation \
-              --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-              --query '{Status:Status,Stdout:StandardOutputContent,Stderr:StandardErrorContent}' \
-              --output json
+          if [ "$STATUS" = Success ]; then
+            SUMMARY=''
+            SUMMARY_UNREAD=''
+            for CHANNEL in StandardErrorContent StandardOutputContent; do
+              [ -z "$SUMMARY" ] || break
+              if BODY=$(ssm_field "$CHANNEL"); then
+                SUMMARY=$(printf '%s\n' "$BODY" | grep -E "$VERIFY_SUMMARY_ANCHOR" || true)
+              else
+                SUMMARY_UNREAD="SSM did not answer for $CHANNEL: $(ssm_error)"
+              fi
+            done
+            if [ -n "$SUMMARY" ]; then
+              echo "$SUMMARY"
+            elif [ -n "$SUMMARY_UNREAD" ]; then
+              echo "the verify summary could not be read — $SUMMARY_UNREAD. The command exited 0, so the deploy itself is fine; this line is missing because the API was not reachable, not because the box was quiet."
+            else
+              echo "no 'verify: PASS|PARTIAL' summary line came back from the box — the command exited 0, so read the invocation by hand: aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INSTANCE_ID"
+            fi
           fi
-          [ -z "${FAILED:-}" ]
+          if [ "$STATUS" != Success ]; then
+            # THE MIRROR OF THE ANCHOR, AND AN ALLOW-LIST — which is the whole of the fix.
+            # The success path publishes only what matches a designed-for-public pattern. The
+            # failure path used to publish everything EXCEPT what matched a withheld pattern,
+            # and a DENY-LIST ON FAILURE OUTPUT CANNOT BE COMPLETE, because the failure text is
+            # written by Docker, Compose and AWS and not by us: MEASURED 2026-09-10 against 13
+            # crafted secret-bearing lines, that pattern withheld ONE. `invalid hostPort: <a
+            # verbatim value from the box's .env>` passed it — no quotes, no `KEY=`, under 40
+            # characters — and reached this world-readable log.
+            #
+            # So the rule is inverted to the one the success path already applies: PUBLISH ONLY
+            # WHAT THE APPLIER ITSELF WROTE, identified by the applier's own timestamp prefix.
+            # log/log_both share one stamping loop and stamp EVERY line they emit (including
+            # every line of a multi-line refusal, which is why they do it), and everything they
+            # print is names and counts by the script's own header rule.
+            #
+            # THE STAMP IS A PUBLICATION RIGHT, so the population is "every script that emits it
+            # inside this SSM command", and it has two members: ops/deploy/apply-config.sh and
+            # ops/drift/hamstrack-config-drift.sh, which step 9 runs and which carries the same
+            # log() byte for byte. A third script that copies log() inherits publication rights,
+            # so it is added here in the same change.
+            #
+            # THIRD-PARTY TEXT IS NEVER STAMPED. The applier's earlier shape passed Compose's and
+            # Grafana's text through a redacting filter and then stamped the result — which made
+            # the deny-list this comment calls incomplete a PUBLISHER (measured 2026-09-10: 13 of
+            # 14 crafted secret-bearing lines reached this log that way, including a database
+            # password and an AWS key pair). It now publishes the SHAPE of foreign text on its own
+            # stamped line — how many lines, how long the first is — and prints the text itself
+            # unstamped behind a "| " marker, so it stays in the journal on the box and in this
+            # invocation's raw SSM output and is dropped here by construction: a foreign line
+            # cannot begin with the stamp once something else is in front of it.
+            #
+            # The cost of dropping a line is one SSM command by somebody who is already reading
+            # a red deploy; the cost of keeping one is a published credential.
+            APPLIER_LINE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z '
+            for CHANNEL in StandardOutputContent StandardErrorContent; do
+              if ! BODY=$(ssm_field "$CHANNEL"); then
+                echo "::group::$CHANNEL from the box (UNREAD)"
+                echo "-- SSM did not answer for $CHANNEL: $(ssm_error)"
+                echo "-- This is NOT 'the box printed nothing'. Read it with:"
+                echo "--   aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INSTANCE_ID --query $CHANNEL --output text"
+                echo "::endgroup::"
+                continue
+              fi
+              KEPT=$(printf '%s\n' "$BODY" | grep -E "$APPLIER_LINE" || true)
+              TOTAL=$(printf '%s' "$BODY" | grep -c '' || true)
+              KEPT_N=$(printf '%s' "$KEPT" | grep -c '' || true)
+              HELD=$(( TOTAL - KEPT_N ))
+              echo "::group::$CHANNEL from the box ($KEPT_N of $TOTAL line(s) published, $HELD line(s) withheld)"
+              # Guarded by the count already computed: `printf '%s\n' ""` prints a blank line,
+              # so an all-foreign channel used to open a group containing one empty line, which
+              # reads as "the box printed a blank" rather than "nothing here was ours".
+              if [ "$KEPT_N" -gt 0 ]; then
+                printf '%s\n' "$KEPT"
+              else
+                echo "-- no line in this channel carries apply-config.sh's timestamp prefix."
+              fi
+              if [ "$HELD" -gt 0 ]; then
+                echo "-- $HELD line(s) were NOT written by apply-config.sh (no timestamp prefix) and are NOT printed here: this log is world-readable and third-party output quotes whatever it was handed, including values from the box's .env. Read them with:"
+                echo "--   aws ssm get-command-invocation --command-id $CMD_ID --instance-id $INSTANCE_ID --query $CHANNEL --output text"
+              fi
+              echo "::endgroup::"
+            done
+          fi
+          [ "$STATUS" = Success ]
 
       # What prod actually reports once it is back up. The HD-115 bug was a
       # WRONG LABEL on a right deployment, which nothing in this pipeline ever
       # looked at — so it survived until someone opened the About dialog. Polled
-      # from the runner, not inside the SSM command, because `aws ssm wait
-      # command-executed` gives up after ~100s and a slow app restart would then
-      # fail an otherwise successful deploy. `continue-on-error` keeps this
-      # purely informational: a flaky curl must never red a good deploy.
+      # from the RUNNER rather than inside the SSM command because that is the
+      # only difference it makes: this is the one reading taken from OUTSIDE the
+      # box, over the public name, through Cloudflare and Caddy, so it covers the
+      # path a visitor uses. The applier's own check 3 already asks /api/meta from
+      # inside the container and REFUSES on a mismatch — this step is the outer
+      # half, and `continue-on-error` keeps it purely informational: a flaky curl
+      # must never red a good deploy. (It used to say it was here because
+      # `aws ssm wait command-executed` gives up after ~100 s; that waiter is not
+      # in this workflow any more, so the reason it named no longer existed.)
       - name: Report deployed version
         continue-on-error: true
         run: |

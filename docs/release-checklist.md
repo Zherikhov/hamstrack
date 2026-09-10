@@ -108,6 +108,56 @@ a suffix, Actions → Build → *Run workflow* on the tag fixes it in one click.
    live `/api/meta`. It is informational (`continue-on-error`), so a red X there
    means the check could not reach the site, not that the deploy failed.
 3. Or by hand: `curl -s https://hamstrack.com/api/meta` → `"version":"X.Y.Z"`.
+4. **The deploy verified itself, or it is red (HD-299).** A green *Deploy via SSM* step now
+   means the box was read back after `up -d` — not that the commands ran. On success the step
+   prints `Status: Success` and **one** line from the box, the applier's public summary:
+
+   ```
+   2026-09-10T09:14:22Z verify: PASS ran=5/5 skipped=none services=10 env-services=4 app-identity=full withheld=0 sha=a1b2c3d version=0.18.2
+   ```
+
+   The first word is **`PASS` only when every declared check read the box**; a run that
+   skipped any of them says `PARTIAL ran=3/5 skipped=grafana,drift-fresh` instead. (It used
+   to say `PASS 5/5` whatever it had read — the declared count over itself, on every run that
+   reached the line.) A check skipped because nothing on the box declares what it reads
+   (no `grafana` service, no drift script) publishes `check_ok` `2`, which pages nobody but is
+   not the `1` a real pass publishes. Exactly one line is
+   echoed, selected by anchor rather than by substring, because the log is public and the
+   applier can also print a `verify: WARN` naming a live weakness of the edge — that one
+   stays on the box. On a red run the whole body is printed instead: a
+   `verify: <check> FAILED: <finding>` line per finding and a `VERIFY FAILED` block naming
+   the remedies. If the **stdout** group stops mid-way, read the **stderr** group before
+   concluding the deploy was killed: SSM returns only the first 24 000 characters of stdout,
+   and the applier mirrors its refusal and its summary to stderr (8 000, near-empty) for
+   exactly that case.
+   On a **release-tag** deploy the workflow passes the tag's version as
+   `EXPECTED_APP_VERSION`, so a prod that still reports the suffixed `main` label is a
+   **red deploy** now, not a wrong About dialog found later; on a `main` deploy the version
+   must carry `g<sha7>` or be the bare release version of a tagged tip. Nothing rolls back
+   on red — read the finding, then fix forward (push, or re-run the deploy) or restore by
+   hand from the `.config-backup` directory and the `sha-<7>` tag the block names
+   (`docs/ops-prod-hardening.md` §3). Re-running is not a universal remedy: some findings
+   name their own command (a Grafana provisioning error stays inside its log window until
+   Grafana is restarted), so do what the finding says. `DeployVerifyFailed` keeps firing
+   until a run verifies green; after a hand fix, `bash
+   /opt/hamstrack/ops/deploy/apply-config.sh /opt/hamstrack /opt/hamstrack --verify-only`
+   over SSM re-reads the box without redeploying (`ops/` is synced, never installed, so the
+   full path is the command).
+5. **Read the four unalerted verify series back, in Grafana → Explore.** They carry no rule
+   and no panel by decision (`docs/observability.md` explains why for each), and this step is
+   the reader that decision names — a metric nobody reads is a metric nobody notices breaking,
+   so the reader is written down even when it is a person rather than a rule. Over the
+   port-forward at `localhost:3300`, Explore → Prometheus:
+
+   ```
+   hamstrack_deploy_verify_ok            → 1
+   hamstrack_deploy_verify_checks_ran    → 5   (fewer means checks were SKIPPED, not that they passed)
+   hamstrack_deploy_verify_timestamp_seconds → within minutes of this deploy
+   hamstrack_deploy_verify_info          → the sha you just deployed
+   ```
+
+   `checks_ran` is the one worth a second look: `ok = 1` with `checks_ran = 3` is a box on
+   which two checks found nothing to look at, and the summary line above says which.
 
 **If the version still comes out wrong:** Actions → Build → **Run workflow** on
 `main` (the `workflow_dispatch` trigger, added with this change). No new commit,
@@ -611,6 +661,42 @@ Two lines, and the second is the one that makes the first checkable:
    the deployed configuration, applied to the one class of value the repository is not
    allowed to hold.
 
+
+**HD-299 adds a second worked example, and it is a repository VARIABLE rather than a value on
+the box.** `.github/workflows/deploy.yml` reads the target instance from `vars.INSTANCE_ID`
+instead of the literal it used to carry. The argument is not concealment — this repository is
+public and the id is in the tree in several places — it is that a repository variable is **not
+masked**, so a mistyped value stays readable in the log instead of showing as `***` while it
+403s against an exact-match IAM policy, and that a fork or a second environment becomes a
+variable change rather than a patch. **There is no fallback**: an empty value refuses the step
+by name, before `send-command`, rather than failing as an AWS error about an empty
+`--instance-ids`.
+
+1. **Set it once, before the next deploy** — GitHub → *Settings* → *Secrets and variables* →
+   *Actions* → **Variables** → `INSTANCE_ID` = the target EC2 instance id. A **variable**, not a
+   secret.
+2. **Verify it is in effect** on the next run of *Deploy to production*: the step prints
+   `Command: <id>` and reaches `Status: Success`. If it was never set, the step stops with
+   `INSTANCE_ID is empty: set the repository variable INSTANCE_ID …` and nothing is sent.
+
+The same release changes what a deploy *refuses*, which is the operator-facing half and needs a
+release blurb of its own:
+
+> **The deploy now reads itself back, and can refuse where it used to finish.**
+> `ops/deploy/apply-config.sh` ends with a **verify** step: after `up -d` it reads the running
+> box back — memory ceilings, declared environment keys, the app image revision and
+> `/api/meta`, Grafana's health and provisioning log, and the drift gauges — and exits non-zero
+> on any disagreement. Nothing is rolled back; the refusal names the finding and the two things
+> you can do about it. Three details worth knowing before your first run: a memory ceiling that
+> **resolves to `0`** is now a refusal rather than a warning (`0` means *unlimited* to Docker,
+> so `APP_MEMORY_LIMIT=0` has always run that container unbounded — check with
+> `docker compose config`); **narrowing `COMPOSE_FILES` cannot clear a finding**, because a
+> check that did not read the box may lower confidence and never raise it; and the summary line
+> reads `verify: PASS ran=5/5` or `verify: PARTIAL ran=3/5 skipped=…`, so the first word tells
+> you how much was actually looked at. If you provision the bundled Grafana alerting you also
+> get **`DeployVerifyFailed`** (critical, 5 m), quiet on a box that has never run the verifying
+> applier; `--verify-only` re-reads the box after a hand fix and is what clears it. Details:
+> [The deploy reads itself back from 0.18.2](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#the-deploy-reads-itself-back-from-0182).
 
 ## Releases that change a file the box runs from a COPY
 

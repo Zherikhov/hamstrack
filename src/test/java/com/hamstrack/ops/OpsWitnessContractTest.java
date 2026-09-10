@@ -24,10 +24,10 @@ import java.util.TreeMap;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import static com.hamstrack.ops.ProvisioningYaml.list;
-import static com.hamstrack.ops.ProvisioningYaml.map;
-import static com.hamstrack.ops.ProvisioningYaml.parse;
-import static com.hamstrack.ops.ProvisioningYaml.text;
+import static com.hamstrack.ops.OpsYaml.list;
+import static com.hamstrack.ops.OpsYaml.map;
+import static com.hamstrack.ops.OpsYaml.parse;
+import static com.hamstrack.ops.OpsYaml.text;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -299,6 +299,150 @@ class OpsWitnessContractTest {
                         it. Say WHERE as a role ("the OBS_ALERT_EMAIL_TO inbox") and WHO as initials, \
                         and keep the address outside the tree where the contact point already keeps it.""",
                         DRILL_HEADING, String.join("\n  ", offenders))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>A series excused from alerting must name a reader, and the reader must exist.</strong>
+     *
+     * <p>{@code docs/observability.md}'s metric table excuses some series from having a rule with
+     * <em>"No alert and no panel by decision"</em>, and justifies it by naming who reads them
+     * instead — Grafana Explore, and a step in a document. It closes with "a metric nobody reads
+     * is a metric nobody notices breaking, so the reader is written down even when it is a person
+     * rather than a rule."
+     *
+     * <p>Measured 2026-09-10: {@code grep -n "hamstrack_deploy_verify\|Explore" docs/release-checklist.md}
+     * returned <strong>zero</strong> hits. Four series had no alert, no panel and no reader,
+     * justified by a citation to a step nobody had written. A named reader is a claim like any
+     * other, and this is what holds it: every {@code docs/*.md} the excusing rows point at must
+     * actually mention every excused series.
+     *
+     * <p>Phrased over the table rather than over those four names, so a series excused later is
+     * a member the day it is written.
+     */
+    @Test
+    void everySeriesExcusedFromAlertingIsReadByTheDocumentItsExcuseNames() throws IOException {
+        var table = Files.readString(Path.of("docs", "observability.md"), java.nio.charset.StandardCharsets.UTF_8);
+        var excused = new LinkedHashSet<String>();
+        var namedReaders = new LinkedHashSet<String>();
+        var metricInRow = Pattern.compile("^\\|\\s*`([a-z_]+)`\\s*\\|");
+        var docInRow = Pattern.compile("docs/[a-z0-9-]+\\.md");
+        for (String row : table.lines().toList()) {
+            if (!row.contains("No alert and no panel by decision") && !row.contains("Same decision:")) {
+                continue;
+            }
+            var m = metricInRow.matcher(row);
+            if (m.find()) {
+                excused.add(m.group(1));
+            }
+            var d = docInRow.matcher(row);
+            while (d.find()) {
+                namedReaders.add(d.group());
+            }
+        }
+        assertThat(excused.size())
+                .withFailMessage("Only %d series in docs/observability.md carry an alerting exemption (%s). "
+                        + "There were 4 when this scan was written, so it has stopped recognising the "
+                        + "wording rather than the table having stopped using it.", excused.size(), excused)
+                .isGreaterThanOrEqualTo(3);
+        assertThat(namedReaders)
+                .withFailMessage("A series is excused from alerting in docs/observability.md and the excuse "
+                        + "names no document as its reader: %s. 'Grafana Explore' alone is a place, not a "
+                        + "step somebody performs — name the document that reads it, or give the series a "
+                        + "rule.", excused)
+                .isNotEmpty();
+
+        var unread = new ArrayList<String>();
+        for (String reader : namedReaders) {
+            // A DELETED READER IS A FINDING, NOT AN ERROR. Files.readString threw NoSuchFileException
+            // here, so the one drift this scan most has to name — the document the excuse cites
+            // being gone — surfaced as a stack trace instead of the message written for it.
+            if (!Files.isRegularFile(Path.of(reader))) {
+                unread.add(reader + " is named as the reader and is not in the tree");
+                continue;
+            }
+            var text = Files.readString(Path.of(reader), java.nio.charset.StandardCharsets.UTF_8);
+            for (String series : excused) {
+                if (!text.contains(series)) {
+                    unread.add(reader + " never mentions " + series);
+                }
+            }
+        }
+        assertThat(unread)
+                .withFailMessage("""
+
+                        docs/observability.md excuses a series from alerting by naming a human reader, and \
+                        that reader does not read it:
+                          %s
+
+                        A metric with no alert, no panel and no reader is one nobody notices breaking, and \
+                        a citation to a step that was never written is worse than no citation — it stops \
+                        the next reader checking. Either add the read-back step to the document named, or \
+                        weaken the excuse to name only what exists.""", String.join("\n  ", unread))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>A skip is a degrade, so it carries a witness — for every assumption in this
+     * package, enumerated rather than listed.</strong>
+     *
+     * <p>{@link ScriptHarness#assumeWithWitness} exists because a JUnit assumption's reason reaches
+     * {@code target/surefire-reports/*.xml} and nowhere else: the console says {@code Skipped: 1}
+     * and the reader has to go looking to learn which gate stopped running. It was applied to the
+     * two real-daemon classes and left off five other call sites — including the guard on this
+     * epic's flagship seal, so the seal that runs the workflow's own allow-list could stop running
+     * and say so only in an XML file nobody opens.
+     *
+     * <p>The rule is over the package, not over those five, and the population comes from the
+     * sources. {@code ScriptHarness} itself is the one permitted caller of the bare form: it is
+     * where the witness is printed.
+     */
+    @Test
+    void everyAssumptionInTheOpsPackageLeavesAWitnessOnTheConsole() throws IOException {
+        var dir = Path.of("src", "test", "java", "com", "hamstrack", "ops");
+        var bare = new ArrayList<String>();
+        int withWitness = 0;
+        try (var files = Files.list(dir)) {
+            for (Path file : files.filter(f -> f.toString().endsWith(".java")).sorted().toList()) {
+                var text = Files.readString(file, java.nio.charset.StandardCharsets.UTF_8);
+                var self = file.getFileName().toString();
+                // CALL SITES ONLY. ScriptHarness.java holds the DEFINITION and this file holds
+                // the spelling inside its own remedy text; neither is a gate that can skip, and
+                // counting them inflated the printed population by two.
+                if (!self.equals("ScriptHarness.java") && !self.equals("OpsWitnessContractTest.java")) {
+                    withWitness += text.split("assumeWithWitness\\(", -1).length - 1;
+                }
+                if (self.equals("ScriptHarness.java")) {
+                    continue;   // where the witness is printed; the bare call is its implementation
+                }
+                // The CALL, not the characters: `Assumptions.assumeTrue(` qualified, or a
+                // statically-imported `assumeTrue(` at the start of a statement. A substring test
+                // matched this scan's own source, which is the same "resembles it" mistake the
+                // seals in ApplyConfigVerifyPhaseTest were failing for.
+                var call = Pattern.compile("Assumptions\\.assumeTrue\\(|^\\s*assumeTrue\\(");
+                for (String line : text.lines().toList()) {
+                    if (call.matcher(line).find() && !line.stripLeading().startsWith("*")
+                            && !line.stripLeading().startsWith("//")) {
+                        bare.add(slash(file) + ": " + line.strip());
+                    }
+                }
+            }
+        }
+        assertThat(withWitness)
+                .withFailMessage("Only %d assumeWithWitness call(s) were found in %s — the scan has stopped "
+                        + "seeing the mechanism rather than the package having stopped using it", withWitness, dir)
+                .isGreaterThanOrEqualTo(8);
+        assertThat(bare)
+                .withFailMessage("""
+
+                        These assumptions skip a gate without leaving a line on the console:
+                          %s
+
+                        A skipped gate is a degraded run, and this project gives every degrade a named \
+                        witness. `Skipped: 1` names nothing, and the reason reaches only the surefire XML. \
+                        Use ScriptHarness.assumeWithWitness("<tag>", condition, reason) — the tag makes the \
+                        line greppable in a CI log, which is where somebody is reading it.""",
+                        String.join("\n  ", bare))
                 .isEmpty();
     }
 

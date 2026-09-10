@@ -907,6 +907,61 @@ groups:
       # incident this pin is holding — does not thereby tell the next unattended deploy that
       # a rolled-back image is the intended one. Adoption is the deliberate act, and this
       # summary is read by somebody tired.
+      # The deploy's own read-back (HD-299). apply-config.sh writes hamstrack_deploy_verify.prom
+      # PESSIMISTICALLY (every check 0) at its first mutation and rewrites it after step 10
+      # has read the running box back, so a 0 here is one of FOUR things and the run's own
+      # output says which: a check failed (the refusal at the end of that output names the
+      # finding and the remedies), a later run SKIPPED that check and therefore republished the
+      # 0 rather than raising it to 2 (a check that did not read the box may lower confidence,
+      # never raise it — otherwise narrowing COMPOSE_FILES would silence this alert, measured),
+      # the run was killed between placing files and verifying (the output ends early), or a
+      # deploy is IN FLIGHT right now (`for: 5m` is what keeps that last one quiet: verify's own
+      # budgets fit inside it on a healthy box).
+      # THE STDOUT IN THAT LOG IS TRUNCATED AT 24 000 CHARACTERS by SSM (8 000 for stderr;
+      # measured from the bundled AWS service model, 2026-09-10), so "the log ends early" and
+      # "the deploy was killed" look identical in the stdout group and the summary must not
+      # pre-load one of them. apply-config.sh mirrors every refusal and its final
+      # `verify: PASS|PARTIAL` summary to stderr for exactly this reason: the stderr group is
+      # near-empty, so it holds the conclusion when stdout has lost it. The summary below sends
+      # the reader there first.
+      # UNAGGREGATED, like ConfigDrift: the summary names $labels.check, and a max()/count()
+      # would hand the reader an alert about nothing in particular. Critical because a DEPLOY
+      # that reaches this state may have left the box half-updated and only one person can push
+      # — the summary does not assert that, because a --verify-only run reaches it too and
+      # changed nothing. No staleness rule: this is not a timer, and "no deploy lately" is not a
+      # finding. noDataState: OK so a box that has never run the verifying applier stays quiet.
+      - uid: hamstrack-deploy-verify-failed
+        title: DeployVerifyFailed
+        condition: B
+        for: 5m
+        noDataState: OK
+        execErrState: OK
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The last verify on this box left check {{ $labels.check }} at 0: apply-config.sh read the running box and found a disagreement, or a later run SKIPPED that check and may not raise its value. WHAT WAS APPLIED DEPENDS ON WHICH RUN WROTE THIS AND THIS ALERT CANNOT TELL YOU - a pipeline deploy applies the configuration and brings the stack up before it verifies, a --verify-only run changes nothing at all, and a deploy killed mid-way wrote these zeros before any check ran. Nothing is ever rolled back automatically. The applier says which, in its own refusal, and the refusal carries the findings and the remedies FOR THE MODE IT RAN IN - read it first. Read it: for a pipeline deploy, Actions -> Deploy to production -> the newest run (only lines apply-config.sh itself wrote are published there; if the stdout group stops early read the STDERR group before concluding anything - SSM returns only the first 24000 characters of stdout and the applier mirrors its refusal and its final summary to stderr); for a hand run, the output of whoever ran it. Nothing in either group means the run really was killed before it verified: run it again. Some findings name their own command and are NOT cleared by re-running (a Grafana provisioning error stays inside its log window until Grafana is restarted) - do what the finding says. This stays firing until a run READS this check green: after a hand fix, bash /opt/hamstrack/ops/deploy/apply-config.sh /opt/hamstrack /opt/hamstrack --verify-only re-reads the box without redeploying, and it must be given the compose set that declares this check - a run that skips it republishes the 0 rather than clearing it, and says so.'
+        data:
+          - refId: A
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              expr: 'hamstrack_deploy_verify_check_ok'
+              instant: true
+              refId: A
+          - refId: B
+            relativeTimeRange: { from: 3600, to: 0 }
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              refId: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+                  operator: { type: and }
+                  query: { params: [] }
+                  reducer: { type: last, params: [] }
+                  type: query
+
       - uid: hamstrack-deploy-image-pinned
         title: DeployImagePinned
         condition: B

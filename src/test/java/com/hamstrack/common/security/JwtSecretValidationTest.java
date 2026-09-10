@@ -257,10 +257,17 @@ class JwtSecretValidationTest {
             }
         }
 
-        assertThat(scanned)
-                .withFailMessage("The scan read no files at all, so it proves nothing — it must run from "
-                        + "the module root (working directory was %s)", REPO_ROOT.toAbsolutePath())
-                .isNotEmpty();
+        // A FLOOR BELOW THE POPULATION, not "at least one file". This scan walks the whole
+        // repository — several thousand scannable files — so `isNotEmpty()` would still pass if
+        // the walk collapsed to a single directory, and a scan that read one file reports the
+        // same clean result as one that read everything. The bound is deliberately far below
+        // today's count: it exists to catch a collapse, not to be re-tuned on every commit.
+        assertThat(scanned.size())
+                .withFailMessage("The scan read only %d file(s) from %s, so it proves almost nothing. It "
+                        + "walks the whole repository and must run from the module root; a count this low "
+                        + "means the walk or the isScannable filter collapsed, not that the repository "
+                        + "shrank.", scanned.size(), REPO_ROOT.toAbsolutePath())
+                .isGreaterThanOrEqualTo(500);
 
         assertThat(offences)
                 .withFailMessage("""

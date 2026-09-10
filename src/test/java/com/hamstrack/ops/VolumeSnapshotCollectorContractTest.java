@@ -1,7 +1,6 @@
 package com.hamstrack.ops;
 
 import com.sun.net.httpserver.HttpServer;
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -1106,7 +1105,7 @@ class VolumeSnapshotCollectorContractTest {
     }
 
     private void assumeBash() {
-        Assumptions.assumeTrue(bash != null,
+        ScriptHarness.assumeWithWitness("volume-snapshot-collector", bash != null,
                 "no bash on PATH (and no Git for Windows bash.exe) — the executed refusals run on"
                         + " CI and on any POSIX machine, and skip only on a Windows box without"
                         + " Git Bash. The file-reading assertions in this class run everywhere.");
@@ -1123,7 +1122,7 @@ class VolumeSnapshotCollectorContractTest {
      * in for AWS.
      */
     private static void assumeCurl() {
-        Assumptions.assumeTrue(onPath("curl"),
+        ScriptHarness.assumeWithWitness("volume-snapshot-collector", onPath("curl"),
                 "no curl on PATH — the IMDS wire tests need one. They run on CI and on any box"
                         + " that could actually run this collector, which needs curl anyway.");
     }

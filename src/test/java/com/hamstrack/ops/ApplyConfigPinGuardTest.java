@@ -1,6 +1,5 @@
 package com.hamstrack.ops;
 
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -619,27 +618,17 @@ class ApplyConfigPinGuardTest {
                 .isEqualTo(drift);
     }
 
-    /** The body of {@code read_image_tag}, with the two scripts' different path variable elided. */
+    /**
+     * The body of {@code read_image_tag}, with the two scripts' different path variable elided.
+     * The extraction itself is {@link ScriptHarness#functionBody}, shared with the two other
+     * function pairs the applier and the drift script carry (HD-299).
+     */
     private static String readImageTagFunction(Path script) throws IOException {
-        var body = new StringBuilder();
-        boolean inside = false;
-        for (String line : Files.readAllLines(script, StandardCharsets.UTF_8)) {
-            if (line.startsWith("read_image_tag() {")) {
-                inside = true;
-            }
-            if (inside) {
-                body.append(line.replace("\"$TARGET/.env\"", "<envfile>").replace("\"$ENV_FILE\"", "<envfile>"))
-                        .append('\n');
-            }
-            if (inside && line.equals("}")) {
-                break;
-            }
-        }
-        assertThat(body.length())
-                .withFailMessage("no read_image_tag() function found in %s — it is the pin parser, and "
-                        + "both scripts must carry it", script)
-                .isNotZero();
-        return body.toString();
+        // The elision moved into ScriptHarness in HD-299's last round, because a SECOND
+        // comparison of the same pair (the derived "every function both scripts carry" test)
+        // needed the same one permitted difference and would otherwise have been red for a
+        // divergence this test had already decided was fine.
+        return ScriptHarness.comparableFunctionBody(script, "read_image_tag");
     }
 
     // --- harness ---------------------------------------------------------------------
@@ -708,7 +697,7 @@ class ApplyConfigPinGuardTest {
     private Result run(Deployment d, Map<String, String> extraEnv, String... flags) throws Exception {
         // The skip is here rather than in @BeforeAll so that the one seal in this class which
         // reads files instead of running them still runs everywhere.
-        Assumptions.assumeTrue(bash != null,
+        ScriptHarness.assumeWithWitness("apply-config-pin-guard", bash != null,
                 "no bash on PATH (and no Git for Windows bash.exe) — the tests that drive the real "
                         + "ops/deploy/apply-config.sh run on CI and on any POSIX machine, and skip only "
                         + "on a Windows box without Git Bash");

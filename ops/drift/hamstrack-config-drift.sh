@@ -70,7 +70,64 @@ set -euo pipefail
 # never a diff, and never a value read from .env. The image tag is the one value that
 # crosses that line, deliberately and sanitised, because a pin is what an operator most
 # needs named back to them.
-log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+#
+# THE STAMP IS A PUBLICATION RIGHT, NOT A TIMESTAMP. deploy.yml's failure path publishes the
+# SSM output's stamped lines and drops everything else, so log() here — byte-identical to
+# apply-config.sh's, and running inside that same SSM command at step 9 — decides what a
+# world-readable Actions log shows. The population is therefore "every script that emits this
+# stamp inside the SSM command", and it has exactly two members today: ops/deploy/apply-config.sh
+# and this file. A third one inherits publication rights the moment it copies log(), so it is
+# added to the list in deploy.yml's failure step in the same change.
+# THE SAME FUNCTIONS ARE CARRIED BY ops/deploy/apply-config.sh — _stamp, log, sanitize_label,
+# value_shape, foreign_shape, hold_foreign, plan_container_pairs and read_image_tag — and
+# ApplyConfigVerifyPhaseTest#everyFunctionBothScriptsCarryIsCarriedVerbatim compares the bodies
+# it finds in both, so change both or neither.
+_stamp() { # $1 = 1 to mirror the message onto stderr as well, $2.. = the message
+  local mirror="$1" line stamp
+  shift
+  stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s %s\n' "$stamp" "$line"
+    [ "$mirror" = 0 ] || printf '%s %s\n' "$stamp" "$line" >&2
+  done <<< "$*"
+}
+log() { _stamp 0 "$*"; }
+
+# FOREIGN TEXT: the one door it goes through, carried verbatim from apply-config.sh, where the
+# reasoning is written out in full. A public channel gets the SHAPE (foreign_shape); the box
+# gets the TEXT, unstamped and behind a "| " marker so it cannot begin with the stamp above and
+# cannot be republished by the allow-list (hold_foreign). This scope used to `cat` Compose's
+# stderr and `printf` its abort text straight out, which was safe only for as long as nothing
+# stamped them — and the reason it looks safe is the reason it needed saying: after the
+# allow-list landed, those two diagnostics vanished from a red deploy's log with nothing left
+# to say they had ever existed.
+# WITHHELD_COUNT exists here because hold_foreign is carried byte-for-byte and increments it.
+# This script prints no total: each door names foreign_shape's count on its own stamped line,
+# which is where a reader of this script's output already is. The applier carries the total on
+# its summary line, because that one line is all a public Actions log gets.
+WITHHELD_COUNT=0
+value_shape() {
+  local v="$1" class=other
+  case "$v" in
+    '') class=empty ;;
+    *[!0-9]*) case "$v" in *[0-9]*) class=mixed ;; *) class=non-numeric ;; esac ;;
+    *) class=all-digits ;;
+  esac
+  printf '%s characters, %s' "${#v}" "$class"
+}
+foreign_shape() { # $1 = foreign text; prints "N line(s), the first M characters, <class>"
+  local text="$1" n first
+  n="$(printf '%s\n' "$text" | grep -c . || true)"
+  first="$(printf '%s\n' "$text" | grep -m 1 . || true)"
+  printf '%s line(s), the first %s' "${n:-0}" "$(value_shape "$first")"
+}
+hold_foreign() { # $1 = foreign text; box-only, unstamped, counted. Never inside $( ) or a pipe.
+  local text="$1" n
+  n="$(printf '%s\n' "$text" | grep -c . || true)"
+  [ "${n:-0}" -gt 0 ] || return 0
+  WITHHELD_COUNT=$(( WITHHELD_COUNT + n ))
+  printf '%s\n' "$text" | sed 's/^/| /'
+}
 
 TARGET="${1:-${HAMSTRACK_DIR:-/opt/hamstrack}}"
 TEXTFILE_DIR="${CONFIG_DRIFT_TEXTFILE_DIR:-/var/lib/node_exporter/textfile_collector}"
@@ -129,6 +186,21 @@ sanitize_label() {
   local v="$1"
   v="${v//[^A-Za-z0-9._-]/}"
   printf '%s' "${v:-unknown}"
+}
+
+# stdin: a `docker compose up -d --dry-run` plan (stdout+stderr merged). stdout: one
+# `<container-name> <TAB> <verb>` per `Container` progress line. The word `Container` is
+# LOCATED rather than assumed first — the two supported Compose generations disagree about
+# what precedes it; the reasoning is at the call site in check_containers. THE SAME FUNCTION
+# IS CARRIED BY ops/deploy/apply-config.sh (its pre-flight reads the same plan before a
+# deploy changes anything); the two bodies are compared by
+# src/test/java/com/hamstrack/ops/ApplyConfigVerifyPhaseTest.java, so change both or neither.
+plan_container_pairs() {
+  tr -d '\r' | awk '{
+      for (i = 1; i <= NF - 2; i++) {
+        if ($i == "Container") { print $(i + 1) "\t" $(i + 2); break }
+      }
+    }'
 }
 
 write_metrics() {
@@ -418,7 +490,7 @@ check_files() {
 # drift, with the output, exactly as an unresolvable `config` already was: a monitor that
 # could not ask its question has not shown that the box is clean.
 check_containers() {
-  local errfile services plan plan_pairs orphans rc svc cids cid name verbs bad mismatched=0
+  local errfile errtext services plan plan_pairs orphans rc svc cids cid name verbs bad mismatched=0
   if [ "${#COMPOSE_ARGS[@]}" -eq 0 ]; then
     log "containers: none of (${COMPOSE_LIST[*]}) is present in $TARGET — there is no declaration to compare the running containers against"
     DRIFT_CONTAINERS=1
@@ -434,9 +506,14 @@ check_containers() {
   # running" — a drift report about a container nobody ever declared.
   errfile="$(mktemp)"
   if ! services="$( cd "$TARGET" && docker compose "${COMPOSE_ARGS[@]}" config --services 2>"$errfile" )"; then
-    log "containers: docker compose could not resolve the box's configuration — that is itself a drift:"
-    cat "$errfile"
+    errtext="$(cat "$errfile" 2>/dev/null || true)"
     rm -f "$errfile"
+    # The line used to end in a colon and `cat` the error after it. Since deploy.yml publishes
+    # only stamped lines, that colon introduced nothing at all on a red deploy — a stamped
+    # sentence with its subject removed. The shape goes on the stamped line; the text stays
+    # unstamped, where the journal and the SSM raw output still have it.
+    log "containers: docker compose could not resolve the box's configuration — that is itself a drift. Compose wrote $(foreign_shape "$errtext") naming the file or variable at fault; the text is not republished on a stamped line (a failed deploy carries these into a public Actions log) and is unstamped below behind a \"| \" marker, in the journal on the box and in this invocation's raw output (over SSM when a deploy ran this check)."
+    hold_foreign "$errtext"
     DRIFT_CONTAINERS=1
     return 0
   fi
@@ -455,31 +532,27 @@ check_containers() {
   # declares `build:`, and a dry run intercepts a build the way it intercepts everything.
   plan="$( cd "$TARGET" && docker compose --ansi never "${COMPOSE_ARGS[@]}" up -d --dry-run 2>&1 )" && rc=0 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    # The diagnostic is printed, on the same terms the `config` failure above already
-    # established: WHATEVER THIS PRINTS IS PUBLIC (see the header) — it reaches the journal
-    # on the box and, on a failed deploy, a GitHub Actions log through SSM. So the bound on
-    # what can appear here has to be the real one, and it is NOT "Compose names files,
-    # services and variables rather than values". Measured, a TYPED field's decode error
-    # quotes the offending RESOLVED VALUE:
+    # The diagnostic reaches the JOURNAL on the box, on the same terms the `config` failure
+    # above already established, and it does not reach the public Actions log — hold_foreign
+    # is what makes that a property of the channel rather than of the text. That distinction
+    # used to be an argument instead: this comment bounded what MAY appear here by reasoning
+    # about the compose files' content, because whatever printed here travelled to a
+    # world-readable log unfiltered. Measured, a TYPED field's decode error quotes the
+    # offending RESOLVED VALUE:
     #     'services[alpha].mem_limit' strconv.ParseFloat: parsing "s3cr3": invalid syntax
     #     'services[alpha].stop_grace_period' time: invalid duration "hunter2s"
-    # The `${VAR:?}` path is the safe one — it names the variable only. What actually bounds
-    # this exception is the CONTENT of the compose files: every typed interpolation in them
-    # today is a tuning knob (a memory limit, a shm size, a grace period), and EVERY secret
-    # that reaches a service definition lands in an untyped `environment:` string, which has
-    # no parse that can fail. Stated as the category on purpose: the member-shaped version
-    # of this sentence named DB_PASSWORD as "the only" one and was already false when it was
-    # written (GF_SECURITY_ADMIN_PASSWORD, MAIL_PASSWORD, DB_MONITOR_PASSWORD are three
-    # more), and a stale count is the last thing wanted in the comment whose job is bounding
-    # what reaches a public Actions log. A new TYPED field fed by a
-    # secret breaks that and would print it here — that is the condition on this exception,
-    # and the thing to re-check when a compose file gains an interpolated typed value.
-    # Within it, this is the one place in this scope where a body rather than a name reaches
-    # the journal, and it is allowed out because a failure an operator cannot see is a
-    # failure they cannot fix — but it is a deliberate exception and not a licence: nothing
-    # on the SUCCESS path below prints the plan, only per-service verdicts.
-    log "containers: 'docker compose up -d --dry-run' exited $rc — this check could not ask whether the box matches its files, which is not the same as an answer of no:"
-    printf '%s\n' "$plan"
+    # …and the argument that no secret reaches a typed field was true only for as long as
+    # every interpolated typed field in the repository's compose files stayed a tuning knob.
+    # An argument that holds until somebody adds a line is not a bound. It is kept here as
+    # the reason the CHANNEL was split rather than as the thing doing the work: a new typed
+    # field fed by a secret is now a line an operator reads on the box, and still nothing a
+    # reader of a red deploy sees.
+    # This is the one place in this scope where a body rather than a name reaches the journal,
+    # and it is allowed out because a failure an operator cannot see is a failure they cannot
+    # fix — but it is a deliberate exception and not a licence: nothing on the SUCCESS path
+    # below prints the plan, only per-service verdicts.
+    log "containers: 'docker compose up -d --dry-run' exited $rc — this check could not ask whether the box matches its files, which is not the same as an answer of no. Compose wrote $(foreign_shape "$plan"); it is unstamped below behind a \"| \" marker (the journal on the box and this invocation's raw output have it, over SSM when a deploy ran this check), and NOT on a stamped line, because a failed deploy republishes those into a world-readable Actions log."
+    hold_foreign "$plan"
     # ONE FAILURE IS COMMON ENOUGH TO NAME. A `depends_on: condition: service_healthy`
     # whose target is not healthy makes Compose abandon the plan where it stands — measured:
     # ` Container x Error dependency y failed to start`, exit 1 — and every service the plan
@@ -534,11 +607,7 @@ check_containers() {
   # measured, a container CREATED by v2 is planned `Recreate` by v5.1.0 while v2 itself calls
   # it `Running`. `up -d` really would act, which is exactly what this scope reports. It
   # clears at the next deploy, when the containers are recreated by the Compose now installed.
-  plan_pairs="$(printf '%s\n' "$plan" | tr -d '\r' | awk '{
-      for (i = 1; i <= NF - 2; i++) {
-        if ($i == "Container") { print $(i + 1) "\t" $(i + 2); break }
-      }
-    }')"
+  plan_pairs="$(printf '%s\n' "$plan" | plan_container_pairs)"
 
   DRIFT_CONTAINERS=0
 

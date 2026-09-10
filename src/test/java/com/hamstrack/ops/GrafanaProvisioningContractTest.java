@@ -15,10 +15,10 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import static com.hamstrack.ops.ProvisioningYaml.list;
-import static com.hamstrack.ops.ProvisioningYaml.map;
-import static com.hamstrack.ops.ProvisioningYaml.parse;
-import static com.hamstrack.ops.ProvisioningYaml.text;
+import static com.hamstrack.ops.OpsYaml.list;
+import static com.hamstrack.ops.OpsYaml.map;
+import static com.hamstrack.ops.OpsYaml.parse;
+import static com.hamstrack.ops.OpsYaml.text;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -161,6 +161,71 @@ class GrafanaProvisioningContractTest {
             """;
 
     // -- the seals ---------------------------------------------------------------------
+
+    /**
+     * <strong>An EMPTY directory is load-bearing, so the file that keeps it in git is too.</strong>
+     *
+     * <p>{@code provisioning/plugins/} carries nothing but a {@code .gitkeep}, and that is the
+     * point: measured on grafana:11.5.2, a start with no such directory logs one
+     * {@code logger=provisioning.plugins level=error} line every time. The deploy's verify step
+     * (check 4, {@code ops/deploy/apply-config.sh}) refuses on any {@code level=error} from a
+     * {@code logger=provisioning*} since {@code State.StartedAt} — so without this file EVERY
+     * healthy box goes red, on a deploy, with a finding about a directory rather than about the
+     * deployment.
+     *
+     * <p>Git does not track directories. Nothing else in this repository would notice the file
+     * being tidied away as "an empty placeholder", and the failure would arrive on the next
+     * production deploy rather than in the change that caused it.
+     *
+     * <p><strong>IN GIT, not in the working tree</strong> — the two are different claims and this
+     * seal asserted the weaker one. Measured 2026-09-10: the directory existed on disk and was
+     * <em>untracked</em> ({@code git status} showed {@code ?? observability/grafana/provisioning/
+     * plugins/}, {@code git ls-files} returned nothing), so the assertion was green while a fresh
+     * clone — which is what a deploy fetches from codeload — would have had no directory at all.
+     * That is precisely the failure the file exists to prevent, present and unseen. Anything whose
+     * whole purpose is to reach another machine is checked with {@code git ls-files
+     * --error-unmatch}, never with {@code Files.exists}.
+     */
+    @Test
+    void theEmptyPluginsDirectoryIsKeptInGitBecauseGrafanaErrorsWithoutIt() {
+        var gitkeep = PROVISIONING.resolve("plugins").resolve(".gitkeep");
+        var tracked = PublishedCredentials.runGit(PublishedCredentials.REPO_ROOT,
+                "ls-files", "--error-unmatch", "observability/grafana/provisioning/plugins/.gitkeep");
+        if (tracked.status() != PublishedCredentials.GitResult.NOT_STARTED) {
+            assertThat(tracked.status())
+                    .withFailMessage(CHECKLIST + """
+
+                            observability/grafana/provisioning/plugins/.gitkeep exists on this machine and is
+                            NOT TRACKED BY GIT (`git ls-files --error-unmatch` exited %d: %s).
+
+                            A deploy fetches a codeload tarball of the COMMIT, so an untracked file is not
+                            there. Measured on grafana:11.5.2, a start with no plugins provisioning directory
+                            logs one `logger=provisioning.plugins level=error` line, and the deploy's verify
+                            step (check 4) refuses on any level=error from logger=provisioning* since
+                            State.StartedAt — so every production deploy would go red, with a finding that
+                            names a rule file and not a missing directory, while this test stayed green
+                            against the copy on the developer's disk.
+
+                            git add observability/grafana/provisioning/plugins/.gitkeep""",
+                            tracked.status(), tracked.error().strip())
+                    .isZero();
+        }
+        assertThat(gitkeep)
+                .withFailMessage(CHECKLIST + """
+
+                        %s is missing.
+
+                        provisioning/plugins/ must EXIST and may be empty. Measured on grafana:11.5.2: a start
+                        with no plugins provisioning directory logs one `logger=provisioning.plugins
+                        level=error` line, and the deploy's verify step (check 4) refuses on any level=error
+                        from logger=provisioning* since State.StartedAt. So deleting this placeholder does not
+                        break Grafana - it turns every healthy production deploy red, with a finding that
+                        names a rule file and not the missing directory.
+
+                        Git cannot track an empty directory: the .gitkeep IS the mechanism.""",
+                        gitkeep.toAbsolutePath())
+                .isRegularFile();
+    }
 
     @Test
     void everyProvisionedFileParsesAndDeclaresItsApiVersion() {
@@ -872,7 +937,7 @@ class GrafanaProvisioningContractTest {
         }
     }
 
-    // -- parsing (the YAML reader itself is ProvisioningYaml, shared with OpsWitnessContractTest) --
+    // -- parsing (the YAML reader itself is OpsYaml, shared with OpsWitnessContractTest) --
 
     private static List<String> references(String expression) {
         var found = new ArrayList<String>();

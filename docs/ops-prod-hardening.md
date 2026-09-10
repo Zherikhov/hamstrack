@@ -174,8 +174,18 @@ aws iam put-user-policy --user-name hamstrack-deploy --policy-name ssm-deploy --
 aws iam create-access-key --user-name hamstrack-deploy   # → GitHub secrets
 ```
 
-GitHub repo secrets: add `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`AWS_INSTANCE_ID`; the old `SERVER_*` secrets become obsolete.
+GitHub repo **secrets**: add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`; the old
+`SERVER_*` secrets become obsolete.
+
+GitHub repo **variable** (*Settings* → *Secrets and variables* → *Actions* → **Variables**):
+`INSTANCE_ID` = the target EC2 instance id. **A variable, not a secret, and this is a one-off
+manual step without which no deploy runs** — the workflow refuses by name on an empty value,
+before `send-command`, so the failure says what to do rather than arriving as an AWS error
+about an empty `--instance-ids`. It is a variable because a *secret* is masked as `***` in the
+log, which makes a mistyped id look correct while it 403s against the exact-match policy above;
+and because a fork or a second environment is then a variable change rather than a patch to the
+workflow. (The snapshot below still shows the older `secrets.AWS_INSTANCE_ID` spelling — it is
+history, as the note under it says.)
 
 ### Pipeline change (`.github/workflows/deploy.yml`)
 
@@ -302,6 +312,72 @@ entry before the list does):
 - **An edit made on the box works, survives until the next deploy, and is noticed.** That
   is the contract, not an accident: `.env` for durable, the file for temporary, a commit
   for permanent. `ConfigDrift` fires within ~30–90 minutes (§6.4, `docs/observability.md`).
+- **The deploy reads the box back before it calls itself complete (HD-299).** Every step
+  above reports what it *did*; the last one (`verify`, step 10 of `apply-config.sh`) reports
+  what the box *is*, over every service Compose resolves — never a literal list: each
+  container's `HostConfig.Memory` equals the resolved `mem_limit` (HD-189's finding, which
+  `up -d` and the `containers` drift scope both walk past — a `docker update` survives them
+  with the same container id); every declared `environment:` **key** is on the running
+  container (keys only, values never printed); the app image's `org.opencontainers.image.revision`
+  label is the deployed sha and `/api/meta` (asked from inside the container) reports a
+  stamped version — the tag's version on a release deploy, `g<sha7>` or a bare release
+  version on `main`; where the compose set declares `grafana`, `/api/health` says
+  `"database":"ok"`, `RestartCount` holds still across a settle window and no
+  `logger=provisioning` line since `State.StartedAt` is `level=error` (HD-283's crash-loop,
+  which `up -d` exits 0 through — measured on 11.5.2, a 41-character uid trips all three
+  readings; a box whose `COMPOSE_FILES` omits the observability file logs a skip line
+  instead); and the drift gauges step 9 just wrote are **newer than the second step 9
+  started** with `files`/`containers` at 0 and this deploy's sha (a stale file is HD-287's
+  silent non-publish, red here). A **pre-flight** before step 4 prints the same read-back
+  *ahead* of the change — which containers `up -d` would act on and each running ceiling
+  beside its declared one — so the diff a deploy is about to make is in the log before it is
+  made (on 2026-08-26 it would have shown three `Recreate`s and three `running=0` against a
+  log claiming nothing to do). A red verify **rolls nothing back**, by decision: the refusal
+  (≤ 25 lines, the tail of the Actions log, printed as text) names both remedies — fix
+  forward and push or re-run the idempotent deploy, or restore from the `.config-backup`
+  directory it names and pin the previous image, which it names as `sha-<7>`. **A finding may
+carry its own remedy and then that one is the remedy** — re-running the deploy does not clear
+a Grafana provisioning error, because the check's window is `State.StartedAt` to now and step
+7b restarts Grafana only when `observability/` changed. The refusal, and the one-line
+`verify: PASS …` summary a green run ends with, are **mirrored to stderr**: SSM returns only
+the first 24 000 characters of stdout (8 000 for stderr; measured 2026-09-10 from the bundled
+AWS service model) and this script's conclusion is at the *end* of stdout, so a long deploy
+would otherwise read as a killed one. On success the workflow echoes that summary line — and
+only that line, selected by anchor — into the public Actions log. **On failure it echoes only
+the lines `apply-config.sh` itself wrote**, identified by the timestamp prefix its `log` and
+`log_both` stamp on every line (they share one stamping loop, which is what makes that true of
+both — `log` used to stamp only the first line of a multi-line message and let the tail through
+unstamped). It reports how many lines it held back plus the one SSM command that reads them.
+That is an *allow-list*: the deny-list it replaced could not be complete, because a failed
+deploy's output is written by Docker, Compose and AWS — measured 2026-09-10 against 13 crafted
+secret-bearing lines it withheld **one**, and `invalid hostPort: <a verbatim .env value>` passed
+it. **The stamp is therefore a publication right, and third-party text never gets one**: every
+door where the applier or the drift script re-quotes Compose's, Docker's or Grafana's own text
+publishes its *shape* on a stamped line — how many lines, how long the first is — and prints the
+text itself unstamped behind a `| ` marker, so it stays in the journal on the box and in the raw
+SSM output and cannot reach the Actions log. Redacting that text and then stamping the result was
+measured publishing 13 of 14 crafted secret-bearing lines, including a database password and an
+AWS key pair: a deny-list with publication rights is worse than one without. The population that
+holds the stamp is "every script that emits it inside the SSM command" — `ops/deploy/apply-config.sh`
+and `ops/drift/hamstrack-config-drift.sh`, which carry `log()` byte for byte. Its witness
+  is `hamstrack_deploy_verify_check_ok{check}` in `hamstrack_deploy_verify.prom`, written
+  **pessimistically (all 0) at the first mutation** and rewritten after verify, so a deploy
+  killed in between fires `DeployVerifyFailed` (critical, 5 m) rather than inheriting last
+  week's 1, and `hamstrack_deploy_verify_checks_ran` beside it says how many checks actually
+  READ the box — a check skipped because nothing on this box declares it publishes `check_ok`
+  **`2`**, which is quiet like a pass but is not the same value, so the roll-up alone cannot
+  tell "everything passed" from "almost nothing was looked at". A run that skips a check the
+  previous run read as **failing** republishes that `0` rather than `2`, and refuses: a check
+  that did not read the box may lower confidence, never raise it, so narrowing `COMPOSE_FILES`
+  cannot silence a firing alert. `bash /opt/hamstrack/ops/deploy/apply-config.sh /opt/hamstrack
+  /opt/hamstrack --verify-only` re-reads the box after a hand fix without redeploying (`ops/`
+  is synced to the box and never installed, so the remedy is a path and not a bare command). The workflow no longer uses `aws ssm wait
+  command-executed` (a 100 s waiter — 20 × 5 s in botocore's model — that would have made
+  the first verified deploy red for being slow): it polls the invocation status for up to
+  20 minutes and prints `still running: Status=InProgress` once a minute, so a running
+  deploy and a failed one read differently — and a poll SSM does not answer is neither, so it
+  is counted, named and stopped at six consecutive failures rather than reported as `Pending`.
+  Owner read-back rows (the first verified production deploy, dated) go here: _none yet_.
 
 Deploy this change and verify one green deploy via SSM **before** the last step:
 
@@ -444,7 +520,7 @@ the box actually reported on 2026-08-28:
 | `app` | **`0` — no limit** | 597 MiB RSS |
 | `postgres` | **`0` — no limit** | — |
 | `caddy` | **`0` — no limit** | — |
-| all seven observability containers | limit **set and honoured** (256m / 128m / 128m / 256m / 64m / 128m / 64m — `grep mem_limit docker-compose.observability.yml`) | **466 MiB total** |
+| every observability container *as that file stood on 2026-08-28* (seven of them then: 256m / 128m / 128m / 256m / 64m / 128m / 64m) | limit **set and honoured** | **466 MiB total** |
 
 So on that day the observability stack was the only bounded part of the deployment, it
 lived well inside its ceilings, and it is not what is squeezing the box — the containers

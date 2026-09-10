@@ -11,10 +11,14 @@
 #     is reachable via an SSM port-forward from the host, never from the internet.
 #   * Same compose project as the prod file, so everything shares the default
 #     network and resolves each other by service name (loki, app, postgres…).
-#   * Every service IN THIS FILE has a mem_limit — seven of them, summing to exactly
-#     1024m — and each sits well inside it: ~466 MiB of actual RSS, verified on
-#     production 2026-08-28 (HD-189). That is a property of THESE SEVEN SERVICES and
-#     of nothing else. This line used to end "…so the stack can't OOM the box", which
+#   * EVERY service in this file declares a mem_limit, and each sits well inside it
+#     (~466 MiB of actual RSS across them, verified on production 2026-08-28, HD-189).
+#     That is a property of the SERVICES IN THE DEPLOYED COMPOSE SET — this file and
+#     docker-compose.prod.yml — and of nothing else. It is held by
+#     ProdComposeContractTest#everyServiceInEveryDeployedComposeFileDeclaresAMemoryCeiling,
+#     which reads both files and names the first service without one; the count that
+#     used to stand here was a number nothing checked, and a number goes stale one
+#     entry before the list does. This line used to end "…so the stack can't OOM the box", which
 #     was false twice over (HD-180): production runs this file layered onto
 #     docker-compose.prod.yml, whose app, postgres and caddy were unbounded at the
 #     time — and, more deeply, bounding every service prevents a HOST OOM only if the

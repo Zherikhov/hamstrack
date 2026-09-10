@@ -12,18 +12,21 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The one reader of a provisioned Grafana YAML, shared by {@link GrafanaProvisioningContractTest}
- * and {@link OpsWitnessContractTest} so the two cannot disagree about what a file, a map or a
- * scalar is. Parsed, not regex-matched: the tree is mostly comments on purpose, and a {@code uid:}
- * mentioned in a comment must not satisfy a check for a uid.
+ * The one reader of a YAML file under {@code ops/} — a provisioned Grafana tree, a compose file —
+ * shared by every test in this package so that no two of them can disagree about what a file, a
+ * map or a scalar is. Parsed, not regex-matched: these trees are mostly comments on purpose, and
+ * a {@code uid:} or a {@code mem_limit:} mentioned in a comment must not satisfy a check for one.
+ *
+ * <p>Named for the package rather than for Grafana since HD-299, when the compose contract joined
+ * it: a helper named after its first caller is the shape that gets copied by its second.
  *
  * <p>Duplicate keys are an error here because they are an error in Grafana's reader too (Go's
- * yaml.v3), and because a duplicate that IS tolerated is the worse failure: the second value wins
- * over the one whose comment explains it.
+ * yaml.v3) and in Compose's, and because a duplicate that IS tolerated is the worse failure: the
+ * second value wins over the one whose comment explains it.
  */
-final class ProvisioningYaml {
+final class OpsYaml {
 
-    private ProvisioningYaml() {
+    private OpsYaml() {
     }
 
     @SuppressWarnings("unchecked")

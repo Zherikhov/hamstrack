@@ -1,15 +1,16 @@
 package com.hamstrack.ops;
 
 import org.junit.jupiter.api.Test;
-import org.yaml.snakeyaml.Yaml;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -34,9 +35,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * running container). The claim "each visitor gets their own auth budget" is a conjunction
  * of three, and none of the three artefacts stands in for the others.
  *
- * <p>Parsed with SnakeYAML rather than matched with a regex: a comment mentioning
+ * <p>Parsed through {@link OpsYaml} rather than matched with a regex: a comment mentioning
  * {@code mem_limit} must not satisfy a check for {@code mem_limit}, and this file is
  * mostly comments on purpose.
+ *
+ * <p>One test here is deliberately NOT about this file alone —
+ * {@link #everyServiceInEveryDeployedComposeFileDeclaresAMemoryCeiling} reads every compose
+ * file a deploy runs, because the memory-ceiling policy is a property of the deployed set and
+ * {@code ops/deploy/apply-config.sh} names this class as the place that policy lives.
  */
 class ProdComposeContractTest {
 
@@ -166,16 +172,144 @@ class ProdComposeContractTest {
                 .isEmpty();
     }
 
-    @SuppressWarnings("unchecked")
+    /**
+     * <strong>Every service in the deployed compose set declares a memory ceiling.</strong>
+     *
+     * <p>The category is "a service Compose brings up on the production box", and its members
+     * are every entry under {@code services:} in <em>both</em> files the applier runs by
+     * default ({@code COMPOSE_FILES} in {@code ops/deploy/apply-config.sh}) — not the one file
+     * this class is named after. Until HD-299 the only ceiling anything checked was
+     * {@code app}'s, while {@code ops/deploy/apply-config.sh}'s check 1 excused a missing one
+     * with a WARN and a comment naming this class as the place the policy lived. It did not
+     * live here: seven observability services and two prod ones were unenumerated, so the
+     * deploy's read-back fell open on exactly the services it was reading back.
+     *
+     * <p>Either spelling counts, because Compose honours either — {@code mem_limit} or
+     * {@code deploy.resources.limits.memory} (measured on Compose v5.1.0, 2026-09-10: a
+     * service may carry both when the values agree, and Compose refuses only distinct ones).
+     */
+    @Test
+    void everyServiceInEveryDeployedComposeFileDeclaresAMemoryCeiling() throws IOException {
+        var unbounded = new ArrayList<String>();
+        int scanned = 0;
+        var deployed = deployedComposeFiles();
+        for (Path file : deployed) {
+            for (var entry : services(file).entrySet()) {
+                scanned++;
+                var service = OpsYaml.map(entry.getValue());
+                Object memLimit = service.get("mem_limit");
+                Object nested = OpsYaml.map(OpsYaml.map(OpsYaml.map(service.get("deploy")).get("resources"))
+                        .get("limits")).get("memory");
+                if (memLimit == null && nested == null) {
+                    unbounded.add(file.getFileName() + " → " + entry.getKey());
+                }
+            }
+        }
+
+        assertThat(unbounded)
+                .withFailMessage(CEILING_CHECKLIST + "\nWithout a ceiling: " + unbounded)
+                .isEmpty();
+        // A FLOOR EQUAL TO THE POPULATION ONLY EVER FIRES ON A DELETION. There are 10 services
+        // in the deployed set today, and a floor of 10 is satisfied by a parse that reads every
+        // one of them and by a parse that reads exactly the ten there happen to be — while the
+        // first service somebody DELETES trips it and blames the scan. The bound is deliberately
+        // below the count: it exists to catch a scan that has gone blind (0, 1, 2 services from a
+        // YAML change the reader cannot follow), which is a different quantity from the number of
+        // services this project runs.
+        assertThat(scanned)
+                .withFailMessage("Only %d service(s) were scanned across %s — there were 10 when this floor "
+                        + "was set, so this scan has stopped seeing services and every assertion above it is "
+                        + "vacuous.", scanned, deployed)
+                .isGreaterThanOrEqualTo(6);
+    }
+
+    /** The failure message is the propagation checklist, for the same reason {@link #CHECKLIST} is. */
+    private static final String CEILING_CHECKLIST = """
+
+            A service in the deployed compose set declares no memory ceiling — neither `mem_limit` \
+            nor `deploy.resources.limits.memory`.
+
+            Why this is a category and not a line: a container without a ceiling can take the whole \
+            box, and the JVM's -XX:MaxRAMPercentage=50 in the app image reads HOST RAM when there is \
+            no container limit (HD-152). It is also what `ops/deploy/apply-config.sh`'s verify step \
+            (check 1, memory-limits) COMPARES: a service with no declared ceiling is a WARN there and \
+            not a failure, precisely because this test is supposed to make that case impossible. \
+            Delete a ceiling and you do not get a red verify on the box — you get a check that \
+            silently has nothing to say about that service.
+
+            A ceiling is a CEILING, never a reservation, and the sum of them may exceed the box's RAM \
+            (it does — the arithmetic and the measured RSS per service are at the top of \
+            docker-compose.prod.yml). This test does not check the sum, and no file may claim the sum \
+            makes the box safe.
+
+            What else moves with a new service: docker-compose.prod.yml's arithmetic block, and \
+            nothing else — the applier reads Compose's own resolved model, so a service added to \
+            either file is a member of every pre-flight and verify check in the same commit.
+            """;
+
+    /**
+     * The compose files a deploy actually runs — <strong>read out of
+     * {@code ops/deploy/apply-config.sh}</strong>, not restated here.
+     *
+     * <p>The javadoc used to say "the applier's default {@code COMPOSE_FILES}" beside a literal
+     * Java list, which is a claim about another file that nothing checked: add a third compose
+     * file to that default and this test would go on scanning two, still describing itself as
+     * covering the deployed set. The applier spells the default once, in the parameter expansion
+     * that reads the variable, and that string is the population.
+     */
+    private static final Path APPLIER = Path.of("ops", "deploy", "apply-config.sh");
+
+    /**
+     * A METHOD, not a static field. As a field the assertions below run inside a static
+     * initialiser, and a failure there arrives as {@code ExceptionInInitializerError} on every
+     * test in the class — three errors and no message, instead of one named assertion failure
+     * that says which compose file the applier gained.
+     */
+    private static List<Path> deployedComposeFiles() throws IOException {
+        String script = Files.readString(APPLIER, StandardCharsets.UTF_8);
+        var m = Pattern.compile("\\$\\{COMPOSE_FILES:-([^}]+)\\}").matcher(script);
+        assertThat(m.find())
+                .withFailMessage("""
+
+                        %s no longer spells its default compose file set as ${COMPOSE_FILES:-…}.
+
+                        That expansion is the definition of "the files a deploy runs", and this test derives its
+                        population from it so the two cannot drift. If the default moved, point this reader at
+                        wherever it lives now - do not paste the list back in here, because a literal list is
+                        what let this test claim to cover the deployed set while covering whatever its author
+                        last typed.""", APPLIER.toAbsolutePath())
+                .isTrue();
+        var files = Arrays.stream(m.group(1).trim().split("\\s+")).map(Path::of).toList();
+        assertThat(files)
+                .withFailMessage("The applier's default COMPOSE_FILES parsed to %s — fewer than the two files "
+                        + "the deployed set has had since the observability stack shipped, so this parse has "
+                        + "stopped working rather than the set having shrunk.", files)
+                .hasSizeGreaterThanOrEqualTo(2);
+        for (Path f : files) {
+            assertThat(f)
+                    .withFailMessage("The applier's default COMPOSE_FILES names %s, which is not in this "
+                            + "repository. A deploy skips a listed file that is absent with a log line, so this "
+                            + "would be a silently narrower deployed set than the default claims.", f)
+                    .isRegularFile();
+        }
+        return files;
+    }
+
     private static Map<String, Object> services() throws IOException {
+        return services(COMPOSE);
+    }
+
+    private static Map<String, Object> services(Path file) throws IOException {
         // Repository-root-relative: surefire runs with the module directory as its working
         // directory, the same way the source-reading seal tests in this suite do.
-        assertThat(COMPOSE)
-                .withFailMessage("docker-compose.prod.yml was not found at %s — this test reads the repository's "
-                        + "own copy, so it must run from the module root", COMPOSE.toAbsolutePath())
+        assertThat(file)
+                .withFailMessage("%s was not found at %s — this test reads the repository's "
+                        + "own copy, so it must run from the module root", file, file.toAbsolutePath())
                 .isRegularFile();
-        var root = (Map<String, Object>) new Yaml().load(Files.readString(COMPOSE, StandardCharsets.UTF_8));
-        return (Map<String, Object>) root.get("services");
+        // OpsYaml, not a second `new Yaml()`: one reader for every YAML this package parses, and
+        // it refuses a duplicate key — a second `mem_limit:` silently winning over the one whose
+        // comment explains it is exactly the drift these seals exist to catch.
+        return OpsYaml.map(OpsYaml.parse(file).get("services"));
     }
 
     @SuppressWarnings("unchecked")

@@ -37,6 +37,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - [Observability (optional)](#observability-optional)
 - [Upgrading](#upgrading)
   - [Applying repository configuration](#applying-repository-configuration)
+  - [The deploy reads itself back from 0.18.2](#the-deploy-reads-itself-back-from-0182)
   - [Statements are bounded from 0.17.0](#statements-are-bounded-from-0170)
   - [Connection acquisition is bounded from 0.18.0](#connection-acquisition-is-bounded-from-0180)
   - [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170)
@@ -82,7 +83,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   box. **A ceiling is not a reservation, and bounding everything does not make a
   small host safe**: app 1 GB + PostgreSQL 512 MB + Caddy 128 MB is ~1.6 GB of
   ceilings before the operating system and the page cache get anything, and adding
-  the [observability stack](#observability-optional) — whose seven services' limits
+  the [observability stack](#observability-optional) — whose per-service limits
   sum to ~1 GB — takes it to ~2.6 GB, more than a 2 GB box has at all. Those maxima
   are not reached together, which is why the smaller figure still works in practice;
   the larger one is why the full stack does not belong on a 2 GB host. Run it on
@@ -455,9 +456,9 @@ Full reference:
 | `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
 | `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and the Quick-start snippet above (default `0.4`). **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
 | `APP_STOP_GRACE_SECONDS` | `30` | How many seconds the app container gets between `SIGTERM` and `SIGKILL`. **Read twice, which is the whole reason it is a variable**: Docker Compose puts it in `stop_grace_period`, and the application binds the same value as `app.mail.async.stop-grace-seconds` — it has to know its own grace, because it waits `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` for queued mail and then writes whatever is left to `failed_email`, and it **refuses to start** unless the whole of that shutdown fits inside this number — the drain, the connection the write must first obtain (`DB_CONNECTION_TIMEOUT_MS`), and the write itself, which costs with the number of rows queued. **Docker's own default is 10 s**, which is *shorter* than the 15 s drain, so a compose file with no `stop_grace_period` line kills the JVM mid-flush and loses the queued password resets and verifications with no row and no log line — see [Mail](#mail). **If you run your own Compose file rather than the bundled one, add the line there too** (the [Quick start](#quick-start) file shows both halves): setting this variable alone changes nothing Docker reads. Raise it before raising the drain, never after. **Valid range 1–600**; `900` is refused at boot, so a drain that needs more than ~598 s of grace is not expressible — which is well past anything the drain's own `@Max` of 120 s can ask for. **An empty value means different things depending on how it reaches the container, which is worth knowing before you blank the line rather than after.** In the bundled `docker-compose.prod.yml` the app reads it through `env_file: .env`, so `APP_STOP_GRACE_SECONDS=` arrives as an empty string, the `${…:30}` fallback in `application.properties` never applies, and **the app aborts the boot** (Compose still gives the container 30 s, so the two disagree). In the [Quick start](#quick-start) file on this page the app service names it explicitly as `APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}`, and Compose's `:-` substitutes for an empty value as well as an absent one — so there a blank renders `30` and the app boots normally. Either way the safe habit is the same: **leave the line out rather than blanking it**, because only one of the two arrangements tells you that you did something. Identical in `dc` and `cloud` |
-| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. **The container limit also chooses the garbage collector, and nothing else here says so.** At `1g` the JVM sits below its "server-class machine" threshold and ergonomically selects **SerialGC** — single-threaded, stop-the-world — where at `2g`, same image and same flags, it selects **G1** (measured 2026-09-01 on `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, 2 CPUs). That is the most likely explanation of the 4.99 s GC pause the 2026-08-31 load run recorded on a `1g` container — the collector was not itself recorded that day, which is why the startup line names it now — so if long pauses rather than `OutOfMemoryError` are your symptom, this is the dial that changes the collector as well as the heap. The application's startup line names the collector it actually got — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan |
-| `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud` |
-| `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud` |
+| `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. **The container limit also chooses the garbage collector, and nothing else here says so.** At `1g` the JVM sits below its "server-class machine" threshold and ergonomically selects **SerialGC** — single-threaded, stop-the-world — where at `2g`, same image and same flags, it selects **G1** (measured 2026-09-01 on `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, 2 CPUs). That is the most likely explanation of the 4.99 s GC pause the 2026-08-31 load run recorded on a `1g` container — the collector was not itself recorded that day, which is why the startup line names it now — so if long pauses rather than `OutOfMemoryError` are your symptom, this is the dial that changes the collector as well as the heap. The application's startup line names the collector it actually got — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
+| `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
+| `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud`. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
 | `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections`. **The max is also a memory dial on the database, and `max_connections` is not the bound that bites first**: `POSTGRES_WORK_MEM` is charged per sort or hash node per *backend*, so this number is the `backends` in `work_mem × nodes × backends` — `4MB × ~4 × ~12` (this pool, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB** at the defaults, and `4MB × 4 × 52` ≈ **830 MB** at a pool of 50, against a `POSTGRES_MEMORY_LIMIT` of `512m`. Fifty connections sits comfortably under a stock `max_connections` of 100 and comfortably over that cgroup ceiling, where the failure is an OOM-killed backend — or postmaster, which takes every session with it — rather than a refused connection. **Raise `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit.** `DB_STATEMENT_TIMEOUT_MS` below is the other half of pool sizing: a longer statement bound holds each of these connections for longer. **Part of this pool is reserved, and the reservation is checked at startup**: `EXPENSIVE_READ_MAX_IN_FLIGHT` is the most of these connections the **expensive-read surface** — every read that holds a connection while it works — may hold at once, so the rest of the API always retains the difference. (Today that surface is reports, HQL search, saved filters, the storage breakdown and the **planning** reads; read it as the category, because the membership grows and an enumeration here goes stale one entry before the list does.) **While you leave that variable unset it is derived from this one** (60 % of it, capped at 6, with the per-user ceiling clamped to fit), so lowering the pool on its own is safe and an install that has never touched `EXPENSIVE_READ_*` cannot be stopped from booting by this row. **If you have set it explicitly it must stay strictly below this number or the app refuses to start**, and an explicit share above 60 % of this number logs a sizing WARN at every boot — so lowering the pool while pinning the share is an edit to make in one go |
 | `POSTGRES_EFFECTIVE_CACHE_SIZE` | `512MB` | What the PostgreSQL **planner believes is cached** — `shared_buffers` plus the OS page cache it can expect to reach. Passed to the server as `postgres -c effective_cache_size=…` by the bundled compose file, so it takes PostgreSQL's units (`512MB`, `2GB`). **It allocates nothing**; it changes which plans look cheap, and a value far above the truth makes the planner prefer index access it will actually have to read off disk. The PostgreSQL image's own default is **4GB**, which is why this row exists: on Hamstrack's 1909 MiB production host that claimed more than twice the machine's entire RAM, on a box measured swapping. The `512MB` default is `shared_buffers` (128 MB) plus the low end of the page cache measured there under load (387 MB). **Set it from your host, in both directions**: roughly `shared_buffers` + the page cache this database can really expect. The usual starting point of ~75% of RAM assumes a *dedicated* database host — a box that also runs the JVM, Caddy and the observability stack is not one. **And under ~1 GB of RAM, lower it — to about `192MB`**: `512MB` on a 512 MB VPS claims the whole machine as cache, which is the image's `4GB` mistake one order of magnitude down. `192MB` is the `64MB` of `shared_buffers` that row recommends plus a small real page cache; confirm the second half with `free -m` rather than copying the figure. That ~1 GB is the same threshold `POSTGRES_SHARED_BUFFERS` and `POSTGRES_WORK_MEM` use — one number for all three dials. A value the server cannot parse makes PostgreSQL refuse to start while `docker compose up -d` still exits `0`, so change one dial at a time and check `docker compose ps`. **Upgrading from before 0.18.0 on a host of 4 GB or more? This default is a planner regression for you** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`: this is host sizing, not a deployment mode |
@@ -1554,16 +1555,59 @@ to `1` and the journal names the file.
 
 `ops/deploy/apply-config.sh` is the same step done deliberately. It is what this project's
 own production box runs, it contains no AWS and no GitHub, and it is offered here because
-it does four things a bare `up -d` does not: it validates the new compose files against
-your real `.env` **before** replacing anything, keeps the last five copies of what it
-replaced under `.config-backup/`, restarts the containers whose config is bind-mounted (a
-replaced file behind a bind mount is invisible to `up -d`), and records what it applied.
+of everything it does that a bare `up -d` does not: it validates the new compose files
+against your real `.env` **before** replacing anything, keeps the last five copies of what
+it replaced under `.config-backup/`, restarts the containers whose config is bind-mounted (a
+replaced file behind a bind mount is invisible to `up -d`), records what it applied, and
+**reads the running box back afterwards** and refuses to call the deploy complete when what
+is running disagrees with what was just applied.
 
 ```bash
 cd /path/to/your/clone && git pull
 sudo ops/deploy/apply-config.sh . /opt/hamstrack --dry-run   # read the diff first
 sudo ops/deploy/apply-config.sh . /opt/hamstrack
 ```
+
+**`--verify-only` is the half of it you will use most.** It runs the read-back alone against
+a box that is already applied — placing nothing, stamping nothing, pulling nothing, bringing
+nothing up — so it is a safe answer to "is this box actually running what I think it is?" at
+any moment, not only during a deploy. It is also how you clear a red deploy after fixing
+something by hand:
+
+```bash
+sudo bash /opt/hamstrack/ops/deploy/apply-config.sh /opt/hamstrack /opt/hamstrack --verify-only
+```
+
+Spell it as a path: `ops/` is *copied* to the box and never installed, so there is no
+`apply-config.sh` on your `PATH` there. It ends in one line —
+
+```
+verify: PASS ran=5/5 skipped=none services=10 env-services=4 app-identity=sha-unknown withheld=0 sha=unknown version=0.18.2
+```
+
+— and the first word is the one to read. `PASS` means every declared check read your box;
+`PARTIAL ran=3/5 skipped=grafana,drift-fresh` means three did and two had nothing to look at.
+A check that has nothing to look at (no `grafana` service, no drift script installed) is
+*skipped*: it pages nobody, and it publishes `2` rather than the `1` a real pass publishes, so
+the two are still told apart afterwards. A run that skips a check an **earlier** run read as
+failing does not clear it — it republishes the `0` and refuses, so narrowing `COMPOSE_FILES`
+can never quiet a finding. What it compares: every service's memory ceiling against the running container's
+`HostConfig.Memory`, every declared environment **key** (never a value) against the running
+container, the app image's revision label and `/api/meta`, Grafana's health and provisioning
+log where your compose set declares Grafana, and the drift metrics as of this run. A finding
+names the service and the two numbers; nothing is rolled back.
+
+`withheld=N` on that line counts the lines of *third-party* text the run read — Compose's,
+Docker's or Grafana's own output, which quotes back whatever it was handed, including values
+out of your `.env`. Those lines never get the timestamp prefix, because a deploy run from
+GitHub Actions republishes prefixed lines into a world-readable log. When `N` is not `0` they
+are in this same output, each behind a `| ` marker: nothing is lost, scroll to the `| ` block.
+
+**One dependency to know about:** if your compose set declares a `grafana` service, the
+script needs **`curl`** on the host — it asks Grafana's `/api/health` on the loopback. It
+checks for it *before* replacing anything and refuses with the reason, rather than failing at
+the end with the image already pulled. A box whose `COMPOSE_FILES` names no observability
+file needs no `curl`.
 
 Two things to know before you run it:
 
@@ -1582,6 +1626,30 @@ Two things to know before you run it:
   inherits nothing from the shell you ran the line above in — so a box narrowed here and not
   there reports your own containers as orphans, every hour, and tells you a deploy would
   delete them. Commands in `docs/ops-prod-hardening.md` → *Installing the drift check*.
+
+  **The verify step's budgets, for a box slower than the defaults assume.** `COMPOSE_FILES` is
+  one of six knobs the applier reads from the **process environment**; the other five bound the
+  read-back at the end of a deploy. They are **never** read from `/opt/hamstrack/.env` — the
+  script hands that file to Compose with `--env-file` and never sources it, so a line written
+  there does nothing at all and says nothing about it. They travel on the command, and `sudo -E`
+  is load-bearing (plain `sudo` drops them and you silently get the defaults):
+
+  | Variable | Default | Range | What it bounds |
+  |---|---|---|---|
+  | `VERIFY_POLL_SECONDS` | `5` | 0–60 | how long each poll waits between attempts |
+  | `VERIFY_APP_TIMEOUT_SECONDS` | `180` | 1–1800 | how long `/api/meta` may take to answer. **Raise this first on a small VPS** — an app that boots in four minutes is a red deploy at the default |
+  | `VERIFY_GRAFANA_TIMEOUT_SECONDS` | `90` | 1–1800 | how long Grafana's `/api/health` may take to report `database: ok` |
+  | `VERIFY_GRAFANA_SETTLE_SECONDS` | `20` | 0–600 | how long Grafana must hold still afterwards to prove it is not crash-looping |
+  | `GRAFANA_HEALTH_URL` | `http://127.0.0.1:3000/api/health` | loopback only | which URL that check asks. Its authority must be exactly `127.0.0.1` or `localhost` with an optional numeric port — Grafana publishes no public port by design |
+
+  ```bash
+  sudo -E VERIFY_APP_TIMEOUT_SECONDS=600 ops/deploy/apply-config.sh . /opt/hamstrack
+  ```
+
+  A value outside its range is refused **before** the deploy changes anything, by name, and
+  every timeout the verify step reports names the variable that widens it — so a red deploy
+  caused by a slow box tells you which line to change. None of them can disarm a check: a
+  shorter budget makes a slow box red, never green.
 
   It replaces exactly the paths listed in `ops/deploy/synced-paths.txt`, and directories
   there are replaced **wholesale** — a file you dropped into `observability/` on the box is
@@ -1669,6 +1737,45 @@ is exactly what the scope reports. It clears at your next deploy, when the conta
 recreated by the Compose you now have installed. Nothing is wrong with your configuration, and
 nothing needs editing; if you would rather not wait for the alert to clear on its own,
 `docker compose … up -d` is the action it is describing.
+
+### The deploy reads itself back from 0.18.2
+
+**Nothing here changes what your stack runs, and one thing changes when your upgrade stops.**
+From 0.18.2 `ops/deploy/apply-config.sh` ends with a **verify** step: after `up -d` it reads
+the running box back and refuses if what is running disagrees with what it just applied. A run
+that used to end at `deploy complete` can now end at `VERIFY FAILED` — the files are already
+placed and the containers already up, nothing is rolled back, and the refusal names both the
+finding and the two things you can do about it. That is the intended trade: a deploy that lied
+quietly is worse than one that stops loudly. If you upgrade with `git pull && docker compose
+up -d` and never run the applier, none of this reaches you.
+
+**Three things to know before the first run.**
+
+- **A ceiling that resolves to `0` is now a refusal, not a warning** — for **every**
+  `*_MEMORY_LIMIT` variable, not one of them. `0` means *unlimited* to Docker, not "use the
+  default", so `APP_MEMORY_LIMIT=0`, `POSTGRES_MEMORY_LIMIT=0` and `CADDY_MEMORY_LIMIT=0` have
+  each always run that container unbounded — they simply said nothing. Measured on Compose
+  v5.1.0 against the deployed set: with none of them set, all ten services carry a `mem_limit`
+  in the resolved model; `APP_MEMORY_LIMIT=0` leaves nine, and the two others together leave
+  eight. The verify step iterates every service Compose declares, so any of the three refuses.
+  Check before you deploy with `docker compose config | grep -B2 mem_limit`; the remedy is a
+  size, or removing the override.
+- **Narrowing `COMPOSE_FILES` cannot clear a finding.** A check that did not read your box may
+  lower confidence and never raise it, so a run that *skips* a check an earlier run read as
+  failing republishes that `0` and refuses, saying so. Re-read with the compose set that
+  declares the check, or fix what the earlier run found.
+- **The summary line says how much was read.** `verify: PASS ran=5/5` means every declared check
+  looked at your box; `verify: PARTIAL ran=3/5 skipped=grafana,drift-fresh` means two of them had
+  nothing to look at here. Read the first word, not the exit code alone.
+
+**If you provision the bundled Grafana alerting**, this release also adds the rule
+**`DeployVerifyFailed`** (critical, 5 m) over a new `hamstrack_deploy_verify_check_ok{check}`
+gauge the applier writes into the node-exporter textfile directory. It is quiet on a box that
+has never run the verifying applier (`noDataState: OK`). What clears it is a run that READS the
+check green: `bash /opt/hamstrack/ops/deploy/apply-config.sh /opt/hamstrack /opt/hamstrack
+--verify-only` re-reads the box after a hand fix without redeploying. The metric and every value
+it can take are in [`docs/observability.md`](observability.md); the procedure is
+[Applying repository configuration](#applying-repository-configuration) above.
 
 ### Notifications are scoped to a workspace from 0.17.0
 

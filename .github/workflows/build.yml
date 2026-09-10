@@ -153,6 +153,30 @@ jobs:
       # frontend executions off together; the image build in `build-and-push`
       # pays nothing either, because its `package -DskipTests` skips a
       # `test`-phase frontend execution the same way it skips surefire.
+      # DeployVerifyOracleTest (HD-299) brings up a scratch Compose project on the
+      # runner's own daemon to read REAL containers back — a real `docker update
+      # --memory` surviving a real `up -d`, which is HD-189's finding and which no
+      # stub can establish. It deliberately never pulls: a test that pulls inside
+      # its own body is a test that fails on a registry outage. So the image is
+      # arranged HERE, as a step, and not left to the `postgres:16-alpine` service
+      # container that happens to sit beside this job — that is a side effect of a
+      # `services:` block somebody may re-version or drop, and the test's failure
+      # mode when it goes is a SKIP, which is green. The pairing is enforced from
+      # both ends: this step, and the test's own
+      # ciCannotLoseTheRealDaemonAssertionToASkip, which refuses a skip whenever
+      # CI/GITHUB_ACTIONS is set and separately refuses this line's absence.
+      #
+      # `image inspect || pull`, not a bare pull, for two reasons that are the same reason.
+      # (1) A REGISTRY BLIP MUST NOT RED A BUILD over an image that is already on the disk —
+      # and it usually is, because the `services:` block above made the runner pull this very
+      # tag. (2) That is exactly why the cost is ~0s in practice — but the comment above says
+      # not to RELY on that block, and relying on it for CORRECTNESS is what this step exists
+      # to stop; relying on it for SPEED is fine, and the `||` is what keeps the two apart. If
+      # the services block is ever re-versioned or dropped, this step starts actually pulling
+      # (a few seconds) and nothing breaks.
+      - name: Pull the image the real-daemon ops oracles run on
+        run: docker image inspect postgres:16-alpine >/dev/null 2>&1 || docker pull postgres:16-alpine
+
       - name: Build and test (backend + frontend suites)
         run: ./mvnw -B verify
         env:

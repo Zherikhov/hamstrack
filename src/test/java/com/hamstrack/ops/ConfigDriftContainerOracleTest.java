@@ -1,6 +1,5 @@
 package com.hamstrack.ops;
 
-import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -223,7 +222,8 @@ class ConfigDriftContainerOracleTest {
     void aCleanTreeIsSilentAndARealDriftIsLoud() throws Exception {
         assumeBash();
         var image = firstLocallyPresentImage();
-        Assumptions.assumeTrue(image != null,
+        ScriptHarness.assumeWithWitness("config-drift-oracle",
+                image != null,
                 "no usable docker daemon, or none of " + IMAGE_CANDIDATES + " is present locally. "
                         + "This test brings up a scratch Compose project to ask the real Compose what "
                         + "`up -d --dry-run` says, and it deliberately does not pull. `docker pull "
@@ -280,14 +280,36 @@ class ConfigDriftContainerOracleTest {
         var failures = new ArrayList<String>();
         try {
             var up = docker(box, "compose", "-p", project, "-f", "docker-compose.yml", "up", "-d");
-            Assumptions.assumeTrue(up.exit() == 0,
-                    "the scratch Compose project would not start, so this machine cannot answer the "
-                            + "question this test asks:\n" + up.output());
+            // AN ASSUMPTION ON A LAPTOP, A FINDING ON A RUNNER — the shape HD-299 fixed in
+            // DeployVerifyOracleTest, applied to its sibling. This one is about the test's OWN
+            // fixture rather than about the subject, so a machine that cannot start a two-service
+            // Compose project with a health-gated depends_on genuinely cannot answer the question
+            // and an honest skip is right there. On CI it is arrangeable — the daemon, the image
+            // and Compose are all provided by the job — so a skip there silently retires the only
+            // test in the build that reads a real `up -d --dry-run` plan.
+            if (ScriptHarness.underCi()) {
+                expect(failures, "the scratch Compose project started (on CI this may not be skipped: "
+                        + "the daemon, the image and Compose are all arranged by the job, so a project that "
+                        + "will not start is a finding, not an absence)", up.exit() == 0, up);
+            } else {
+                ScriptHarness.assumeWithWitness("config-drift-oracle",
+                up.exit() == 0,
+                        "the scratch Compose project would not start, so this machine cannot answer the "
+                                + "question this test asks:\n" + up.output());
+            }
 
             var alphaBefore = containerId(box, project, "alpha");
             var betaBefore = containerId(box, project, "beta");
+            // A HARD PRE-CONDITION, COLLECTED RATHER THAN ASSUMED — the shape
+            // DeployVerifyOracleTest fixed at its own bedrock check, applied here. Everything
+            // below reads these two containers and then asks the oracle probe about them, and
+            // requireAReadableOracle ASSERTS: on a machine where the project would not start it
+            // threw first, so the report was a sixty-line essay about the drift oracle instead of
+            // the one line written for "the scratch project did not start". The block is guarded
+            // rather than run against empty ids.
             expect(failures, "the scratch project really started", !alphaBefore.isBlank() && !betaBefore.isBlank(),
                     up);
+            if (!alphaBefore.isBlank() && !betaBefore.isBlank()) {
 
             // --- can this environment's Compose be read at all? -----------------------
             requireAReadableOracle(box, project);
@@ -379,11 +401,85 @@ class ConfigDriftContainerOracleTest {
             expect(failures, "…and created no container", ps.output().isBlank(), ps);
             var nets = docker(box, "network", "ls", "--filter", "name=" + project, "--format", "{{.Name}}");
             expect(failures, "…and created no network", nets.output().isBlank(), nets);
+
+            }   // end of the block guarded on the scratch project having started
         } finally {
             docker(box, "compose", "-p", project, "-f", "docker-compose.yml",
                     "down", "-v", "--remove-orphans", "-t", "1");
         }
 
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>The drift script's two foreign-text doors, run rather than argued about.</strong>
+     *
+     * <p>This scope is where a body rather than a name reaches the journal: {@code config --services}
+     * failing used to {@code cat} Compose's stderr and {@code up -d --dry-run} failing used to
+     * {@code printf} its whole abort text. Both were bounded by an ARGUMENT — that every
+     * interpolated typed field in this repository's compose files is a tuning knob, so no secret
+     * can reach a typed decode error — and that argument holds until somebody adds a line.
+     *
+     * <p>They now go through the same {@code hold_foreign} the applier uses (carried verbatim;
+     * {@code ApplyConfigVerifyPhaseTest#everyFunctionBothScriptsCarryIsCarriedVerbatim} compares
+     * the bodies), which means: the SHAPE on a stamped line, the TEXT unstamped behind a
+     * {@code | } marker. That matters here specifically because this script runs INSIDE the
+     * deploy's SSM command at step 9 and its {@code log()} carries the same stamp — so its
+     * stamped lines are published into a world-readable Actions log by
+     * {@code deploy.yml}'s allow-list, and its unstamped ones are not.
+     *
+     * <p>Both directions are asserted: nothing crafted on a stamped line, and the crafted text
+     * still present unstamped — a door that stopped printing anything would satisfy the first
+     * assertion alone, and the operator on the box would have lost the only diagnostic there is.
+     */
+    @Test
+    void bothDriftDoorsThatQuoteComposePublishAShapeAndKeepTheTextOffTheStampedChannel() throws Exception {
+        assumeBash();
+        var failures = new ArrayList<String>();
+        var crafted = String.join("\n",
+                "services[app].mem_limit invalid size: 'super-secret-looking-value'",
+                "error while parsing config: bad value hunter2ProdDbPass",
+                "invalid hostPort: Sekret123",
+                // A line carrying this script's OWN stamp format. Without it every member of
+                // this population fails the `stamped` test on its own and the assertion below
+                // passes with the `| ` marker deleted — the marker's whole job is that a foreign
+                // line cannot begin with the stamp once something else is in front of it.
+                "2026-09-10T08:00:00Z compose quoted b3aconStampForgery9 from .env");
+        var spans = List.of("super-secret-looking-value", "hunter2ProdDbPass", "Sekret123",
+                "b3aconStampForgery9");
+        var stamped = Pattern.compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z ");
+
+        record Door(String what, Map<String, String> env, String explains) { }
+        var doors = List.of(
+                new Door("`config --services` failure", Map.of("STUB_CONFIG_FAIL", "1", "STUB_CONFIG_ERR", crafted),
+                        "could not resolve the box's configuration"),
+                new Door("`up -d --dry-run` failure", Map.of("STUB_PLAN", crafted, "STUB_PLAN_RC", "1"),
+                        "could not ask whether the box matches its files"));
+        assertThat(doors.size())
+                .withFailMessage("Only %d door(s) in this scope re-quote Compose's own text. There were 2 "
+                        + "when this seal was written; a door dropped from the list is a door with no seal.",
+                        doors.size())
+                .isGreaterThanOrEqualTo(2);
+
+        for (Door door : doors) {
+            var run = runStubbed("foreign-" + Math.abs(door.what().hashCode()), door.env());
+            var output = run.result().output();
+            var onStamped = output.lines().filter(l -> stamped.matcher(l).find()).toList();
+            var leaked = spans.stream()
+                    .filter(s -> onStamped.stream().anyMatch(l -> l.contains(s)))
+                    .toList();
+            expect(failures, door.what() + ": nothing Compose wrote reaches a STAMPED line"
+                            + (leaked.isEmpty() ? "" : " — LEAKED " + leaked), leaked.isEmpty(), run.result());
+            expect(failures, door.what() + ": a stamped line still explains it (`" + door.explains() + "`)",
+                    onStamped.stream().anyMatch(l -> l.contains(door.explains())), run.result());
+            expect(failures, door.what() + ": …and names the shape rather than the text",
+                    onStamped.stream().anyMatch(l -> l.contains("line(s), the first")), run.result());
+            expect(failures, door.what() + ": the text itself is still on the box, unstamped, behind `| `",
+                    output.lines().anyMatch(l -> l.startsWith("| ")
+                            && spans.stream().anyMatch(l::contains)), run.result());
+            expect(failures, door.what() + ": …and the scope still reads as drift",
+                    containersGauge(run.box()) == 1, run.result());
+        }
         assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
     }
 
@@ -966,6 +1062,62 @@ class ConfigDriftContainerOracleTest {
                 .contains("UNHEALTHY");
     }
 
+    /**
+     * <strong>Under CI this class's real-daemon test may not skip.</strong> The companion to
+     * {@code DeployVerifyOracleTest#ciCannotLoseTheRealDaemonAssertionToASkip}, sharing its
+     * definition of "under CI" ({@link ScriptHarness#underCi()}) rather than restating it — this
+     * class asks the real Compose what {@code up -d --dry-run} says, which is the oracle behind
+     * the whole {@code containers} drift scope, and a green skip retires it silently.
+     *
+     * <p>Takes no assumption of its own, so it always runs — and it carries an UNCONDITIONAL
+     * half, like its sibling, because a method whose whole body is {@code if (!underCi())
+     * return;} contributes 1 to {@code Tests run} on every developer machine, executes nothing,
+     * and does not skip either, so it leaves no reason behind. The sibling's unconditional half
+     * asserts that the workflow pulls an image before {@code ./mvnw -B verify}; the half that
+     * belongs to THIS class is the sentence that used to be prose — "the same step covers both
+     * classes". It covers this one only while the images this class will accept are among the
+     * ones that step pulls, and nothing but this line reads that.
+     */
+    @Test
+    void ciCannotLoseTheContainerOracleToASkip() throws IOException {
+        // UNCONDITIONAL. Runs on a laptop too, which is the only place a mismatch introduced by
+        // an edit to either list would be noticed before CI silently starts skipping.
+        var workflow = Files.readString(Path.of(".github/workflows/build.yml"), StandardCharsets.UTF_8);
+        var pulled = IMAGE_CANDIDATES.stream().filter(i -> workflow.contains("docker pull " + i)).toList();
+        assertThat(pulled)
+                .withFailMessage("""
+                        [config-drift-oracle] .github/workflows/build.yml pulls none of this class's images \
+                        %s before the test run, so on a runner this class finds no usable image and SKIPS — \
+                        greenly. DeployVerifyOracleTest asserts that SOME image is pulled; whether it is one \
+                        THIS class accepts is a separate fact, and this is the only line that reads it.
+
+                        Add the pull, or widen IMAGE_CANDIDATES to include what the workflow already pulls.""",
+                        IMAGE_CANDIDATES)
+                .isNotEmpty();
+        if (!ScriptHarness.underCi()) {
+            return;
+        }
+        var missing = new ArrayList<String>();
+        if (bash == null) {
+            missing.add("no bash on PATH");
+        }
+        if (firstLocallyPresentImage() == null) {
+            missing.add("no docker daemon, or none of " + IMAGE_CANDIDATES + " present locally");
+        }
+        assertThat(missing)
+                .withFailMessage("%s", """
+                        [config-drift-oracle] running under CI with a daemon this class cannot use, so the \
+                        only test in the build that reads a REAL `docker compose up -d --dry-run` plan would \
+                        be SKIPPED — and a skipped gate in CI is not a gate. The containers drift scope is \
+                        built entirely on that plan's shape.
+
+                        The job that runs this suite must arrange it before `./mvnw -B verify`:
+                          - run: docker image inspect postgres:16-alpine >/dev/null 2>&1 || docker pull postgres:16-alpine
+
+                        Unusable because: """ + missing)
+                .isEmpty();
+    }
+
     // --- harness ---------------------------------------------------------------------
 
     private static void expect(List<String> failures, String what, boolean ok, Result r) {
@@ -979,7 +1131,8 @@ class ConfigDriftContainerOracleTest {
     private record Stubbed(Path box, Path dockerLog, Result result) {}
 
     private void assumeBash() {
-        Assumptions.assumeTrue(bash != null,
+        ScriptHarness.assumeWithWitness("config-drift-oracle",
+                bash != null,
                 "no bash on PATH (and no Git for Windows bash.exe) — the tests that drive the real "
                         + "ops/drift/hamstrack-config-drift.sh run on CI and on any POSIX machine, and "
                         + "skip only on a Windows box without Git Bash");
@@ -1064,7 +1217,7 @@ class ConfigDriftContainerOracleTest {
                 case " $* " in
                   *" config --services "*)
                     if [ "${STUB_CONFIG_FAIL:-0}" = 1 ]; then
-                      echo "stub: cannot resolve" >&2
+                      printf '%s\\n' "${STUB_CONFIG_ERR:-stub: cannot resolve}" >&2
                       exit 1
                     fi
                     printf '%s\\n' ${STUB_SERVICES-alpha beta}
