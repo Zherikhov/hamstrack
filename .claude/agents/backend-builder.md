@@ -2,7 +2,7 @@
 name: backend-builder
 description: "Implements backend features in the Hamstrack Spring Boot 4 / Java 21 codebase following its established conventions. Use for adding/changing entities, repositories, services, controllers, DTOs, and exceptions. The only agent that writes backend code. Enumerates the category before touching a member, proves framework behaviour by a probe, and reports with evidence labels."
 tools: Read, Edit, Write, Grep, Glob, Bash
-model: fable
+model: opus
 effort: high
 ---
 

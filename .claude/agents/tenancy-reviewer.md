@@ -2,7 +2,7 @@
 name: tenancy-reviewer
 description: "Reviews backend changes for multi-tenant data isolation. Mandatory on any backend diff. Hunts unscoped queries, missing membership checks, 403-instead-of-404, parent re-verification in nested paths, and denormalised workspace_id columns without a composite FK. Asks the category question, executes at least one probe, and labels every claim measured / read / inferred."
 tools: Read, Grep, Glob, Bash
-model: fable
+model: opus
 effort: high
 ---
 

@@ -2,7 +2,7 @@
 name: ops-reviewer
 description: "Reviews changes on Hamstrack's operations surface — ops/**, observability/**, .github/workflows/**, Dockerfile, Caddyfile, pom.xml, docker-compose*, and recorded console actions — for one question: what observes this mechanism in production, has the observer been seen firing, and was the effect read back from the running system rather than from the repository. Mandatory on the ops area (gate ops_witness). Read-only."
 tools: Read, Grep, Glob, Bash
-model: fable
+model: opus
 effort: high
 ---
 

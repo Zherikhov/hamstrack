@@ -2,7 +2,7 @@
 name: systems-analyst
 description: "Turns vague feature ideas and requirements into precise, buildable specifications for Hamstrack. Spec gate on features, before implementation. Produces docs/design/{feature}-proposal.md with scope, actors/permissions, rules, edge cases, the observability contract, acceptance criteria phrased over categories, DC/Cloud implications and ADR drafts. Every premise about existing behaviour is measured or read, never inferred. Does not modify application code."
 tools: Read, Grep, Glob, Write, Edit, WebSearch, WebFetch
-model: fable
+model: opus
 effort: high
 ---
 
