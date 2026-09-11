@@ -1,0 +1,10 @@
+{
+  "task": "HD-916 category sealed by an existing test named in the house Class#method form",
+  "class": "feature",
+  "category": { "rule": "fixture rule", "members": ["A", "B"], "sealedBy": "SuiteCoverageGuardTest#givesEveryFloorRemediesItsOwnReaderCanPerform" },
+  "gates": {
+    "spec": "pass",
+    "security": "pass",
+    "tests": { "status": "pass", "negativeControl": "seen: FixtureTest red" }
+  }
+}

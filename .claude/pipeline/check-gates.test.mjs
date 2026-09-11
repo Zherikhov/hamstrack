@@ -259,3 +259,17 @@ test("AC-9 documented: the procedure, the skill line and the ignore rules exist"
   }
   assert.equal(spawnSync("git", ["check-ignore", "-q", ".claude/pipeline/fixtures/a4-pass.json"], { cwd: ROOT }).status, 1, "fixtures are tracked");
 });
+
+// HD-301. The counterpart of the B5 row, which the EXITS table cannot hold: B5 asserts the REFUSAL
+// fires on a seal that does not exist, and a fixture that only ever asserts a refusal cannot notice
+// that the same refusal fires on a VALID input too. Until this ticket the hook resolved the whole
+// `sealedBy` string as a file name, so `Class#method` — the form every "test:" pointer in CLAUDE.md
+// uses, and the form that says WHICH test holds the category — was refused as a missing file.
+test("a seal named in CLAUDE.md's own Class#method form resolves to the class that holds it", () => {
+  const r = runHook({ runPath: fixture("b7-sealedby-method.json"), history: join(TMP, "b7-history.jsonl") });
+  assert.equal(r.status, 0, `the hook refused a seal that exists: ${r.stdout}${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /sealedBy names/, "the hook resolved the #method half as part of the file name");
+  // The class really is there, so a green here is not green-because-absent.
+  const cls = "src/test/java/com/hamstrack/common/testsupport/SuiteCoverageGuardTest.java";
+  assert.ok(existsSync(join(ROOT, cls)), `${cls} must exist for this test to mean anything`);
+});

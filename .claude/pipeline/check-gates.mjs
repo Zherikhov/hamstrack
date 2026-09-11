@@ -176,7 +176,11 @@ if (!cat["n/a"]) {
   if (cat.members.length === 1 && GUARD_RE.test(addedLines()))
     block(`category.members lists one site (${cat.members[0]}) but the diff adds a bound/guard/rule (${(addedLines().match(GUARD_RE) || [])[0]}). ` +
       `Enumerate the siblings (grep the category) and apply the rule to every member in this change, or list them and name the category test that enumerates them.`);
-  const seal = cat.sealedBy.replace(/\.(java|ts|tsx)$/, "");
+  // A seal is named the way CLAUDE.md names one: `Class#method`, a bare class, or a path. The
+  // `#method` half says WHICH test in the class holds the category; the file lookup below can only
+  // see the class, so strip it. Refusing the documented form was itself a defect (found by HD-301,
+  // whose seal was named in the form every `⟶ test:` pointer in CLAUDE.md uses).
+  const seal = cat.sealedBy.split("#")[0].trim().replace(/\.(java|ts|tsx)$/, "");
   const tracked = sh("git ls-files src/test src/main/frontend") + "\n" + sh("git ls-files --others --exclude-standard src/test src/main/frontend");
   const sealFound = tracked.split("\n").some((f) => f.endsWith(`/${seal}.java`) || f.endsWith(`/${seal}.test.ts`) || f.endsWith(`/${seal}.test.tsx`) || f.endsWith(`/${seal}`));
   if (!sealFound && !existsSync(`${ROOT}/${cat.sealedBy}`))
