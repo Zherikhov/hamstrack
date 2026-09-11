@@ -81,6 +81,7 @@ export default function DocsPage() {
           <Link
             to="/"
             className="font-display font-bold"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ fontSize: 20, color: 'var(--color-text)', letterSpacing: '-0.3px', textDecoration: 'none' }}
           >
             Hamstrack
@@ -98,6 +99,7 @@ export default function DocsPage() {
       <main className="flex-1 mx-auto w-full" style={{ maxWidth: 1080, padding: '40px 24px 64px' }}>
         <h1
           className="font-display font-bold"
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ fontSize: 34, color: 'var(--color-text)', letterSpacing: '-0.5px', margin: 0 }}
         >
           Documentation

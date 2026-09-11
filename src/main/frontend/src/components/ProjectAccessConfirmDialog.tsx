@@ -75,7 +75,9 @@ export default function ProjectAccessConfirmDialog({ wsId, payload, onClose, onA
       .then(result => { if (!cancelled) setImpact(result) })
       .catch(err => { if (!cancelled) setPreviewError(classifyConflict(err)) })
     return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // The key is the SERIALISED payload, not the object: a fresh object literal
+    // every render would refetch the preview forever. (exhaustive-deps objects to
+    // the computed key; the rule is not in the SPA rule set — HD-300 Q1.)
   }, [wsId, JSON.stringify(payload)])
 
   async function apply() {

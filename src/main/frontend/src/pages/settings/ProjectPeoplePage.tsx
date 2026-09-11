@@ -152,6 +152,7 @@ export default function ProjectPeoplePage() {
   return (
     <div>
       <div className="mb-5">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 className="font-display font-bold" style={{ fontSize: 18, letterSpacing: '-0.2px' }}>People</h2>
         <p className="text-sm mt-1" style={{ color: 'var(--color-text-secondary)', maxWidth: 620 }}>
           {restricted

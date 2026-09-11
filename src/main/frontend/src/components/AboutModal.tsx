@@ -1,6 +1,7 @@
 import { Link } from 'react-router'
 import { X, BookOpen, Github, ExternalLink } from 'lucide-react'
 import { useConfigStore } from '../config'
+import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 
 const REPO_URL = 'https://github.com/Zherikhov/hamstrack'
 const LICENSE_URL = `${REPO_URL}/blob/main/LICENSE`
@@ -11,6 +12,9 @@ interface Props {
 
 export default function AboutModal({ onClose }: Props) {
   const version = useConfigStore(s => s.config.version)
+
+  // The keyboard half of the role="dialog" claim the panel below makes (HD-300).
+  useCloseOnEscape(onClose)
 
   const overlayStyle: React.CSSProperties = {
     position: 'fixed', inset: 0, zIndex: 50,
@@ -32,7 +36,8 @@ export default function AboutModal({ onClose }: Props) {
 
   return (
     <div data-modal-open="true" style={overlayStyle} onClick={onClose}>
-      <div style={panelStyle} onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="About"
+           style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
           className="flex items-center justify-between px-5 py-4 border-b"
           style={{ borderColor: 'var(--color-border)' }}
@@ -48,11 +53,13 @@ export default function AboutModal({ onClose }: Props) {
           <div className="flex items-center gap-3">
             <span
               className="flex items-center justify-center rounded font-display font-bold flex-shrink-0"
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               style={{ width: 40, height: 40, fontSize: 22, background: 'var(--color-brand)', color: 'white' }}
             >
               H
             </span>
             <div>
+              {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
               <div className="font-display font-bold" style={{ fontSize: 17 }}>Hamstrack</div>
               <div className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>
                 version {version || 'unknown'}

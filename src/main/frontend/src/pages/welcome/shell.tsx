@@ -22,6 +22,7 @@ export function WelcomeShell({ children }: { children: ReactNode }) {
   return (
     <div className="h-full flex flex-col" style={{ background: 'var(--color-surface)' }}>
       <header className="flex items-center justify-between px-6 py-4">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="font-display font-bold" style={{ fontSize: 20, letterSpacing: '-0.5px', color: 'var(--color-text)' }}>
           Hamstrack
         </span>

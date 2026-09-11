@@ -60,6 +60,7 @@ export default function AgingChart({
               className="mono"
               style={{
                 position: 'absolute', right: 6, top: y(t) - 7,
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 fontSize: 11, color: CHART_AXIS, whiteSpace: 'nowrap',
               }}
             >
@@ -96,6 +97,7 @@ export default function AgingChart({
                   <span
                     style={{
                       position: 'absolute', left: 0, right: 0, top: height / 2 - 8,
+                      // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                       textAlign: 'center', fontSize: 11.5, color: 'var(--color-text-muted)',
                     }}
                   >
@@ -131,6 +133,7 @@ export default function AgingChart({
                         className="flex items-center gap-1 truncate cursor-pointer"
                         style={{
                           position: 'absolute', left: 16, top: placed.labelTop,
+                          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                           maxWidth: 'calc(100% - 20px)', fontSize: 11, lineHeight: '14px',
                           color: over85 ? color : 'var(--color-text-secondary)',
                           fontWeight: over85 ? 700 : 500,
@@ -172,8 +175,10 @@ export default function AgingChart({
                     boxShadow: `inset 0 0 0 1px ${ringOn(columnColor(column) ?? CHART_CONTEXT, SURFACE.card)}`,
                   }}
                 />
+                {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                 <span className="truncate" style={{ fontSize: 12, fontWeight: 600 }}>{column.name}</span>
               </div>
+              {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
               <div className="mono" style={{ fontSize: 11, color: 'var(--color-text-muted)', marginTop: 2 }}>
                 {column.items.length}
               </div>
@@ -182,6 +187,7 @@ export default function AgingChart({
         </div>
       </div>
 
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <p style={{ fontSize: 11, color: CHART_AXIS, margin: '10px 0 0 44px' }}>
         Age in days, since work started (or since creation for anything never started).
       </p>
@@ -202,6 +208,7 @@ function Rule({ label, top, dash }: { label: string; top: number; dash: string }
       <span
         className="mono"
         style={{
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           position: 'absolute', right: 2, top: top - 14, fontSize: 11, color: CHART_AXIS,
           background: 'var(--color-card)', padding: '0 3px',
         }}

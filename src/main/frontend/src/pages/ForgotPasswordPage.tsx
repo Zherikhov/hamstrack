@@ -167,6 +167,7 @@ export default function ForgotPasswordPage() {
         <div className="mb-8 text-center">
           <h1
             className="font-display font-bold"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ fontSize: 28, color: 'var(--color-text)', letterSpacing: '-0.5px' }}
           >
             Hamstrack

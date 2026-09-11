@@ -13,6 +13,7 @@ import { VersionPicker } from './versions'
 import { SprintPicker } from './sprints'
 import { deliveryOf } from '../hooks/useProjectDelivery'
 import { permissionsFrom } from '../hooks/usePermissions'
+import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { Button, Input, Select, Textarea } from './ui'
 
 interface Props {
@@ -27,6 +28,12 @@ interface Props {
 
 export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClose }: Props) {
   const qc = useQueryClient()
+
+  // The keyboard half of the role="dialog" claim the panel below makes (HD-300).
+  // A picker that owns Escape while its popup is open (Select, LabelPicker,
+  // VersionPicker, SprintPicker) calls preventDefault first, so the first press
+  // closes the popup and the second closes this dialog.
+  useCloseOnEscape(onClose)
 
   const [wsSelection, setWsSelection] = useState('')
 
@@ -335,7 +342,8 @@ export default function CreateIssueModal({ wsId, defaultProjectId, preset, onClo
 
   return (
     <div data-modal-open="true" style={overlayStyle} onClick={onClose}>
-      <div style={panelStyle} onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="New Issue"
+           style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
           className="flex items-center justify-between px-5 py-4 border-b flex-shrink-0"
           style={{ borderColor: 'var(--color-border)' }}

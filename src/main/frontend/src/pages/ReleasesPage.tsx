@@ -132,6 +132,7 @@ export default function ReleasesPage() {
       <div style={{ maxWidth: 1180, padding: '20px 26px 40px' }}>
         <div className="flex items-start justify-between gap-4 mb-4">
           <div>
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <h1 style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.01em' }}>Releases</h1>
             <p className="text-sm mt-1" style={{ color: 'var(--color-text-secondary)', maxWidth: 560 }}>
               The versions this project ships. Link issues to one as a <b>fix version</b> (“this
@@ -324,6 +325,7 @@ function VersionCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             {/* DESIGN.md: version names are inspectable data → IBM Plex Mono */}
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <span className="mono truncate" style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-text)' }}>
               {version.name}
             </span>

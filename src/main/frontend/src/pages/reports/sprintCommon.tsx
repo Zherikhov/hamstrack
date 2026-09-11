@@ -141,9 +141,11 @@ export function SprintHeadline({ sprint }: { sprint: Pick<Sprint, 'name' | 'stat
   const range = formatSprintRange(sprint)
   return (
     <div className="flex flex-wrap items-center gap-2">
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span style={{ fontSize: 15, fontWeight: 800 }}>{sprint.name}</span>
       <SprintStateBadge state={sprint.state} compact />
       {range && (
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         <span className="mono" style={{ fontSize: 12, color: 'var(--color-text-secondary)' }}>{range}</span>
       )}
     </div>
@@ -173,6 +175,7 @@ export function ScrumRequiredCard({ wsId, projectId, canEdit, report }: {
   const copy = CAPABILITY.iterations
   return (
     <ReportCard>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>{copy.offTitle}</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: '8px 0 0', maxWidth: 640 }}>
         This project doesn’t run sprints, so there is no sprint {report} to draw. {copy.offBlurb}
@@ -217,6 +220,7 @@ export function NoSprintsCard({ wsId, projectId, canCreate }: {
 }) {
   return (
     <ReportCard>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>This project has no sprints yet</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: '8px 0 0', maxWidth: 640 }}>
         Sprint reports are drawn from a sprint’s own history, so there is nothing to report until

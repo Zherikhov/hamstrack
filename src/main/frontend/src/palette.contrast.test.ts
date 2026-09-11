@@ -31,11 +31,13 @@ import { contrastRatio, parseColour, relativeLuminance } from './colour'
  * `npm run audit:contrast` (see `audit/`) covers them. Both are required; neither
  * replaces the other, and a green run here is not a clean audit.
  *
- * **This suite runs on no automated path.** CI executes exactly one command,
- * `./mvnw -B verify`, whose frontend executions are `npm ci` and `npm run build` —
- * nothing invokes `npm test` (HD-242, already recorded in `colour.test.ts`). So
- * what is written here protects a reviewer and a local run, not a merge, and
- * "asserted" means "the assertion exists", not "the assertion ran".
+ * **This suite runs inside `mvnw verify` (HD-242).** The paragraph that used to
+ * stand here said the opposite — "this suite runs on no automated path" — and was
+ * true when it was written and false from the day `pom.xml` grew the `npm-test`
+ * execution, because nothing about a *sentence* changes when a *build file* does.
+ * That is the failure mode worth naming: a claim about the world, parked in a
+ * javadoc, with nothing holding it. What holds this one is `src/lint/debt.test.ts`,
+ * which reads `pom.xml` and goes red if the frontend executions leave it.
  */
 
 // ── The declared values, read from the stylesheet ──────────────────────────────
@@ -399,35 +401,31 @@ describe('per-site overrides', () => {
  * last third went grey. A wrong mechanism whose output is plausible is not found
  * by looking at it.
  *
- * **What it cannot see — and nothing else sees it either.** The same indirection
- * blind spot `RAW_INK` records: a token parked in a `const` or in a lookup table
- * (`color={STATUS_COLOR[u.status]}`) reaches the prop under a name, and that is
- * how three of the four badges in the historical bug were actually written. So the
- * shape that caused it is the shape this regex misses. That was checked rather than
- * assumed — the lookup-table version was reinstated verbatim and the whole suite
- * stayed green — every test in every file, nothing to report. Nor do the DOM tests
- * catch it: `ui.contrast.test.tsx` pins the *component's behaviour*, never a *call
- * site*, and no assertion anywhere reads the arguments a page passes. **This half is
- * not detected, and it is not "pinned behaviourally instead".**
+ * **The `color`-prop half of this scan is gone, and the reason it is gone is the
+ * blind spot it used to record here (HD-300).** What stood in this paragraph was a
+ * measurement: a token parked in a `const` or in a lookup table
+ * (`color={STATUS_COLOR[u.status]}`) reaches the prop under a name, that is how
+ * three of the four badges in the historical bug were actually written, and the
+ * lookup-table version was reinstated verbatim and the whole suite stayed green.
+ * A regex over source text cannot follow a value; a **type** can. `Badge`,
+ * `StatusBadge` and `ParentChip` now take {@link Hex} (`` `#${string}` ``), so all
+ * three shapes — the literal, the `const`, the table — are `tsc -b` errors, and
+ * `tsc -b` runs in `npm run build`, which runs in the image build and in `mvnw
+ * verify`. The seal on that is `src/lint/eslintRules.test.ts`'s table plus the
+ * three plants recorded in HD-300.
  *
- * What the DOM tests do buy is narrower, and real. A wrong call site now fails
- * **uniformly**: `Badge` rejects a token in all three of tint, hairline and label,
- * so the badge goes plainly neutral instead of the two-thirds-broken render that
- * still looked deliberate — being partly right is what let the original live in
- * `AdminUsersPage` until HD-176 turned the last third grey. And the correct
- * mechanism now exists: `ToneBadge` takes a declared fill/ink pair, so the fix at a
- * call site is a component swap and not a hex. Uniform failure plus an available
- * remedy — not detection.
+ * **So the first entry of this list was DELETED rather than kept alongside.** Two
+ * mechanisms for one trap is the duplication this repo treats as a defect: the
+ * weaker one is the one people read, and it would have gone on advertising a
+ * blind spot that no longer exists.
  *
- * Widening the regex to bare identifiers would fire on every legitimate
- * `color={c}` and would still not follow a table into another module. A scan that
- * cannot honestly do that says so where it is defined, rather than implying it away.
+ * **What stays, and why it cannot be a type.** A token as the *first* argument of
+ * `inkOn`/`tintOf`/`fillOf`/`ringOn`/`onSolid`. Those signatures take `unknown` on
+ * purpose — the value arrives from JSONB and may be anything — so no parameter
+ * type can express the refusal, and the regex is the only mechanism available.
+ * One home each.
  */
 const TOKEN_INTO_DERIVED: { what: string; re: RegExp }[] = [
-  {
-    what: 'a `color` prop whose contract is "a hue from the database"',
-    re: /<(?:Badge|StatusBadge|ParentChip)\b[^>]*?\bcolor=(?:\{[^}]*|["'])var\(--/,
-  },
   {
     what: 'a derivation primitive called ON a token (first argument)',
     // First argument only: the LAST argument of inkOn/ringOn/fillOf is the
@@ -438,17 +436,20 @@ const TOKEN_INTO_DERIVED: { what: string; re: RegExp }[] = [
 
 describe('a stylesheet token never enters the render-time path', () => {
   it('fires on the shape it exists to catch — otherwise it proves nothing', () => {
-    // The two historical offences, verbatim in shape. A tripwire nobody has ever
-    // seen trip is a tripwire nobody knows is connected.
-    const admin = `<Badge label={ROLE_LABEL[u.systemRole]}
-                         color={u.systemRole === 'ADMIN' ? 'var(--color-brand)' : undefined} />`
-    expect(TOKEN_INTO_DERIVED.some(({ re }) => re.test(admin))).toBe(true)
+    // The historical offence this list still owns, verbatim in shape. A tripwire
+    // nobody has ever seen trip is a tripwire nobody knows is connected.
     expect(TOKEN_INTO_DERIVED.some(({ re }) => re.test("inkOn('var(--color-success)', SURFACE.card)"))).toBe(true)
 
     // …and stays quiet on the legitimate neighbours, or its green is worth
     // nothing: a token as the NEUTRAL argument, and a token in plain CSS.
     expect(TOKEN_INTO_DERIVED.some(({ re }) => re.test("ringOn(o.color, SURFACE.card, 'var(--color-brand)')"))).toBe(false)
     expect(TOKEN_INTO_DERIVED.some(({ re }) => re.test('<StateChip color="var(--color-pending)" />'))).toBe(false)
+
+    // The OTHER historical offence — `<Badge color={… ? 'var(--color-brand)' : undefined} />`
+    // — is deliberately absent: since HD-300 it is a `tsc -b` error, not a scan
+    // hit, and this list has exactly one entry left. Asserting it here too would
+    // rebuild the second mechanism the type replaced.
+    expect(TOKEN_INTO_DERIVED).toHaveLength(1)
   })
 
   it('finds none in the components', () => {

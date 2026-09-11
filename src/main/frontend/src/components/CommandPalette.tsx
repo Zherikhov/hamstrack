@@ -445,12 +445,14 @@ function PalettePanel() {
             className="flex-1 min-w-0 outline-none"
             style={{
               border: 'none', background: 'transparent',
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 15, fontWeight: 450, color: 'var(--color-text)',
             }}
           />
           <span
             className="mono"
             style={{
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 10.5, padding: '2px 6px', borderRadius: 'var(--radius-sm)',
               border: '1px solid var(--color-border-2)', background: 'var(--color-surface-2)',
               color: 'var(--color-text-secondary)', flexShrink: 0,
@@ -483,6 +485,7 @@ function PalettePanel() {
             <div
               style={{
                 padding: '28px 18px 8px', textAlign: 'center',
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 fontSize: 13, color: 'var(--color-text-muted)',
               }}
             >
@@ -496,6 +499,7 @@ function PalettePanel() {
                 <div
                   aria-hidden="true"
                   style={{
+                    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                     fontSize: 11, fontWeight: 700, letterSpacing: '.08em',
                     textTransform: 'uppercase', color: 'var(--color-text-muted)',
                     padding: '12px 18px 4px',
@@ -522,6 +526,7 @@ function PalettePanel() {
           {!wsId && (
             <div
               style={{
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 padding: '10px 18px 4px', fontSize: 12,
                 color: 'var(--color-text-muted)',
               }}
@@ -538,6 +543,7 @@ function PalettePanel() {
             height: 34, flexShrink: 0, display: 'flex', alignItems: 'center',
             justifyContent: 'space-between', padding: '0 18px',
             borderTop: '1px solid var(--color-border)',
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             fontSize: 11, color: 'var(--color-text-muted)',
           }}
         >
@@ -634,6 +640,7 @@ function Row({ cmd, active, onHover, onRun }: {
       <span className="flex-1 min-w-0 truncate">
         <span
           style={{
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             fontSize: 13.5, fontWeight: 600,
             color: cmd.disabled ? 'var(--color-text-muted)' : 'var(--color-text)',
           }}
@@ -641,6 +648,7 @@ function Row({ cmd, active, onHover, onRun }: {
           {cmd.label}
         </span>
         {cmd.sublabel && (
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
             {' · '}{cmd.sublabel}
           </span>
@@ -648,6 +656,7 @@ function Row({ cmd, active, onHover, onRun }: {
       </span>
 
       {cmd.meta && (
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         <span className="mono flex-shrink-0" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
           {cmd.meta}
         </span>
@@ -666,6 +675,7 @@ export function Kbd({ children }: { children: React.ReactNode }) {
     <span
       className="mono"
       style={{
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 10.5, padding: '2px 6px', borderRadius: 'var(--radius-sm)',
         border: '1px solid var(--color-border-2)', background: 'var(--color-surface-2)',
         color: 'var(--color-text-secondary)', whiteSpace: 'nowrap',

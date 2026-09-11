@@ -7,7 +7,7 @@ import CreateIssueModal from './CreateIssueModal'
 import { sprintsApi, versionsApi } from '../api'
 import { boardIssuesKey } from '../lib/queryKeys'
 import type { CreateIssuePreset } from '../uiStore'
-import type { BoardIssues, Issue, ProjectDelivery } from '../types'
+import type { BoardIssues, Hex, Issue, IssueType, ProjectDelivery, Status } from '../types'
 import {
   PROJECT_CONTRIBUTOR_PERMISSIONS, PROJECT_VIEWER_PERMISSIONS,
 } from '../test/permissions'
@@ -25,19 +25,19 @@ import {
 // with "projectIssues.filter is not a function" whenever it was opened over a
 // board that had already populated the entry.
 
-const STATUSES = [
+const STATUSES: Status[] = [
   { id: 's1', name: 'To Do', color: '#999', category: 'TODO' as const, position: 0 },
   { id: 's2', name: 'In Progress', color: '#09f', category: 'IN_PROGRESS' as const, position: 1 },
   { id: 's3', name: 'Done', color: '#0a0', category: 'DONE' as const, position: 2 },
 ]
 
-const TASK = { id: 't1', name: 'Task', color: '#555', position: 0, hierarchyLevel: 1 }
-const EPIC = { id: 't2', name: 'Epic', color: '#0a0', position: 1, hierarchyLevel: 2 }
+const TASK: IssueType = { id: 't1', name: 'Task', color: '#555', position: 0, hierarchyLevel: 1 }
+const EPIC: IssueType = { id: 't2', name: 'Epic', color: '#0a0', position: 1, hierarchyLevel: 2 }
 
 // Mutable mock state — the config's issue types decide whether a parent picker
 // exists at all (it needs a type exactly one level above the selected one).
 const mockState = vi.hoisted(() => ({
-  issueTypes: [] as { id: string; name: string; color: string; position: number; hierarchyLevel: number }[],
+  issueTypes: [] as { id: string; name: string; color: Hex; position: number; hierarchyLevel: number }[],
   board: { issues: [], truncated: false, totalAvailable: 0, cap: 500 } as BoardIssues,
   // HD-102: the SELECTED project's declared delivery capabilities decide which
   // path-specific inputs this form offers — never whether it happens to have
@@ -321,5 +321,36 @@ describe('CreateIssueModal project picker (HD-123 §14.3)', () => {
     render(<CreateIssueModal wsId="w1" onClose={() => {}} />, { wrapper })
 
     expect(await screen.findByText('No projects in this workspace yet.')).toBeInTheDocument()
+  })
+})
+
+/**
+ * HD-300 — the keyboard half of the `role="dialog"` claim. The category and what
+ * it deliberately does not cover (a focus trap) are stated once, in
+ * `dialogEscape.test.tsx`. This member is the one that matters most, because it
+ * is the only one of the three with nested widgets that own Escape themselves:
+ * a dialog-level handler written without the `defaultPrevented` clause makes the
+ * FIRST Escape close the whole form out from under an open listbox.
+ */
+describe('CreateIssueModal closes on Escape (HD-300)', () => {
+  it('closes the open listbox first, and the dialog on the next press', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    render(<CreateIssueModal wsId="w1" onClose={onClose} />, { wrapper })
+
+    expect(screen.getByRole('dialog', { name: 'New Issue' })).toBeInTheDocument()
+    const trigger = await screen.findByLabelText('Project')
+    await user.click(trigger)
+    expect(screen.queryAllByRole('option').length).toBeGreaterThan(0)
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryAllByRole('option')).toEqual([])
+    expect(
+      onClose,
+      'the first Escape closed the dialog as well as the listbox it was aimed at',
+    ).not.toHaveBeenCalled()
+
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 })

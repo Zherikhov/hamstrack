@@ -305,6 +305,7 @@ export default function HqlInput({
             className="mono"
             style={{
               position: 'absolute', inset: 0, padding: `${padY}px ${padX}px`,
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 13, whiteSpace: 'pre', overflow: 'hidden',
               color: 'transparent', pointerEvents: 'none',
             }}
@@ -327,6 +328,7 @@ export default function HqlInput({
             position: 'relative', background: 'transparent',
             border: `1px solid ${error ? 'var(--color-error)' : 'var(--color-border-2)'}`,
             borderRadius: 'var(--radius-md)', padding: `${padY}px ${padX}px`,
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             fontSize: 13, color: 'var(--color-text)',
           }}
           onChange={e => { onChange(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); setOpen(true) }}
@@ -362,11 +364,13 @@ export default function HqlInput({
             >
               <span
                 className="mono flex-1 min-w-0 truncate"
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 style={{ fontSize: 12.5, color: 'var(--color-text)' }}
               >
                 {s.label}
               </span>
               {s.hint && (
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 <span className="text-xs flex-shrink-0" style={{ color: 'var(--color-text-muted)', fontSize: 10.5 }}>
                   {s.hint}
                 </span>

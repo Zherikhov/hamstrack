@@ -75,6 +75,7 @@ export function NotFoundScreen({ variant = 'route', noun = 'page', children }: {
 
           <div
             className="mono mb-2"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ fontSize: 11, letterSpacing: '0.05em', color: 'var(--color-text-muted)' }}
           >
             404
@@ -82,6 +83,7 @@ export function NotFoundScreen({ variant = 'route', noun = 'page', children }: {
 
           <h1
             className="font-bold"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ fontSize: 20, letterSpacing: '-0.02em', color: 'var(--color-text)' }}
           >
             {variant === 'route' ? 'This page doesn’t exist' : `We couldn’t find that ${noun}`}
@@ -100,6 +102,7 @@ export function NotFoundScreen({ variant = 'route', noun = 'page', children }: {
               className="mono mt-4 truncate"
               title={pathname}
               style={{
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 fontSize: 12, padding: '8px 12px', borderRadius: 'var(--radius-md)',
                 background: 'var(--color-surface)', border: '1px solid var(--color-border)',
                 color: 'var(--color-text-secondary)',

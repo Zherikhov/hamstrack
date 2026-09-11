@@ -58,6 +58,7 @@ export default function AppShell() {
           style={{
             position: 'fixed', left: 16, bottom: 16, zIndex: 80,
             background: 'var(--color-ink-menu)', color: '#fff',
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             borderRadius: 'var(--radius-sm)', padding: '4px 9px', fontSize: 11,
             animation: reducedMotion ? undefined : 'cmdk-chord-in 120ms ease-out',
           }}

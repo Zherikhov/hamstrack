@@ -81,6 +81,7 @@ export default function ProjectBindingsPage() {
   return (
     <div>
       <div className="mb-5">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 className="font-display font-bold" style={{ fontSize: 20, letterSpacing: '-0.3px' }}>
           Taxonomy
         </h2>

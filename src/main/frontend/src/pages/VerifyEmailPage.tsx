@@ -37,7 +37,9 @@ export default function VerifyEmailPage() {
       }
     }
     verify(token)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Mount only: the token is burned once, and a re-run would report a burned
+    // token as an invalid link. (exhaustive-deps objects; not in the rule set — HD-300 Q1.)
+  }, [])
 
   return (
     <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
@@ -45,6 +47,7 @@ export default function VerifyEmailPage() {
         <div className="mb-8 text-center">
           <h1
             className="font-display font-bold"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ fontSize: 28, color: 'var(--color-text)', letterSpacing: '-0.5px' }}
           >
             Hamstrack

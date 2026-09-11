@@ -107,9 +107,11 @@ export default function ProjectSwitcher({ wsId, projectId, tone = 'dark' }: Prop
         {current ? (
           <>
             <span className="mono text-xs" style={{ color: dark ? 'rgba(255,255,255,0.55)' : 'var(--color-text-muted)' }}>{current.key}</span>
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <span className="max-w-44 truncate" style={{ fontSize: 13.5 }}>{current.name}</span>
           </>
         ) : (
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           <span style={{ fontSize: 13.5 }}>Projects</span>
         )}
         <ChevronDown size={13} style={{ color: dark ? 'rgba(255,255,255,0.4)' : 'var(--color-text-muted)' }} />
@@ -165,6 +167,7 @@ export default function ProjectSwitcher({ wsId, projectId, tone = 'dark' }: Prop
                   >
                     <span
                       className="flex items-center justify-center rounded font-display font-bold text-white flex-shrink-0"
+                      // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                       style={{ width: 24, height: 24, fontSize: 10, background: 'var(--color-brand)' }}
                     >
                       {e.key.slice(0, 2)}

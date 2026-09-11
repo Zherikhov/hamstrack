@@ -415,6 +415,7 @@ export default function BoardPage() {
           <div className="flex items-center gap-2 min-w-0">
             {/* The rail item and this title stay "Board" in both modes — the
                 header strip below says WHICH sprint is on screen (HD-27). */}
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>Board</span>
           </div>
         </div>
@@ -608,6 +609,7 @@ export default function BoardPage() {
                     maxWidth: 460,
                   }}
                 >
+                  {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                   <p className="font-semibold" style={{ fontSize: 15 }}>No active sprint</p>
                   <p className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
                     This project’s board is scoped to the running sprint. Start one to see the work

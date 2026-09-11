@@ -153,6 +153,7 @@ function HelpPanel() {
           className="flex items-center justify-between flex-shrink-0"
           style={{ padding: '16px 20px', borderBottom: '1px solid var(--color-border)' }}
         >
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <span style={{ fontSize: 15, fontWeight: 800 }}>Keyboard shortcuts</span>
           <button
             ref={closeRef}
@@ -177,6 +178,7 @@ function HelpPanel() {
             <div key={group.title}>
               <div
                 style={{
+                  // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                   fontSize: 11, fontWeight: 700, letterSpacing: '.08em',
                   textTransform: 'uppercase', color: 'var(--color-text-muted)',
                   padding: '16px 0 6px',
@@ -193,8 +195,10 @@ function HelpPanel() {
                   <span className="flex items-center gap-1 flex-shrink-0" style={{ minWidth: 92 }}>
                     {row.keys.map((k, i) => <Kbd key={i}>{k}</Kbd>)}
                   </span>
+                  {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                   <span style={{ fontSize: 13.5, color: 'var(--color-text)' }}>{row.label}</span>
                   {row.note && (
+                    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                     <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>— {row.note}</span>
                   )}
                 </div>
@@ -204,6 +208,7 @@ function HelpPanel() {
 
           <div
             style={{
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 11, fontWeight: 700, letterSpacing: '.08em',
               textTransform: 'uppercase', color: 'var(--color-text-muted)',
               padding: '16px 0 6px',
@@ -212,6 +217,7 @@ function HelpPanel() {
             Notes
           </div>
           {/* The honest statement of today's search limits (§4.2). */}
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <p style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--color-text-muted)', margin: 0 }}>
             Text search matches issue titles and descriptions in the current workspace.
             Use Search for full HQL queries.

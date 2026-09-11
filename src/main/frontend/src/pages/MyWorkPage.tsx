@@ -23,7 +23,9 @@ export default function MyWorkPage() {
     <div style={{ flex: 1, overflow: 'auto' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '20px 26px 0' }}>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 style={{ fontSize: 22, fontWeight: 800 }}>My work</h1>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span style={{ fontSize: 13, color: 'var(--color-text-muted)', fontWeight: 600 }}>everything assigned to you across projects</span>
       </div>
 
@@ -32,10 +34,12 @@ export default function MyWorkPage() {
         <button
           onClick={() => setOpenOnly(v => !v)}
           className="cursor-pointer"
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 13px', borderRadius: 'var(--radius-md)', border: '1px solid var(--color-border-2)', background: 'var(--color-card)', fontSize: 12.5, fontWeight: 600, color: 'var(--color-text-secondary)' }}
         >
           {openOnly ? 'Open issues' : 'All issues'}
         </button>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span style={{ marginLeft: 'auto', fontSize: 12.5, color: 'var(--color-text-muted)', fontWeight: 600 }}>
           {isLoading ? 'loading…' : `${rows.length} issue${rows.length !== 1 ? 's' : ''}`}
         </span>
@@ -44,6 +48,7 @@ export default function MyWorkPage() {
       {/* Table */}
       <div style={{ padding: '0 26px 26px' }}>
         {rows.length === 0 && !isLoading ? (
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           <div style={{ padding: '48px 0', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: 14 }}>
             {openOnly ? 'No open issues assigned to you 🎉' : 'Nothing assigned to you yet'}
           </div>
@@ -52,6 +57,7 @@ export default function MyWorkPage() {
             <thead>
               <tr>
                 {['Key', 'Title', 'Project', 'Status', 'Priority', 'Due'].map(h => (
+                  // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                   <th key={h} style={{ textAlign: 'left', fontSize: 11.5, textTransform: 'uppercase', letterSpacing: '0.04em', color: 'var(--color-text-muted)', fontWeight: 700, padding: '10px 14px', borderBottom: '1px solid var(--color-border)' }}>{h}</th>
                 ))}
               </tr>
@@ -64,13 +70,17 @@ export default function MyWorkPage() {
                     style={{ borderBottom: '1px solid var(--color-border)' }}
                     onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-card)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+                    {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                     <td style={{ padding: '12px 14px' }}><span className="mono" style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{i.key}</span></td>
+                    {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                     <td style={{ padding: '12px 14px', maxWidth: 360 }}><span className="truncate" style={{ display: 'block', fontSize: 13.5, fontWeight: 500 }}>{i.title}</span></td>
+                    {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                     <td style={{ padding: '12px 14px' }}><span style={{ fontSize: 12.5, color: 'var(--color-text-secondary)', fontWeight: 600 }}>{i._project.name}</span></td>
                     <td style={{ padding: '12px 14px' }}><StatusBadge name={i.status.name} category={i.status.category} color={i.status.color} /></td>
                     <td style={{ padding: '12px 14px' }}><PriorityBadge priority={i.priority} /></td>
                     <td style={{ padding: '12px 14px' }}>
                       {due
+                        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                         ? <span style={{ fontSize: 12, fontWeight: 700, color: due.urgent ? 'var(--color-error-ink)' : 'var(--color-text-secondary)' }}>{due.text}</span>
                         : <span style={{ color: 'var(--color-text-muted)' }}>—</span>}
                     </td>

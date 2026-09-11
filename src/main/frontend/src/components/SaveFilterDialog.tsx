@@ -87,6 +87,7 @@ export default function SaveFilterDialog({ wsId, hql, editing, onClose, onSaved,
           <div
             className="mono"
             style={{
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 12, padding: '9px 12px', borderRadius: 'var(--radius-md)',
               background: 'var(--color-surface)', border: '1px solid var(--color-border)',
               color: 'var(--color-text-secondary)', wordBreak: 'break-word',

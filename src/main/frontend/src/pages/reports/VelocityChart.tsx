@@ -57,6 +57,7 @@ export default function VelocityChart({
           <XAxis
             dataKey="name"
             tickFormatter={shortSprintName}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             interval={0}
@@ -65,6 +66,7 @@ export default function VelocityChart({
             domain={[0, axis.max]}
             ticks={axis.ticks}
             allowDecimals={measure === 'POINTS'}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             width={44}
@@ -83,6 +85,7 @@ export default function VelocityChart({
               stroke={CHART_CONTEXT}
               strokeWidth={2}
               strokeDasharray="5 4"
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               label={{ value: 'p50', position: 'right', fill: CHART_AXIS, fontSize: 11 }}
             />
           )}
@@ -92,6 +95,7 @@ export default function VelocityChart({
               stroke={CHART_CONTEXT}
               strokeWidth={2}
               strokeDasharray="2 4"
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               label={{ value: 'p85', position: 'right', fill: CHART_AXIS, fontSize: 11 }}
             />
           )}
@@ -212,6 +216,7 @@ function VelocityTooltip({ measure, payload, active }: {
         border: '1px solid var(--color-border-2)',
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-pop)',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 12,
         padding: '8px 10px',
         maxWidth: 300,

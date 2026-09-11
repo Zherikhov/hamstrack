@@ -187,6 +187,7 @@ export default function ProjectDeliverySettingsPage() {
     <div className="flex flex-col gap-5">
       <div>
         <div className="flex items-center gap-2 flex-wrap">
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <h2 className="font-semibold" style={{ fontSize: 15 }}>Delivery</h2>
           {/* Only for a response that actually carried one: `deliveryOf` answers
               CUSTOM for a pre-HD-102 project, and a label we invented client-side
@@ -510,6 +511,7 @@ function PresetPill({ preset }: { preset: DeliveryPreset }) {
       style={{
         borderRadius: 'var(--radius-full, 9999px)',
         padding: '2px 9px',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 11,
         background: 'var(--color-surface-2)',
         color: 'var(--color-text-secondary)',

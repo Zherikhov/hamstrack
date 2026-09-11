@@ -146,6 +146,7 @@ export function ReportExportBar({
           <span
             className="mono"
             style={{
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 9, letterSpacing: '0.05em', marginLeft: 4,
               border: '1px solid var(--color-border-2)', borderRadius: 5, padding: '1px 4px',
             }}

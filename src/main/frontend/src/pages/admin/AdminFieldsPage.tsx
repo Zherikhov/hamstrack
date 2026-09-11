@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { AlertTriangle, EyeOff, Trash2 } from 'lucide-react'
 import type { UpsertFieldPayload } from '../../api'
-import type { AdminField, AdminFieldSet, AdminScopeTag, FieldType } from '../../types'
+import type { AdminField, AdminFieldSet, AdminScopeTag, FieldType, Hex } from '../../types'
 import { FIELD_TYPE_LABELS } from '../../components/fields'
 import { Button, Checkbox, Input, Select } from '../../components/ui'
 import { AdminTable, ArchivedBadge, ArchivedToggle, ImpactBanner, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
@@ -102,6 +102,7 @@ export default function AdminFieldsPage() {
 
       {/* Field sets */}
       <div className="flex items-center justify-between mt-8 mb-3">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 className="font-display font-bold" style={{ fontSize: 17 }}>Field sets</h2>
         <Button variant="secondary" size="sm" onClick={() => setEditingSet('new')}>+ New field set</Button>
       </div>
@@ -261,7 +262,7 @@ function FieldDeleteDialog({ field, onArchive, onClose, onDeleted }: {
   )
 }
 
-interface OptionDraft { id: string; label: string; color?: string }
+interface OptionDraft { id: string; label: string; color?: Hex }
 
 function slugify(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')

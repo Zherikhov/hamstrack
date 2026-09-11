@@ -372,6 +372,7 @@ export default function SprintBurnupPage() {
               <LegendItem color={CHART_SERIES[2]} label="Completed, cumulative" />
               <LegendItem color={CHART_CONTEXT} label="Ideal — to the scope committed at the start" dashed />
               {burnup.isFetching && (
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 <span className="mono ml-auto" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                   refreshing…
                 </span>
@@ -431,6 +432,7 @@ export default function SprintBurnupPage() {
           )}
 
           {/* ── The scope-change log ─────────────────────────────────────── */}
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <h2 style={{ fontSize: 15, fontWeight: 800, margin: '8px 0 0' }}>Scope changes</h2>
           <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: 0, maxWidth: 760 }}>
             Every issue that joined or left this sprint, with who moved it and when.{' '}
@@ -486,6 +488,7 @@ const HANDLED_STATUSES = [400, 404, 429]
 function PageHeading() {
   return (
     <div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em', margin: 0 }}>
         Sprint burn-up
       </h1>
@@ -538,7 +541,9 @@ function Stat({ label, value, hint, color }: {
         minWidth: 150,
       }}
     >
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em' }}>{value}</div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>
         {label}{hint ? ` · ${hint}` : ''}
       </div>

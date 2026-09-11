@@ -83,23 +83,28 @@ export default function AdminArea() {
         {/* Brand */}
         <div className="flex items-center gap-2.5" style={{ padding: '6px 8px 12px' }}>
           <span className="flex items-center justify-center flex-shrink-0"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ width: 28, height: 28, borderRadius: 9, fontWeight: 800, fontSize: 15, color: '#2a1a05', background: `linear-gradient(135deg, ${ACCENT}, #FBBF24)` }}>H</span>
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <b style={{ fontWeight: 800, fontSize: 16, color: '#fff' }}>Hamstrack</b>
         </div>
 
         {/* Elevated-access caption */}
         <div className="flex items-center gap-2" style={{ margin: '2px 4px 12px', padding: '8px 10px', borderRadius: 10, background: ACTIVE_BG, border: `1px solid rgba(245,158,11,0.28)` }}>
           <ShieldAlert size={15} style={{ color: ACCENT, flexShrink: 0 }} />
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <span style={{ fontSize: 11.5, fontWeight: 700, color: ACTIVE_TX, letterSpacing: '0.02em' }}>System administration</span>
         </div>
 
         <AdminNavItem to="/home" icon={Home} label="Back to app" exact />
 
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <div style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '14px 11px 6px', fontWeight: 700 }}>Administration</div>
         {SECTIONS.map(s => (
           <AdminNavItem key={s.path} to={`/admin/${s.path}`} icon={s.icon} label={s.label} />
         ))}
 
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <div style={{ fontSize: 11, color: MUTED, padding: '14px 11px 4px' }}>
           Workspaces — <span style={{ color: MUTED }}>planned</span>
         </div>
@@ -122,7 +127,9 @@ export default function AdminArea() {
           >
             {user && <Avatar name={user.displayName} avatarUrl={user.avatarUrl} size={30} />}
             <span className="flex-1 min-w-0 text-left">
+              {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
               <span className="block truncate" style={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>{user?.displayName}</span>
+              {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
               <span className="block truncate" style={{ fontSize: 11, color: ACTIVE_TX }}>{user?.systemRole === 'ADMIN' ? 'Admin' : user?.email}</span>
             </span>
             <ChevronDown size={14} style={{ color: MUTED, transform: menuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }} />
@@ -164,6 +171,7 @@ function AdminNavItem({ to, icon: Icon, label, exact }: { to: string; icon: Luci
       style={({ isActive }) => ({
         display: 'flex', alignItems: 'center', gap: 11,
         padding: '9px 11px', borderRadius: 10,
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 13.5, fontWeight: 600, textDecoration: 'none',
         color: isActive ? ACTIVE_TX : (h ? '#fff' : ITEM),
         background: isActive ? ACTIVE_BG : (h ? HOVER_BG : 'transparent'),

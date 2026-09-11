@@ -89,6 +89,7 @@ export default function ProjectSettingsArea() {
       <div style={{ maxWidth: 960 }}>
         <div className="mb-4">
           <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>Project settings</div>
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <h1 className="font-display font-bold" style={{ fontSize: 24, letterSpacing: '-0.4px' }}>
             {project?.name ?? '…'}
           </h1>

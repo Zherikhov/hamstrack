@@ -6,6 +6,34 @@ import react from '@vitejs/plugin-react'
 // tests assert DOM/behavior, not computed styles, so we skip the CSS pipeline.
 export default defineConfig({
   plugins: [react()],
+  // `src/lint/debt.test.ts` reads `pom.xml` as text — the last silent-drop path
+  // for the lint gate is the Maven execution being deleted, and nothing else
+  // would notice. It sits three directories above the Vite root, so without an
+  // entry here the transform is refused as a `Denied ID`.
+  //
+  // The entries NAME THE FILE. `'../../..'` — what HD-300 first wrote — hands
+  // the whole repository to Vite's transform middleware: `application*.properties`,
+  // `data/attachments/`, `ops/`, `.claude/`, any `.env` a developer keeps there.
+  // It grants no capability a test lacked (`node:fs` was never gated), but it is
+  // the control that bounds what an open `@vitest/mocker` path-traversal
+  // advisory can reach, and there is no reason for it to be wider than one file.
+  //
+  // WHY TWO ENTRIES FOR ONE FILE, measured against vite 6.4.3 rather than read:
+  // `isFileLoadingAllowed` matches an entry by `isSameFileUri(uri, filePath) ||
+  // isParentDirectory(uri, filePath)`, and this import is checked TWICE on two
+  // different spellings of the same file. `isServerAccessDeniedForTransform`
+  // runs first and passes the id **with its query** (`…/pom.xml?raw`); the load
+  // path afterwards passes `cleanUrl(id)` (`…/pom.xml`). A directory entry
+  // covered both by prefix; an exact-match entry covers only what it spells, so
+  // `allow: ['./', '../../../pom.xml']` alone fails at collection with
+  // `Denied ID C:/…/pom.xml?raw` — reproduced here on 2026-09-11 before this
+  // line was written. Remove the `?raw` entry and `debt.test.ts` stops running
+  // at all, which is a lint gate losing its outside guard; it does not fail
+  // quietly, but it does fail for a reason nobody would guess from the diff.
+  //
+  // `vite.config.ts` (the production build) is untouched and still cannot reach
+  // outside src/main/frontend.
+  server: { fs: { allow: ['./', '../../../pom.xml', '../../../pom.xml?raw'] } },
   test: {
     environment: 'jsdom',
     globals: true,

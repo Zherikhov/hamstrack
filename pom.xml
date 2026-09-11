@@ -37,13 +37,15 @@
         <jjwt.version>0.12.6</jjwt.version>
         <awssdk.version>2.47.3</awssdk.version>
         <!-- HD-94: -Dfrontend.skip=true skips node install + npm install + npm run build
-             — and, since HD-242, `npm test` too — for a fast backend-only loop
-             (`mvnw test`). Keep the default false: a plain `mvnw package` / CI's
-             `./mvnw -B verify` MUST still build the SPA into src/main/resources/static,
-             which is what ships inside the JAR, and MUST still run the frontend suite,
-             which nothing else does. Note the two off-switches are not the same switch:
-             this one drops the SPA from the artifact, `-DskipTests` leaves the build
-             intact and drops only the test executions (surefire's and npm-test's). -->
+             — and, since HD-242, `npm test`, and since HD-300 `npm run lint` — for a
+             fast backend-only loop (`mvnw test`). Keep the default false: a plain
+             `mvnw package` / CI's `./mvnw -B verify` MUST still build the SPA into
+             src/main/resources/static, which is what ships inside the JAR, and MUST
+             still run the frontend suite and the frontend lint gate, which nothing else
+             does. Note the two off-switches are not the same switch: this one drops the
+             SPA from the artifact and takes every execution of the plugin with it,
+             `-DskipTests` leaves the build intact and drops only the executions bound to
+             a testing phase (surefire's, npm-test's and npm-lint's). -->
         <frontend.skip>false</frontend.skip>
     </properties>
     <dependencyManagement>
@@ -205,8 +207,13 @@
                     <workingDirectory>src/main/frontend</workingDirectory>
                     <installDirectory>target</installDirectory>
                     <!-- Every goal of this plugin (install-node-and-npm, npm) declares its
-                         own editable `skip` parameter, so one plugin-level binding covers
-                         all four executions below, including npm-test (HD-242). -->
+                         own editable `skip` parameter, so this one plugin-level binding
+                         covers EVERY execution below, whatever they come to be — an
+                         execution added later inherits it and needs no line here. Stating
+                         how many there are today is the one thing this comment must not
+                         do: the count goes stale one execution before the list does, and
+                         the other four sentences about this plugin were rewritten for
+                         exactly that reason (HD-300, HD-242). -->
                     <skip>${frontend.skip}</skip>
                 </configuration>
                 <executions>
@@ -215,6 +222,13 @@
                         <goals><goal>install-node-and-npm</goal></goals>
                         <phase>generate-resources</phase>
                         <configuration>
+                            <!-- HD-300: this pin sits EXACTLY on the lint gate's floor.
+                                 eslint@10.10.0 declares engines `^20.19.0 || ^22.13.0 || >=24`
+                                 and `npm ci` only WARNS on EBADENGINE, so a node downgrade here
+                                 (or an eslint bump that raises its floor) breaks `npm-lint` with
+                                 a runtime crash on the Maven path while a developer on a newer
+                                 system node stays green. Zero patch versions of margin: check
+                                 both engine ranges before touching either number. -->
                             <nodeVersion>v22.13.0</nodeVersion>
                         </configuration>
                     </execution>
@@ -241,6 +255,102 @@
                         <phase>generate-resources</phase>
                         <configuration><arguments>run build</arguments></configuration>
                     </execution>
+                    <!-- HD-300: the SPA's ESLint rule set, on the same automated path.
+
+                         WHAT IT IS. Four custom rules (`src/main/frontend/eslint-rules/`),
+                         each one a mechanical entry of the frontend trap list, run by
+                         `lint.mjs` — a program rather than a bare `eslint .`, because a bare
+                         run EXITS 0 WHEN IT LINTS NOTHING and an `ignores` that grows a `**`
+                         is indistinguishable from a clean tree. `lint.mjs` asserts a floor on
+                         the number of files linted and prints the count on every run; that
+                         count, not the exit code, is the witness. Same reasoning as the
+                         `passWithNoTests` paragraph above, and the same answer HD-265 chose
+                         for the backend: the guard is shaped as a program, because the thing
+                         it guards against would swallow a guard shaped as a rule.
+
+                         WHY `test` AND NOT `generate-resources`. Exactly HD-242's reason, one
+                         execution up: `test` is one of the two bindings `AbstractFrontendMojo`
+                         honours `-DskipTests` for (`isTestingPhase()` accepts `test` and
+                         `integration-test` — read from the 1.15.1 bytecode, not from its
+                         docs), so the image build (`clean package -DskipTests`, Dockerfile)
+                         does not pay for a gate CI has already run, and the plugin-level
+                         `<skip>${frontend.skip}</skip>` switches every execution of this
+                         plugin off together rather than all-but-one plus a flag someone must
+                         remember. Folded into `npm run build` instead, it would be paid a
+                         third time per pipeline. ONE FLAG, NOT TWO: the plugin binds its
+                         `skipTests` parameter to `${skipTests}` only, so `-Dmaven.test.skip=true`
+                         — which does silence surefire — would NOT silence this execution or
+                         npm-test. The Dockerfile uses `-DskipTests`, so it is correct today
+                         and nothing seals it.
+
+                         WHY BEFORE `npm-test`. Declaration order decides order within a
+                         phase, so the ~5s gate reports before the ~45-70s one. (Surefire,
+                         being the default-lifecycle binding, still runs before both.) Sealed
+                         by `src/lint/debt.test.ts`, which compares the two declaration
+                         offsets — otherwise a reorder is silent and costs a developer the
+                         long gate before the short verdict.
+
+                         COST, measured ON THE 12-CORE DEV BOX on 2026-09-11, with a warm
+                         `node_modules` (228 files linted, 203 suppressed HD-177 sites at the
+                         time; both numbers have since moved and the witness line is what
+                         prints them). Three ways, in the shape the paragraph below uses,
+                         because one number would have been a lie:
+
+                           4.8s / 4.3s  `npm run lint` on its own, two runs, same tree
+                           5.6s         the execution alone through Maven
+                                        (`mvnw frontend:npm@npm-lint`; 8.0s wall clock, the
+                                        difference being JVM start)
+                           unresolvable the lifecycle delta. `mvnw test
+                                        -Dmaven.test.skip.exec=true` — same tree, same npm
+                                        ci, same vite build, same vitest run — took 1:56 and
+                                        2:11 WITH this execution and 2:00 with the execution
+                                        deleted from this pom. The spread between two runs of
+                                        the IDENTICAL command (15s) is three times the
+                                        execution's own cost, so the delta cannot be measured
+                                        this way and the isolated numbers above are the
+                                        honest ones.
+
+                         So budget ~5s ON THAT BOX, and read the third row as the point rather
+                         than as a failed measurement: it is the same thing HD-240 found one
+                         layer down and the same thing the vitest paragraph below records (41s
+                         vs 55s for the identical command). Adding this gate costs less than
+                         the noise on the gate that was already here — which is also a dev-box
+                         statement, n=3.
+
+                         THE MACHINE THAT ACTUALLY PAYS is a 2-core GitHub-hosted runner with
+                         a cold `node_modules` from `npm ci`, and that number does not exist
+                         yet: the first CI run of the `frontend:1.15.1:npm (npm-lint)` step is
+                         the first measurement of it. Read the step duration there before
+                         repeating the figure above. Note `lint.mjs` deliberately takes no
+                         cache flag (a cache turns a clean run into a claim about a previous
+                         run, and `src/lint/debt.test.ts` refuses one), so CI pays a full cold
+                         lint every run by design.
+
+                         (An XML comment may not contain two consecutive dashes, which is why
+                         neither the Maven step banner nor the ESLint flag is spelled verbatim
+                         above — Maven refuses to parse the POM at all, loudly, on the first
+                         command anyone runs.)
+
+                         THE FAILURE MODE THIS STEP HAS. Not "a rule fires" — that is the step
+                         working, and the stylish report names file, line and rule. It is a run
+                         that verifies less than it looks like it verified. `lint.mjs` refuses
+                         four shapes of that: a run that lints (almost) nothing (FILE_FLOOR),
+                         a warning (the only way to get one is a severity downgraded inside a
+                         source file, which no config guard can see), a suppression count over
+                         DECLARED, and a suppression naming no ticket — the last two over every
+                         file the run lints, `.js` and `.mjs` included. From the other side,
+                         `src/lint/debt.test.ts` guards the config FROM OUTSIDE it: a rule
+                         turned to 'warn', an `ignores` that grew, an `eslint-suppressions.json`,
+                         a suppression flag anywhere, this execution deleted or moved, or
+                         `lint.mjs` losing one of its refusals — each turns that test red. A
+                         guard living inside the artifact it guards is disarmed by the same
+                         edit that needs guarding. -->
+                    <execution>
+                        <id>npm-lint</id>
+                        <goals><goal>npm</goal></goals>
+                        <phase>test</phase>
+                        <configuration><arguments>run lint</arguments></configuration>
+                    </execution>
                     <!-- HD-242: the frontend suite runs inside `mvn verify`, not beside it.
 
                          Before this execution existed, `npm test` ran on no automated path
@@ -259,8 +369,10 @@
                          release locally, the Dockerfile, a future workflow — each would have
                          to remember the second mechanism. Here there is one: whatever runs
                          the lifecycle runs the suite, and `-Dfrontend.skip=true` (HD-94)
-                         switches all four executions off together, by construction rather
-                         than by a second flag that has to be kept in sync.
+                         switches every execution of this plugin off together — the binding
+                         is plugin-level, so an execution added later inherits it — by
+                         construction rather than by a second flag that has to be kept in
+                         sync.
 
                          WHY THE `test` PHASE SPECIFICALLY. AbstractFrontendMojo honours
                          `-DskipTests` ONLY for an execution bound to `test` or

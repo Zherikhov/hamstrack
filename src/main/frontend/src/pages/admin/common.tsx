@@ -13,6 +13,7 @@ export function PageHeader({ title, subtitle, action }: { title: string; subtitl
     <div className="flex items-start justify-between mb-5">
       <div>
         <div className="text-xs mb-1" style={{ color: 'var(--color-text-muted)' }}>{eyebrow}</div>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 className="font-display font-bold" style={{ fontSize: 24, letterSpacing: '-0.4px' }}>{title}</h1>
         {/* Inline maxWidth: our @theme --spacing-* scale shadows Tailwind's
             max-w-{xs..3xl} sizes (max-w-xl would be 32px!) — see CLAUDE.md */}

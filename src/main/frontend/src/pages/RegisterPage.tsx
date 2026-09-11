@@ -76,6 +76,7 @@ export default function RegisterPage() {
         >
           <div
             className="mx-auto w-10 h-10 rounded-full flex items-center justify-center"
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             style={{ background: 'var(--color-brand)', color: 'white', fontSize: 20 }}
           >
             ✓
@@ -96,6 +97,7 @@ export default function RegisterPage() {
     <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
       <div className="w-full flex flex-col" style={{ maxWidth: 380, padding: '0 16px' }}>
         <div className="mb-8 text-center">
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <h1 className="font-display font-bold" style={{ fontSize: 28, color: 'var(--color-text)', letterSpacing: '-0.5px' }}>
             Hamstrack
           </h1>

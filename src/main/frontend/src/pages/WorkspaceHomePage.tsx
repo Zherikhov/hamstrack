@@ -55,7 +55,9 @@ export default function WorkspaceHomePage() {
     if (!showAll && active.length === 1 && archived.length === 0) {
       navigate(`/w/${wsId}/p/${active[0].id}`, { replace: true })
     }
-  }, [active.length, archived.length, showAll]) // eslint-disable-line react-hooks/exhaustive-deps
+    // Depends on the COUNTS, not the arrays: a new array identity each fetch would
+    // re-fire the redirect. (exhaustive-deps objects; not in the rule set — HD-300 Q1.)
+  }, [active.length, archived.length, showAll])
 
   if (isLoading) {
     return (

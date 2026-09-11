@@ -149,6 +149,7 @@ export default function InsightsPanel({
         {/* ── Header + controls ─────────────────────────────────────────── */}
         <div className="flex flex-wrap items-end gap-2">
           <div style={{ marginRight: 'auto' }}>
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>Insights</h2>
             <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-secondary)', margin: 0 }}>
               These numbers describe exactly the issues this query matches — nothing wider,
@@ -444,6 +445,7 @@ const FOOT: CSSProperties = {
 
 function SegmentSwatch({ series, index }: { series: SegmentSeries; index: number }) {
   return (
+    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
     <span className="inline-flex items-center gap-2" style={{ fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
       <span
         aria-hidden="true"

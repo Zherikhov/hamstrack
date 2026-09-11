@@ -319,6 +319,7 @@ export default function VelocityPage() {
                     <LegendItem color={CHART_CONTEXT} label="p50 / p85 forecast" dashed />
                   )}
                   {velocity.isFetching && (
+                    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                     <span className="mono ml-auto" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                       refreshing…
                     </span>
@@ -392,6 +393,7 @@ const SPRINT_COUNTS = Array.from({ length: VELOCITY_MAX_SPRINTS }, (_, i) => i +
 function PageHeading() {
   return (
     <div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em', margin: 0 }}>
         Velocity
       </h1>
@@ -419,6 +421,7 @@ function BandCard({ band, measure }: {
   const sentence = velocitySentence(band, measure)
   return (
     <ReportCard className="h-full">
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>
         {band.kind === 'BAND' ? 'How much to plan for' : 'Not enough history to forecast'}
       </h2>
@@ -455,7 +458,9 @@ function BandCard({ band, measure }: {
 function Figure({ label, value }: { label: string; value: string }) {
   return (
     <div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em' }}>{value}</div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>{label}</div>
     </div>
   )
@@ -473,6 +478,7 @@ function Figure({ label, value }: { label: string; value: string }) {
 function NoCompletedSprintsCard() {
   return (
     <ReportCard>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>No sprint has finished here yet</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: '8px 0 0', maxWidth: 640 }}>
         Velocity is measured from <b>completed</b> sprints, so a sprint that is running or planned

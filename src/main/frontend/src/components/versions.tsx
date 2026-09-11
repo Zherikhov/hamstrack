@@ -88,6 +88,7 @@ export function VersionBadge({ version, onRemove, compact }: {
     >
       <span className="rounded-full flex-shrink-0" style={{ width: 6, height: 6, background: c }} />
       {/* DESIGN.md: version names are inspectable data → IBM Plex Mono */}
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span className="mono truncate" style={{ fontSize: compact ? 11 : 12 }}>{version.name}</span>
       {onRemove && (
         <button
@@ -123,6 +124,7 @@ export function VersionBadges({ versions, max = 2, compact }: {
         <span
           className="mono flex-shrink-0"
           title={versions.slice(max).map(v => v.name).join(', ')}
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ fontSize: compact ? 10.5 : 11, color: 'var(--color-text-muted)' }}
         >
           +{rest}
@@ -141,6 +143,7 @@ export function ReleasedPill({ released }: { released: boolean }) {
       style={{
         borderRadius: 'var(--radius-full, 9999px)',
         padding: '2px 9px',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 11,
         fontWeight: 600,
         background: `color-mix(in srgb, ${c} 14%, white)`,

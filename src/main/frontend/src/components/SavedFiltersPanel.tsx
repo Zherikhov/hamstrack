@@ -136,6 +136,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
     <div
       className="text-xs font-semibold uppercase px-2 pt-2 pb-1"
+      // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
       style={{ color: 'var(--color-text-muted)', letterSpacing: '0.05em', fontSize: 10.5 }}
     >
       {children}
@@ -184,6 +185,7 @@ function FilterRow({
             onClick={e => e.stopPropagation()}
             className="w-full outline-none"
             style={{
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 13, padding: '2px 4px', borderRadius: 4,
               border: '1px solid var(--color-brand)', color: 'var(--color-text)', background: 'white',
             }}
@@ -193,6 +195,7 @@ function FilterRow({
           <>
             {/* name + hql are plain text content — never HTML (shared-filter XSS guard) */}
             <div className="text-sm truncate" style={{ color: 'var(--color-text)' }}>{f.name}</div>
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <div className="mono truncate" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
               {f.hql || 'all issues'}{!f.mine && ` · ${f.ownerName}`}
             </div>

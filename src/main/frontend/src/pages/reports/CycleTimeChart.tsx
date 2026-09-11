@@ -80,6 +80,7 @@ export default function CycleTimeChart({
             domain={[domain.min, domain.max]}
             ticks={domain.ticks}
             tickFormatter={formatDay}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             minTickGap={20}
@@ -89,6 +90,7 @@ export default function CycleTimeChart({
             dataKey="y"
             domain={[0, axis.max]}
             ticks={axis.ticks}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             width={44}
@@ -110,12 +112,14 @@ export default function CycleTimeChart({
           {p50 != null && (
             <ReferenceLine
               y={p50} stroke={CHART_CONTEXT} strokeDasharray="5 4" strokeWidth={2}
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               label={{ value: `p50 ${formatDays(p50)}d`, position: 'insideTopLeft', fill: CHART_AXIS, fontSize: 11 }}
             />
           )}
           {p85 != null && (
             <ReferenceLine
               y={p85} stroke={CHART_CONTEXT} strokeDasharray="2 3" strokeWidth={2}
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               label={{ value: `p85 ${formatDays(p85)}d`, position: 'insideTopLeft', fill: CHART_AXIS, fontSize: 11 }}
             />
           )}
@@ -163,6 +167,7 @@ function PointTooltip({ measure, payload, active }: {
         border: '1px solid var(--color-border-2)',
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-pop)',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 12,
         padding: '8px 10px',
         maxWidth: 320,

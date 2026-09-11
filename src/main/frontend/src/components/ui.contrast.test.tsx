@@ -3,7 +3,7 @@ import { render, screen } from '@testing-library/react'
 import { Badge, ParentChip, PriorityBadge, StatusBadge, ToneBadge } from './ui'
 import type { BadgeTone } from './ui'
 import { INK_MIN, NEUTRAL_FILL, NEUTRAL_INK, contrastRatio, parseColour } from '../colour'
-import type { Priority } from '../types'
+import type { Hex, Priority } from '../types'
 
 /**
  * The rendering half of HD-176, asserted **from the DOM rather than from the
@@ -80,7 +80,12 @@ describe('StatusBadge', () => {
 
 describe('Badge', () => {
   it('refuses a stylesheet token — `color` means a hue that came from the database', () => {
-    render(<Badge label="Active" color="var(--color-success)" />)
+    // The cast is the assertion. Since HD-300 the `color` prop is {@link Hex},
+    // so this line does not compile without one — the token is refused by `tsc -b`
+    // at every call site, which is the defence the product actually gets. What is
+    // pinned below is the SECOND line of that defence, for a hue that arrives from
+    // JSONB as `unknown` and can still be anything at runtime.
+    render(<Badge label="Active" color={'var(--color-success)' as Hex} />)
     const el = screen.getByText('Active')
     // **Pinned as correct, not tolerated as a bug.** A token cannot be measured,
     // so it is rejected and the badge goes neutral; the remedy is `ToneBadge` at
@@ -95,7 +100,9 @@ describe('Badge', () => {
   })
 
   it('falls back to neutral tokens for a colour it cannot parse, and does not throw', () => {
-    render(<Badge label="Broken" color="not-a-colour" />)
+    // Cast for the same reason as above: unreachable from typed code, reachable
+    // from a JSONB value.
+    render(<Badge label="Broken" color={'not-a-colour' as Hex} />)
     const el = screen.getByText('Broken')
     // jsdom drops an unparseable declaration, so what matters is that nothing
     // threw and no raw junk reached the style.

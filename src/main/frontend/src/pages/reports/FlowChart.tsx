@@ -43,6 +43,7 @@ export default function FlowChart({
           <XAxis
             dataKey="date"
             tickFormatter={d => formatBucketDate(d, interval)}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             minTickGap={24}
@@ -52,6 +53,7 @@ export default function FlowChart({
             domain={[0, counts.max]}
             ticks={counts.ticks}
             allowDecimals={false}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             width={44}
@@ -62,6 +64,7 @@ export default function FlowChart({
             domain={[0, open.max]}
             ticks={open.ticks}
             allowDecimals={false}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             width={44}
@@ -73,6 +76,7 @@ export default function FlowChart({
               border: '1px solid var(--color-border-2)',
               borderRadius: 'var(--radius-md)',
               boxShadow: 'var(--shadow-pop)',
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 12,
             }}
           />

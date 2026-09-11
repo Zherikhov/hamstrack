@@ -92,6 +92,7 @@ export default function NotificationBell({ incoming, tone = 'dark' }: Props) {
               width: 14, height: 14,
               background: 'var(--color-error)',
               borderRadius: '50%',
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               fontSize: 9,
               color: 'white',
               lineHeight: 1,

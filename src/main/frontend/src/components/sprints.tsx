@@ -719,6 +719,7 @@ export function SprintStateBadge({ state, compact }: { state: SprintState; compa
       style={{
         borderRadius: 'var(--radius-full, 9999px)',
         padding: compact ? '1px 7px' : '2px 9px',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: compact ? 10.5 : 11,
         fontWeight: 600,
         background: `color-mix(in srgb, ${c} 14%, white)`,
@@ -756,6 +757,7 @@ export function SprintBadge({ sprint, compact }: { sprint: SprintRef; compact?: 
       }}
     >
       <Flag size={compact ? 9 : 10} style={{ color: c, flexShrink: 0 }} />
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span className="truncate" style={{ fontSize: compact ? 11 : 12 }}>{sprint.name}</span>
     </span>
   )
@@ -781,6 +783,7 @@ export function SprintPointsBadge({ stats, compact }: {
         style={{
           borderRadius: 'var(--radius-full, 9999px)',
           padding: compact ? '1px 7px' : '2px 9px',
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           fontSize: compact ? 10.5 : 11,
           background: 'var(--color-surface-2)',
           color: 'var(--color-text-secondary)',
@@ -811,6 +814,7 @@ export function StoryPointsChip({ points, compact }: { points: number | null | u
       style={{
         borderRadius: 'var(--radius-full, 9999px)',
         padding: compact ? '0px 6px' : '1px 7px',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: compact ? 10.5 : 11,
         fontWeight: 600,
         background: 'var(--color-surface-2)',
@@ -896,6 +900,7 @@ export function SprintHeader({ sprint, canCurate, showPoints, onComplete }: {
     >
       <div className="flex items-center gap-2 min-w-0">
         <Flag size={14} style={{ color: 'var(--color-brand-ink)', flexShrink: 0 }} />
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="font-bold truncate" style={{ fontSize: 14 }}>{sprint.name}</span>
         <SprintStateBadge state={sprint.state} compact />
       </div>

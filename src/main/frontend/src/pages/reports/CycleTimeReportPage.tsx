@@ -364,6 +364,7 @@ export default function CycleTimeReportPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em', margin: 0 }}>
           Cycle &amp; lead time
         </h1>
@@ -460,6 +461,7 @@ export default function CycleTimeReportPage() {
       />
 
       {/* ── Finished work ───────────────────────────────────────────────────── */}
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: '4px 0 0' }}>Finished work</h2>
 
       {/* Every 400 through one path — each one names the bound it measured
@@ -564,6 +566,7 @@ export default function CycleTimeReportPage() {
                 <LegendItem color={CHART_CONTEXT} label="p50 / p85 of finished work" dashed />
               )}
               {cycle.isFetching && (
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 <span className="mono ml-auto" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                   refreshing…
                 </span>
@@ -685,6 +688,7 @@ export default function CycleTimeReportPage() {
       )}
 
       {/* ── Aging work in progress ──────────────────────────────────────────── */}
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h2 style={{ fontSize: 15, fontWeight: 800, margin: '12px 0 0' }}>Aging work in progress</h2>
       <p className="text-sm" style={{ color: 'var(--color-text-secondary)', margin: 0, maxWidth: 700 }}>
         Everything open right now, by status and by age, oldest at the top — read against p50/p85 of
@@ -753,6 +757,7 @@ export default function CycleTimeReportPage() {
                 <LegendItem color={CHART_CONTEXT} label="p50 / p85 of cycle time, all completed work" dashed />
               )}
               {aging.isFetching && (
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 <span className="mono ml-auto" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                   refreshing…
                 </span>
@@ -870,7 +875,9 @@ function Stat({ label, value, hint, color }: {
         minWidth: 150,
       }}
     >
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em' }}>{value}</div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>
         {label}{hint ? ` · ${hint}` : ''}
       </div>

@@ -59,6 +59,8 @@
  * `DESIGN.md` already requires of charts.
  */
 
+import type { Hex } from './types'
+
 // ── Thresholds ────────────────────────────────────────────────────────────────
 
 /** WCAG 1.4.3 minimum for text. Not a tuning parameter; deliberately not a configuration property. */
@@ -198,7 +200,7 @@ export function contrastRatio(colour: unknown, against: unknown): number {
  * component asks {@link token}, which prefers the live value, so a theme that
  * remaps `index.css` re-skins the app without touching this file.
  */
-export const TOKEN_FALLBACK: Record<string, string> = {
+export const TOKEN_FALLBACK: Record<string, Hex> = {
   '--color-card': '#FFFFFF',
   '--color-surface': '#F3F5F9',
   '--color-surface-2': '#EEF1F6',
@@ -211,7 +213,7 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--color-success': '#12B981',
 }
 
-const tokenCache = new Map<string, string>()
+const tokenCache = new Map<string, Hex>()
 
 /**
  * `--color-card` → `#FFFFFF`, read from the document when there is one.
@@ -220,7 +222,7 @@ const tokenCache = new Map<string, string>()
  * runs; {@link resetColourCache} exists for the test that proves the fallback and
  * the live read agree, and for a future theme switch.
  */
-export function token(name: string): string {
+export function token(name: string): Hex {
   const cached = tokenCache.get(name)
   if (cached !== undefined) return cached
   let value = ''
@@ -231,7 +233,11 @@ export function token(name: string): string {
       value = ''
     }
   }
-  const resolved = parseColour(value) ? value.toUpperCase() : (TOKEN_FALLBACK[name] ?? '#FFFFFF')
+  // The one narrowing in this module. Both branches are hexes by construction —
+  // a parsed custom property, or a TOKEN_FALLBACK entry — and 'Hex' is lexical, so
+  // there is nothing further to check. A token that RESOLVES to a hex is a hex; the
+  // trap the type exists for is the unresolved literal, which never reaches here.
+  const resolved = (parseColour(value) ? value.toUpperCase() : (TOKEN_FALLBACK[name] ?? '#FFFFFF')) as Hex
   tokenCache.set(name, resolved)
   return resolved
 }

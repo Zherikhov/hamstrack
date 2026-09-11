@@ -1,3 +1,40 @@
+/**
+ * **A colour a human picked and the database stored — never a stylesheet token.**
+ *
+ * Statuses, priorities, issue types, labels and custom-field select options each
+ * carry one. `colour.ts` derives readable ink from it at render time (`inkOn` /
+ * `fillOf` / `ringOn`), which means it is **parsed and measured**: a value that is
+ * not a colour is not dimmed, it is rejected, and the element renders neutral —
+ * plausibly, and therefore silently. `AdminUsersPage` passed
+ * `'var(--color-success)'` to a `Badge` and two thirds of the badge quietly did
+ * nothing for months. ADR-0027 and ADR-0029 draw the line: a stored hue is an
+ * identity, a semantic state is a stylesheet colour, and `ToneBadge` is the other
+ * side of the seam.
+ *
+ * **Why a template-literal type rather than a nominal brand (HD-300, measured).**
+ * The requirement is to refuse `var(--…)`, not to refuse every string, and this
+ * spelling does exactly that while a hex literal still types itself. Measured on
+ * 2026-09-11 over the same set of props and DTO fields: a nominal brand
+ * (`string & { readonly __hex: unique symbol }`) produced **61** `tsc -b` errors
+ * across 22 files, of which 52 were test fixtures that would each have needed a
+ * cast; this one produced **13**, every one of them a real seam. A brand that has
+ * to be cast at 52 sites is a brand that documents nothing.
+ *
+ * **What it buys over the regex scan it replaces.** `palette.contrast.test.ts`
+ * records by measurement that a token reaching the prop through a variable or a
+ * lookup table (`color={STATUS_COLOR[u.status]}`) is invisible to a text scan —
+ * "the lookup-table version was reinstated verbatim and the whole suite stayed
+ * green". A type follows both: `const c = 'var(--color-brand)'` is
+ * `"var(--color-brand)"`, and a `Record<string, string>` lookup is `string`;
+ * neither is assignable here. That scan's first entry is deleted, so this trap has
+ * one mechanism and not two.
+ *
+ * **What it does not buy.** It is lexical, not semantic: `'#nothex'` satisfies it.
+ * The value is still parsed at render, which is where a malformed hex is caught,
+ * and no type can express "six hex digits" without a check the parser already does.
+ */
+export type Hex = `#${string}`
+
 export interface User {
   id: string;
   email: string;
@@ -173,7 +210,7 @@ export interface ProjectDefaultRole {
 export interface IssueType {
   id: string;
   name: string;
-  color: string;
+  color: Hex;
   icon?: string;
   position: number;
   // Hierarchy: higher = higher in the tree (Epic=2, Story/Task/Bug=1, Sub-task=0).
@@ -184,7 +221,7 @@ export interface IssueType {
 export interface Status {
   id: string;
   name: string;
-  color: string;
+  color: Hex;
   category: 'TODO' | 'IN_PROGRESS' | 'DONE';
   position: number;
 }
@@ -193,7 +230,7 @@ export interface Status {
 export interface Priority {
   id: string;
   name: string;
-  color: string;
+  color: Hex;
   icon?: string;
   position?: number;
 }
@@ -220,7 +257,7 @@ export type FieldType =
 export type FieldValue = string | number | boolean | string[];
 
 export interface FieldConfig {
-  options?: { id: string; label: string; color?: string }[];  // selects
+  options?: { id: string; label: string; color?: Hex }[];  // selects
   min?: number;                                               // numbers
   max?: number;
 }
@@ -267,7 +304,7 @@ export interface AssigneeInfo {
 export interface LabelRef {
   id: string;
   name: string;
-  color: string;
+  color: Hex;
   archived: boolean;
 }
 

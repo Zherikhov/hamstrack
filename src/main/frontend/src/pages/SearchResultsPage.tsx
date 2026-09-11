@@ -574,6 +574,7 @@ function ColumnChooser({ visible, onToggle, onClose }: {
         <label
           key={c.key}
           className="flex items-center gap-2 cursor-pointer"
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ padding: '7px 10px', borderRadius: 'var(--radius-sm)', fontSize: 13 }}
         >
           <input
@@ -631,6 +632,7 @@ function StartView({ wsId, onExample, onLoadFilter }: {
               <div className="text-sm truncate" style={{ color: 'var(--color-text)' }}>
                 {f.name}{!f.mine && ` · ${f.ownerName}`}
               </div>
+              {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
               <div className="mono truncate" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                 {f.hql || 'all issues'}
               </div>
@@ -667,6 +669,7 @@ function ExamplesList({ onExample }: { onExample: (ex: string) => void }) {
           onClick={() => onExample(ex)}
           className="mono text-left cursor-pointer transition-colors"
           style={{
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             fontSize: 12, padding: '8px 12px', borderRadius: 'var(--radius-md)',
             background: 'white', border: '1px solid var(--color-border)', color: 'var(--color-text-secondary)',
           }}

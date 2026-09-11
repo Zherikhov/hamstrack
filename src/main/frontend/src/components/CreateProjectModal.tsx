@@ -14,6 +14,7 @@ import {
   type DeliveryChoice,
 } from './delivery'
 import { readLastDeliveryChoice, rememberDeliveryChoice } from '../lib/lastDeliveryChoice'
+import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { Button, Input } from './ui'
 import type { BoardMode } from '../types'
 
@@ -65,6 +66,7 @@ function DeliveryCard({
           {note && (
             <span
               className="ml-2 font-medium"
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               style={{ fontSize: 11, color: 'var(--color-brand-ink)' }}
             >
               {note}
@@ -169,6 +171,8 @@ export default function CreateProjectModal({ wsId, onClose }: Props) {
   const qc = useQueryClient()
   const navigate = useNavigate()
   const userId = useAuthStore(s => s.user?.id)
+  // The keyboard half of the role="dialog" claim the panel below makes (HD-300).
+  useCloseOnEscape(onClose)
   const [name, setName] = useState('')
   const [key, setKey] = useState('')
   const [error, setError] = useState('')
@@ -232,7 +236,8 @@ export default function CreateProjectModal({ wsId, onClose }: Props) {
 
   return (
     <div data-modal-open="true" style={overlayStyle} onClick={onClose}>
-      <div style={panelStyle} onClick={e => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-label="New Project"
+           style={panelStyle} onClick={e => e.stopPropagation()}>
         <div
           className="flex items-center justify-between px-5 py-4 border-b"
           style={{ borderColor: 'var(--color-border)', flexShrink: 0 }}

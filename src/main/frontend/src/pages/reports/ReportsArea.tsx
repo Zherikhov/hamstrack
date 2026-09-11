@@ -66,6 +66,7 @@ export default function ReportsArea() {
       <div style={{ maxWidth: 1180, padding: '20px 26px 40px' }}>
         <div className="mb-4">
           <div className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Reports</div>
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <h1 className="font-display font-bold" style={{ fontSize: 22, letterSpacing: '-0.01em' }}>
             {project?.name ?? '…'}
           </h1>
@@ -171,6 +172,7 @@ function ReportLink({ to, label, disabled, disabledHint }: {
         <span
           className="mono"
           style={{
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             marginLeft: 'auto', fontSize: 9, letterSpacing: '0.05em',
             border: '1px solid var(--color-border-2)', borderRadius: 5, padding: '1px 5px',
           }}

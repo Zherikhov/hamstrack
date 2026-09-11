@@ -59,6 +59,7 @@ export default function BurnupChart({
           <XAxis
             dataKey="date"
             tickFormatter={formatSprintDay}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             minTickGap={22}
@@ -67,6 +68,7 @@ export default function BurnupChart({
             domain={[0, axis.max]}
             ticks={axis.ticks}
             allowDecimals={measure === 'POINTS'}
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             tick={{ fill: CHART_AXIS, fontSize: 11 }}
             stroke={CHART_GRID}
             width={44}
@@ -89,6 +91,7 @@ export default function BurnupChart({
               x={firstFuture.date}
               stroke={CHART_GRID}
               strokeWidth={2}
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               label={{ value: 'today', position: 'insideTopRight', fill: CHART_AXIS, fontSize: 11 }}
             />
           )}
@@ -159,6 +162,7 @@ function BurnupTooltip({ measure, actorName, payload, active }: {
         border: '1px solid var(--color-border-2)',
         borderRadius: 'var(--radius-md)',
         boxShadow: 'var(--shadow-pop)',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 12,
         padding: '8px 10px',
         maxWidth: 340,

@@ -55,7 +55,9 @@ export default function AccountPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto' }}>
       <div style={{ padding: '20px 26px 0' }}>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 style={{ fontSize: 22, fontWeight: 800 }}>Account</h1>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <p style={{ fontSize: 13, color: 'var(--color-text-muted)', fontWeight: 600, marginTop: 4 }}>
           Your sign-in details, and how to have this account deleted.
         </p>
@@ -100,9 +102,11 @@ function IdentityCard({ displayName, email, avatarUrl }: {
       <div className="flex items-center gap-3">
         <Avatar name={displayName} avatarUrl={avatarUrl} size={44} />
         <div className="min-w-0">
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <div className="truncate" style={{ fontSize: 15, fontWeight: 700, color: 'var(--color-text)' }}>
             {displayName}
           </div>
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <div className="mono truncate" style={{ fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
             {email}
           </div>

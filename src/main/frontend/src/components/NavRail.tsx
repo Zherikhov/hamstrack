@@ -186,9 +186,11 @@ export default function NavRail() {
       >
         <span
           className="flex items-center justify-center flex-shrink-0"
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ width: 28, height: 28, borderRadius: 9, fontWeight: 800, fontSize: 15, color: 'var(--color-on-brand)',
             background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))' }}
         >H</span>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         {!collapsed && <b style={{ fontWeight: 800, fontSize: 16, color: '#fff', whiteSpace: 'nowrap' }}>Hamstrack</b>}
       </button>
 
@@ -201,6 +203,7 @@ export default function NavRail() {
           width: collapsed ? 26 : undefined, height: collapsed ? 26 : undefined,
           margin: collapsed ? '2px 0 12px' : '2px 4px 12px', padding: collapsed ? 0 : 10,
           borderRadius: collapsed ? 8 : 11, border: 'none',
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           fontWeight: 800, fontSize: 13.5, color: 'var(--color-on-brand)', whiteSpace: 'nowrap', overflow: 'hidden',
           background: 'linear-gradient(135deg, var(--color-brand), var(--color-accent-2))',
         }}
@@ -223,6 +226,7 @@ export default function NavRail() {
           {!collapsed && (
             <div
               className="truncate"
+              // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
               style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}
               title={project?.name ?? cur.name}
             >
@@ -259,6 +263,7 @@ export default function NavRail() {
       {/* No project yet (brand-new user) — get them into one */}
       {!cur && (
         <>
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           {!collapsed && <div style={{ fontSize: 10.5, letterSpacing: '0.1em', textTransform: 'uppercase', color: MUTED, padding: '16px 11px 6px', fontWeight: 700 }}>Workspace</div>}
           {collapsed && <div style={{ height: 12 }} />}
           <RailLink to="/workspaces" icon={LayoutGrid} label="All projects" collapsed={collapsed} />
@@ -270,6 +275,7 @@ export default function NavRail() {
         <button
           onClick={toggleCollapse}
           className="w-full flex items-center gap-2.5 cursor-pointer"
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ padding: collapsed ? '9px 0' : '9px 11px', justifyContent: collapsed ? 'center' : 'flex-start', marginBottom: 6, borderRadius: 10, background: 'none', border: 'none', color: MUTED, fontSize: 12.5, fontWeight: 600 }}
           onMouseEnter={e => (e.currentTarget.style.background = HOVER_BG)}
           onMouseLeave={e => (e.currentTarget.style.background = 'none')}
@@ -316,7 +322,9 @@ export default function NavRail() {
             {!collapsed && (
               <>
                 <span className="flex-1 min-w-0 text-left">
+                  {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                   <span className="block truncate" style={{ fontSize: 13, fontWeight: 600, color: '#fff' }}>{user?.displayName}</span>
+                  {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                   <span className="block truncate" style={{ fontSize: 11, color: MUTED }}>{user?.systemRole === 'ADMIN' ? 'Admin' : user?.email}</span>
                 </span>
                 <ChevronDown size={14} style={{ color: MUTED, transform: menuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 150ms' }} />
@@ -356,6 +364,7 @@ function RailLink({ to, end, icon: Icon, label, collapsed }: { to: string; end?:
       style={({ isActive }) => ({
         display: 'flex', alignItems: 'center', justifyContent: collapsed ? 'center' : 'flex-start', gap: 11,
         padding: collapsed ? '9px 0' : '9px 11px', borderRadius: 10,
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: 13.5, fontWeight: 600, textDecoration: 'none', whiteSpace: 'nowrap',
         color: isActive ? ACTIVE : (h ? '#fff' : ITEM),
         background: isActive ? ACTIVE_BG : (h ? HOVER_BG : 'transparent'),

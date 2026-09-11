@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import type { AdminStatus } from '../../types'
+import type { AdminStatus, Hex } from '../../types'
 import { Badge, Button, Input, Select, StatusBadge } from '../../components/ui'
 import { SURFACE, contrastRatio, fillOf, inkOn, parseColour, ringOn, tintOf, token } from '../../colour'
 import { AdminTable, ArchivedBadge, ArchivedToggle, DeleteDialog, InheritedBadge, Modal, PageHeader, UsageChip } from './common'
@@ -159,7 +159,7 @@ function StatusForm({ status, onClose, onSaved }: {
  * `input type="color"` of its own and the product keeps one picker.
  */
 export function ColorField({ value, onChange, compact }: {
-  value: string; onChange: (v: string) => void; compact?: boolean
+  value: Hex; onChange: (v: Hex) => void; compact?: boolean
 }) {
   const parsed = parseColour(value) !== null
   const ratio = contrastRatio(value, SURFACE.card)
@@ -168,7 +168,13 @@ export function ColorField({ value, onChange, compact }: {
   const derived = parsed && ink.toUpperCase() !== value.trim().toUpperCase()
 
   const swatch = (
-    <input type="color" value={parsed ? value : token('--color-sandbox')} onChange={e => onChange(e.target.value)}
+    // The ONE narrowing of a raw string into {@link Hex} in the product. It is
+    // sound here and nowhere else: the HTML colour input's value is defined by
+    // the HTML standard to be a lowercase seven-character `#rrggbb` string, so
+    // the browser — not this code — is what makes the assertion true. Every other
+    // Hex in the SPA comes from the server DTO, from LABEL_PALETTE, or from
+    // token(), and needs no assertion at all.
+    <input type="color" value={parsed ? value : token('--color-sandbox')} onChange={e => onChange(e.target.value as Hex)}
            aria-label="Color"
            className="cursor-pointer flex-shrink-0"
            style={{ width: compact ? 30 : 34, height: compact ? 28 : 30, border: 'none', background: 'none' }} />

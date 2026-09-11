@@ -222,6 +222,7 @@ export default function FlowReportPage() {
   return (
     <div className="flex flex-col gap-4">
       <div>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em', margin: 0 }}>Flow</h1>
         <p className="text-sm mt-1" style={{ color: 'var(--color-text-secondary)', maxWidth: 620 }}>
           Created versus resolved. Are we keeping up — is the backlog growing or shrinking, and
@@ -397,6 +398,7 @@ export default function FlowReportPage() {
               <LegendItem color={CHART_SERIES[2]} label="Resolved" />
               <LegendItem color={CHART_CONTEXT} label="Open at end (right axis)" dashed />
               {isFetching && (
+                // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                 <span className="mono ml-auto" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
                   refreshing…
                 </span>
@@ -554,9 +556,11 @@ function Total({ label, value, color, signed: isSigned, hint }: {
         minWidth: 132,
       }}
     >
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 22, fontWeight: 800, letterSpacing: '-0.02em' }}>
         {isSigned ? signed(value) : value.toLocaleString()}
       </div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>
         {label}{hint ? ` · ${hint}` : ''}
       </div>

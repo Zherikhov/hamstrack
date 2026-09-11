@@ -40,6 +40,7 @@ export default function WelcomePage() {
   return (
     <WelcomeShell>
       <div className="mb-8">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 className="font-display font-bold" style={{ fontSize: 34, letterSpacing: '-0.6px', color: 'var(--color-text)' }}>
           Welcome{firstName ? `, ${firstName}` : ''}
         </h1>
@@ -96,6 +97,7 @@ function ChoiceCard({ icon, title, description, onClick, badge, disabled }: {
       </span>
       <span className="flex-1 min-w-0">
         <span className="flex items-center gap-2">
+          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
           <span className="font-semibold" style={{ fontSize: 16, color: 'var(--color-text)' }}>{title}</span>
           {badge !== undefined && (
             <span className="text-xs font-semibold px-2 py-0.5 rounded-full"

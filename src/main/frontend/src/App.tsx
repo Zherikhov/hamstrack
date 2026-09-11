@@ -82,7 +82,11 @@ function AuthInit({ children }: { children: React.ReactNode }) {
     }
     // Both must settle before first render to avoid landing/checkbox flicker
     Promise.all([initAuth(), initConfig()]).then(setInitialized)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    // Mount only, deliberately: both initialisers are one-shot bootstraps and a
+    // dep array here would re-run auth on every render of the root. (This is the
+    // shape react-hooks/exhaustive-deps objects to; the rule is not in the SPA
+    // rule set — HD-300 Q1 measured 21 findings for a follow-up.)
+  }, [])
 
   if (!initialized) {
     return (

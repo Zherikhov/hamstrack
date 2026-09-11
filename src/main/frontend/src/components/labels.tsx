@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Plus, Tag, X } from 'lucide-react'
 import { ApiResponseError, labelsApi } from '../api'
 import type { LabelMatch } from '../api'
-import type { Label, LabelRef } from '../types'
+import type { Label, LabelRef, Hex } from '../types'
 import { NEUTRAL_EDGE, NEUTRAL_FILL, SURFACE, fillOf, ringOn, tintOf } from '../colour'
 
 /**
@@ -41,7 +41,7 @@ export const LABEL_PALETTE = [
  * wrapped to a signed 32-bit int) so the client preview and the server's
  * `LabelService.colorForName` agree on the same swatch.
  */
-export function colorForName(name: string): string {
+export function colorForName(name: string): Hex {
   let hash = 0
   const lower = name.toLowerCase()
   for (let i = 0; i < lower.length; i++) {
@@ -102,6 +102,7 @@ export function LabelChip({ label, onRemove, title, compact }: {
       style={{
         borderRadius: 'var(--radius-full, 9999px)',
         padding: compact ? '1px 7px' : '2px 8px',
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: compact ? 11 : 12,
         lineHeight: 1.4,
         background: tint,
@@ -147,6 +148,7 @@ export function LabelChips({ labels, max = 3, compact }: {
         <span
           className="mono flex-shrink-0"
           title={labels.slice(max).map(l => l.name).join(', ')}
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           style={{ fontSize: compact ? 10.5 : 11, color: 'var(--color-text-muted)' }}
         >
           +{rest}
@@ -202,7 +204,7 @@ export function LabelPicker({
     return map
   }, [labels, known])
 
-  const selected = value.map(id => byId.get(id) ?? { id, name: '…', color: '#667085', archived: false })
+  const selected: LabelRef[] = value.map(id => byId.get(id) ?? { id, name: '…', color: '#667085', archived: false })
   const atCap = value.length >= maxLabels
 
   const normalized = normalizeName(query)

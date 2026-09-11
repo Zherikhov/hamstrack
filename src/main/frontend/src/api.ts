@@ -16,6 +16,7 @@ import type {
   SprintBurnupReport, SprintMeasure, SprintReviewReport, VelocityReport,
   InsightsDimension, InsightsMeasure, InsightsResponse,
   WorkspaceStorageSummary, WorkspaceStorageByProject,
+  Hex,
 } from './types'
 import { useAuthStore } from './auth'
 
@@ -955,7 +956,7 @@ export async function apiGetIssueHistory(
 
 export interface UpsertCatalogPayload {
   name: string
-  color?: string
+  color?: Hex
   icon?: string
   category?: 'TODO' | 'IN_PROGRESS' | 'DONE'  // statuses only
   position?: number
@@ -1507,7 +1508,7 @@ export const projectDefaultRoleApi = {
 
 export interface UpsertLabelPayload {
   name?: string
-  color?: string
+  color?: Hex
   description?: string
 }
 
@@ -1519,7 +1520,7 @@ export const labelsApi = {
     const qs = params.toString()
     return request<Label[]>(`/workspaces/${wsId}/labels${qs ? `?${qs}` : ''}`)
   },
-  create: (wsId: string, payload: { name: string; color?: string; description?: string }) =>
+  create: (wsId: string, payload: { name: string; color?: Hex; description?: string }) =>
     request<Label>(`/workspaces/${wsId}/labels`, { method: 'POST', body: JSON.stringify(payload) }),
   // Partial: only the keys present change (null/undefined = leave as is).
   update: (wsId: string, id: string, payload: UpsertLabelPayload) =>

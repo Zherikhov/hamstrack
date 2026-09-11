@@ -252,6 +252,7 @@ export default function SprintReviewPage() {
 
           {/* The one header line §2.4 pins, verbatim in shape. */}
           <ReportCard>
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <p style={{ fontSize: 15, fontWeight: 700, margin: 0, letterSpacing: '-0.01em' }}>
               {reviewHeadline(report, formatSprintRange({ startAt: report.startAt, endAt: report.endAt }))}
             </p>
@@ -385,12 +386,15 @@ function ReviewSection({ title, blurb, empty, list, columns }: {
   return (
     <ReportCard>
       <div className="flex flex-wrap items-baseline gap-2">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 style={{ fontSize: 15, fontWeight: 800, margin: 0 }}>{title}</h2>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="mono" style={{ fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
           {list.count.toLocaleString()} issue{list.count === 1 ? '' : 's'}
           {points !== null && ` · ${points} point${list.points === 1 ? '' : 's'}`}
         </span>
         {list.unestimatedCount > 0 && (
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           <span className="mono" style={{ fontSize: 11.5, color: 'var(--color-text-muted)' }}>
             {list.unestimatedCount.toLocaleString()} unestimated
           </span>
@@ -458,6 +462,7 @@ function ReviewIssueKey({ issue, href }: { issue: SprintReviewIssue; href: strin
 function PageHeading() {
   return (
     <div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h1 style={{ fontSize: 20, fontWeight: 800, letterSpacing: '-0.01em', margin: 0 }}>
         Sprint review record
       </h1>

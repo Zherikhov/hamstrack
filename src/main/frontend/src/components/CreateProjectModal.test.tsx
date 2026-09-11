@@ -294,3 +294,33 @@ describe('CreateProjectModal — the last-preset nudge (§18 q1)', () => {
     expect(payload.delivery).toEqual(creationDelivery(LEAN_DELIVERY_CHOICE))
   })
 })
+
+/**
+ * HD-300 — the keyboard half of the `role="dialog"` claim. The category and what
+ * it deliberately does not cover (a focus trap) are stated once, in
+ * `dialogEscape.test.tsx`; this is the member whose fixture lives here.
+ */
+describe('CreateProjectModal closes on Escape (HD-300)', () => {
+  it('closes on Escape', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter initialEntries={[`/w/${WS_ID}`]}>
+          <CreateProjectModal wsId={WS_ID} onClose={onClose} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    )
+
+    expect(screen.getByRole('dialog', { name: 'New Project' })).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Project name'), 'Payments')
+    // From inside a text field too: in a dialog, Escape means dismiss.
+    await user.keyboard('{Escape}')
+    expect(
+      onClose,
+      'the panel says role="dialog" aria-modal="true" and does not honour the one keystroke ' +
+      'every assistive technology tells its user to try',
+    ).toHaveBeenCalledTimes(1)
+  })
+})

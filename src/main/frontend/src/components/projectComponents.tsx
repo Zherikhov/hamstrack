@@ -45,6 +45,7 @@ export function ComponentName({ component, compact }: { component: ComponentRef;
       className="truncate inline-block max-w-full"
       title={component.archived ? `${component.name} (archived)` : component.name}
       style={{
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         fontSize: compact ? 11 : 12,
         color: 'var(--color-text-muted)',
         opacity: component.archived ? 0.6 : 1,

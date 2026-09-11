@@ -4,6 +4,7 @@ import { useAuthStore } from '../auth'
 import { useMyWork, dueLabel, daysUntil, type MyIssue } from '../hooks/useMyWork'
 import { Avatar, PriorityBadge } from '../components/ui'
 import { SURFACE, fillOf, onSolid, ringOn, token } from '../colour'
+import type { Hex } from '../types'
 
 const CARD: React.CSSProperties = {
   background: 'var(--color-card)', border: '1px solid var(--color-border)',
@@ -46,8 +47,12 @@ export default function HomePage() {
     .filter(i => { const d = daysUntil(i.dueDate); return d !== null && d <= 7 })
     .sort((a, b) => (daysUntil(a.dueDate)! - daysUntil(b.dueDate)!))
 
-  // Priority breakdown of open work
-  const priCounts = new Map<string, { name: string; color: string; n: number }>()
+  // Priority breakdown of open work. `color` is a `Hex` and stays one through
+  // this local aggregation: widening it to `string` would discard, at the exact
+  // point the value leaves its DTO, the one type that says "a stored hue, not a
+  // token" (ADR-0029) — and the next reader of this map would have no way to
+  // tell which of the two it is holding.
+  const priCounts = new Map<string, { name: string; color: Hex; n: number }>()
   for (const i of open) {
     const p = i.priority
     const cur = priCounts.get(p.id) ?? { name: p.name, color: p.color, n: 0 }
@@ -64,9 +69,11 @@ export default function HomePage() {
     <div style={{ flex: 1, overflow: 'auto' }}>
       <div style={{ padding: '26px 26px 44px', maxWidth: 1180 }}>
         {/* Greeting */}
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em' }}>
           {greeting()}, {user?.displayName?.split(' ')[0] ?? 'there'} 👋
         </h1>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <p style={{ fontSize: 14.5, color: 'var(--color-text-muted)', fontWeight: 500, marginTop: 3 }}>
           {isLoading ? 'Loading your work…' : `You have ${open.length} open issue${open.length !== 1 ? 's' : ''} assigned · ${dueSoon.length} due soon`}
         </p>
@@ -98,6 +105,7 @@ export default function HomePage() {
                   const items = issues.filter(i => i.status.category === c.key)
                   return (
                     <div key={c.key} style={{ flex: '1 1 0', minWidth: 130 }}>
+                      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                       <div style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: 11.5, fontWeight: 700, color: 'var(--color-text-secondary)', marginBottom: 8 }}>
                         <span style={{ width: 8, height: 8, borderRadius: '50%', background: token(c.token) }} />{c.name}
                         <span style={{ marginLeft: 'auto', color: 'var(--color-text-muted)' }}>{items.length}</span>
@@ -108,10 +116,13 @@ export default function HomePage() {
                           style={{ background: 'var(--color-surface)', borderRadius: 10, padding: 10, marginBottom: 8, border: 'none', display: 'block' }}
                           onMouseEnter={e => (e.currentTarget.style.background = 'var(--color-surface-2)')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'var(--color-surface)')}>
+                          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                           <div className="mono" style={{ fontSize: 10, color: 'var(--color-text-muted)', marginBottom: 4 }}>{i.key}</div>
+                          {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                           <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.35 }}>{i.title}</div>
                         </button>
                       ))}
+                      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                       {items.length === 0 && <div style={{ fontSize: 11.5, color: 'var(--color-text-muted)', padding: '6px 2px' }}>—</div>}
                     </div>
                   )
@@ -142,6 +153,7 @@ export default function HomePage() {
                   </div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
                     {priList.map(p => (
+                      // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                       <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: 9, fontSize: 13 }}>
                         <span style={{ width: 10, height: 10, borderRadius: 3, background: fillOf(p.color), boxShadow: `inset 0 0 0 1px ${ringOn(p.color, SURFACE.card)}` }} />{p.name}
                         <span style={{ marginLeft: 'auto', fontWeight: 700, color: 'var(--color-text-secondary)' }}>{p.n}</span>
@@ -155,7 +167,9 @@ export default function HomePage() {
             {/* Recent activity — no feed endpoint yet */}
             <Widget title="Recent activity">
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, padding: '18px 8px', textAlign: 'center' }}>
+                {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--color-brand-ink)', background: 'color-mix(in srgb, var(--color-brand) 12%, white)', borderRadius: 999, padding: '5px 12px' }}>✦ Coming soon</span>
+                {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
                 <p style={{ fontSize: 12, color: 'var(--color-text-muted)', lineHeight: 1.5, maxWidth: 240 }}>
                   A live feed of comments, moves and completions across your projects will appear here.
                 </p>
@@ -172,7 +186,9 @@ function Stat({ icon, tint, n, label }: { icon: React.ReactNode; tint: string; n
   return (
     <div style={{ ...CARD, padding: 18, position: 'relative', overflow: 'hidden' }}>
       <span style={{ position: 'absolute', top: 16, right: 16, color: tint, opacity: 0.9 }}>{icon}</span>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: '-0.02em' }}>{n}</div>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <div style={{ fontSize: 12.5, color: 'var(--color-text-muted)', fontWeight: 600, marginTop: 2 }}>{label}</div>
     </div>
   )
@@ -182,7 +198,9 @@ function Widget({ title, hint, children }: { title: string; hint?: string; child
   return (
     <section style={{ ...CARD, padding: 18 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 14 }}>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h3 style={{ fontSize: 15, fontWeight: 800 }}>{title}</h3>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         {hint && <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--color-text-muted)', fontWeight: 600 }}>{hint}</span>}
       </div>
       {children}
@@ -191,6 +209,7 @@ function Widget({ title, hint, children }: { title: string; hint?: string; child
 }
 
 function Empty({ text }: { text: string }) {
+  // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
   return <p style={{ fontSize: 13, color: 'var(--color-text-muted)', fontWeight: 500, padding: '8px 2px' }}>{text}</p>
 }
 
@@ -206,12 +225,16 @@ function TaskRow({ i, onClick, showDue }: { i: MyIssue; onClick: () => void; sho
           `onSolid` belongs: black or white over the type's own hue, whichever
           measures higher. It shipped white unconditionally, which measured 1.92
           on the seeded Medium yellow — the tile stays a tile, only its ink moves. */}
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span style={{ width: 20, height: 20, borderRadius: 6, display: 'grid', placeItems: 'center', fontSize: 10, color: onSolid(i.type.color), fontWeight: 800, flexShrink: 0, background: fillOf(i.type.color) }}>{i.type.name[0]}</span>
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="block truncate" style={{ fontSize: 13.5, fontWeight: 600 }}>{i.title}</span>
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="mono" style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>{i.key} · {i._project.name}</span>
       </span>
       {showDue && due
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         ? <span style={{ fontSize: 12, fontWeight: 700, padding: '3px 9px', borderRadius: 8, flexShrink: 0, color: due.urgent ? 'var(--color-error)' : 'var(--color-text-secondary)', background: due.urgent ? 'color-mix(in srgb, var(--color-error) 12%, white)' : 'var(--color-surface)' }}>{due.text}</span>
         : <PriorityBadge priority={i.priority} />}
       {i.assignee && <Avatar name={i.assignee.displayName} avatarUrl={i.assignee.avatarUrl} size={22} />}

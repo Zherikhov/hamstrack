@@ -549,6 +549,7 @@ export default function BacklogPage() {
           style={{ background: 'white', borderColor: 'var(--color-border)' }}
         >
           <div className="flex items-center gap-2 min-w-0">
+            {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
             <span className="font-bold truncate" style={{ fontSize: 18, letterSpacing: '-0.01em' }}>
               Backlog
             </span>
@@ -1311,6 +1312,7 @@ function SprintSectionHeader({
   return (
     <>
       <div className="flex items-center gap-2 min-w-0">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <span className="font-semibold truncate" style={{ fontSize: 14 }}>{sprint.name}</span>
         <SprintStateBadge state={sprint.state} compact />
         {/* Why every move control disappeared for this section. */}
@@ -1396,6 +1398,7 @@ function BacklogSectionHeader({ stats, showPoints, canCreateIssue, onCreateIssue
 }) {
   return (
     <>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span className="font-semibold" style={{ fontSize: 14 }}>Backlog</span>
       <div className="flex items-center gap-2 ml-auto flex-shrink-0">
         <span className="mono text-xs" style={{ color: 'var(--color-text-muted)' }}>

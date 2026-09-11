@@ -57,6 +57,7 @@ export default function JoinTeamPage() {
         <ArrowLeft size={15} /> Back
       </button>
 
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <h1 className="font-display font-bold" style={{ fontSize: 28, letterSpacing: '-0.5px', color: 'var(--color-text)' }}>
         Join a team
       </h1>

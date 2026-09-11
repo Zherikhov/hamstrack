@@ -113,8 +113,8 @@ jobs:
       # Anything that runs the lifecycle now runs the suite; read the long
       # comment on that execution before changing this.
       #
-      # WHAT TO LOOK FOR IN THIS STEP'S LOG. Two lines, both from the frontend
-      # execution (`--- frontend:1.15.1:npm (npm-test) ---`):
+      # WHAT TO LOOK FOR IN THIS STEP'S LOG. Three lines, all from the frontend
+      # executions (`--- frontend:1.15.1:npm (npm-lint) ---`, then `(npm-test)`):
       #
       #   * `Test Files … / Tests …` — the COUNT. A test step that silently
       #     matched nothing is the failure mode being guarded here, and it looks
@@ -136,6 +136,18 @@ jobs:
       #     nobody runs is the state HD-242 exists to end and it would cost ~50s
       #     a build to stay in it.
       #
+      #   * `[eslint] N files linted (floor 200) · … errors · … warnings ·
+      #     … suppressed (HD-177)` — HD-300's witness, from the npm-lint
+      #     execution. Same question as the first bullet, for the lint gate: a
+      #     run that lints nothing exits 0 and reads exactly like a clean tree.
+      #     `N` was 231 on 2026-09-11. The FLOOR IS DELIBERATELY SLACK — it fires
+      #     on a collapse (an `ignores` that swallowed the tree takes N to single
+      #     digits), not on the drift, so a change that takes 231 to 205 is GREEN,
+      #     enforced by nothing, and visible only here. A drop toward the floor
+      #     means an `ignores` or a target changed, not that the tree got smaller.
+      #     The suppressed count is the HD-177 debt and may only go down; lint.mjs
+      #     itself refuses it going up, so a rise cannot reach this line.
+      #
       # The BACKEND half of that same question stopped being a matter of reading
       # in HD-265: an unfiltered run now compares the test classes it actually
       # executed against src/test/java and fails, naming whatever it never
@@ -149,8 +161,9 @@ jobs:
       # it.
       #
       # COST: measured +45-70s per non-skipped build on a dev box (see pom.xml).
-      # Local fast loops keep `-Dfrontend.skip=true`, which switches all four
-      # frontend executions off together; the image build in `build-and-push`
+      # Local fast loops keep `-Dfrontend.skip=true`, which switches EVERY
+      # frontend execution off together — it is bound at the plugin level, so a
+      # new execution inherits it and no count here can go stale; the image build in `build-and-push`
       # pays nothing either, because its `package -DskipTests` skips a
       # `test`-phase frontend execution the same way it skips surefire.
       # DeployVerifyOracleTest (HD-299) brings up a scratch Compose project on the

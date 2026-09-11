@@ -133,6 +133,7 @@ export function MetaLine({ meta }: { meta: ReportMeta | undefined }) {
     'UTC day boundaries',
   ].join(' · ')
   return (
+    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
     <p className="mono" style={{ color: 'var(--color-text-muted)', fontSize: 11.5, margin: 0 }}>
       {line}
     </p>
@@ -251,7 +252,9 @@ export function SeriesTable<T>({
   footer?: ReactNode
 }) {
   return (
+    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
     <table className="w-full mono" style={{ borderCollapse: 'collapse', fontSize: 12 }}>
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <caption className="text-left" style={{ color: 'var(--color-text-secondary)', fontSize: 12.5, paddingBottom: 8 }}>
         {caption}
       </caption>
@@ -303,6 +306,7 @@ export function SeriesTable<T>({
 /** A legend swatch + label pair, so colour is never the only encoding. */
 export function LegendItem({ color, label, dashed }: { color: string; label: string; dashed?: boolean }) {
   return (
+    // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
     <span className="inline-flex items-center gap-2" style={{ fontSize: 12.5, color: 'var(--color-text-secondary)' }}>
       <span
         aria-hidden="true"

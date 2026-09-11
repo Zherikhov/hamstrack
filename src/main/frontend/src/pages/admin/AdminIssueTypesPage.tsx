@@ -85,6 +85,7 @@ export default function AdminIssueTypesPage() {
 
       {/* Issue type sets */}
       <div className="flex items-center justify-between mt-8 mb-3">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 className="font-display font-bold" style={{ fontSize: 17 }}>Type sets</h2>
         <Button variant="secondary" size="sm" onClick={() => setEditingSet('new')}>+ New type set</Button>
       </div>

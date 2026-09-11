@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useParams } from 'react-router'
 import { ApiResponseError, labelsApi } from '../../api'
-import type { Label } from '../../types'
+import type { Label, Hex } from '../../types'
 import { Button, Input, Select, Textarea } from '../../components/ui'
 import { LABEL_PALETTE, LabelChip, colorForName, labelsKey } from '../../components/labels'
 import { ISSUES_KEY_ROOT } from '../../lib/queryKeys'
@@ -203,7 +203,7 @@ function LabelForm({ wsId, label, onClose, onSaved }: {
     },
   })
 
-  function pick(c: string) {
+  function pick(c: Hex) {
     setColor(c)
     setColorTouched(true)
   }

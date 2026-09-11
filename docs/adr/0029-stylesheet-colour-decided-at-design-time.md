@@ -59,6 +59,40 @@ build, because anyone can look at it.**
   repository, it belongs to the stylesheet; if it can be found only by a query to the database, it
   belongs to the renderer.*
 
+### How the seam is enforced (added by HD-300, 2026-09-11)
+
+The reviewer rule above is now backed by a **type**, not only by a scan. `Hex` (a template-literal
+`#`-prefixed string, `src/types.ts`) is the declared type of every stored hue **in both directions**:
+
+* **read** — `IssueType.color`, `Status.color`, `Priority.color`, `LabelRef.color`,
+  `FieldConfig.options[].color`, and the props whose contract is "a hue from the database": `Badge`,
+  `StatusBadge`, `ParentChip`, plus `ColorField` and `token()`;
+* **write** — `UpsertCatalogPayload.color`, `UpsertLabelPayload.color` and `labelsApi.create`'s
+  inline payload (`api.ts`). HD-300's first round typed only the read side, and the tests gate found
+  the consequence: a `var(--…)` posted through a write door was stored and came back typed `Hex`, so
+  the type told the truth about everything except how the value got there. Typing the three write
+  sites cost **no** call-site change — `ColorField` already narrows at the one place a hue enters the
+  app, `e.target.value as Hex` on an `<input type="color">`, whose value is `#rrggbb` by
+  specification.
+
+`<Badge color="var(--color-brand)" />` is therefore a `tsc -b` error, so is the same token arriving
+through a `const` or a lookup table, and so is one handed to `labelsApi.update` (verified by planting
+each shape and reading the compiler's refusal, 2026-09-11).
+
+That last case is why this is a type and not a lint rule. `palette.contrast.test.ts` recorded, **by
+measurement**, that a token parked in a lookup table was invisible to its regex — "the lookup-table
+version was reinstated verbatim and the whole suite stayed green" — and that is how three of the four
+badges in the original bug were actually written. A regex over source text cannot follow a value; a
+type can. The scan's `color`-prop entry was **deleted** in the same change rather than kept beside the
+type, because two mechanisms for one trap means the weaker one is the one people read. What remains in
+that scan is the half no type can express: a token as the first argument of
+`inkOn`/`tintOf`/`fillOf`/`ringOn`/`onSolid`, whose signatures take `unknown` on purpose because the
+value arrives from JSONB.
+
+`Hex` is lexical, not semantic — `'#nothex'` satisfies it. The parse at render time is still the
+check for a malformed hex; what the type removes is the *category* error of a stylesheet colour
+crossing into the renderer, which is what this ADR is about.
+
 ## Consequences
 
 + The palette stays **surveyable**: a colour's value is visible in the diff, not derived by an
@@ -70,11 +104,14 @@ build, because anyone can look at it.**
 + A new token cannot be added silently: the tripwire demands that it be classified.
 − **There are two guard mechanisms, and the seam between them has to be known.** It rests on one
   sentence above and on a reference from both tests.
-− **Neither of the two mechanisms runs automatically today.** CI runs exactly
-  `./mvnw -B verify`, and the `frontend-maven-plugin` executions are `npm ci` and `npm run build`;
-  nothing invokes `npm test` (HD-242). That is, both artefacts protect the reviewer and the local run,
-  not the merge. This must be written next to every claim of "the property is tested" until
-  HD-242 is closed.
++ **The vitest half now runs on the merge (HD-242, closed).** `./mvnw -B verify` is still CI's only
+  command, but the `frontend-maven-plugin` executions now include `npm-test` (and, since **HD-300**,
+  `npm-lint`), both bound to the `test` phase. The bullet that stood here said the opposite and was
+  true when written; it stayed for the reason this ADR keeps repeating — *nothing about a sentence
+  changes when a build file does*. What holds the replacement is `src/lint/debt.test.ts`, which reads
+  `pom.xml` and goes red if either execution leaves it.
+− **The browser audit still runs on nobody's merge.** `npm run audit:contrast` needs the system
+  Chrome and a populated instance, so it protects the reviewer and the local run only.
 − The DOM audit requires the system Chrome (`puppeteer-core`, `channel: 'chrome'`), a running
   instance and populated pages; it has floors on the number of elements found, or a green run over an
   empty backlog reads as clean.

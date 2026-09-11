@@ -2,7 +2,7 @@ import { clsx } from 'clsx'
 import { forwardRef, useState, useRef, useEffect, useMemo, Children, isValidElement, Fragment } from 'react'
 import type { ButtonHTMLAttributes, InputHTMLAttributes, TextareaHTMLAttributes, SelectHTMLAttributes, ReactNode } from 'react'
 import { ChevronsUp, ChevronUp, Equal, ChevronDown, Minus, CornerDownRight, Check, type LucideIcon } from 'lucide-react'
-import type { Priority } from '../types'
+import type { Priority, Hex } from '../types'
 import {
   EDGE_WEIGHT, NEUTRAL_EDGE, NEUTRAL_FILL, NEUTRAL_INK, SURFACE, inkOn, tintOf, token,
 } from '../colour'
@@ -344,6 +344,7 @@ export function Select({
                 onClick={() => choose(o)}
                 className="flex items-center gap-2 cursor-pointer"
                 style={{
+                  // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
                   padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: 13.5,
                   color: o.disabled ? 'var(--color-text-muted)' : 'var(--color-text)',
                   background: selected
@@ -358,6 +359,7 @@ export function Select({
             )
           })}
           {options.length === 0 && (
+            // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
             <div style={{ padding: '8px 10px', fontSize: 13, color: 'var(--color-text-muted)' }}>No options</div>
           )}
         </div>
@@ -370,7 +372,7 @@ export function Select({
 
 interface BadgeProps {
   label: string
-  color?: string
+  color?: Hex
   className?: string
   /**
    * The opaque surface the badge itself sits on — what its tint is composited
@@ -531,6 +533,12 @@ export function Avatar({ name, avatarUrl, size = 24 }: { name: string; avatarUrl
       // this one component. Same fill, the fill's own ink: 5.58:1.
       className="rounded-full flex items-center justify-center font-medium flex-shrink-0"
       style={{
+        // The 204th HD-177 site, and the one the rule could not see until its
+        // fix round: `size * 0.4` is arithmetic, not a literal. Paying it off is
+        // not a one-line swap to a rem string — the circle around it is px too
+        // (`width`/`height` come from the same prop), so the whole component has
+        // to become size-relative at once. That belongs to HD-177, not here.
+        // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
         width: size, height: size, fontSize: size * 0.4,
         background: 'var(--color-brand)', color: 'var(--color-on-brand)',
       }}
@@ -595,7 +603,7 @@ const categoryTokens: Record<string, string> = {
 }
 
 export function StatusBadge({ name, category, color, surface }: {
-  name: string; category: string; color?: string; surface?: string
+  name: string; category: string; color?: Hex; surface?: string
 }) {
   const fallback = categoryTokens[category]
   return <Badge label={name} color={color ?? (fallback ? token(fallback) : undefined)} surface={surface} />
@@ -611,7 +619,7 @@ const PARENT_TINT_WEIGHT = 0x18 / 255
 export function ParentChip({
   parentKey, color, title, onClick, surface = SURFACE.row,
 }: {
-  parentKey: string; color?: string; title?: string
+  parentKey: string; color?: Hex; title?: string
   onClick?: (e: React.MouseEvent) => void; surface?: string
 }) {
   const tint = color ? tintOf(color, surface, PARENT_TINT_WEIGHT) : NEUTRAL_FILL
@@ -626,6 +634,7 @@ export function ParentChip({
       style={{ background: tint, border: `1px solid ${edge}` }}
     >
       <CornerDownRight size={11} style={{ color: ink, flexShrink: 0 }} />
+      {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
       <span className="mono truncate" style={{ fontSize: 11, color: ink }}>{parentKey}</span>
     </button>
   )
@@ -651,6 +660,7 @@ export function ChildrenProgress({
         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full mono"
         title={`${done} of ${total} sub-issues done`}
         style={{
+          // eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177
           fontSize: 10.5,
           background: complete ? `${brand}18` : 'var(--color-surface-2)',
           color: complete ? brand : 'var(--color-text-muted)',

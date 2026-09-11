@@ -76,6 +76,7 @@ export default function WorkspaceRolesPage() {
     const custom = inScope.filter(r => !r.builtIn)
     return (
       <section key={scope} className="mb-8">
+        {/* eslint-disable-next-line hamstrack/no-numeric-font-size -- HD-177 */}
         <h2 className="font-display font-bold mb-1" style={{ fontSize: 15 }}>
           {scope === 'WORKSPACE' ? 'Workspace roles' : 'Project roles'}
         </h2>
