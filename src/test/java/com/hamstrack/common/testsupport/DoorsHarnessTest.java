@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * reflection finds on {@code Doors}, so a population added without a floor is red by name. Floors
  * are ~85 % of the count on the day the population was written for the large ones and the exact
  * count for the populations of five or fewer, where a deleted door is worth a deliberate edit (D4).
- * Raise deliberately; never lower to pass — the message says which of three causes to look for.
+ * Raise deliberately; never lower to pass — the message names the causes of a collapsed Doors population.
  * {@link Doors#requestRecords()} is the one population whose floor says nothing about which members
  * it holds (its by-name half re-finds a record the closure dropped), so it also gets an exact
  * witness: its reachability half is derived a second way from the body parameters and held equal.

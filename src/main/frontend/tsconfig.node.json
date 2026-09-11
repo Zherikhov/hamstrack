@@ -16,5 +16,17 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["vite.config.ts", "vitest.config.ts"]
+  "// include": [
+    "The files that run in Node. HD-301 added the two under src/: the vitest reporter and",
+    "the ambient declarations it needs. They are excluded from tsconfig.app.json so that",
+    "`declare module 'node:fs'` is not offered to every component in the SPA, and they are",
+    "here so that `tsc -b` still type-checks them — a file in no project is a file no gate",
+    "reads."
+  ],
+  "include": [
+    "vite.config.ts",
+    "vitest.config.ts",
+    "src/test/nodeApi.d.ts",
+    "src/test/suiteRecorder.ts"
+  ]
 }

@@ -5,6 +5,11 @@ import { describe, it, expect } from 'vitest'
 // `css: false`. There is deliberately not a second mechanism for reading it.
 import INDEX_CSS from './index.css?raw'
 import { contrastRatio, parseColour, relativeLuminance } from './colour'
+// The comment filter, from the one place that spells it. This file had the third
+// copy of it — the sentence in source.ts says "shared by every test that makes
+// one", and a claim about a category is only true while nothing keeps its own
+// copy beside it (HD-301 round 3).
+import { code } from './lint/source'
 
 /**
  * **The seal on HD-175's declared palette.**
@@ -353,11 +358,9 @@ describe('per-site overrides', () => {
   const DECLARED_OVERRIDES = 68
 
   function countHexLiterals(source: string): number {
-    const code = source
-      .split('\n')
-      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)) // a documented ratio is not a paint
-      .join('\n')
-    return (code.match(/#[0-9a-fA-F]{6}\b/g) ?? []).length
+    // A documented ratio is not a paint, which is the same reason every
+    // configuration assertion in this repo drops comments first.
+    return (code(source).match(/#[0-9a-fA-F]{6}\b/g) ?? []).length
   }
 
   it('does not grow past the number declared here', () => {

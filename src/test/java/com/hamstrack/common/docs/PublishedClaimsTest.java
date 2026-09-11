@@ -29,12 +29,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * or from an older document, and the new paragraph drifting into variants.
  *
  * <h2>Why this is a JUnit test and not a vitest sibling</h2>
- * {@code vitest} never runs in CI: {@code .github/workflows/build.yml} runs exactly one command,
- * {@code ./mvnw -B verify}, and the {@code frontend-maven-plugin} executions are {@code npm ci} and
- * {@code npm run build}. Nothing invokes {@code npm test}, so a guard written there executes only
- * when a human types it, and is one nobody has seen fail by construction. This claim's surfaces are
- * also mostly outside {@code src/} &mdash; {@code README.md} and {@code docs/*.md} &mdash; which a
- * vitest seal scoped like {@code src/main/frontend/src/licensing.test.ts} could not reach at all.
+ * The original reason has expired and the conclusion has not, so both are stated. <strong>Expired
+ * (HD-242, 2026):</strong> {@code vitest} used to run on no automated path at all &mdash;
+ * {@code .github/workflows/build.yml} ran one command, {@code ./mvnw -B verify}, and the
+ * {@code frontend-maven-plugin} executions were {@code npm ci} and {@code npm run build} only, so a
+ * guard written there executed when a human typed it and nobody had seen it fail. There is now an
+ * {@code npm-test} execution bound to the {@code test} phase, and since HD-301 a build step that
+ * refuses a run which executed less of the SPA tree than the tree holds. <strong>Standing:</strong>
+ * this claim's surfaces are mostly outside {@code src/} &mdash; {@code README.md} and
+ * {@code docs/*.md} &mdash; which a vitest seal scoped like
+ * {@code src/main/frontend/src/licensing.test.ts} could not reach at all.
  * Reading repository text from a test with a CWD-relative path has precedent here
  * ({@code AuthMailDoorsTest} walks {@code src/main/java}, {@code MailThrottleCoverageTest} reads
  * {@code rules.yml}); Java reads {@code .md} and {@code .tsx} as text equally well, so one runner

@@ -10,7 +10,6 @@ import org.junit.platform.launcher.TestPlan;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
@@ -110,8 +109,11 @@ public final class ExecutedTestClassRecorder implements TestExecutionListener {
             return;
         }
         try {
-            var buildDir = System.getProperty(SuiteRunRecord.BUILD_DIRECTORY_PROPERTY, "target");
-            var directory = SuiteRunRecord.directory(Path.of(buildDir));
+            // Through SuiteRunRecord rather than getProperty(key, "target"): the two-argument form
+            // falls back on an ABSENT property and not on an explicitly empty one, which is the
+            // hole its vitest sibling had through `??` (HD-301 round 2).
+            var directory = SuiteRunRecord.directory(SuiteRunRecord.buildDirectory(
+                    System.getProperty(SuiteRunRecord.BUILD_DIRECTORY_PROPERTY)));
             Files.createDirectories(directory);
             var file = directory.resolve(SuiteRunRecord.fileName(
                     System.getProperty(SuiteRunRecord.RUN_ID_PROPERTY), ProcessHandle.current().pid()));

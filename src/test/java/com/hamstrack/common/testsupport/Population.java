@@ -16,7 +16,9 @@ import java.util.stream.Stream;
  * harness's own test prints when the scan collapses. A floor is anti-vacuity, not change
  * detection: it catches a broken scan or a narrowed predicate, and a consumer that must notice a
  * single door leaving asserts the members instead. Raise a floor deliberately; never lower one to
- * make a run pass — the message below says which of the three causes to look for.
+ * make a run pass — the message below names the causes its own reader can act on: three of them for
+ * a {@code Doors} population, and a caller whose floor is over a different subject passes its own
+ * (HD-301).
  *
  * <p>Immutable. {@link #floor(int)} returns a copy that remembers the floor so that
  * {@link #describe()} can print it; {@link #filter(String, Predicate)} remembers the parent's size
@@ -150,21 +152,46 @@ public final class Population<T> implements Iterable<T> {
     }
 
     /**
-     * The §4.5 floor message. Kept under 25 lines and naming the action: the three causes are the
-     * only three, and exactly one of them is true.
+     * Why a {@link Doors}-shaped population that shrank makes everything above it vacuous, and the
+     * three causes of it. Passed to {@link #floorMessage(String, int, int, String, String, List)}
+     * rather than baked into it, because a caller whose floor is over a <em>different</em> subject
+     * would otherwise inherit a remedy it cannot perform (HD-301: the suite-coverage arms printed
+     * "`mvnw clean compile`" and "fix Doors" at a reader whose real problem was a vitest
+     * {@code include} line).
      */
-    static String floorMessage(String name, int size, int floor, String description) {
-        return """
-                %s: the scan saw %d, under the floor of %d.
+    static final String POPULATION_WHY =
+            "Every consumer of this population asserts \"nothing offends\", so a scan that stopped"
+            + " seeing members reports clean for ever.";
 
-                Every consumer of this population asserts "nothing offends", so a scan that stopped
-                seeing members reports clean for ever. Exactly one of these is true:
-                  1. the scan is broken — target/classes is stale or empty (`mvnw clean compile`), or
-                     HamstrackApplication moved and the code-source root moved with it;
-                  2. a door really left — if that was deliberate, lower the floor in the SAME commit
-                     and name the door in that commit's message;
-                  3. the predicate narrowed — a renamed annotation, a moved package, a stereotype Doors
-                     does not recognise yet: fix Doors, never the floor.
-                Do not lower a floor to make a run pass. (%s)""".formatted(name, size, floor, description);
+    static final List<String> POPULATION_CAUSES = List.of(
+            "the scan is broken — target/classes is stale or empty (`mvnw clean compile`), or"
+            + " HamstrackApplication moved and the code-source root moved with it;",
+            "a door really left — if that was deliberate, lower the floor in the SAME commit and"
+            + " name the door in that commit's message;",
+            "the predicate narrowed — a renamed annotation, a moved package, a stereotype Doors does"
+            + " not recognise yet: fix Doors, never the floor.");
+
+    /** The §4.5 floor message for a {@link Doors} population, over {@link #POPULATION_CAUSES}. */
+    static String floorMessage(String name, int size, int floor, String description) {
+        return floorMessage(name, size, floor, description, POPULATION_WHY, POPULATION_CAUSES);
+    }
+
+    /**
+     * The §4.5 floor message over a caller's own causes: the frame is shared (so every floor in this
+     * repository refuses in one voice) and the remedies are the caller's (so every one of them is an
+     * action its reader can perform). Kept under 25 lines, which bounds {@code causes} at about ten.
+     */
+    static String floorMessage(String name, int size, int floor, String description, String why,
+                               List<String> causes) {
+        var message = new StringBuilder(name + ": the scan saw " + size + ", under the floor of "
+                                        + floor + "." + System.lineSeparator()
+                                        + System.lineSeparator() + why
+                                        + " Exactly one of these is true:" + System.lineSeparator());
+        var n = 1;
+        for (var cause : causes) {
+            message.append("  ").append(n++).append(". ").append(cause).append(System.lineSeparator());
+        }
+        return message.append("Do not lower a floor to make a run pass. (").append(description)
+                .append(")").toString();
     }
 }

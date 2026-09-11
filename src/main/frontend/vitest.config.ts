@@ -84,6 +84,14 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
 
-    reporters: ['default', './src/test/marginReporter.ts'],
+    // `suiteRecorder` is the record half of the HD-301 suite-ran guard: it writes
+    // down which test modules this run executed, and the `test-tree-coverage-guard`
+    // antrun step in pom.xml refuses a run whose executed set is smaller than the
+    // tree. Dropping it from this array does not make anything green — the guard
+    // finds no record and refuses, naming this line among its causes. Both
+    // entries here are asserted by `src/lint/suiteGuard.test.ts`; a `--reporter=…`
+    // flag on the command line REPLACES this list, which is why `package.json`'s
+    // `test` script is pinned to a bare `vitest run` by the same test.
+    reporters: ['default', './src/test/marginReporter.ts', './src/test/suiteRecorder.ts'],
   },
 })

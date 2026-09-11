@@ -19,5 +19,15 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "// exclude": [
+    "HD-301. The two files under src/ that run in NODE rather than in the browser.",
+    "nodeApi.d.ts is an ambient script (no top-level import/export), so inside this program",
+    "its `declare module 'node:fs'` is offered to every component; suiteRecorder.ts is the",
+    "only file that may import one. tsconfig.node.json compiles both, so `tsc -b` still",
+    "type-checks them — measured: a planted type error in suiteRecorder.ts reds the build.",
+    "src/lint/nodeApi.test.ts is the other half: it refuses a Node API named anywhere else",
+    "under src/, because this split is one `include` edit away from reverting in silence."
+  ],
+  "exclude": ["src/test/nodeApi.d.ts", "src/test/suiteRecorder.ts"]
 }

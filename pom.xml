@@ -440,7 +440,33 @@
                         <id>npm-test</id>
                         <goals><goal>npm</goal></goals>
                         <phase>test</phase>
-                        <configuration><arguments>run test</arguments></configuration>
+                        <configuration>
+                            <arguments>run test</arguments>
+                            <!--
+                              HD-301: the identity of THIS Maven session, handed to the vitest
+                              reporter that records which test modules actually ran, exactly as
+                              <systemPropertyVariables> below hands the same value to the JUnit
+                              listener that records which test classes ran. ONE identity, both
+                              suites: ${maven.build.timestamp} is interpolated once per session,
+                              so the antrun guard accepts only the records this run wrote and
+                              ignores every leftover (an earlier run, an IDE run, a crashed run)
+                              on sight. Freshness is an identity, never a file timestamp — that
+                              is the whole reason target/surefire-reports was rejected in HD-265.
+
+                              Losing either line is silent in the only way that matters: the
+                              suite still runs and still passes, and the guard can no longer tell
+                              how much of it ran — which is why it treats a missing record as a
+                              failure rather than as nothing to do. `frontend-maven-plugin`
+                              1.15.1's npm goal declares `environmentVariables` as an editable
+                              Map parameter and passes it to the child process; measured
+                              2026-09-11 by reading HAMSTRACK_TEST_RUN_ID back inside the
+                              reporter through `mvnw frontend:npm@npm-test`.
+                            -->
+                            <environmentVariables>
+                                <HAMSTRACK_TEST_RUN_ID>${maven.build.timestamp}</HAMSTRACK_TEST_RUN_ID>
+                                <HAMSTRACK_TEST_RUN_DIR>${project.build.directory}</HAMSTRACK_TEST_RUN_DIR>
+                            </environmentVariables>
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
@@ -581,7 +607,14 @@
                 </configuration>
             </plugin>
             <!--
-              HD-265: THE STEP THAT REFUSES A RUN THAT SILENTLY SKIPPED PART OF THE TREE.
+              HD-265 / HD-301: THE STEP THAT REFUSES A RUN THAT SILENTLY SKIPPED PART OF A TREE.
+
+              ONE STEP, ONE ARM PER SUITE. The rule is about a category — every automated suite here
+              proves how much of its own tree it executed — so the SPA's vitest suite is a second arm
+              inside this one JVM (HD-301) rather than a second mechanism somewhere else, and both go
+              through SuiteCoverage.verdict. One step means one summary table
+              (target/test-tree-summary.md, which CI appends to the job summary with `if: always()`)
+              rather than two a reader has to add up. A third suite is a third arm.
 
               An unfiltered `mvnw test` reported `Tests run: 1463, Failures: 0, Errors: 0` and BUILD
               SUCCESS while executing 224 of 252 test classes. The absent 28 were a contiguous
@@ -604,13 +637,29 @@
               IT COSTS ONE SHORT-LIVED JVM. No JUnit, no Spring context, no database: the classpath
               is target/test-classes and the program reads two directories and one record file.
 
-              ARMING. Every switch that legitimately narrows the plan is passed straight through and
-              disarms the check inside SuiteCoverageGuard rather than out here, so all of it is
-              readable in one place — a profile activation can only test ONE property, and this needs
-              the whole category. An undefined Maven property interpolates to its own placeholder,
-              which is how "not passed" reaches the program; it reads blank as unset too, so it
-              behaves the same if that ever changes. An IDE builds its own command line and never
-              runs a Maven phase, so IDE runs are untouched.
+              ARMING, AND IT IS NOT THE SAME SET FOR THE TWO ARMS. Every switch that legitimately
+              narrows a plan is passed straight through and disarms its arm inside SuiteCoverageGuard
+              rather than out here, so all of it is readable in one place — a profile activation can
+              only test ONE property, and this needs the whole category. The asymmetry is the part
+              that will be got wrong: `-Dtest=`, `-Dgroups=`, `-DexcludedGroups=` and
+              `-Dmaven.test.skip[.exec]=true` narrow surefire and do NOT reach
+              frontend-maven-plugin (its npm goal binds ${skipTests} and nothing else — read from
+              the 1.15.1 plugin descriptor), so such a run still pays the whole 45-70s vitest suite
+              and the vitest arm stays ANSWERABLE for it; `-Dfrontend.skip=true` is the exact
+              reverse. Only `-DskipTests` stands both down. An undefined Maven property interpolates
+              to its own placeholder, which is how "not passed" reaches the program; it reads blank
+              as unset too. `frontend.skip` is different — it has a POM-declared default, so it
+              always arrives as a literal and the guard's `!equalsIgnoreCase("false")` test is what
+              reads it correctly. An IDE builds its own command line and never runs a Maven phase, so
+              IDE runs are untouched.
+
+              KNOWN EDGE, PRE-EXISTING AND NOT INTRODUCED BY EITHER TICKET: under
+              `-Dmaven.test.skip=true` the test sources are not compiled, so target/test-classes may
+              not contain the guard at all and this fork dies with "Could not find or load main
+              class" → Java Result: 1 → the <fail> below. Measured 2026-09-11 by running that command
+              against an absent target/test-classes. It is a property of the step as it stands, filed
+              separately rather than patched here; `-DskipTests` is the flag that skips tests and
+              keeps the build honest.
 
               ORDERING: within the `test` phase the default lifecycle binding (surefire:test) runs
               before POM-declared executions, so the record is complete by the time this reads it —
@@ -627,6 +676,20 @@
                         <phase>test</phase>
                         <goals><goal>run</goal></goals>
                         <configuration>
+                            <!-- HD-301 round 2. The `run` goal's own `skip` parameter defaults to
+                                 ${maven.antrun.skip} and is editable, so `-Dmaven.antrun.skip=true`
+                                 ran BOTH suites in full, skipped this step and exited BUILD SUCCESS
+                                 (measured 2026-09-11: `Skipping Antrun execution` + BUILD SUCCESS on
+                                 an invocation that refuses without the flag). An explicit value here
+                                 wins over the property expression, so the switch no longer reaches
+                                 it. That is the same shape this step was placed OUTSIDE
+                                 frontend-maven-plugin to avoid — the difference is only that
+                                 `frontend.skip` is a flag CLAUDE.md tells developers to use daily
+                                 and `maven.antrun.skip` appears nowhere in this repo — and "one
+                                 level up is out of reach" was an absolute that was never true.
+                                 Asserted from the other side by
+                                 src/main/frontend/src/lint/suiteGuard.test.ts. -->
+                            <skip>false</skip>
                             <target>
                                 <!-- failonerror would end the build with "Java returned: 1", which
                                      names neither the check nor where its report went; the exit
@@ -643,14 +706,25 @@
                                     <arg value="testClasses=${project.build.testOutputDirectory}"/>
                                     <arg value="buildDirectory=${project.build.directory}"/>
                                     <arg value="runId=${maven.build.timestamp}"/>
+                                    <arg value="frontendRoot=src/main/frontend"/>
                                     <arg value="test=${test}"/>
                                     <arg value="groups=${groups}"/>
                                     <arg value="excludedGroups=${excludedGroups}"/>
                                     <arg value="skipTests=${skipTests}"/>
                                     <arg value="maven.test.skip=${maven.test.skip}"/>
                                     <arg value="maven.test.skip.exec=${maven.test.skip.exec}"/>
+                                    <!-- HD-301. `frontend.skip` has a POM-DECLARED DEFAULT of false,
+                                         so unlike ${test} it arrives as the literal `false` rather
+                                         than as its own placeholder; the guard's
+                                         !equalsIgnoreCase("false") test already reads that
+                                         correctly. It disarms the vitest arm ONLY: -Dtest=Foo and
+                                         -Dgroups=... narrow surefire and leave the whole vitest
+                                         suite running, so they disarm the jvm arm and the vitest
+                                         arm stays answerable for it. That asymmetry is the thing to
+                                         keep when adding a switch here. -->
+                                    <arg value="frontend.skip=${frontend.skip}"/>
                                 </java>
-                                <fail message="This test run cannot be shown to have executed the whole tree, so its result is not evidence about whatever it left out. The [test-tree] report above says what is missing; HD-265.">
+                                <fail message="A suite in this run cannot be shown to have executed the whole tree it is answerable for, so its result is not evidence about whatever it left out. The [test-tree] (backend) and [vitest-tree] (SPA) report above says which, and what is missing; HD-265, HD-301.">
                                     <condition>
                                         <not><equals arg1="${hamstrack.test-tree.exit}" arg2="0"/></not>
                                     </condition>

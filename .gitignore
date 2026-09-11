@@ -1,6 +1,11 @@
 HELP.md
 target/
 
+# Suite-run records (HD-265/HD-301). They live under target/ and are pruned by the
+# coverage guard; this belt is for the run that lands one somewhere else — a blank
+# HAMSTRACK_TEST_RUN_DIR used to resolve against the CWD and litter the SPA root.
+test-run-record/
+
 ### Dev pipeline transient run state (see docs/design/dev-team-pipeline.md) ###
 .claude/pipeline/run.json
 .claude/pipeline/history.jsonl

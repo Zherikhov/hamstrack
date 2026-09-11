@@ -6,6 +6,10 @@ import POM_SOURCE from '../../../../../pom.xml?raw'
 import VITEST_CONFIG_SOURCE from '../../vitest.config.ts?raw'
 import { RULE_NAMES } from '../../eslint-rules/index.js'
 import { CLOCK_DAYS, DECLARED, DECLARED_AS_OF, verdict } from '../../lint.debt.mjs'
+// The comment filter every configuration-text assertion in this repo runs first.
+// It was declared here until suiteGuard.test.ts needed the same one; a second
+// copy is a drift waiting for the diff that fixes one of them (HD-301).
+import { code } from './source'
 
 /**
  * **The guard on the rule set, deliberately outside the rule set (HD-300).**
@@ -60,11 +64,13 @@ const SOURCES = import.meta.glob('../**/*.{ts,tsx}', {
  * the same green line, so the population is asserted before anything is asserted
  * about it.
  *
- * The glob matched **217** files on 2026-09-11 (`lint.mjs` lints more than that:
- * it adds the `.js`/`.mjs` config and root scripts). Like every floor in this
- * ticket it catches the **collapse** — a glob that resolves to nothing after a
- * directory rename — and not the drift; 17 files of slack is not a budget for
- * deleting 17 files, and nothing here would notice if you did.
+ * The glob matched **222** files on 2026-09-11, after HD-301 added its five
+ * (`lint.mjs` lints more than that: it adds the `.js`/`.mjs` config and root
+ * scripts). `nodeApi.test.ts` globs the same tree with the same pattern and the
+ * same floor, so the two numbers are one fact. Like every floor in this ticket it
+ * catches the **collapse** — a glob that resolves to nothing after a directory
+ * rename — and not the drift; the slack is not a budget for deleting that many
+ * files, and nothing here would notice if you did.
  */
 const FILE_FLOOR = 200
 
@@ -76,27 +82,6 @@ const FILE_FLOOR = 200
  * the keys are needed, and the file this looks for is machine-written JSON.
  */
 const SUPPRESSION_FILES = import.meta.glob('../../**/eslint-suppressions.json')
-
-/**
- * **Comments are dropped before every text assertion below.** Each of these
- * files DOCUMENTS the mechanism it must not contain — the pom comment names the
- * suppression flag, `lint.mjs` explains why it takes no cache flag, the flat
- * config discusses its own `ignores` — so a naive scan fires on the explanation
- * and teaches the next author to stop explaining. Prose is not configuration.
- *
- * Line-based on purpose, and the same filter `palette.contrast.test.ts` uses on
- * the same kind of question: a `/* … *\/` stripper that does not understand
- * string literals eats the config's own `'node_modules/**'` and everything after
- * it, which is a scan that reads nothing while looking like one that read
- * everything. There is no third spelling of this filter in the repo.
- */
-function code(source: string): string {
-  return source
-    .replace(/<!--[\s\S]*?-->/g, '')                      // XML comments, unambiguous
-    .split('\n')
-    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))         // JS/TS comment lines
-    .join('\n')
-}
 
 const DIRECTIVE_RE = /eslint-disable(?:-next-line|-line)?\s+([\w/-]+)([^\n]*)/g
 

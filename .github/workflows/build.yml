@@ -118,11 +118,14 @@ jobs:
       #
       #   * `Test Files … / Tests …` — the COUNT. A test step that silently
       #     matched nothing is the failure mode being guarded here, and it looks
-      #     identical to a green one everywhere except this line. Today an empty
-      #     match is red (`vitest run` exits 1, verified by pointing the include
-      #     glob at an empty directory), and `--passWithNoTests` is deliberately
-      #     absent from the whole repo — but the count is what tells a reader
-      #     which of those two worlds this run happened in.
+      #     identical to a green one everywhere except this line. An empty match
+      #     is red (`vitest run` exits 1, verified by pointing the include glob at
+      #     an empty directory) and `--passWithNoTests` is deliberately absent from
+      #     the whole repo; since HD-301 a PARTIAL match is red too — the
+      #     `[vitest-tree]` line from the guard below compares the modules this run
+      #     executed against the test files git reports under src/main/frontend.
+      #     So this line is now the DRIFT, which nothing enforces: 73 files going
+      #     to 60 with all 60 executed is green and visible only here.
       #
       #   * `margin survey — testTimeout …ms, slowest …ms (…%)` — HD-240's
       #     standing report of the five slowest tests as a percentage of the
@@ -148,17 +151,20 @@ jobs:
       #     The suppressed count is the HD-177 debt and may only go down; lint.mjs
       #     itself refuses it going up, so a rise cannot reach this line.
       #
-      # The BACKEND half of that same question stopped being a matter of reading
-      # in HD-265: an unfiltered run now compares the test classes it actually
-      # executed against src/test/java and fails, naming whatever it never
-      # reached (the `test-tree-coverage-guard` execution in pom.xml). It exists
-      # because a green `mvnw test` once reported four zeros over a plan missing
-      # whole packages, and the only thing that noticed was a human remembering
-      # a different total. The line to glance at is `[test-tree] all N test
-      # classes ... executed in this run` — but it is now enforced rather than
-      # trusted, and it disarms itself for `-Dtest=`/`-DskipTests`, which is why
-      # the image build in build-and-push neither pays for it nor is refused by
-      # it.
+      # EVERY automated suite here proves how much of its own tree it executed,
+      # and refuses a run that cannot show it — the `test-tree-coverage-guard`
+      # execution in pom.xml, one arm per suite. It exists because a green
+      # `mvnw test` once reported four zeros over a plan missing whole packages,
+      # and the only thing that noticed was a human remembering a different total
+      # (HD-265); the SPA suite got the same guarantee in HD-301. The lines to
+      # glance at are `[test-tree] all N test classes ... executed in this run`
+      # and `[vitest-tree] all N test files ... executed in this run (M tests)`,
+      # and the step after this one puts both counts in the job summary. Each arm
+      # disarms itself honestly and prints which switch did it — and NOT on the
+      # same switches: `-Dtest=` narrows surefire only and leaves the vitest arm
+      # answerable, `-Dfrontend.skip=true` is the reverse. That is why the image
+      # build in build-and-push (`package -DskipTests`, which reaches both)
+      # neither pays for either suite nor is refused by either arm.
       #
       # COST: measured +45-70s per non-skipped build on a dev box (see pom.xml).
       # Local fast loops keep `-Dfrontend.skip=true`, which switches EVERY
@@ -198,6 +204,36 @@ jobs:
           DB_PASSWORD: hamstrack
           # Dummy value for tests only — JwtService requires >= 32 bytes (HMAC-SHA256)
           JWT_SECRET: ci-only-jwt-secret-0123456789abcdef0123456789
+
+      # HD-301. How much of each tree the step above executed, without arithmetic
+      # and without scrolling: one row per suite (jvm, vitest) with the executed
+      # count, the tree count, the test count and the verdict.
+      #
+      # `if: always()` is the load-bearing part, and the run it is load-bearing FOR
+      # is the one THIS GUARD failed: the counts matter most there, and a summary
+      # written only on green is a summary nobody reads when it would help. It says
+      # nothing about the other four red paths — a failure in compile, surefire,
+      # npm-lint or npm-test aborts before the antrun step, so no summary is written
+      # and the fallback below is all there is. Both arms disarm honestly and say so
+      # in their row, so a `disarmed by …` line here is information, not a hole.
+      #
+      # The fallback REFUSES rather than notes. It used to `echo` and exit 0, which
+      # made it a note in a place nobody looks; the one case where it fires on an
+      # otherwise-green job is the guard having been switched off in place
+      # (-Dmaven.antrun.skip=true, now pinned in the pom) or its execution deleted —
+      # precisely the case where nothing else goes red. On the four paths where a
+      # suite already failed the job is red anyway, so this costs nothing there.
+      - name: Test-tree counts in the job summary
+        if: always()
+        run: |
+          if [ -f target/test-tree-summary.md ]; then
+            cat target/test-tree-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            message="no test-tree summary was written: either a suite went red before the guard ran, or the guard itself was skipped or deleted. The step above separates them — if it is RED, read its failure and fix that; if it is GREEN, nothing compared either suite against its tree on this run and the guard is what to look at."
+            echo "::error title=Test-tree guard did not run::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
 
   # Build the Docker image and push to GitHub Container Registry.
   # Gated on green tests; runs on main pushes, release tags and manual
