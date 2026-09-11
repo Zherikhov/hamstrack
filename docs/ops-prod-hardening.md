@@ -377,7 +377,27 @@ and `ops/drift/hamstrack-config-drift.sh`, which carry `log()` byte for byte. It
   20 minutes and prints `still running: Status=InProgress` once a minute, so a running
   deploy and a failed one read differently — and a poll SSM does not answer is neither, so it
   is counted, named and stopped at six consecutive failures rather than reported as `Pending`.
-  Owner read-back rows (the first verified production deploy, dated) go here: _none yet_.
+  Owner read-back rows (the first verified production deploy, dated) go here.
+
+| Date | Deploy | The box's own summary line | Read back from Prometheus |
+|---|---|---|---|
+| 2026-09-11 | `080aec4`, version 0.18.2, the first deploy this verify phase ever ran on | `verify: PASS ran=5/5 skipped=none services=10 env-services=6 app-identity=full withheld=37` | `hamstrack_deploy_verify_ok` **1**, `hamstrack_deploy_verify_check_ok` **1** on all five checks, `hamstrack_deploy_verify_checks_ran` **5** — read by the owner (VZ) in Grafana Explore over an SSM port-forward |
+
+  Two things that row is worth reading for. **Nothing was skipped**: `ran=5/5` with
+  `skipped=none` means every check read the running box, so the gauge's `2` ("not applicable
+  here") was never used and `checks_ran` is the denominator it was built to be. And
+  **`withheld=37`** is the disclosure control working on a real deploy: thirty-seven lines
+  that Compose, Docker or the AWS CLI wrote were kept off a world-readable Actions log, and
+  the only reason they are not in it is that they do not carry this script's timestamp prefix.
+
+  **The first two attempts failed in 9 s and 14 s, and the failure is worth recording.**
+  `INSTANCE_ID` had been created as an Actions **secret** rather than an Actions **variable**,
+  so `vars.INSTANCE_ID` resolved to the empty string. The step refused by name before touching
+  anything — `INSTANCE_ID is empty: set the repository variable …` — which is exactly the
+  behaviour the paragraph above argues for: had it been a secret, GitHub would have masked a
+  wrong value and the same run would have failed later, against SSM, looking like an AWS
+  problem. A deploy that refuses in nine seconds and says which setting is missing costs less
+  than one that gets halfway.
 
 Deploy this change and verify one green deploy via SSM **before** the last step:
 
