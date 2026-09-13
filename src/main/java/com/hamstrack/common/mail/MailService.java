@@ -280,7 +280,7 @@ public class MailService {
         try {
             var row = new FailedEmail();
             row.setEmailType(type.name());
-            row.setRecipient(truncate(to, 320));
+            row.setRecipient(fitStoredRecipient(type, to, metrics));
             row.setSubject(truncate(subject, 255));
             row.setLastError(error == null ? null : truncate(String.valueOf(error.getMessage()), 1000));
             row.setAttempts(attempts);
@@ -304,7 +304,52 @@ public class MailService {
         }
     }
 
-    /** Package-private: {@link UndeliverableMail} writes rows into the same columns. */
+    /**
+     * <strong>The one counted cut for {@code failed_email.recipient}</strong>, shared by this class's
+     * dead-letter write and {@link UndeliverableMail}'s (HD-306 fix loop).
+     *
+     * <p><strong>Why it is not {@link #truncate}.</strong> That cut is a bare {@code substring}: it
+     * counts nothing, logs nothing and splits a surrogate pair — while the exclusion that covered all
+     * three stored copies of a recipient address said they were "truncated at the site that writes it
+     * AND COUNTED", which was true of the two in {@code RecipientMailThrottle} and false here. A
+     * category sentence that claims a parity the code does not have is this project's named failure
+     * mode, and sharing the mechanism is cheaper than documenting the asymmetry for ever. So the
+     * address goes through {@code MailAddresses.fitStoredRecipient} — one width, one surrogate-safe
+     * cut, one counter — and {@code truncate} keeps the two values that are not addresses (the
+     * subject, the error text), where nothing claims a witness.
+     *
+     * <p><strong>Unreachable today, deliberately.</strong> Every value that arrives here is a
+     * {@code MailTask} recipient and every source of one is a 255-wide column, so the 320 cut cannot
+     * fire until a door with a wider source ships. It is wired anyway, for the reason on
+     * {@link ProductMetrics.TruncatedMailColumn#FAILED_EMAIL_RECIPIENT}.
+     *
+     * <p><strong>WARN, not DEBUG, and that is not a contradiction of
+     * {@code RecipientMailThrottle.record}'s anonymous-DEBUG rule.</strong> That rule exists because
+     * the line there fires on every ALLOWED anonymous send, a rate an unauthenticated caller controls
+     * through a key space they own. This one fires only beside a dead-letter decision that already
+     * logs an unconditional ERROR per message, so it adds no ingest anybody can drive that the line
+     * next to it does not already carry — and unlike that one it names something an operator must
+     * act on, because the address in a row a re-drive reads is now short.
+     *
+     * <p>DOMAIN ONLY, never the local part — the standing rule of this package.
+     *
+     * @param metrics passed in rather than read off a field so the same cut serves a caller in
+     *                another class; the witness belongs where the mechanism is, not copied twice
+     */
+    static String fitStoredRecipient(EmailType type, String recipient, ProductMetrics metrics) {
+        return MailAddresses.fitStoredRecipient(recipient, length -> {
+            metrics.mailStoredAddressTruncated(ProductMetrics.TruncatedMailColumn.FAILED_EMAIL_RECIPIENT);
+            log.warn("failed_email.recipient for a {} address was {} characters and was cut to fit "
+                     + "(type={}); {}", MailAddresses.domainOf(recipient), length, type,
+                    ProductMetrics.TruncatedMailColumn.FAILED_EMAIL_RECIPIENT.consequence());
+        });
+    }
+
+    /**
+     * Package-private: {@link UndeliverableMail} writes rows into the same columns. For the
+     * <em>recipient</em> use {@link #fitStoredRecipient} instead — see its javadoc for why this one
+     * is not good enough for an address.
+     */
     static String truncate(String s, int max) {
         if (s == null) return null;
         return s.length() <= max ? s : s.substring(0, max);

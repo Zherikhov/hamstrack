@@ -12,6 +12,7 @@ import com.hamstrack.auth.repository.UserRepository;
 import com.hamstrack.auth.service.EmailUniqueness;
 import com.hamstrack.common.config.AppProperties;
 import com.hamstrack.common.dto.PageResponse;
+import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.util.TokenUtils;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -23,7 +24,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Locale;
 import java.util.UUID;
 
 /**
@@ -53,8 +53,18 @@ public class AdminUserService {
 
     @Transactional
     public CreatedUserResponse create(CreateUserRequest req) {
-        // Locale.ROOT, never the JVM default — the fold IS the account identity (HD-120).
-        var email = req.email().toLowerCase(Locale.ROOT);
+        // Locale.ROOT, never the JVM default — the fold IS the account identity (HD-120) — and the
+        // FOLDED length is what users.email has to hold, which is not the length @Size bounded
+        // (HD-306). toLowerCase maps U+0130 to two code points, so 64 of them plus a 190-character
+        // ASCII domain passes every constraint on this DTO at 255 characters and arrives at the
+        // column as 319: measured, and identical to the register door's fixture because the two
+        // records carry the same constraint set. Same gate as register and invite; the 255 is an
+        // ADR-0017 repeated literal equal to the column width.
+        //
+        // NO COUNTER, and that is a decision rather than an omission: this caller is authenticated
+        // and authorised, a mistyped address is not an incident, and a counter per door would be
+        // cardinality with no question behind it. The 400 in the access log is the witness.
+        var email = MailAddresses.requireStorableAddress(req.email(), 255);
         // Folded in SQL, with the same expression users_email_lower_uk is built from (V23), for
         // the reason UserRepository.existsByFoldedEmail states: an exact check can say "free"
         // where the index says "taken", which puts an ordinary create through a doomed INSERT —

@@ -85,6 +85,89 @@ public final class ProductionBytecode {
         return callers.stream().sorted(Comparator.comparing(JavaClass::getName)).toList();
     }
 
+    /**
+     * <strong>Every production call SITE of {@code owner}'s named methods</strong> —
+     * {@code "com.hamstrack.x.YService#methodName"}, in site-name order — followed transitively
+     * through {@code throughHelpers} exactly as {@link #callersOf} does.
+     *
+     * <p><strong>Why the root is narrowed by METHOD NAME:</strong> a rule about case folding has to
+     * start from {@code String.toLowerCase}/{@code toUpperCase}, and {@code callersOf(helpers,
+     * String.class)} matches every class that calls <em>any</em> method on {@code String} — the whole
+     * tree, floor and all, so the rule would be about nothing. The same applies to any root that is a
+     * JDK workhorse rather than a purpose-built helper ({@code Objects}, {@code Map},
+     * {@code Optional}). Matched on the NAME and not on a signature, deliberately: overloads of a fold
+     * ({@code toLowerCase()} and {@code toLowerCase(Locale)}) are the same act, and an overload added
+     * by a future JDK must not silently leave the population.
+     *
+     * <p><strong>Why a site and not a class, i.e. the defect that produced this method</strong>
+     * (HD-306 fix loop): {@code AuthService} folds and stores an address in {@code register}, in
+     * {@code resendVerification} and in {@code forgotPassword}. A class-keyed population let ONE row
+     * about {@code register} satisfy the whole class, so the two unauthenticated doors were members of
+     * the category, present in its population, and covered by nothing — and the seal was green. The
+     * unit of a rule about a transform is the place the transform happens; a class is the unit only
+     * when the class has one such place, which is a fact nobody re-checks.
+     *
+     * <p>The enclosing method comes from ArchUnit's {@code getOrigin()}, so a constructor appears as
+     * {@code #<init>} and a static initialiser as {@code #<clinit>} — both are real sites and neither
+     * is filtered, because a fold in a constructor stores just as well as one in a method.
+     *
+     * <p>Helper transitivity is unchanged and remains a CLASS-level decision: a class named in
+     * {@code throughHelpers} becomes an owner in turn (all of its methods), because a helper's whole
+     * job is to be called. Its own sites are members like anybody else's — a consumer that wants them
+     * out declares them out, at site granularity, and {@code Population.excluding} then holds it to
+     * naming sites that are live.
+     */
+    public static List<String> callSitesOfMethods(Set<String> throughHelpers, Class<?> owner,
+                                                  Set<String> methodNames) {
+        Set<String> methodTargets = new LinkedHashSet<>();
+        for (String methodName : methodNames) {
+            methodTargets.add(owner.getName() + "#" + methodName);
+        }
+        Set<String> ownerTargets = new LinkedHashSet<>();
+        Set<String> sites = new LinkedHashSet<>();
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (JavaClass clazz : MAIN) {
+                var found = sitesIn(clazz, methodTargets, ownerTargets);
+                if (found.isEmpty()) {
+                    continue;
+                }
+                sites.addAll(found);
+                if (throughHelpers.contains(clazz.getName()) && ownerTargets.add(clazz.getName())) {
+                    grew = true;
+                }
+            }
+        }
+        return sites.stream().sorted().toList();
+    }
+
+    /** The enclosing methods of {@code clazz}'s calls to {@code methodTargets} or into {@code owners}. */
+    private static Set<String> sitesIn(JavaClass clazz, Set<String> methodTargets, Set<String> owners) {
+        Set<String> sites = new LinkedHashSet<>();
+        clazz.getMethodCallsFromSelf().stream()
+                .filter(call -> methodTargets.contains(
+                                        call.getTargetOwner().getName() + "#" + call.getName())
+                                || owners.contains(call.getTargetOwner().getName()))
+                .forEach(call -> sites.add(site(call.getOrigin().getOwner().getName(),
+                        call.getOrigin().getName())));
+        clazz.getMethodReferencesFromSelf().stream()
+                .filter(ref -> methodTargets.contains(
+                                       ref.getTargetOwner().getName() + "#" + ref.getName())
+                               || owners.contains(ref.getTargetOwner().getName()))
+                .forEach(ref -> sites.add(site(ref.getOrigin().getOwner().getName(),
+                        ref.getOrigin().getName())));
+        return sites;
+    }
+
+    /**
+     * The one spelling of a site, so a consumer's declared exclusions and this walk's members cannot
+     * be formatted differently and silently fail to match.
+     */
+    public static String site(String className, String methodName) {
+        return className + "#" + methodName;
+    }
+
     private static boolean calls(JavaClass clazz, Set<String> targets) {
         return clazz.getMethodCallsFromSelf().stream().anyMatch(call -> targets.contains(call.getTargetOwner().getName()))
                || clazz.getMethodReferencesFromSelf().stream().anyMatch(ref -> targets.contains(ref.getTargetOwner().getName()));

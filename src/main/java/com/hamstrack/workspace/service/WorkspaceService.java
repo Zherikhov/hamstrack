@@ -251,7 +251,41 @@ public class WorkspaceService {
         // distinct strings that reach one human, and both recipient ceilings read zero every time.
         // So the throttle counts MailAddresses.throttleKey(email) — derived inside the throttle, not
         // here, so no call site can forget it — while this value stays exactly what was typed.
-        var email = req.email().toLowerCase(Locale.ROOT);
+        //
+        // AND THE FOLD IS MEASURED HERE, BECAUSE A FOLD IS A DERIVED VALUE (HD-306). @Size bounds
+        // the RAW text at 255 and workspace_invites.email stores the FOLDED text in a VARCHAR(255),
+        // and toLowerCase maps U+0130 to two code points. The @Pattern above keeps the local part
+        // ASCII, so this door needs the growth in the DOMAIN — and one U+0130 there is enough:
+        // MEASURED 2026-09-13, 60 ASCII + "@" + a 194-character domain carrying a single U+0130 is
+        // 255 characters raw, 256 folded, has an ASCII (punycode) domain of 202, and draws ZERO
+        // violations from this DTO's @Email/@Size/@Pattern. So the pattern narrows the attack to one
+        // character and does not close it. Same gate as register and the admin console; the 255 is
+        // an ADR-0017 repeated literal equal to the column width.
+        //
+        // ABOVE inviteThrottle.requireSenderVolume, AND THE INVARIANT THAT MAKES THAT CORRECT IS
+        // POSITIONAL RATHER THAN ABOUT WHAT A CHECK DOES (HD-306, restated in the fix loop after an
+        // earlier version of this comment claimed the discriminator was "refusals that require a
+        // LOOKUP" — contradicted eleven lines below, where the existing-membership refusal IS a
+        // lookup and IS free, deliberately). The invariant this method implements, in one sentence:
+        //
+        //   everything above requireSenderVolume is FREE, the sender half is the FIRST CHARGE, and
+        //   nothing may be added below the recipient half.
+        //
+        // The free band is bounded by nothing on this endpoint and is therefore kept small and
+        // decided-from-the-request: this refusal reads the submitted bytes and no state, exactly like
+        // the @Size/@Pattern/@Email refusals that already answer above everything. What decides its
+        // side of the sender half is the direction of harm: below it, a malformed body would consume a
+        // legitimate inviter's hourly allowance, which is in-memory and never returned. What decides
+        // that it may not go below the RECIPIENT half is the rule stated at length underneath — that
+        // half writes a mail_send_events row in this transaction, and a refusal after it unwrites the
+        // record while the caller has already seen the refusal.
+        //
+        // NO COUNTER, and that is a decision rather than an omission — the wording AdminUserService
+        // states for the same gate: this caller is authenticated and permission-checked, a mistyped
+        // address is not an incident, and a counter per door would be cardinality with no question
+        // behind it. Register's gate counts because a knock on THAT door is itself information
+        // (signup_refused{reason="email_too_long"}). The 400 in the access log is the witness here.
+        var email = MailAddresses.requireStorableAddress(req.email(), 255);
         // Check not already a member
         userRepository.findByEmail(email).ifPresent(user -> {
             if (memberRepository.existsByWorkspaceAndUser(workspace, user)) {

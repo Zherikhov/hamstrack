@@ -581,6 +581,75 @@ class SeedGuardStartupOrderingTest {
     }
 
     /**
+     * <strong>A {@code SEED_ADMIN_EMAIL} the column cannot hold refuses the boot by NAME</strong>
+     * (HD-306). {@code seed.admin.email} is a {@code @Value} field — no {@code @Size}, no
+     * {@code @Email}, no DTO to annotate — and the address is stored LOWER-CASED, so the length that
+     * matters is the folded one.
+     *
+     * <p><strong>MEASURED before the guard (2026-09-13):</strong> a 300-character
+     * {@code SEED_ADMIN_EMAIL} passed {@code refusePublishedCredentials} untouched and killed the boot
+     * inside {@link DataSeeder#run} with {@code DataIntegrityViolationException: could not execute
+     * statement [ERROR: value too long for type character varying(255)] [insert into users …]},
+     * mentioning neither {@code SEED_ADMIN_EMAIL} nor {@code seed.admin.email}. That is the DC install
+     * path, and the operator has to guess which of their variables did it.
+     *
+     * <p>Both directions are asserted, because a guard that refuses too much is the other failure: a
+     * 255-character address that does not grow under the fold still boots. The fold is what this row
+     * exists for — the two cases below differ by one character of raw length and by 64 code points of
+     * folded length.
+     */
+    @Test
+    void anOverLongSeedAdminEmailRefusesTheBootByName() {
+        var repository = Mockito.mock(UserRepository.class);
+        var seeder = new DataSeeder(repository, ENCODER);
+        // 64 x U+0130 + a 190-character ASCII domain: 255 characters as configured, 319 once folded.
+        var foldsOver = "İ".repeat(64) + "@"
+                        + "a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(62);
+        setSeedProperties(seeder, foldsOver, "k7Qv2#tR9pLm4zXw");
+
+        assertThatIllegalStateException()
+                .describedAs("""
+
+                        A SEED_ADMIN_EMAIL that users.email cannot hold did not refuse the boot. \
+                        Without this guard the install dies inside the INSERT with "value too long \
+                        for type character varying(255)" and names no variable, on the path a \
+                        self-hosted instance uses to get its first administrator. Note the length \
+                        that matters is the FOLDED one: 255 characters of capital-I-with-dot become \
+                        319 when lower-cased, so a raw length check would pass this value through.""")
+                .isThrownBy(seeder::refusePublishedCredentials)
+                .withMessageContaining("SEED_ADMIN_EMAIL")
+                .withMessageContaining("255")
+                .withMessageContaining("319");
+
+        // The other direction: 255 characters that do not grow must still boot.
+        var fits = "a".repeat(64) + "@" + "a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(62);
+        assertThat(fits).hasSize(255);
+        setSeedProperties(seeder, fits, "k7Qv2#tR9pLm4zXw");
+        assertThat(catchThrowable(seeder::refusePublishedCredentials))
+                .describedAs("an address that is exactly the column's width and does not grow under "
+                             + "the fold is storable — the bound is `>`, not `>=`")
+                .isNull();
+
+        // AND THE GATE IS "WILL run() ACTUALLY WRITE?", INHERITED FROM rejectOverLongPassword RATHER
+        // THAN RESTATED (HD-306 fix loop). run() returns before touching users when EITHER seed
+        // property is blank, so an over-long address configured beside a blank password created
+        // nothing and must not refuse a boot over it. The first round of this guard refused it while
+        // its javadoc called blankness of the ADDRESS "the one exemption" — a claim about a list,
+        // stale one entry before the list was.
+        setSeedProperties(seeder, foldsOver, "");
+        assertThat(catchThrowable(seeder::refusePublishedCredentials))
+                .describedAs("""
+                        A boot was refused over an over-long SEED_ADMIN_EMAIL that run() would never \
+                        have written: seed.admin.password is blank, so run() logs "skipped" and \
+                        returns before users is touched. A length guard may only refuse a \
+                        configuration that would otherwise reach the INSERT -- the one it exists to \
+                        replace -- which is the gate rejectOverLongPassword states and this one \
+                        inherits. Leaving it stricter breaks an upgrade whose operator removed the \
+                        password and left the address behind.""")
+                .isNull();
+    }
+
+    /**
      * The bound itself, asserted as a number the reader can see, because it was learned the
      * expensive way: unbounded, one bcrypt per administrator, this added over two minutes to
      * every startup against a database with 1362 of them and the test suite stopped

@@ -371,15 +371,22 @@ public class ProductMetrics {
     }
 
     /**
-     * Why {@code POST /api/auth/register} refused before it looked at the address (HD-261). A
-     * knock on a closed door is information, not an incident — there is deliberately no alert
-     * rule; the counter and its row in {@code docs/observability.md} are the witness. Status codes
-     * are unchanged: a counter is not an oracle, the door still answers what it answers.
+     * Why {@code POST /api/auth/register} refused cheaply (HD-261). A knock on a closed door is
+     * information, not an incident — there is deliberately no alert rule; the counter and its row in
+     * {@code docs/observability.md} are the witness. Status codes are unchanged: a counter is not an
+     * oracle, the door still answers what it answers.
      *
-     * <p>The category is every refusal {@code AuthService.register} makes before
-     * {@code req.email()} is read, and it has four members, not the two it shipped with (HD-298
-     * review): the two password refusals below are shared with the reset door, so the counter is
-     * emitted by register at its call site, never inside the shared helper — reset is not a signup.
+     * <p><strong>The category is every refusal {@code AuthService.register} makes before it spends a
+     * bcrypt or a mail ceiling</strong> — which is the property the counter is actually for: those two
+     * are the expensive, side-effecting halves of that method, and a refusal above both costs the
+     * instance a fold and a comparison. It was phrased as "before {@code req.email()} is read" while
+     * every member happened to be about the password, and HD-306 made that false rather than merely
+     * narrow: a refusal ABOUT the address is by definition after the address is read.
+     *
+     * <p>Every member's counter is emitted by {@code register} at its own call site and never inside
+     * the shared helper the refusal lives in — the two password refusals are shared with the reset
+     * door and {@link #EMAIL_TOO_LONG}'s gate is shared with the admin and invite doors, and a counter
+     * named {@code signup_refused} must not move for any of them.
      */
     public enum SignupRefusal {
         /** {@code app.registration.public-signup-enabled=false} — the DC default. */
@@ -392,7 +399,13 @@ public class ProductMetrics {
          */
         PUBLISHED_PASSWORD("published_password"),
         /** Over {@code PasswordLimits.MAX_PASSWORD_BYTES} in UTF-8 — BCrypt could not hash it. */
-        UNENCODABLE_PASSWORD("unencodable_password");
+        UNENCODABLE_PASSWORD("unencodable_password"),
+        /**
+         * The address is at most 255 characters as typed and over 255 once lower-cased, so
+         * {@code users.email} could not hold it (HD-306). The member that broke this enum's old
+         * category sentence: it is a refusal ABOUT the address, and it is still above both spends.
+         */
+        EMAIL_TOO_LONG("email_too_long");
 
         final String tag;
         SignupRefusal(String tag) { this.tag = tag; }
@@ -656,9 +669,10 @@ public class ProductMetrics {
 
     /**
      * {@code hamstrack.auth.signup_refused{reason}} — at every refusal {@code AuthService.register}
-     * makes before it reads the address (HD-261; the {@link SignupRefusal} javadoc holds the
-     * members). Emitted before the throw; the transaction that follows rolls back, which a counter
-     * does not (header rule).
+     * makes before it spends a bcrypt or a mail ceiling (HD-261/HD-306; the {@link SignupRefusal}
+     * javadoc holds the members and the reason that sentence is phrased over the spends rather than
+     * over the address). Emitted before the throw; the transaction that follows rolls back, which a
+     * counter does not (header rule).
      */
     public void signupRefused(SignupRefusal reason) {
         registry.counter("hamstrack.auth.signup_refused", "reason", reason.tag).increment();
@@ -898,6 +912,99 @@ public class ProductMetrics {
     /** {@link #mailDropped(MailDropReason)} for a batch — the shutdown residue, or the in-flight count. */
     public void mailDropped(MailDropReason reason, int count) {
         registry.counter("hamstrack.mail.dead_letter_skipped", "reason", reason.tag).increment(count);
+    }
+
+    /**
+     * <strong>Which stored copy of a recipient address was cut</strong> (HD-306). One meter with a
+     * label rather than one meter per column, because the question behind it is single — "an address
+     * this instance was about to store did not fit, and it was shortened" — and the remedy is single
+     * too; what differs is the CONSEQUENCE, which each constant carries so that the log line and this
+     * javadoc cannot drift apart. Cardinality is closed by this enum.
+     *
+     * <p>The first two columns are written from the same caller-folded address in
+     * {@code RecipientMailThrottle}, one line apart, and HD-306 bounded them in two different rounds:
+     * the first covered {@link #RECIPIENT_KEY} and reported clean while {@link #RECIPIENT_EMAIL} could
+     * still take a {@code 22001} out of the INSERT on two unauthenticated doors. That is why they
+     * share a meter, a witness shape and a cut ({@code MailAddresses.fitStoredMailValue}).
+     *
+     * <p><strong>{@link #FAILED_EMAIL_RECIPIENT} joined them in the fix loop, and the reason is the
+     * asymmetry a category sentence had already claimed away</strong>: that column's cut was
+     * {@code MailService.truncate}, which counted nothing, logged nothing and split surrogate pairs,
+     * while the exclusion covering all three said "truncated at the site that writes it AND COUNTED".
+     * One mechanism for the whole category is cheaper than documenting the difference for ever —
+     * so all three now go through the one cut, and every one of them has a witness.
+     */
+    public enum TruncatedMailColumn {
+        /**
+         * The value every ceiling counts. A cut key merges two inboxes into one bucket — the
+         * fail-safe direction for a ceiling ({@code MailAddresses.throttleKey} argues it), and still a
+         * slot spent by an innocent bystander who cannot see why.
+         */
+        RECIPIENT_KEY("recipient_key",
+                "two inboxes may now share one ceiling bucket"),
+        /**
+         * The forensic copy of the address. Nothing counts it, nothing matches on it, and the mail
+         * goes to the address the service holds — so a cut costs an operator a few characters of a
+         * domain suffix and costs nobody an identity.
+         */
+        RECIPIENT_EMAIL("recipient_email",
+                "the stored copy of the address is shortened; no ceiling and no delivery is affected"),
+        /**
+         * {@code failed_email.recipient} — the dead-letter row's copy of the address, written by
+         * {@code MailService.deadLetter} (a send that exhausted its retries) and by
+         * {@code UndeliverableMail.row} (a message never attempted at all).
+         *
+         * <p><strong>Not reachable today, and counted anyway.</strong> Every value that reaches it is
+         * a {@code MailTask} recipient, and every source of one is a 255-wide column, so the 320 cut
+         * cannot fire until a door with a wider source ships. A witness on an unreachable branch is
+         * the cheap half of the trade: the day that door lands, the cut is already counted rather
+         * than silent — which is the shape this ticket spent two rounds removing elsewhere.
+         *
+         * <p>Worse than the forensic copy above if it ever does fire: a dead-letter row is what a
+         * re-drive reads, so a cut address is a message somebody would have to re-send by hand.
+         */
+        FAILED_EMAIL_RECIPIENT("failed_email_recipient",
+                "the dead-letter row's copy of the address is shortened; a re-drive would need the "
+                + "full address from elsewhere");
+
+        final String tag;
+        private final String consequence;
+
+        TruncatedMailColumn(String tag, String consequence) {
+            this.tag = tag;
+            this.consequence = consequence;
+        }
+
+        /** The one sentence a reader of the log line or of the dashboard needs. */
+        public String consequence() {
+            return consequence;
+        }
+
+        /** The column's name, for a log line that has to name what was cut. */
+        public String column() {
+            return tag;
+        }
+    }
+
+    /**
+     * {@code hamstrack.mail.stored_address_truncated{column}} (Prometheus:
+     * {@code hamstrack_mail_stored_address_truncated_total}) — a stored copy of a recipient address
+     * did not fit the column that holds it and was cut to the column's width at the site that
+     * produces it (HD-306).
+     *
+     * <p><strong>What a non-zero value means to whoever reads it.</strong> The per-column consequence
+     * is on {@link TruncatedMailColumn}; the cause is one of exactly two things either way, and both
+     * are worth a look: somebody is submitting pathological addresses, or the arithmetic those widths
+     * rest on has drifted again. Reaching this counter is not an error and answers no differently to
+     * the caller — the truncation is invisible by design, which is why it needs a counter to be
+     * visible at all.
+     *
+     * <p><strong>No label but the column.</strong> The one other thing an operator would want — which
+     * domain — is unbounded cardinality, so it goes to the log instead, and the log carries the DOMAIN
+     * only ({@code MailAddresses.domainOf}): the local part is what makes an address personal data.
+     */
+    public void mailStoredAddressTruncated(TruncatedMailColumn column) {
+        registry.counter("hamstrack.mail.stored_address_truncated", "column", column.tag).increment();
     }
 
     // --- scheduled jobs (HD-298) ---

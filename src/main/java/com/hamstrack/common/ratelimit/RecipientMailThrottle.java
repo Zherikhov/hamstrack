@@ -7,6 +7,7 @@ import com.hamstrack.common.mail.MailSendEvent;
 import com.hamstrack.common.mail.MailSendEventRepository;
 import com.hamstrack.common.observability.ProductMetrics;
 import com.hamstrack.common.observability.ProductMetrics.EmailType;
+import com.hamstrack.common.observability.ProductMetrics.TruncatedMailColumn;
 import com.hamstrack.common.persistence.LockTimeout;
 import jakarta.persistence.EntityManager;
 import lombok.extern.slf4j.Slf4j;
@@ -440,7 +441,22 @@ public class RecipientMailThrottle {
 
         // Derived HERE rather than taken from the caller, so "the ceilings count inboxes" is true by
         // construction and cannot be undone by a future call site that folds its address differently.
-        var recipientKey = MailAddresses.throttleKey(recipientEmail);
+        //
+        // THE WITNESS FOR THE ONE STEP OF THAT DERIVATION THAT LOSES INFORMATION (HD-306). The fold
+        // in throttleKey's first line APPENDS — U+0130 becomes two code points — so a key can exceed
+        // mail_send_events.recipient_key (measured: an 85-character address RegisterRequest accepts
+        // with zero violations yields 384 against a 320-wide column). throttleKey cuts it to the
+        // column rather than letting a 22001 roll back the very row this method has already counted
+        // the caller on; the cut is invisible to the caller by design, which is exactly why it needs
+        // a counter to be visible at all.
+        //
+        // THIS IS ONE OF TWO COLUMNS WRITTEN FROM THE SAME ADDRESS, AND THEY SHARE ONE WITNESS
+        // (storedAddressTruncated) FOR THE REASON THE FIX LOOP FOUND: round 1 of HD-306 bounded this
+        // one and left recipient_email verbatim, so the 22001 this paragraph exists to prevent was
+        // still reachable one line below. Two copies of a witness are two chances to install one.
+        var recipientKey = MailAddresses.throttleKey(recipientEmail, keyLength ->
+                storedAddressTruncated(TruncatedMailColumn.RECIPIENT_KEY, type, recipientEmail,
+                        senderUserId, keyLength));
 
         // THE MASTER SWITCH TURNS OFF THE CEILINGS, NOT THE BOOKKEEPING. Recording while limiting is
         // off costs one insert on a low-frequency write and buys two things worth more: the
@@ -612,7 +628,23 @@ public class RecipientMailThrottle {
                         UUID senderUserId, UUID workspaceId) {
         var event = new MailSendEvent();
         event.setEmailType(type.name());
-        event.setRecipientEmail(recipientEmail);
+        // THE SECOND COLUMN THE CALLER'S FOLD CAN OVERFLOW, bounded at the site that writes it
+        // (HD-306 fix loop). Every door folds its address before handing it over, and toLowerCase
+        // APPENDS — so an address @Size(max = 255) accepts with zero violations arrives here at 347
+        // characters against a 320-wide column (measured; MailAddressesThrottleKeyTest parameterises
+        // that over every writing DTO). The two anonymous doors are the ones that matter: nothing
+        // above them measures the folded length, both are unauthenticated, and both answer ONE
+        // uniform sentence whatever happens — so a 22001 out of this INSERT is a shape change on an
+        // endpoint that must not have one, and it rolls back the ceiling row the caller was already
+        // counted on, which is the free probe of a stranger's ceilings.
+        //
+        // TRUNCATED and not refused: this column is forensic, nothing counts it, nothing matches on
+        // it, and the mail goes to the address the SERVICE holds, not to this string. The identity
+        // columns take the opposite decision at their own doors
+        // (MailAddresses.requireStorableAddress), and the discriminator is what the value IS.
+        event.setRecipientEmail(MailAddresses.fitStoredRecipient(recipientEmail, length ->
+                storedAddressTruncated(TruncatedMailColumn.RECIPIENT_EMAIL, type, recipientEmail,
+                        senderUserId, length)));
         event.setRecipientKey(recipientKey);
         event.setSenderUserId(senderUserId);
         event.setWorkspaceId(workspaceId);
@@ -637,6 +669,38 @@ public class RecipientMailThrottle {
         } else {
             log.info("mail send allowed: type={} sender={} workspace={} recipientDomain={}",
                     type, senderUserId, workspaceId, MailAddresses.domainOf(recipientEmail));
+        }
+    }
+
+    /**
+     * <strong>One witness for both of {@code mail_send_events}' derived address columns</strong>
+     * (HD-306 fix loop). The two cuts happen a line apart, from the same caller-folded address, for
+     * the same reason and with the same remedy; the only thing that differs is which column and what
+     * it costs, and both of those live on {@link TruncatedMailColumn}. One method rather than two
+     * copies because HD-306 installed this witness on one column and reported clean while the other
+     * could still take a {@code 22001} — the second copy is the one nobody writes.
+     *
+     * <p><strong>The counter is unconditional; the log line follows {@code record}'s own level
+     * decision.</strong> A truncation is triggered by the submitting caller, so on the two anonymous
+     * doors an INFO line per request is exactly the unbounded-ingest vector {@code record}'s comment
+     * argues about for the success line — and the sender and workspace it would print are both null,
+     * so it names nothing an operator can act on either. The metric is the witness that cannot be
+     * turned down; the log adds the domain when there is a "who" beside it.
+     *
+     * <p>DOMAIN ONLY, never the local part — this class's and {@code MailAddresses}' standing rule.
+     */
+    private void storedAddressTruncated(TruncatedMailColumn column, EmailType type,
+                                        String recipientEmail, UUID senderUserId, int length) {
+        metrics.mailStoredAddressTruncated(column);
+        if (senderUserId == null) {
+            log.debug("mail_send_events.{} for a {} address was {} characters and was cut to fit "
+                      + "(anonymous, type={}); {}", column.column(),
+                    MailAddresses.domainOf(recipientEmail), length, type, column.consequence());
+        } else {
+            log.info("mail_send_events.{} for a {} address was {} characters and was cut to fit "
+                     + "(sender={}, type={}); {}", column.column(),
+                    MailAddresses.domainOf(recipientEmail), length, senderUserId, type,
+                    column.consequence());
         }
     }
 

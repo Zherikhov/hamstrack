@@ -41,16 +41,30 @@ public class MailSendEvent extends CreatedOnlyEntity {
     private String emailType;
 
     /**
-     * The recipient exactly as submitted, lower-cased at the boundary. <strong>Nothing counts this
-     * column</strong> — it is what a refusal echoes back to the caller and what an operator needs
-     * when working an alert, so it stays faithful to what was typed.
+     * The recipient as submitted, lower-cased by the caller, <strong>cut to this width at the site
+     * that writes it</strong> ({@code MailAddresses.fitStoredRecipient}). <strong>Nothing counts this
+     * column</strong> — it is what an operator needs when working an alert, so it stays as faithful to
+     * what was typed as the width allows.
      *
      * <p>320 rather than the invite path's 255 to match {@code failed_email.recipient}: this table
      * is shared by every outbound-mail flow, and a shared column should not be sized by whichever
-     * request DTO happens to be narrowest today. Each writing flow is bounded by its own DTO —
-     * {@code InviteMemberRequest}, and HD-202's {@code ForgotPasswordRequest} /
-     * {@code ResendVerificationRequest}, are all {@code @Size(max = 255)} — so the extra room is
-     * margin, not a licence to store unbounded input.
+     * request DTO happens to be narrowest today.
+     *
+     * <p><strong>What that extra room is NOT is a bound, and this javadoc used to say it was</strong>
+     * (HD-306 fix loop). It read: "each writing flow is bounded by its own DTO — {@code
+     * InviteMemberRequest}, {@code ForgotPasswordRequest}, {@code ResendVerificationRequest} are all
+     * {@code @Size(max = 255)} — so the extra room is margin, not a licence to store unbounded input."
+     * MEASURED FALSE on 2026-09-13: a {@code @Size} bounds the RAW text and every door folds the
+     * address with {@code toLowerCase(Locale.ROOT)} before handing it over, and that fold APPENDS
+     * (U+0130 → two code points). An address {@code ForgotPasswordRequest} accepts with zero violations
+     * at 255 characters arrives here at <strong>347</strong>. The two anonymous doors have no bound
+     * above them at all — deliberately, because their contract is one uniform response — so the DTO was
+     * never what protected this column. What does is the truncation at the write site, counted on
+     * {@code hamstrack.mail.stored_address_truncated{column="recipient_email"}}, and the seal is
+     * {@code MailAddressesThrottleKeyTest#theWidestAddressEveryWritingDtoStoresFitsTheForensicColumn}
+     * plus its sibling that proves the write really goes through the fit. The general lesson, since it
+     * cost two rounds on two columns of one table: <em>a column that holds a value the server DERIVED
+     * is bounded by the derivation site or by nothing.</em>
      */
     @Column(name = "recipient_email", nullable = false, updatable = false, length = 320)
     private String recipientEmail;
@@ -71,21 +85,39 @@ public class MailSendEvent extends CreatedOnlyEntity {
      * {@link #recipientEmail}.
      *
      * <p><strong>Same 320 as above, different reason — the DTO bound that justifies that one does
-     * not transfer to this one.</strong> Punycode is the one step in {@code throttleKey} that can
-     * LENGTHEN what it is given (every other step strips), and it lengthens generously: a domain of
-     * a couple of hundred non-ASCII characters converts to several times that many {@code xn--}
-     * characters. So "every writing flow is {@code @Size(max = 255)}" says nothing at all about how
-     * long a key derived from a 255-character address can be. What does bound it lives inside
-     * {@code @Email}, which each of those flows also carries: Hibernate Validator refuses a local
-     * part longer than 64 characters, and refuses a domain whose <em>ASCII</em> form exceeds 255 —
-     * it runs {@code IDN.toASCII} itself, before measuring. The longest key that can reach this
-     * column is therefore 64 + {@code "@"} + 255 = 320. It fits exactly, with no margin, and it
-     * fits on a third-party invariant that nothing in this codebase states — which is why the
-     * bound is worth an assertion rather than this paragraph. Also why a future fold that ever
-     * APPENDS to a key rather than only stripping from it needs a wider column first.
+     * not transfer to this one.</strong> Punycode LENGTHENS what it is given, and it lengthens
+     * generously: a domain of a couple of hundred non-ASCII characters converts to several times that
+     * many {@code xn--} characters. So "every writing flow is {@code @Size(max = 255)}" says nothing
+     * at all about how long a key derived from a 255-character address can be. Part of what bounds it
+     * lives inside {@code @Email}, which each of those flows also carries: Hibernate Validator refuses
+     * a local part longer than 64 characters, and refuses a domain whose <em>ASCII</em> form exceeds
+     * 255 — it runs {@code IDN.toASCII} itself, before measuring. Hence 64 + {@code "@"} + 255 = 320,
+     * which is this width.
      *
-     * <p>({@code InviteMemberRequest}'s ASCII-only local part does not change this arithmetic: the
-     * lengthening is in the DOMAIN, which stays deliberately internationalisable.)
+     * <p><strong>That arithmetic is a property of an ASCII local part only, and this javadoc used to
+     * state it as a property of the column</strong> (HD-306). It said punycode was "the one step in
+     * {@code throttleKey} that can LENGTHEN what it is given (every other step strips)", and that a
+     * "future fold that ever APPENDS to a key rather than only stripping from it needs a wider column
+     * first" — a hypothetical describing a defect that was already shipped. {@code toLowerCase} runs on
+     * the LOCAL PART in {@code throttleKey}'s first line and it appends: U+0130 becomes two code
+     * points, so Hibernate Validator's 64 buys 128 characters of key and the arithmetic is
+     * 128 + 1 + 255 = <strong>384</strong> for every writing DTO that does not force an ASCII local
+     * part — i.e. every one of them except {@code InviteMemberRequest}. MEASURED 2026-09-13: an
+     * 85-character address {@code RegisterRequest} accepts with zero violations produced a 384-character
+     * key. The old claim was certified against {@code InviteMemberRequest} alone, which is a uniqueness
+     * claim proved on one member.
+     *
+     * <p><strong>So the general bound on this column is not a DTO's, it is the truncation.</strong>
+     * {@code MailAddresses.throttleKey} cuts a key to this width at the site that produces it and
+     * counts the cut ({@code hamstrack.mail.stored_address_truncated{column="recipient_key"}}). The
+     * door bound the three storing doors carry is <em>not</em> a second belt under it and an earlier
+     * round of HD-306 claimed it was ("makes 384 hard to reach rather than impossible"): the register
+     * door's own worst key is 384 produced by an address that folds to 149, i.e. 106 characters inside
+     * the 255 it refuses at, so the door bound is simply not evidence about this column.
+     * Widening this column (and {@code failed_email.recipient} with it)
+     * would buy back a bound resting on third-party invariants nothing here states, which is what
+     * failed the first time. {@code MailAddressesThrottleKeyTest} certifies the worst case of
+     * <em>every</em> writing DTO against the width read off this field.
      */
     @Column(name = "recipient_key", nullable = false, updatable = false, length = 320)
     private String recipientKey;

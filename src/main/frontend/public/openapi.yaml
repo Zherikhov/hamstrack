@@ -743,7 +743,25 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
-        '400': { $ref: '#/components/responses/ValidationError' }
+        '400':
+          description: >-
+            Two shapes share this status. **A declared constraint** (blank or
+            malformed field, `email`/`password`/`displayName` over their
+            `maxLength`) is the ordinary field-anchored refusal — `errors`
+            names the field. **The address, once folded to lower-case for
+            storage, is too long to fit `users.email`** is the other: refused
+            before anything else the endpoint does (before the uniqueness
+            check, before bcrypt, above the mail ceiling), it names no field
+            and carries **no** `errors` map and **no** `errorType` — `detail`
+            states the arithmetic instead, e.g. `` `Email address must be at
+            most 255 characters (lower-casing it turned its 255 characters
+            into 319) — use a shorter address.` `` `maxLength: 255` on `email`
+            bounds the *raw* text; lower-casing is not length-preserving
+            (U+0130 → two characters), so a raw address at that bound can
+            still be refused here. See `ValidationProblemDetail`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
           description: Email is already registered
@@ -1803,6 +1821,28 @@ paths:
         `422`, as is a role reference this instance cannot assign.
 
 
+        **The address, once folded to lower-case for storage, must still fit
+        `workspace_invites.email` — a `400` distinct from the ordinary
+        255-character field bound.** Lower-casing is not
+        length-preserving (U+0130 → two characters), so a raw address at the
+        255-character `maxLength` can still be too long once folded. Same
+        gate as `POST /auth/register` and `POST /admin/users`, but not at the
+        same point in the call: those two doors measure it before anything
+        else they do, because neither has a tenancy gate above it. This one
+        measures it after the workspace is resolved (`404` for a non-member
+        or an unknown workspace), `workspace.member.manage` is checked
+        (`403`), and the role and its grant ceiling are checked (`422`,
+        `403`) — a caller failing any of those never reaches this refusal.
+        It is still above every charge and every lookup that probes another
+        party's state: the existing-member check, the caller's own
+        invitation-volume budget, the duplicate-invite check and the
+        recipient's mail ceilings all run after it. It names no field and
+        carries **no** `errors` map and **no** `errorType` — `detail` states
+        the arithmetic instead, e.g. `` `Email address must be at most 255
+        characters (lower-casing it turned its 255 characters into 319) —
+        use a shorter address.` ``
+
+
         **The invited address must have an ASCII local part — a `400`, and a
         delivery rule rather than a style rule.** The invitation is stored
         under, and *mailed to*, the address case-folded (`Locale.ROOT`
@@ -1915,7 +1955,28 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MessageResponse' }
-        '400': { $ref: '#/components/responses/ValidationError' }
+        '400':
+          description: >-
+            Two shapes share this status. **A declared constraint**
+            (missing/malformed `email`, over its `maxLength`, or a non-ASCII
+            local part) is the ordinary field-anchored refusal, keyed `email`
+            — see `ValidationProblemDetail`. **The address, once folded to
+            lower-case for storage, is too long to fit
+            `workspace_invites.email`** is the other: refused after tenancy,
+            `workspace.member.manage` and the role/grant-ceiling checks (a
+            caller failing any of those never reaches it), but above every
+            charge and every lookup on another party's state — the
+            existing-member check, the sender's invitation-volume budget,
+            the duplicate-invite check and the recipient's mail ceilings. It
+            names no field and carries **no** `errors` map and **no**
+            `errorType` — `detail` states the arithmetic instead, e.g. ``
+            `Email address must be at most 255 characters (lower-casing it
+            turned its 255 characters into 319) — use a shorter address.` ``
+            Same gate as `POST /auth/register` and `POST /admin/users`,
+            though later in the call — see the description above.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/InviteConflict' }
@@ -3733,7 +3794,15 @@ paths:
               type: object
               required: [email, displayName]
               properties:
-                email: { type: string, format: email, maxLength: 255 }
+                email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  description: >-
+                    Bounds the text as submitted. The address is stored
+                    lower-cased, and lower-casing is not length-preserving
+                    (U+0130 → two characters), so an address at this bound
+                    can still be refused — see the `400` response.
                 displayName: { type: string, maxLength: 100 }
                 systemRole: { type: string, enum: [ADMIN, USER], default: USER }
       responses:
@@ -3746,6 +3815,23 @@ paths:
                 properties:
                   user: { $ref: '#/components/schemas/AdminUser' }
                   setupLink: { type: string }
+        '400':
+          description: >-
+            Two shapes share this status. **A declared constraint** (blank
+            `email`/`displayName`, either over its `maxLength`, or a
+            `displayName` with a control character) is the ordinary
+            field-anchored refusal — `errors` names the field. **The address,
+            once folded to lower-case for storage, is too long to fit
+            `users.email`** is the other, refused before anything else the
+            endpoint does: it names no field and carries **no** `errors` map
+            and **no** `errorType` — `detail` states the arithmetic instead,
+            e.g. `` `Email address must be at most 255 characters
+            (lower-casing it turned its 255 characters into 319) — use a
+            shorter address.` `` Same gate as `POST /auth/register` and
+            `POST …/invites`. See `ValidationProblemDetail`.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/ValidationProblemDetail' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409':
           description: Email already registered
@@ -10626,7 +10712,15 @@ components:
       type: object
       required: [email, password, displayName]
       properties:
-        email: { type: string, format: email, maxLength: 255 }
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          description: >-
+            Bounds the text as submitted. The address is stored lower-cased,
+            and lower-casing is not length-preserving (U+0130 → two
+            characters), so an address at this bound can still be refused —
+            see the `400` response.
         password:
           type: string
           minLength: 8
@@ -12176,7 +12270,11 @@ components:
           maxLength: 255
           pattern: '^[\u0000-\u007F]*@[^@]*$'
           description: >-
-            **The local part must be ASCII** — everything before the last `@`.
+            `maxLength` bounds the text as submitted. The address is stored
+            lower-cased, and lower-casing is not length-preserving (U+0130 →
+            two characters), so an address at that bound can still be
+            refused as too long once folded — see the operation's `400`
+            response. **The local part must be ASCII** — everything before the last `@`.
             A non-ASCII character there is a `400`, because the invitation is
             stored under, and *mailed to*, this address case-folded, and that
             fold collapses U+212A KELVIN SIGN onto a plain `k`: the message

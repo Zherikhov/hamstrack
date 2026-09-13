@@ -43,9 +43,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>The exemptions are by CATEGORY, and each carries its own sentence</h2>
  * A list of individual controllers would be a list somebody maintains by remembering it exists.
- * These are four categories, each with an argument that survives a new endpoint joining it — and
- * one of them ({@link #WORKSPACE_CREATION}) is an exemption with <strong>no good reason</strong>,
- * which is the finding this test's polarity forces into the open rather than fixes.
+ * Each exemption below is a category with an argument that survives a new endpoint joining it — no
+ * count of them is given here, because a count goes stale one entry before the list does, and this
+ * one did. Two shapes are worth knowing about: {@link #WORKSPACE_CREATION} is an exemption with
+ * <strong>no good reason</strong>, which is the finding this test's polarity forces into the open
+ * rather than fixes; and {@link #THE_INVITE_DOOR} is a single endpoint given a sentence of its own
+ * because the category's sentence was true of only part of what it does.
  *
  * <h2>What it does NOT assert</h2>
  * How big a budget is, and whether a mutation is expensive. One interceptor applying to the verb
@@ -100,12 +103,38 @@ class WriteThrottleCoverageTest {
      * HD-190's ceilings are keyed on the RECIPIENT and are spent inside the service, precisely
      * because a recipient-keyed refusal spent in an interceptor would answer a cross-tenant
      * question to a non-member. Adding a per-principal request budget on top would not bound
-     * anything the recipient ceilings do not already bound, and would put a second refusal shape
-     * on an endpoint that already has two 429s meaning different things.
+     * anything those ceilings do not already bound, and would put a second refusal shape on an
+     * endpoint that already has two 429s meaning different things.
+     *
+     * <p>The property asserted is that each of these endpoints' <em>expensive</em> work is bounded on
+     * an axis of its own, never that every refusal any of them makes is — see {@link #THE_INVITE_DOOR},
+     * which is the member where that distinction has content.
      */
     private static final String MEMBERSHIP_AND_INVITES =
             "membership / invitation write: bounded by the recipient-keyed mail ceilings (HD-190), "
             + "which are spent in the service for tenancy reasons and cannot be an interceptor";
+
+    /**
+     * <strong>{@code POST …/invites} — the one member of the set above with a budget of its own and a
+     * FREE BAND above it</strong> (HD-306 fix loop; the sentence it replaced said only "bounded by the
+     * recipient-keyed mail ceilings", which is true of this endpoint's expensive half and of nothing
+     * else it does).
+     *
+     * <p>{@code WorkspaceService.inviteMember}'s first charge is
+     * {@code inviteThrottle.requireSenderVolume}. Every refusal above that line — the unknown role
+     * (422), both grant-ceiling refusals (403), the post-fold address bound (400, HD-306) and the
+     * already-a-member probe (409) — costs the caller nothing on this endpoint: no mail ceiling, no
+     * sender budget, and no {@code PrincipalThrottleInterceptor}, which does not cover this path. That
+     * is deliberate and positional (the invariant is stated at that method), and it is why the band is
+     * kept to checks that cost one comparison and no state. It is recorded here because a reader of the
+     * exemption above would otherwise conclude that everything this door refuses is budgeted.
+     */
+    private static final String THE_INVITE_DOOR =
+            "invitation write: its FIRST CHARGE is the per-sender volume budget and its expensive half "
+            + "the recipient-keyed mail ceilings (HD-190), both spent in the service for tenancy "
+            + "reasons and neither expressible in an interceptor. The band of refusals ABOVE the "
+            + "sender half is bounded by nothing on this endpoint, by design — so it holds only "
+            + "checks decided from the request in one comparison";
 
     /**
      * <strong>Saved-filter writes.</strong> Already on the SEARCH budget
@@ -167,7 +196,7 @@ class WriteThrottleCoverageTest {
             java.util.Map.entry("WorkspaceController#create", WORKSPACE_CREATION),
             java.util.Map.entry("WorkspaceController#update", ADMIN_AND_TAXONOMY),
             java.util.Map.entry("WorkspaceController#previewProjectAccess", ADMIN_AND_TAXONOMY),
-            java.util.Map.entry("WorkspaceController#invite", MEMBERSHIP_AND_INVITES),
+            java.util.Map.entry("WorkspaceController#invite", THE_INVITE_DOOR),
             java.util.Map.entry("WorkspaceController#revokeInvite", MEMBERSHIP_AND_INVITES),
             java.util.Map.entry("WorkspaceController#acceptInvite", MEMBERSHIP_AND_INVITES),
             java.util.Map.entry("WorkspaceController#updateMember", MEMBERSHIP_AND_INVITES),

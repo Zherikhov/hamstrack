@@ -4,6 +4,7 @@ import com.hamstrack.auth.entity.SystemRole;
 import com.hamstrack.auth.entity.User;
 import com.hamstrack.auth.entity.UserStatus;
 import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.mail.MailAddresses;
 import com.hamstrack.common.security.PasswordLimits;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -130,6 +131,7 @@ public class DataSeeder implements ApplicationRunner {
     void refusePublishedCredentials() {
         rejectPublishedPassword(adminPassword, adminEmail);
         rejectOverLongPassword(adminPassword, adminEmail);
+        rejectOverLongEmail(adminEmail, adminPassword);
         rejectPublishedAdminHash();
     }
 
@@ -224,6 +226,75 @@ public class DataSeeder implements ApplicationRunner {
                 + MAX_SEED_PASSWORD_BYTES + " bytes or fewer, or clear SEED_ADMIN_EMAIL if you did "
                 + "not mean to seed an administrator at all. A random 64-character ASCII password is "
                 + "far stronger than anything BCrypt can use, so nothing is lost by shortening.");
+    }
+
+    /**
+     * <strong>The address half of the same statement</strong> (HD-306): {@code seed.admin.email} has
+     * no {@code @Size}, no {@code @Email} and no DTO to annotate — it is a {@code @Value} field — so
+     * the only thing standing between it and {@code users.email VARCHAR(255)} was the INSERT.
+     *
+     * <p><strong>MEASURED (2026-09-13), which is what this guard buys:</strong> with a 300-character
+     * {@code SEED_ADMIN_EMAIL} the boot died inside {@link #run} with
+     * {@code DataIntegrityViolationException: could not execute statement [ERROR: value too long for
+     * type character varying(255)] [insert into users (…)]} — a message that names neither the
+     * variable at fault nor anything the operator can do about it, on the DC install path that is how
+     * a self-hosted instance gets its first administrator. The failure is real either way; what the
+     * guard buys is a sentence.
+     *
+     * <p><strong>A fold is a derived value, so the length is measured AFTER it.</strong> Every site in
+     * this class folds the configured address with {@code strip().toLowerCase(Locale.ROOT)} and that
+     * is what {@link #run} stores, and {@code toLowerCase} is not length-preserving: U+0130 becomes
+     * two code points, so 64 of them plus a 190-character domain is 255 characters as configured and
+     * 319 as stored. The bound is asked of {@code MailAddresses.exceedsStorableLength} — the one the
+     * three request doors ask — so the boot and the API cannot disagree about what fits; only the
+     * refusal differs, which is the {@code PasswordLimits.exceedsEncoderLimit} split exactly.
+     *
+     * <p><strong>The gate is {@link #rejectOverLongPassword}'s, inherited rather than restated: it
+     * may only refuse a boot whose {@link #run} would reach the INSERT.</strong> An over-long value
+     * that is never written never created anything, so every configuration {@link #run} steps out of
+     * has to boot — <em>both</em> of its early returns, not just the one about the address. A blank
+     * {@code seed.admin.email} makes {@link #run} return before it touches {@code users}; so does a
+     * blank {@code seed.admin.password}, and an earlier round of HD-306 refused that boot while
+     * claiming blankness of the address was "the one exemption". The property, since a list of cases
+     * is what went stale: <em>this guard refuses exactly the configurations that would otherwise reach
+     * the INSERT.</em>
+     *
+     * <p>The one case {@link #rejectOverLongPassword} has and this cannot is the existing row — "a row
+     * already occupies the folded address, so {@link #run} promotes it and returns before encoding".
+     * The row it would look for would have to hold an over-255-character address in a 255-wide column,
+     * so {@code existsByFoldedEmail} would be a query that can never answer yes.
+     *
+     * @param password {@code seed.admin.password} — read only to ask whether {@link #run} will get as
+     *                 far as writing, exactly as the password guard reads the address only to name an
+     *                 account
+     */
+    void rejectOverLongEmail(String email, String password) {
+        if (email == null || email.isBlank()) {
+            return;
+        }
+        if (password == null || password.isBlank()) {
+            return;
+        }
+        // Stripped first, for the reason run() states at its own fold: a trailing space survives
+        // env_file and @Value does not trim, so the value measured here has to be the value stored.
+        String configured = email.strip();
+        // 255 is an ADR-0017 repeated literal equal to users.email's width and to the three request
+        // doors' bound — a guard that imported the constant it is testing would agree with any value
+        // that constant took.
+        if (!MailAddresses.exceedsStorableLength(configured, 255)) {
+            return;
+        }
+        throw new IllegalStateException(
+                "seed.admin.email (SEED_ADMIN_EMAIL) is " + configured.length() + " characters long, "
+                + "and " + MailAddresses.storageFold(configured).length() + " characters once "
+                + "lower-cased; users.email holds 255. The address is stored LOWER-CASED, and "
+                + "lower-casing can lengthen it — U+0130 (capital I with a dot above) becomes two "
+                + "characters — so count the folded form, not what you typed. Seeding this value "
+                + "cannot create the administrator it names: the boot would fail inside the INSERT "
+                + "instead, saying only \"value too long for type character varying(255)\" and naming "
+                + "no variable. Shorten SEED_ADMIN_EMAIL to 255 characters or fewer (folded), or clear "
+                + "it if you did not mean to seed an administrator at all. Nothing has been created, "
+                + "so nothing needs repairing.");
     }
 
     /**

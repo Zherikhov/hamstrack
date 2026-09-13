@@ -26,18 +26,23 @@ import com.hamstrack.workspace.repository.WorkspaceStorageUsageRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.server.ResponseStatusException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * <strong>Every refusal {@code AuthService.register} makes before it reads the address counts
- * why</strong> (HD-261; widened to the whole category in the HD-298 fix loop). The closed door is
+ * <strong>Every refusal {@code AuthService.register} makes before it spends a bcrypt or a mail
+ * ceiling counts why</strong> (HD-261; widened to the whole category in the HD-298 fix loop, and
+ * re-phrased over the spends in HD-306 when a refusal ABOUT the address joined it). The closed door is
  * the DC default and answered 403 for months with no witness at all. The status codes are unchanged
  * — {@code RegistrationLockdownTest} holds the 403 at the real door and reads the same counter
- * there; this class holds the other three branches with the collaborators mocked, plus the claim
+ * there; this class holds the other branches with the collaborators mocked, plus the claim
  * that the reset door, which shares the two password refusals, moves no signup counter.
  */
 class SignupRefusalCounterTest {
@@ -47,9 +52,10 @@ class SignupRefusalCounterTest {
             mock(WorkspaceRepository.class), mock(ProjectRepository.class), mock(IssueRepository.class),
             mock(WorkspaceStorageUsageRepository.class));
     private final AppProperties app = mock(AppProperties.class);
+    private final PasswordEncoder passwordEncoder = mock(PasswordEncoder.class);
     private final AuthService service = new AuthService(mock(UserRepository.class),
             mock(RefreshTokenRepository.class), mock(EmailVerificationRepository.class),
-            mock(PasswordResetRepository.class), mock(PasswordEncoder.class), mock(JwtService.class),
+            mock(PasswordResetRepository.class), passwordEncoder, mock(JwtService.class),
             mock(JwtProperties.class), app, mock(MailService.class), mock(RateLimitService.class),
             mock(RecipientMailThrottle.class), metrics);
 
@@ -100,6 +106,28 @@ class SignupRefusalCounterTest {
 
         assertThat(refused(SignupRefusal.UNENCODABLE_PASSWORD)).isEqualTo(1);
         assertThat(refused(SignupRefusal.PUBLISHED_PASSWORD)).isZero();
+    }
+
+    /**
+     * <strong>The member that made this enum's old category sentence false</strong> (HD-306). It reads
+     * the address — by definition — and it is still above both spends, which is the property the
+     * counter is actually for. 64 × U+0130 plus a 190-character ASCII domain is 255 characters with
+     * zero constraint violations and 319 once lower-cased, into a {@code VARCHAR(255)}.
+     */
+    @Test
+    void anAddressThatOnlyOverflowsOnceFoldedCountsEmailTooLong() {
+        doorOpen();
+        var address = "İ".repeat(64) + "@"
+                      + "a".repeat(63) + "." + "b".repeat(63) + "." + "c".repeat(62);
+
+        assertThatThrownBy(() -> service.register(
+                new RegisterRequest(address, "password123", "Person", true)))
+                .isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("255");
+
+        assertThat(refused(SignupRefusal.EMAIL_TOO_LONG)).isEqualTo(1);
+        assertThat(refused(SignupRefusal.UNENCODABLE_PASSWORD)).isZero();
+        verify(passwordEncoder, never()).encode(any());
     }
 
     /** The two password helpers are shared with the reset door; a reset is not a signup. */

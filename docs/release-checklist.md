@@ -158,6 +158,23 @@ a suffix, Actions → Build → *Run workflow* on the tag fixes it in one click.
 
    `checks_ran` is the one worth a second look: `ok = 1` with `checks_ran = 3` is a box on
    which two checks found nothing to look at, and the summary line above says which.
+6. **Read `hamstrack_mail_stored_address_truncated_total` back, in the same Explore tab.**
+   Also unalerted by decision (`docs/observability.md` gives the reason), and this step is
+   the reader that decision names. Expected **absent or flat**: a non-zero value means a
+   stored copy of a recipient address did not fit its 320-wide column and was shortened —
+   somebody is submitting pathological addresses, or the width arithmetic has drifted
+   again. The log line beside it is `DEBUG` on every path that can currently reach it, so
+   it is not in Loki at `LOG_LEVEL_APP=INFO`; the rows are what you read instead:
+
+   ```sql
+   SELECT count(*) FROM mail_send_events WHERE length(recipient_email) = 320;
+   SELECT count(*) FROM mail_send_events WHERE length(recipient_key)   = 320;
+   SELECT count(*) FROM failed_email     WHERE length(recipient)       = 320;
+   ```
+
+   The first two are swept within a day (`ANONYMOUS_EVENT_RETENTION`), so read them near
+   the deploy; a `failed_email` hit is the one to act on, because a dead-letter row with a
+   shortened address is a message a re-drive cannot reconstruct.
 
 **If the version still comes out wrong:** Actions → Build → **Run workflow** on
 `main` (the `workflow_dispatch` trigger, added with this change). No new commit,

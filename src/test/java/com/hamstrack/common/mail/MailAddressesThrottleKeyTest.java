@@ -1,18 +1,31 @@
 package com.hamstrack.common.mail;
 
+import com.hamstrack.auth.dto.ForgotPasswordRequest;
+import com.hamstrack.auth.dto.RegisterRequest;
+import com.hamstrack.auth.dto.ResendVerificationRequest;
+import com.hamstrack.auth.repository.UserRepository;
+import com.hamstrack.common.observability.ProductMetrics;
+import com.hamstrack.common.testsupport.ProductionBytecode;
+import com.hamstrack.issue.repository.IssueRepository;
+import com.hamstrack.project.repository.ProjectRepository;
 import com.hamstrack.workspace.dto.InviteMemberRequest;
+import com.hamstrack.workspace.repository.WorkspaceRepository;
+import com.hamstrack.workspace.repository.WorkspaceStorageUsageRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import jakarta.persistence.Column;
 import jakarta.validation.Validation;
 import jakarta.validation.Validator;
 import jakarta.validation.constraints.Email;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.IDN;
 import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * <strong>The ceilings count one key per INBOX, not one per spelling</strong> (HD-190 section 4.3 /
@@ -168,75 +181,358 @@ class MailAddressesThrottleKeyTest {
     // =================================================== the key's width, and what actually bounds it
 
     /**
-     * <strong>Punycode is the one step in {@code throttleKey} that LENGTHENS its input, and
-     * {@code mail_send_events.recipient_key} fits the worst case with zero characters to
-     * spare.</strong>
+     * <strong>The widest key EVERY writing DTO can produce fits
+     * {@code mail_send_events.recipient_key}</strong> — parameterised over all four of them, which is
+     * the correction HD-306 made to this file.
      *
      * <p>The tempting justification for that column's width — every flow that writes it carries
-     * {@code @Size(max = 255)}, so 320 is margin — is true of {@code recipient_email} and false
-     * here. Every other rule in {@code throttleKey} strips ({@code +tag}, quotes, Gmail dots);
-     * {@code IDN.toASCII} adds, and it adds without any relation to what it was given: the address
-     * built below is <strong>85 characters</strong>, comfortably inside the DTO bound, and its key
-     * is <strong>320</strong>. So the DTO bound says nothing at all about how wide this column has
-     * to be, and one character more would be a
-     * {@code DataIntegrityViolationException} on a path with no handler — a 500 in place of a
-     * ceiling, reached by typing an address.
+     * {@code @Size(max = 255)}, so 320 is margin — is false of <em>both</em> columns this table
+     * stores an address in, and an earlier round of HD-306 wrote here that it was "true of
+     * {@code recipient_email}". It is not: a {@code @Size} bounds the RAW text and both columns hold
+     * text the server DERIVED from it, so neither is bounded by 255 at all
+     * ({@link #theWidestAddressEveryWritingDtoStoresFitsTheForensicColumn(WritingDoor)} is the
+     * other half of this claim, and it found the hole that sentence hid). Punycode adds without any
+     * relation to what it was given: the invite fixture below is <strong>85 characters</strong>,
+     * comfortably inside the DTO bound, and its key is <strong>320</strong>. So the DTO bound says
+     * nothing at all about how wide either column has to be.
      *
-     * <p><strong>What does bound it lives inside {@code @Email}</strong>, which every writing flow
+     * <p><strong>Part of what bounds it lives inside {@code @Email}</strong>, which every writing flow
      * also carries: Hibernate Validator refuses a local part over 64 characters, and runs
-     * {@code IDN.toASCII} itself before refusing a domain whose <em>ASCII</em> form exceeds 255. So
-     * the ceiling is 64 + {@code "@"} + 255 = 320, exactly the column, and it rests on a
-     * third-party invariant that nothing in this codebase states. Which is why it is constructed
-     * here rather than reasoned about: the address below is built to sit on both of those limits at
-     * once, and {@link #pastTheWorstCaseItIsValidationThatRefusesAndNotTheColumn()}
-     * is the other direction — the next step up is refused by {@code @Email}, not by Postgres.
+     * {@code IDN.toASCII} itself before refusing a domain whose <em>ASCII</em> form exceeds 255 — hence
+     * 64 + {@code "@"} + 255 = 320, exactly the column.
+     *
+     * <p><strong>And that was certified against {@code InviteMemberRequest} ALONE, which is a
+     * uniqueness claim proved on one member</strong> (HD-306). This test used to send one address, built
+     * through the one DTO whose {@code @Pattern} forces an ASCII local part, and concluded a property of
+     * the column. {@code toLowerCase} runs on the LOCAL PART in {@code throttleKey}'s first line and it
+     * APPENDS, so for the other three DTOs Hibernate Validator's 64 buys 128 characters of key and the
+     * arithmetic is 128 + 1 + 255 = 384 ({@link #theRegisterDoorsWidestKeyIsTruncatedAndCounted()}).
+     * What keeps every door inside the column now is the truncation, and this test is what says so for
+     * each of them rather than for the one it was written against.
      *
      * <p>The column width is read off the entity rather than restated, so widening the column
      * without revisiting this arithmetic cannot pass here by coincidence.
      */
-    @Test
-    void theWidestKeyReachableThroughTheRealDtoConstraintsExactlyFillsTheColumn() {
-        var address = worstCaseAddress();
+    @ParameterizedTest
+    @EnumSource(WritingDoor.class)
+    void theWidestKeyReachableThroughEveryWritingDtoFitsTheColumn(WritingDoor door) {
+        var address = door.worstCaseAddress();
 
-        assertThat(violations(address))
-                .as("the worst case has to be REACHABLE or this test bounds nothing: %s must pass "
-                    + "every constraint on InviteMemberRequest.email", address)
+        assertThat(door.violations(address))
+                .as("the worst case has to be REACHABLE or this case bounds nothing: %s must pass "
+                    + "every constraint on %s's address field", address, door.dto())
                 .isEmpty();
 
         assertThat(address.length())
                 .as("and it is nowhere near the DTO's own @Size(max = 255) — which is the point: "
                     + "the length of the submitted address does not bound the length of the key")
-                .isEqualTo(85)
                 .isLessThan(255);
 
-        var key = MailAddresses.throttleKey(address);
-
-        assertThat(key.length())
+        assertThat(MailAddresses.throttleKey(address).length())
                 .as("""
-                        A key derived from an address the DTO ACCEPTS does not fit \
+                        A key derived from an address %s ACCEPTS does not fit \
                         mail_send_events.recipient_key.
 
-                        Punycode is the one step in throttleKey that lengthens rather than strips, \
-                        and a single code point can expand to 29 ASCII characters, so the width of \
-                        this column has nothing to do with @Size(max = 255) on the request. It is \
-                        bounded by @Email instead: local part <= 64, ASCII domain <= 255, hence \
-                        64 + 1 + 255 = 320 and no margin.
+                        TWO steps in throttleKey lengthen rather than strip: punycode (one code point \
+                        can expand to 29 ASCII characters) and the toLowerCase in its first line \
+                        (U+0130 becomes two code points). So the width of this column has nothing to do \
+                        with @Size(max = 255) on the request, and the 64 + 1 + 255 = 320 arithmetic \
+                        inside @Email holds only for a DTO whose @Pattern forces an ASCII local part -- \
+                        which is one of the four.
 
-                        An over-long key is not a refused invitation -- it is a \
-                        DataIntegrityViolationException out of the INSERT, which this application \
-                        does not handle, so it answers 500 on a request that should have spent a \
-                        ceiling. If a folding rule was added that APPENDS to a key rather than only \
-                        stripping from it, widen the column (and failed_email.recipient with it) \
-                        before doing anything else.""")
-                .isEqualTo(columnWidth("recipientKey"))
-                .isEqualTo(320);
+                        An over-long key is not a refused send, it is a DataIntegrityViolationException \
+                        out of the INSERT that rolls back the ceiling row the caller was already \
+                        counted on -- a free probe of a stranger's ceilings. So throttleKey truncates \
+                        to this width at the site that produces the key, and counts it. If this case is \
+                        red, that truncation has been removed or the column has been narrowed; do not \
+                        widen the column instead -- a width resting on third-party invariants nothing \
+                        here states is what failed the first time.""", door.dto())
+                .isLessThanOrEqualTo(columnWidth("recipientKey"));
+    }
+
+    /**
+     * <strong>The OTHER column this table stores an address in, and the same claim over it</strong>
+     * (HD-306 fix loop): the widest address every writing DTO can put into
+     * {@code mail_send_events.recipient_email} fits that column too.
+     *
+     * <p><strong>Why this case exists at all — the half a "recipient_key" claim cannot see.</strong>
+     * {@code RecipientMailThrottle.record} writes TWO columns from the address its caller folded: the
+     * derived key, and the folded address itself. HD-306 round 1 truncated the key and left the
+     * address verbatim, so the two anonymous doors — {@code POST /api/auth/forgot-password} and
+     * {@code /api/auth/resend-verification}, whose entire contract is one uniform response — could
+     * drive a {@code 22001} out of the INSERT that records them, rolling back the ceiling row inside
+     * the advisory lock: the free probe of a stranger's ceilings that this file's own truncation
+     * argument exists to prevent, reached through the column the truncation did not cover.
+     *
+     * <p><strong>The fixture is a DIFFERENT worst case from the key's, and that is the lesson.</strong>
+     * The key is widened by PUNYCODE, so its worst case is a short address with an expanding domain
+     * ({@link WritingDoor#worstCaseAddress()}, 85 characters). The stored address is widened by the
+     * FOLD, so its worst case is an address ON the DTO's {@code @Size(max = 255)} spending every
+     * character it can on a mapping that lengthens ({@link WritingDoor#widestStoredAddress()}). One
+     * fixture cannot certify both columns, which is why round 1's single fixture certified one of
+     * them and reported clean.
+     *
+     * <p><strong>It deliberately does NOT rely on the door bound.</strong> Register and invite refuse
+     * a folded address over 255 before the throttle is reached, so two of these four cases could be
+     * argued away — and that argument is exactly what
+     * {@code MailAddresses#requireStorableAddress} says it is not allowed to be ("hard rather than
+     * impossible" was the round-1 wording, and it was false: the register door's own worst key is 384
+     * with a folded address of 149). The column is either bounded at the site that writes it or it is
+     * not bounded.
+     *
+     * <p>Both widths are read off {@link MailSendEvent} rather than restated.
+     */
+    @ParameterizedTest
+    @EnumSource(WritingDoor.class)
+    void theWidestAddressEveryWritingDtoStoresFitsTheForensicColumn(WritingDoor door) {
+        var address = door.widestStoredAddress();
+
+        assertThat(door.violations(address))
+                .as("the worst case has to be REACHABLE or this case bounds nothing: %s's address "
+                    + "field must accept a %d-character value that folds to %d", door.dto(),
+                        address.length(), MailAddresses.storageFold(address).length())
+                .isEmpty();
+
+        assertThat(MailAddresses.storageFold(address).length() > columnWidth("recipientEmail"))
+                .as("""
+                        The premise of this case for %s has stopped holding: the widest address it \
+                        accepts now folds to %d, and the column is %d.
+
+                        For the three DTOs with no ASCII @Pattern on the local part the fold MUST be \
+                        able to overflow -- if it cannot, this fixture is no longer a worst case and \
+                        the assertion below is vacuous. For InviteMemberRequest it must NOT, and the \
+                        reason is punycode rather than the fold: buying folded length in the domain \
+                        costs ~5 ASCII characters per code point, so @Email's 255-character ASCII \
+                        domain limit runs out first. Re-derive the fixture; do not relax the flag.""",
+                        door.dto(), MailAddresses.storageFold(address).length(),
+                        columnWidth("recipientEmail"))
+                .isEqualTo(door.foldCanOverflowTheForensicColumn());
+
+        assertThat(MailAddresses.fitStoredRecipient(MailAddresses.storageFold(address), length -> {})
+                .length())
+                .as("""
+                        The address %s ACCEPTS does not fit mail_send_events.recipient_email once \
+                        folded (%d characters against %d).
+
+                        The fold runs in the SERVICE, above the throttle, on every one of these \
+                        doors -- so @Size(max = 255) on the request bounds the raw text and this \
+                        column holds something longer. An over-long value here is not a refused \
+                        send: it is a 22001 out of the INSERT that records the send, INSIDE the \
+                        advisory lock, which rolls back the ceiling row the caller has already been \
+                        counted on and answers 400 with an ERROR line -- on two endpoints whose \
+                        whole contract is one uniform response, unauthenticated.
+
+                        So MailAddresses.fitStoredRecipient cuts it to this width at the site that \
+                        writes it and counts the cut, exactly as throttleKey does for the key beside \
+                        it. If this case is red, that call has been removed from \
+                        RecipientMailThrottle.record or the column has been narrowed. Do not refuse \
+                        instead: this column is forensic, nothing counts it, nothing matches on it, \
+                        and the mail goes to the address the service holds.""",
+                        door.dto(), MailAddresses.storageFold(address).length(),
+                        columnWidth("recipientEmail"))
+                .isLessThanOrEqualTo(columnWidth("recipientEmail"));
+    }
+
+    /**
+     * <strong>The member the old single-DTO claim could not see, with its arithmetic and its
+     * witness</strong> (HD-306). {@code RegisterRequest} carries no ASCII pattern, so 64 × U+0130 is a
+     * legal local part that folds to 128 characters: the key WOULD be 128 + 1 + 255 = 384 against a
+     * 320-wide column. The address is 85 characters and folds to 149 — well inside the 255 the three
+     * storing doors now refuse above — so the door bound does not save this column and the truncation
+     * is not decoration.
+     *
+     * <p>The pre-truncation length is computed from the parts rather than by calling {@code throttleKey}
+     * with the truncation disabled: there is no such call, deliberately, and a test that could ask for
+     * one would be asserting a mode production never runs in.
+     */
+    @Test
+    void theRegisterDoorsWidestKeyIsTruncatedAndCounted() {
+        var address = WritingDoor.REGISTER.worstCaseAddress();
+        var registry = new SimpleMeterRegistry();
+        var metrics = new ProductMetrics(registry, mock(UserRepository.class),
+                mock(WorkspaceRepository.class), mock(ProjectRepository.class),
+                mock(IssueRepository.class), mock(WorkspaceStorageUsageRepository.class));
+
+        assertThat(WritingDoor.REGISTER.violations(address))
+                .as("the fixture has to pass RegisterRequest's real constraints or it bounds nothing")
+                .isEmpty();
+        assertThat(address.length()).as("the submitted address").isEqualTo(85);
+        assertThat(address.toLowerCase(java.util.Locale.ROOT).length())
+                .as("folded, it is far inside the 255 the storing doors refuse above — which is why "
+                    + "MailAddresses.requireStorableAddress does NOT save this column")
+                .isEqualTo(149);
+
+        int preTruncation = EXPANDING_LOCAL_PART.toLowerCase(java.util.Locale.ROOT).length()
+                            + 1 + IDN.toASCII(worstCaseDomain(), IDN.ALLOW_UNASSIGNED).length();
+        assertThat(preTruncation)
+                .as("128 + \"@\" + 255: the arithmetic MailSendEvent.recipientKey's javadoc used to "
+                    + "state as 64 + \"@\" + 255, certified against InviteMemberRequest alone")
+                .isEqualTo(384)
+                .isGreaterThan(columnWidth("recipientKey"));
+
+        var key = MailAddresses.throttleKey(address, keyLength -> {
+            assertThat(keyLength).as("the witness is told the PRE-truncation length, which is the "
+                                     + "number an operator needs").isEqualTo(384);
+            metrics.mailStoredAddressTruncated(ProductMetrics.TruncatedMailColumn.RECIPIENT_KEY);
+        });
 
         assertThat(key.length())
-                .as("the key is nearly four times the address it came from — 'every writing flow "
-                    + "is @Size(max = 255), so 320 is margin' is an argument about "
-                    + "recipient_email and it does not transfer to this column")
-                .isGreaterThan(address.length());
+                .as("the key is cut to the column rather than refused: over-folding is the fail-safe "
+                    + "direction for a ceiling, and a 22001 here would roll back the very row the "
+                    + "caller has already been counted on")
+                .isEqualTo(columnWidth("recipientKey"))
+                .isEqualTo(320);
+        assertThat(registry.find("hamstrack.mail.stored_address_truncated")
+                .tag("column", "recipient_key").counter())
+                .as("""
+                        The truncation is SILENT to the caller by design, so the counter is the only \
+                        thing that can say it happened: two inboxes now share one ceiling bucket, and \
+                        either somebody is probing with pathological addresses or the 320 arithmetic has \
+                        drifted again. A drop with no witness is the shape behind five of this project's \
+                        CRIT defects.""")
+                .isNotNull()
+                .extracting(io.micrometer.core.instrument.Counter::count).isEqualTo(1.0);
     }
+
+    /**
+     * <strong>No production class may take the witnessless {@code throttleKey(String)} overload.</strong>
+     * The truncation itself cannot be forgotten — it is inside the method — but the <em>report</em> is
+     * the caller's, and an overload that silently degrades is exactly the silence the retrospective
+     * named. Matched on the parameter count, because that is what distinguishes the two overloads;
+     * {@code ProductionBytecode} deliberately matches only owner + name, so this assertion is written
+     * here rather than expressed through it.
+     */
+    @Test
+    void noProductionCallerTakesTheWitnesslessOverload() {
+        var offenders = new java.util.ArrayList<String>();
+        for (var clazz : ProductionBytecode.main()) {
+            if (clazz.getName().equals(MailAddresses.class.getName())) {
+                continue; // the witnessed overload delegates to nothing; the 1-arg form delegates to it
+            }
+            for (var call : clazz.getMethodCallsFromSelf()) {
+                if (call.getTargetOwner().getName().equals(MailAddresses.class.getName())
+                    && call.getName().equals("throttleKey")
+                    && call.getTarget().getRawParameterTypes().size() == 1) {
+                    offenders.add(clazz.getName() + " at " + call.getSourceCodeLocation());
+                }
+            }
+        }
+
+        assertThat(offenders)
+                .as("""
+                        A production class derives a recipient throttle key through the overload that \
+                        reports nothing.
+
+                        %s
+
+                        throttleKey truncates a key that does not fit mail_send_events.recipient_key, \
+                        which merges two inboxes into one ceiling bucket and costs an innocent \
+                        bystander a slot. Pass the witness -- \
+                        throttleKey(address, len -> { metrics.mailThrottleKeyTruncated(); log.info(...); }) \
+                        -- as RecipientMailThrottle.spend does. The one-argument overload is for tests \
+                        and for callers that only compare or measure a key.""",
+                        String.join("\n", offenders))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>Every production write of a STORED COPY of a recipient address goes through the shared
+     * counted fit</strong> (HD-306 fix loop) — the assertion that ties the width case above to the
+     * code, rather than to a helper the code might stop calling.
+     *
+     * <p>{@link #theWidestAddressEveryWritingDtoStoresFitsTheForensicColumn(WritingDoor)} measures
+     * {@code MailAddresses.fitStoredRecipient}, so on its own it would stay green the day a write site
+     * stopped calling it — which is precisely the failure round 1 shipped, one column over. Matched on
+     * the METHOD that performs the write rather than on its class, because a class with two write
+     * sites is a class where one of them can be missed.
+     *
+     * <p><strong>The category is the columns, not the column</strong> (round 3): two entities hold a
+     * stored copy of a recipient address — {@code MailSendEvent.recipientEmail} and
+     * {@code FailedEmail.recipient}, both {@code VARCHAR(320)} — and the second was cut by
+     * {@code MailService.truncate}, an uncounted, surrogate-splitting {@code substring}, while the
+     * exclusion in {@code RequestFieldLengthBoundTest} that covered all of them said each was cut "and
+     * counted". {@link #SETTERS} is the enumeration; a third such column is a member the day its setter
+     * is called.
+     *
+     * <p><strong>One declared wrapper is followed, and only while it still fits.</strong>
+     * {@code MailService.fitStoredRecipient} exists because {@code MailAddresses} is a static utility
+     * with no registry and cannot count its own cut, so the two {@code failed_email} writers reach the
+     * fit through it. It is itself a fitting site, so it is followed exactly as long as it calls the
+     * fit — the day it stops, it leaves the set and takes both of its callers with it.
+     */
+    @Test
+    void everyProductionWriteOfTheForensicAddressGoesThroughTheFit() {
+        var writeSites = new java.util.LinkedHashSet<String>();
+        var fittingSites = new java.util.LinkedHashSet<String>();
+        var throughWrapper = new java.util.LinkedHashSet<String>();
+        for (var clazz : ProductionBytecode.main()) {
+            for (var call : clazz.getMethodCallsFromSelf()) {
+                var site = call.getOrigin().getOwner().getName() + "#" + call.getOrigin().getName();
+                var target = call.getTargetOwner().getName() + "#" + call.getName();
+                if (SETTERS.contains(target)) {
+                    writeSites.add(site);
+                }
+                if (target.equals(MailAddresses.class.getName() + "#fitStoredRecipient")) {
+                    fittingSites.add(site);
+                }
+                if (target.equals(COUNTING_WRAPPER)) {
+                    throughWrapper.add(site);
+                }
+            }
+        }
+        if (fittingSites.contains(COUNTING_WRAPPER)) {
+            fittingSites.addAll(throughWrapper);
+        }
+
+        assertThat(columnWidth(FailedEmail.class, "recipient"))
+                .as("""
+                        One cut serves every stored copy of a recipient address \
+                        (MailAddresses.fitStoredMailValue, 320), so the columns must agree. \
+                        failed_email.recipient is now %d and mail_send_events.recipient_email is %d: \
+                        widening one of them without revisiting that literal gives the widened column \
+                        a cut it does not need and hides the narrow one.""",
+                        columnWidth(FailedEmail.class, "recipient"), columnWidth("recipientEmail"))
+                .isEqualTo(columnWidth("recipientEmail"))
+                .isEqualTo(320);
+
+        assertThat(writeSites)
+                .as("nothing in production writes any of %s at all — this case and the width case "
+                    + "above are then both vacuous, so find the write and point them at it", SETTERS)
+                .hasSizeGreaterThanOrEqualTo(3);
+        assertThat(writeSites)
+                .as("""
+                        A production method stores a copy of a recipient address without fitting it \
+                        to the 320-wide column that holds it.
+
+                        The address reaching RecipientMailThrottle has been folded by its caller and \
+                        toLowerCase APPENDS, so a value every writing DTO accepts with zero \
+                        violations can be 347 characters against a 320-wide column: the INSERT then \
+                        raises 22001 inside the advisory lock, rolls back the ceiling row the caller \
+                        was already counted on, and answers 400 with an ERROR line -- on two \
+                        unauthenticated doors whose whole contract is one uniform response. A \
+                        failed_email row takes the same 22001 on a thread with no caller to tell.
+
+                        Wrap the value in MailAddresses.fitStoredRecipient(address, length -> ...) \
+                        with a witness, as RecipientMailThrottle.record does, or in \
+                        MailService.fitStoredRecipient(type, address, metrics), which is that wrapper \
+                        with failed_email.recipient's witness already on it. Do not refuse instead, \
+                        and do not reach for MailService.truncate: these columns are forensic, and \
+                        that cut counts nothing and splits surrogate pairs.""")
+                .isSubsetOf(fittingSites);
+    }
+
+    /**
+     * Every setter that writes a stored copy of a recipient address, {@code Owner#method}. Two
+     * entities, three production call sites (2026-09-13): {@code MailService.deadLetter},
+     * {@code UndeliverableMail.row}, {@code RecipientMailThrottle.record}.
+     */
+    private static final java.util.Set<String> SETTERS = java.util.Set.of(
+            MailSendEvent.class.getName() + "#setRecipientEmail",
+            FailedEmail.class.getName() + "#setRecipient");
+
+    /** The one counted entry point the {@code failed_email} writers share; see the test's javadoc. */
+    private static final String COUNTING_WRAPPER =
+            MailService.class.getName() + "#fitStoredRecipient";
 
     /**
      * The other direction, and the one that makes the number above a <em>ceiling</em> rather than a
@@ -252,6 +548,9 @@ class MailAddressesThrottleKeyTest {
     @Test
     void pastTheWorstCaseItIsValidationThatRefusesAndNotTheColumn() {
         var overlong = LOCAL_PART_AT_THE_LIMIT + "@" + EXPANDING_LABEL + "." + worstCaseDomain();
+        // The domain is what this case is about, so it is asked of the DTO whose local part cannot
+        // grow: with an expanding local part the key would be truncated and the question would be a
+        // different one (theRegisterDoorsWidestKeyIsTruncatedAndCounted asks that one).
 
         assertThat(IDN.toASCII(EXPANDING_LABEL + "." + worstCaseDomain(), IDN.ALLOW_UNASSIGNED)
                 .length())
@@ -436,25 +735,118 @@ class MailAddressesThrottleKeyTest {
     /** 64 ASCII characters: Hibernate Validator's {@code MAX_LOCAL_PART_LENGTH}, to the character. */
     private static final String LOCAL_PART_AT_THE_LIMIT = "a".repeat(64);
 
+    /**
+     * <strong>The same 64-character limit spent on the one lowercase mapping that lengthens</strong>
+     * (U+0130 → {@code i} + U+0307), so it folds to 128 — the local part every writing DTO except
+     * {@code InviteMemberRequest} accepts, and the reason that DTO's arithmetic is not the column's.
+     */
+    private static final String EXPANDING_LOCAL_PART = "İ".repeat(64);
+
     private static final Validator VALIDATOR =
             Validation.buildDefaultValidatorFactory().getValidator();
 
     /**
-     * The longest key any request body can produce, built rather than assumed: a local part on
-     * {@code @Email}'s 64-character limit, and a domain whose ASCII form is on its 255-character
-     * one. Eight expanding labels reach 239, and the filler adds the last 16 (a dot and 15).
-     *
-     * <p>Each limit is asserted here rather than in the tests, so a JDK whose Nameprep tables move
-     * fails as a broken fixture — which is what it would be — instead of as a quietly weaker bound.
+     * <strong>Every DTO that reaches {@code RecipientMailThrottle}, with the worst case its own
+     * constraints allow.</strong> Parameterising over this rather than over one member is HD-306's
+     * correction: three of the four bound nothing about the local part, and it is the local part that
+     * the fold lengthens.
      */
-    private static String worstCaseAddress() {
-        var address = LOCAL_PART_AT_THE_LIMIT + "@" + worstCaseDomain();
-        assertThat(LOCAL_PART_AT_THE_LIMIT).as("@Email's local-part limit").hasSize(64);
-        assertThat(IDN.toASCII(worstCaseDomain(), IDN.ALLOW_UNASSIGNED).length())
-                .as("@Email's domain limit is measured on the ASCII form, and this fixture is "
-                    + "only a worst case while it sits exactly on it")
-                .isEqualTo(255);
-        return address;
+    private enum WritingDoor {
+        /** {@code POST /api/auth/register} — {@code @Email @NotBlank @Size(max = 255)}, no pattern. */
+        REGISTER(EXPANDING_LOCAL_PART, address -> VALIDATOR.validate(
+                new RegisterRequest(address, "password-1234", "Person", true))),
+        /** {@code POST /api/auth/forgot-password} — the same three, on a single-field record. */
+        FORGOT_PASSWORD(EXPANDING_LOCAL_PART, address -> VALIDATOR.validate(
+                new ForgotPasswordRequest(address))),
+        /** {@code POST /api/auth/resend-verification} — likewise. */
+        RESEND_VERIFICATION(EXPANDING_LOCAL_PART, address -> VALIDATOR.validate(
+                new ResendVerificationRequest(address))),
+        /**
+         * {@code POST /api/workspaces/{ws}/invites} — the one that ALSO carries
+         * {@code @Pattern("\\p{ASCII}*@[^@]*")}, so its local part cannot grow and its key is 320.
+         */
+        INVITE(LOCAL_PART_AT_THE_LIMIT, address -> VALIDATOR.validate(
+                new InviteMemberRequest(address, null, "MEMBER")));
+
+        private final String localPart;
+        private final java.util.function.Function<String,
+                java.util.Set<? extends jakarta.validation.ConstraintViolation<?>>> validate;
+
+        WritingDoor(String localPart,
+                    java.util.function.Function<String,
+                            java.util.Set<? extends jakarta.validation.ConstraintViolation<?>>> validate) {
+            this.localPart = localPart;
+            this.validate = validate;
+        }
+
+        /**
+         * <strong>The widest address this door's own constraints allow ONCE FOLDED</strong> — the
+         * fixture for {@code mail_send_events.recipient_email}, and a different one from
+         * {@link #worstCaseAddress()} for the reason that case's javadoc gives: the key is widened by
+         * punycode and the stored address by the fold, so the two worst cases pull the fixture in
+         * opposite directions (short address / expanding domain, against a maximal address spending
+         * every character on a lengthening mapping).
+         *
+         * <p>Built and measured rather than assumed: the address sits on {@code @Size}'s 255, its local
+         * part is this door's widest, and its domain is the widest FOLDING one that still passes
+         * {@code @Email}'s ASCII-form limit ({@link #widestFoldingDomain}). Asserted here so a JDK whose
+         * Nameprep tables move fails as a broken fixture rather than as a quietly weaker bound.
+         */
+        String widestStoredAddress() {
+            var domain = widestFoldingDomain(RAW_ADDRESS_BOUND - localPart.length() - 1);
+            var address = localPart + "@" + domain;
+            assertThat(address).as("on @Size(max = 255), which is where a fold worst case lives")
+                    .hasSize(RAW_ADDRESS_BOUND);
+            return address;
+        }
+
+        /**
+         * Whether {@link #widestStoredAddress()} can overflow {@code recipient_email} — asserted
+         * rather than trusted, because it is the premise that makes the fit assertion non-vacuous.
+         * True for every DTO that lets the LOCAL PART grow (64 × U+0130 → 128); false for
+         * {@code InviteMemberRequest}, and not because of its {@code @Pattern} alone: folded length
+         * bought in the domain costs about five ASCII characters per code point, so {@code @Email}'s
+         * 255-character limit on the ASCII form runs out long before 320 folded characters do.
+         */
+        boolean foldCanOverflowTheForensicColumn() {
+            return this != INVITE;
+        }
+
+        /**
+         * The longest key this door's body can produce, built rather than assumed: a local part on
+         * {@code @Email}'s 64-character limit, and a domain whose ASCII form is on its 255-character
+         * one. Eight expanding labels reach 239, and the filler adds the last 16 (a dot and 15).
+         *
+         * <p>Each limit is asserted here rather than in the tests, so a JDK whose Nameprep tables move
+         * fails as a broken fixture — which is what it would be — instead of as a quietly weaker bound.
+         */
+        String worstCaseAddress() {
+            assertThat(localPart).as("@Email's local-part limit").hasSize(64);
+            assertThat(IDN.toASCII(worstCaseDomain(), IDN.ALLOW_UNASSIGNED).length())
+                    .as("@Email's domain limit is measured on the ASCII form, and this fixture is "
+                        + "only a worst case while it sits exactly on it")
+                    .isEqualTo(255);
+            return localPart + "@" + worstCaseDomain();
+        }
+
+        /**
+         * The address put through the constraints it actually meets, rather than through a locally
+         * re-declared {@code @Email}. The bound this file certifies is only worth anything if it is the
+         * one a request is held to.
+         */
+        java.util.Set<? extends jakarta.validation.ConstraintViolation<?>> violations(String address) {
+            return validate.apply(address);
+        }
+
+        /** The record whose constraints this case is held to, for the failure message. */
+        String dto() {
+            return switch (this) {
+                case REGISTER -> "RegisterRequest";
+                case FORGOT_PASSWORD -> "ForgotPasswordRequest";
+                case RESEND_VERIFICATION -> "ResendVerificationRequest";
+                case INVITE -> "InviteMemberRequest";
+            };
+        }
     }
 
     private static String worstCaseDomain() {
@@ -464,11 +856,58 @@ class MailAddressesThrottleKeyTest {
                 FILLER_LABEL);
     }
 
+    /** {@code @Size(max = 255)}, carried by every writing DTO — a repeated literal, never an import. */
+    private static final int RAW_ADDRESS_BOUND = 255;
+
     /**
-     * The address put through the constraints it actually meets — {@code InviteMemberRequest.email}
-     * — rather than through a locally re-declared {@code @Email}. The bound this file certifies is
-     * only worth anything if it is the one a request is held to.
+     * <strong>The domain of exactly {@code rawBudget} characters whose FOLDED form is the longest one
+     * {@code @Email} still accepts.</strong> Searched rather than hand-built, so the fixture cannot
+     * quietly stop being a worst case: every U+0130 in the domain buys one folded character and costs
+     * about five in the punycode form Hibernate Validator measures, so the maximum is wherever those
+     * two limits cross, and that crossing is a JDK Nameprep property rather than a number worth
+     * transcribing here.
+     *
+     * @throws AssertionError when no domain of that budget fits, which would mean the premise of the
+     *         forensic-column case has changed rather than that the case failed
      */
+    private static String widestFoldingDomain(int rawBudget) {
+        for (int expanding = Math.min(63, rawBudget - 2); expanding >= 0; expanding--) {
+            var domain = expanding == 0
+                    ? asciiLabels(rawBudget)
+                    : "İ".repeat(expanding) + "." + asciiLabels(rawBudget - expanding - 1);
+            if (domain.length() != rawBudget) {
+                continue;
+            }
+            try {
+                if (IDN.toASCII(domain, IDN.ALLOW_UNASSIGNED).length() <= RAW_ADDRESS_BOUND) {
+                    return domain;
+                }
+            } catch (IllegalArgumentException labelTooLong) {
+                // The SECOND limit on buying folded length in the domain, and the one that bites
+                // first: DNS bounds a LABEL at 63 ASCII characters, so a run of U+0130 long enough to
+                // matter cannot be punycoded at all. Hibernate Validator calls the same IDN.toASCII
+                // and refuses such an address, so this is "does not fit" rather than an error.
+                continue;
+            }
+        }
+        throw new AssertionError("no " + rawBudget + "-character domain passes @Email's 255-character "
+                                 + "ASCII-form limit — the fixture for recipient_email's worst case "
+                                 + "cannot be built, so re-derive it before trusting that case");
+    }
+
+    /** {@code zzz…}, dot-separated into labels inside DNS's 63, exactly {@code length} characters. */
+    private static String asciiLabels(int length) {
+        var labels = new java.util.ArrayList<String>();
+        int remaining = length;
+        while (remaining > 63) {
+            labels.add("z".repeat(60));
+            remaining -= 61;  // the label and the dot that follows it
+        }
+        labels.add("z".repeat(remaining));
+        return String.join(".", labels);
+    }
+
+    /** The invite door's constraints, which {@link #pastTheWorstCaseItIsValidationThatRefusesAndNotTheColumn()} asks about. */
     private static java.util.Set<jakarta.validation.ConstraintViolation<InviteMemberRequest>>
             violations(String address) {
         return VALIDATOR.validate(new InviteMemberRequest(address, null, "MEMBER"));
@@ -476,11 +915,16 @@ class MailAddressesThrottleKeyTest {
 
     /** The declared width of a {@link MailSendEvent} column, so no number here is a restatement. */
     private static int columnWidth(String field) {
+        return columnWidth(MailSendEvent.class, field);
+    }
+
+    /** The declared width of any entity column, read off the entity rather than restated. */
+    private static int columnWidth(Class<?> entity, String field) {
         try {
-            return MailSendEvent.class.getDeclaredField(field).getAnnotation(Column.class).length();
+            return entity.getDeclaredField(field).getAnnotation(Column.class).length();
         } catch (NoSuchFieldException e) {
-            throw new AssertionError("MailSendEvent." + field + " no longer exists — this file "
-                    + "asserts that a throttle key fits that column", e);
+            throw new AssertionError(entity.getSimpleName() + "." + field + " no longer exists — this "
+                    + "file asserts that a stored address fits that column", e);
         }
     }
 }

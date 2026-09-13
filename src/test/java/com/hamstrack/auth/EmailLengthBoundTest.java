@@ -63,6 +63,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * mistaken for one. It says nothing about columns reached by any route other than a validated
  * request body.
  *
+ * <p><strong>And a clean pass here is NOT the guarantee that the stored address fits</strong>
+ * (HD-306). {@code @Size(max = 255)} bounds the RAW text; three of these doors then fold the address
+ * with {@code toLowerCase(Locale.ROOT)} and store the FOLDED one, and that fold lengthens U+0130 into
+ * two code points — so 255 characters here can be 319 in the column, and a source scan cannot see it,
+ * for HD-171's central reason: a derived value has no annotation to read. Deliberately not added to
+ * the scan below, which would have to evaluate a transform to say anything true. The post-fold
+ * guarantee is behavioural and lives in
+ * {@code RequestFieldLengthBoundTest#everyDoorThatCaseFoldsAValueItStoresMeasuresItsBoundAfterTheFold}
+ * and its {@code [fold]} rows.
+ *
  * <p><strong>And not every {@code @Email} it finds is a request field, which the opening
  * paragraph's column argument does not reach.</strong> The scan is over production source, so it
  * also covers an address that lands in no column at all — a bound {@code @ConfigurationProperties}

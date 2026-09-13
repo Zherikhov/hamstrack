@@ -66,6 +66,7 @@ class FailedEmailBoundsTest {
     @Autowired FailedEmailRepository failedEmailRepository;
     @Autowired FailedEmailWriter failedEmailWriter;
     @Autowired ProductMetrics metrics;
+    @Autowired io.micrometer.core.instrument.MeterRegistry meterRegistry;
     @Autowired MailAsyncProperties mailAsyncProperties;
     @Autowired TransactionTemplate transactions;
     @Autowired EntityManager em;
@@ -147,6 +148,67 @@ class FailedEmailBoundsTest {
         assertThat(failedEmailRepository.findAll())
                 .as("the tried-and-failed row lands whatever the never-attempted cap has done")
                 .anySatisfy(written -> assertThat(written.getAttempts()).isEqualTo(3));
+    }
+
+    // ================================================================ the width bound
+
+    /**
+     * <strong>{@code failed_email.recipient} is cut to its column AND counted</strong> (HD-306 fix
+     * loop, round 3).
+     *
+     * <p>The cut here used to be {@code MailService.truncate} — a bare {@code substring} that counted
+     * nothing, logged nothing and could split a surrogate pair — while the exclusion in
+     * {@code RequestFieldLengthBoundTest} that covers all three stored copies of a recipient address
+     * said each was cut "at the site that writes it <em>and counted</em>". It was true of the two in
+     * {@code RecipientMailThrottle} and false of this one. Both reviewers found it independently, and
+     * routing this column through the same counted cut was chosen over weakening the sentence.
+     *
+     * <p><strong>Not reachable through a door today, and asserted at the writer instead.</strong> Every
+     * value that arrives here is a {@code MailTask} recipient and every source of one is a 255-wide
+     * column, so nothing an HTTP caller can send reaches 320 — which is exactly why this case builds
+     * the over-long task by hand rather than through a door. An unreachable branch is where a missing
+     * witness survives longest.
+     *
+     * <p>Behavioural, in both halves the round-2 defect showed matter: the row <em>commits</em> (an
+     * unfitted 340-character address is a {@code 22001} the writer's own catch turns into
+     * {@code false} and no row at all, on a thread with no caller to tell), and the counter moved.
+     */
+    @Test
+    void anOverLongDeadLetterRecipientIsCutToTheColumnAndCounted() {
+        var before = truncationsCounted();
+        var overLong = "x".repeat(330) + "@example.test";
+        assertThat(overLong.length())
+                .as("the premise: past the 320 the column and the shared cut both hold")
+                .isGreaterThan(320);
+
+        assertThat(undeliverable.record(taskTo(overLong), Reason.QUEUE_FULL))
+                .as("""
+                        true, i.e. the row was really written. Without the fit this INSERT raises \
+                        22001, UndeliverableMail's catch counts write_failed and answers false, and \
+                        the only trace of the message is a log line -- a durable record lost to an \
+                        address nobody could read anyway.""")
+                .isTrue();
+
+        assertThat(failedEmailRepository.findAll())
+                .singleElement()
+                .satisfies(row -> assertThat(row.getRecipient().length())
+                        .as("cut to the column, not refused: a dead-letter row is a record of a "
+                            + "failure and refusing to write it loses the failure too")
+                        .isEqualTo(320));
+
+        assertThat(truncationsCounted() - before)
+                .as("""
+                        and the cut has a witness. A truncation is invisible to everybody -- there is \
+                        no caller on this path at all -- so the counter is the only thing that can say \
+                        it happened, and a cut address in a row a re-drive reads is a message somebody \
+                        has to reconstruct by hand.""")
+                .isEqualTo(1.0);
+    }
+
+    private double truncationsCounted() {
+        var counter = meterRegistry.find("hamstrack.mail.stored_address_truncated")
+                .tag("column", "failed_email_recipient").counter();
+        return counter == null ? 0.0 : counter.count();
     }
 
     // ================================================================ the pool bound
@@ -289,7 +351,12 @@ class FailedEmailBoundsTest {
     // ================================================================ fixture
 
     private MailTask task(String label) {
-        return new MailTask(EmailType.PASSWORD_RESET, address(label), "Reset your Hamstrack password",
+        return taskTo(address(label));
+    }
+
+    /** A task to an exact address — for the width case, whose whole subject is that address. */
+    private MailTask taskTo(String recipient) {
+        return new MailTask(EmailType.PASSWORD_RESET, recipient, "Reset your Hamstrack password",
                 () -> { throw new AssertionError("a never-attempted task is never run"); });
     }
 

@@ -31,6 +31,7 @@ import org.springframework.http.ResponseCookie;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -94,7 +95,20 @@ public class AuthService {
         // stops resolving to the same row the day the locale changes. The rule is the category,
         // not this line: any fold whose result is stored, mailed, or used as a lookup key names
         // its locale (HD-120).
-        var email = req.email().toLowerCase(Locale.ROOT);
+        //
+        // AND THE FOLD IS MEASURED, BECAUSE A FOLD IS A DERIVED VALUE (HD-306). toLowerCase maps
+        // U+0130 to two code points, so 64 of them plus a 190-character ASCII domain is 255
+        // characters with ZERO constraint violations and 319 characters once folded - into a
+        // VARCHAR(255). The 255 is a repeated literal, not an import (ADR-0017): a door that read
+        // the constant it is testing would agree with any value that constant took.
+        //
+        // ABOVE existsByFoldedEmail, above passwordEncoder.encode and above the ceiling, so a
+        // refused request costs one fold and one comparison - no query, no bcrypt-12, no
+        // mail_send_events row, and nothing inside the advisory lock the ceiling takes. It is no
+        // oracle either: the refusal is a statement about the bytes this caller submitted and is
+        // decided before anything is looked up.
+        var email = requireStorableEmail(req.email(),
+                () -> metrics.signupRefused(SignupRefusal.EMAIL_TOO_LONG));
         // Folded in SQL, with the same expression users_email_lower_uk is built from (V23) —
         // NOT existsByEmail. The fold above and PostgreSQL's lower() are different functions, and
         // this DTO bounds nothing: where they disagree an exact check says "free" while the index
@@ -467,6 +481,37 @@ public class AuthService {
         if (PasswordLimits.exceedsEncoderLimit(password)) {
             refused.run();
             throw new PasswordTooLongException(PasswordLimits.byteLength(password));
+        }
+    }
+
+    /**
+     * <strong>The fold that is the account identity, measured against the column that stores it</strong>
+     * (HD-306). The refusal itself lives in {@code MailAddresses.requireStorableAddress}, shared with
+     * {@code AdminUserService.create}, {@code WorkspaceService.inviteMember} and the seed guard,
+     * because five copies of one length check is how this project got here.
+     *
+     * <p><strong>The COUNT is register's and is therefore made here, not in the shared gate</strong> —
+     * the same rule, and the same shape, as {@link #rejectUnencodablePassword}: the admin console and
+     * the invite door call the same gate, an administrator mistyping an address is not a signup, and a
+     * counter named {@code signup_refused} must not move for one.
+     *
+     * <p><strong>The 255 is this method's, not the gate's, and a narrower column is the caller's to
+     * pass.</strong> Every door here stores into a 255-wide column ({@code users.email}), so the limit
+     * lives in one place; a future door in this class whose target column is narrower would inherit
+     * 255 silently and take a {@code 22001} the gate cannot see. The limit belongs to the column, so
+     * such a door passes its own — see {@code MailAddresses.requireStorableAddress}'s {@code maxLength}.
+     *
+     * @param refused register's witness; the reset-shaped doors have none to give
+     */
+    private String requireStorableEmail(String raw, Runnable refused) {
+        try {
+            return MailAddresses.requireStorableAddress(raw, 255);
+        } catch (ResponseStatusException tooLong) {
+            // The refusal is the gate's (one sentence, one status, shared by four doors) and the
+            // COUNT is this door's, so the only way to have both is to observe the throw here. A
+            // predicate exported beside the gate would let a call site ask and then not refuse.
+            refused.run();
+            throw tooLong;
         }
     }
 

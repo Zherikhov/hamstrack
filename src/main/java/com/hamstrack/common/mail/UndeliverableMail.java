@@ -330,7 +330,10 @@ public class UndeliverableMail {
     private FailedEmail row(MailTask task, Reason reason) {
         var row = new FailedEmail();
         row.setEmailType(task.type().name());
-        row.setRecipient(MailService.truncate(task.recipient(), 320));
+        // The shared COUNTED cut, not MailService.truncate (HD-306 fix loop): three columns hold a
+        // stored copy of a recipient address, one exclusion covers all three claiming each is "cut at
+        // the site that writes it and counted", and this was the member for which that was false.
+        row.setRecipient(MailService.fitStoredRecipient(task.type(), task.recipient(), metrics));
         row.setSubject(MailService.truncate(task.subject(), 255));
         // attempts = 0 and this prefix are the two halves of "we never tried" — see the class
         // javadoc for why the row has to say which of its two meanings it carries.
