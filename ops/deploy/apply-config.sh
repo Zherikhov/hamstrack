@@ -527,7 +527,7 @@ log "validation passed"
 # fetch is by sha; the TAG is mutable, so they can. That claim is now this check.
 #
 # WHAT IS REFUSED IS THE PIN MOVING, NOT THE PIN EXISTING. docs/self-hosting.md tells every
-# self-hoster to pin (`APP_IMAGE_TAG=0.4`), so for most of this script's audience "pinned"
+# self-hoster to pin (`APP_IMAGE_TAG=0.18`), so for most of this script's audience "pinned"
 # is the steady state rather than an incident, and refusing it outright would make the
 # tool's default answer to them "no", for ever, behind a flag they retype every time.
 # `.deployed-image-tag` is stamped on every run, so the two states are distinguishable and
