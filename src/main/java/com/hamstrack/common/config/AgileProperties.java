@@ -124,7 +124,9 @@ public record AgileProperties(
      */
     @AssertTrue(message = "app.agile.section-max-issues x (app.agile.max-open-sprints-per-project + 1) "
             + "must not exceed " + MAX_PLANNING_VIEW_ROWS + " — one GET /backlog assembles that many "
-            + "issues in a single unpaged response; lower one of the two")
+            + "issues in a single unpaged response; lower AGILE_SECTION_MAX_ISSUES or "
+            + "AGILE_MAX_OPEN_SPRINTS (those are the environment variables behind the two "
+            + "properties named above — your .env sets the variables, Spring reports the properties)")
     public boolean isPlanningViewBounded() {
         return (long) sectionMaxIssues * (maxOpenSprintsPerProject + 1) <= MAX_PLANNING_VIEW_ROWS;
     }

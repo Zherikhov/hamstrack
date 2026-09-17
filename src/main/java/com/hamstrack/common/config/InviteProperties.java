@@ -308,11 +308,12 @@ public record InviteProperties(
             + "(MailThrottlePolicy.MAX_CEILING_WINDOW, 24h, fixed in code and not settable by any "
             + "property). mail_send_events rows are swept on the retention window and counted by "
             + "every one of those ceilings, so a shorter retention silently shortens whichever it "
-            + "undercuts. RAISE THE RETENTION — it is the only side that can satisfy this. Lowering "
-            + "app.invites.recipient-cooldown-minutes cannot, because the 24h bound is the larger "
+            + "undercuts. RAISE THE RETENTION — INVITE_EVENT_RETENTION_DAYS in your .env — it is the "
+            + "only side that can satisfy this. Lowering app.invites.recipient-cooldown-minutes "
+            + "(INVITE_RECIPIENT_COOLDOWN_MINUTES) cannot, because the 24h bound is the larger "
             + "term whatever the cooldown is; and lowering app.invites.max-per-recipient-per-day "
-            + "cannot either, because that property is a COUNT and the width it is counted over is "
-            + "the one fixed in code")
+            + "(INVITE_MAX_PER_RECIPIENT_PER_DAY) cannot either, because that property is a COUNT "
+            + "and the width it is counted over is the one fixed in code")
     public boolean isRetentionLongerThanWidestCeilingWindow() {
         return (long) eventRetentionDays * MINUTES_PER_DAY
                > Math.max(recipientCooldownMinutes, FIXED_CEILING_WINDOW_MINUTES);

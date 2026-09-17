@@ -83,10 +83,15 @@ class ExpensiveReadPropertiesTest {
      */
     @Test
     void zeroRefusesToStartAndOnlyTheDeriveSentinelIsNegative() {
-        assertRejected("app.expensive-read.max-in-flight=0", "maxInFlight");
+        // The two `0` refusals are the compact constructor's own messages, and since HD-315 they
+        // identify the bound by the ENVIRONMENT VARIABLE an operator sets rather than by the Java
+        // field name — the field name told the reader nothing they could act on. The `-2` cases
+        // below are still bean validation (`@Min(-1)`), whose message quotes the field, so the two
+        // expectations differ on purpose: each asserts the identifier its own mechanism produces.
+        assertRejected("app.expensive-read.max-in-flight=0", "EXPENSIVE_READ_MAX_IN_FLIGHT");
         assertRejected("app.expensive-read.max-in-flight=-2", "maxInFlight");
         assertRejected("app.expensive-read.max-in-flight-per-principal=0",
-                       "maxInFlightPerPrincipal");
+                       "EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL");
         assertRejected("app.expensive-read.max-in-flight-per-principal=-2",
                        "maxInFlightPerPrincipal");
 

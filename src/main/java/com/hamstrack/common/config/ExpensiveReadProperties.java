@@ -289,7 +289,7 @@ public record ExpensiveReadProperties(
     public ExpensiveReadProperties {
         if (maxInFlight == 0) {
             throw new IllegalArgumentException(
-                    "app.expensive-read.max-in-flight (maxInFlight) is 0, which is not "
+                    "app.expensive-read.max-in-flight (EXPENSIVE_READ_MAX_IN_FLIGHT) is 0, which is not "
                     + "'unlimited' — it would refuse every expensive read on this instance. There "
                     + "is no unlimited value: EXPENSIVE_READ_LIMIT_ENABLED=false removes the "
                     + "bound, a positive number sizes it, and -1 (the shipped default) has it "
@@ -297,7 +297,8 @@ public record ExpensiveReadProperties(
         }
         if (maxInFlightPerPrincipal == 0) {
             throw new IllegalArgumentException(
-                    "app.expensive-read.max-in-flight-per-principal (maxInFlightPerPrincipal) is "
+                    "app.expensive-read.max-in-flight-per-principal "
+                    + "(EXPENSIVE_READ_MAX_IN_FLIGHT_PER_PRINCIPAL) is "
                     + "0, which is not 'unlimited' — it would refuse every expensive read on this "
                     + "instance. There is no unlimited value: EXPENSIVE_READ_LIMIT_ENABLED=false "
                     + "removes the bound, a positive number sizes it, and -1 (the shipped default) "

@@ -29,7 +29,13 @@ public class S3FileStorage implements FileStorage {
     public S3FileStorage(StorageProperties props) {
         var cfg = props.s3();
         if (!StringUtils.hasText(cfg.bucket())) {
-            throw new IllegalStateException("app.storage.type=s3 requires app.storage.s3.bucket");
+            throw new IllegalStateException(
+                    "app.storage.type=s3 (STORAGE_TYPE) requires app.storage.s3.bucket "
+                    + "(STORAGE_S3_BUCKET), which is empty or unset. Set STORAGE_S3_BUCKET to the "
+                    + "bucket name, or set STORAGE_TYPE=local to keep attachments on the "
+                    + "container's own disk, which is the self-hosted default. The dotted names "
+                    + "are the properties Spring reports; the SHOUTING ones are what you set in "
+                    + ".env, and a search for either finds this message.");
         }
         this.bucket = cfg.bucket();
 

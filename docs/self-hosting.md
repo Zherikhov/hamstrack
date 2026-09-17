@@ -172,8 +172,13 @@ between the database container and the application that logs in to it.
 [`.env.prod.example`](../.env.prod.example) is the **reference for every variable this
 application reads**, but it targets the fuller reverse-proxy production stack; for a
 self-hosted install start from [`deploy/dc/.env.example`](../deploy/dc/.env.example) and
-come back to the prod template when you need a variable it does not carry. Keep `.env` out
-of version control (it already is — the repository ignores it).
+come back to the prod template when you need a variable it does not carry. **Copy the
+lines you need, never the whole file:** `.env.prod.example` ships
+`SPRING_PROFILES_ACTIVE=cloud`, and that one line moves an install onto the Cloud
+defaults — S3 attachment storage, public signup left open, a 10 GB workspace ceiling
+instead of 100 GB. The DC stack pins the profile as a literal so the copied line cannot
+reach it there, but everything else in a cribbed file does. Keep `.env` out of version
+control (it already is — the repository ignores it).
 
 ### An unedited template is refused, by design
 
@@ -341,7 +346,9 @@ All configuration is via environment variables. For a self-hosted install start 
 [`deploy/dc/.env.example`](../deploy/dc/.env.example), which carries the subset that stack
 actually reads; [`.env.prod.example`](../.env.prod.example) is the fuller reference for
 every variable this application understands (it's owner-oriented and targets the
-reverse-proxy production stack — take the subset you need).
+reverse-proxy production stack — take the subset you need, and note it ships
+`SPRING_PROFILES_ACTIVE=cloud`, which selects the Cloud defaults described in the
+`SPRING_PROFILES_ACTIVE` row below).
 
 > **A `$` in any `.env` value is an interpolation, not a character.** Docker Compose expands
 > `$NAME`/`${NAME}` inside `.env`, and an undefined name expands to *nothing* — so a

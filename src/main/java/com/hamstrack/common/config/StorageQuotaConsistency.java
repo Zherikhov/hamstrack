@@ -107,7 +107,8 @@ public class StorageQuotaConsistency {
                     "app.attachments.max-file-size is " + maxFile + " bytes. A non-positive "
                     + "per-file limit permits no upload at all, and it also disables the two "
                     + "checks below (every other size is 'at least as big as one legal file'), "
-                    + "which lets app.storage.quota.workspace-bytes be zero — and a zero quota "
+                    + "which lets app.storage.quota.workspace-bytes (STORAGE_QUOTA_WORKSPACE_BYTES) "
+                    + "be zero — and a zero quota "
                     + "makes GET /api/workspaces/{id}/storage answer a fill percentage of "
                     + "Infinity, which is not valid JSON. Set ATTACHMENT_MAX_FILE_SIZE to the "
                     + "largest file this instance should accept (default 20MB).");

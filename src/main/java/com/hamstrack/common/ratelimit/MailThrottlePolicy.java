@@ -205,7 +205,7 @@ public record MailThrottlePolicy(EmailType type,
         if (cooldown == null || cooldown.isZero() || cooldown.isNegative()) {
             throw new IllegalArgumentException(
                     "a policy for " + type + " must declare a positive cooldown — the off switch "
-                    + "is app.rate-limit.enabled, never a zero window");
+                    + "is app.rate-limit.enabled (RATE_LIMIT_ENABLED), never a zero window");
         }
         if (ceilingWindow == null || ceilingWindow.isZero() || ceilingWindow.isNegative()) {
             throw new IllegalArgumentException(
