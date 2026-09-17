@@ -1,0 +1,135 @@
+# The self-hosted (DC) Hamstrack stack: the application and its database, nothing else.
+#
+# This file is the stack — not an illustration of one. `docs/self-hosting.md` and the
+# repository README link to it rather than reprinting it, because a copy in a document is a
+# copy that drifts and a reader cannot tell which of the two is the one that runs.
+#
+# No reverse proxy here on purpose: a stranger trying Hamstrack out has no domain, so an
+# ACME challenge cannot complete and a TLS service would make the stack fail for exactly
+# the reader it exists for. TLS is a later step — docs/self-hosting.md § TLS & reverse proxy.
+#
+# Start it with:   cp .env.example .env   # then fill the required values
+#                  docker compose up -d --wait --wait-timeout 120
+#
+# `--wait` is what makes the exit code mean something: a plain `up -d` returns 0 while a
+# container is crash-looping. The timeout is required, not tidy — both services below declare
+# `restart: unless-stopped`, so a bare `--wait` waits as long as the restarting continues.
+services:
+  app:
+    # Lowercase and literal. No ${GITHUB_OWNER}: that is a production-deploy concern, and
+    # needing it is exactly what makes docker-compose.prod.yml unusable for a newcomer.
+    # The tag is a release LINE, so `docker compose pull` picks up patch releases; an
+    # exact version pins harder. Never `latest` — it moves on every main build.
+    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.18}
+    # DELIVERY. Everything an operator legitimately sets reaches the container through
+    # this one line, so adding SMTP or storage later is an edit to `.env` and never to
+    # this file. `required: false` so a fresh clone can still be parsed
+    # (`docker compose config -q`) before any `.env` exists — the ${…:?} guards below
+    # are what refuse the `up`, and a missing-file error names nothing a reader can act on.
+    #
+    # The ellipsis in that expansion is deliberate: EnvTemplateGuardTest harvests the
+    # guarded-variable registry out of this file's TEXT, so a comment spelling a live
+    # ${NAME:?} registers NAME as a variable every env template must then ship.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # The deployment model, as a LITERAL rather than ${SPRING_PROFILES_ACTIVE:-dc}.
+      # A value under `environment:` wins over `env_file:`, so an operator who cribbed
+      # their .env from .env.prod.example (which ships SPRING_PROFILES_ACTIVE=cloud) still
+      # gets `dc`. Flipping it silently would mean S3 storage they have no bucket for, a
+      # workspace quota they did not choose, and open public signup.
+      SPRING_PROFILES_ACTIVE: dc
+      # Internal: the database host is this compose project's service name, not a host
+      # address. Literal for the same reason — a .env cannot redirect this stack.
+      DB_URL: jdbc:postgresql://postgres:5432/hamstrack
+      DB_USERNAME: hamstrack
+      # ONE line for both sides. This same variable seeds the postgres container's
+      # POSTGRES_PASSWORD below, so the two cannot drift apart and leave the app unable
+      # to log in to its own database.
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+      # Minimum 32 bytes. The app refuses to start on a shorter value, and by name on the
+      # placeholder values this project has published.
+      # No `: ` inside this guard message: an unquoted YAML scalar ends at a colon-space,
+      # so "generate with: openssl ..." makes the whole file unparseable (measured).
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - openssl rand -base64 48}
+      # The first administrator, created on startup. Public self-registration is closed on
+      # `dc`, so without these two nobody can log in at all.
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL in .env beside this file}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD in .env - your own, not one from these docs}
+      # Where this instance is reached from a browser. Leave it http://localhost:PORT while
+      # you are trying it out: with an https base the session cookie is Secure and will not
+      # survive plain HTTP, so an https value requires actually serving HTTPS.
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      # Read by the app (it refuses to start if its mail drain would not fit) and by
+      # stop_grace_period below. One variable, both places, so they cannot disagree.
+      APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}
+    ports:
+      # APP_BIND=127.0.0.1 makes the app reachable only from this host, which is the right
+      # answer on a public server until a TLS proxy is in front of it. The default is
+      # 0.0.0.0 because an operator on a VPS who cannot reach the app at all concludes the
+      # stack is broken; closing it is one word in .env.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8080}:8080"
+    # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so with no
+    # limit here it sizes against host RAM. 1g -> a 512 MB heap.
+    mem_limit: ${APP_MEMORY_LIMIT:-1g}
+    # Docker's own default is 10s between SIGTERM and SIGKILL, shorter than the 15s the app
+    # spends flushing queued mail at shutdown. Without this, every restart drops queued
+    # password resets and verifications that users have already been told to expect.
+    stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
+    volumes:
+      - attachments_data:/app/data/attachments
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/meta"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hamstrack
+      POSTGRES_USER: hamstrack
+      # The app's DB_PASSWORD, from the same line of .env — see the comment there.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+    # PostgreSQL's memory dials, as variables rather than literals: a literal here is a
+    # value your .env cannot reach, so setting it there later changes nothing and looks
+    # like it did. The image's own effective_cache_size default (4GB) tells the planner a
+    # small host has more cache than the machine has RAM.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+    # A ceiling, not a reservation: it contains a runaway inside this container instead of
+    # letting the kernel pick a victim elsewhere on the host.
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
+    # Docker gives every container a 64 MB /dev/shm and PostgreSQL's parallel workers size
+    # their shared segments from work_mem. This default is Docker's own, so the line changes
+    # nothing until you raise POSTGRES_WORK_MEM — it exists so the matching dial is in .env
+    # when you do.
+    shm_size: ${POSTGRES_SHM_SIZE:-64m}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hamstrack -d hamstrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+# Named volumes are scoped to the COMPOSE PROJECT, which is derived from this directory's
+# name. Two clones in different directories therefore do not share data — see README.md.
+# No `container_name:` anywhere, deliberately: two Hamstrack projects on one host must not
+# collide on a container name. They collide only on the published port, which is APP_PORT.
+volumes:
+  postgres_data:
+  attachments_data:

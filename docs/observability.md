@@ -847,17 +847,107 @@ In DC the stack is **opt-in** — the app logs and exposes metrics regardless, b
 you choose whether to run Grafana/Loki/Prometheus.
 
 **Prerequisites:** your compose must define services named **`app`** and
-**`postgres`** on a shared network (the sample compose in
-[self-hosting.md](self-hosting.md#quick-start) does), the app must be reachable on
+**`postgres`** on a shared network (the bundled
+[`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) does), the app must be reachable on
 its management port `9090` **inside** the network (do **not** publish 9090), and
 you need the `docker-compose.observability.yml` file plus the `observability/`
 config directory next to your compose file (both are in the repo).
 
 Enable it by layering the file:
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.observability.yml up -d
+**Layering moves where your `.env` has to live.** Everything relative — the `observability/`
+config directory, `${VAR}` interpolation, *and* `env_file:` delivery — resolves against the
+**project directory**, which Compose takes from the first `-f` unless you override it. So move
+(or copy) your `.env` from `deploy/dc/` to the **repository root** before layering:
+
+**Layering also changes the Compose project name, and that is what detaches your data.**
+Compose names the project after the project directory, so the everyday `cd deploy/dc` form is
+project `dc` with volumes `dc_postgres_data` and `dc_attachments_data`, while the layering
+form below would be named after your clone's directory — and would therefore create *new,
+empty* volumes. Flyway would migrate an empty schema, the administrator would be seeded again,
+and nothing would error: your data is still on the host, just not attached. So pin the name in
+the same `.env` you are moving:
+
 ```
+COMPOSE_PROJECT_NAME=dc
+DB_USERNAME=hamstrack
+```
+
+`DB_USERNAME` is there for the **postgres-exporter**, and its absence is the one failure on
+this page that nothing shouts about. The exporter's user is
+`${DB_MONITOR_USER:-${DB_USERNAME}}`; the DC stack sets `DB_USERNAME` as a *literal* under
+`environment:` — deliberately, so a `.env` cannot redirect the app at another database — and a
+literal is invisible to interpolation. With no `DB_USERNAME` in `.env` the exporter starts with
+an **empty** user, falls back to its container's OS user, and can never log in. Set it to
+whatever `POSTGRES_USER` the stack uses, which is `hamstrack` unless you changed it. (Setting
+`DB_MONITOR_USER`/`DB_MONITOR_PASSWORD` to a dedicated read-only `pg_monitor` role instead is
+better still — see the `DB_MONITOR_*` row under
+[Configuration reference](#configuration-reference).)
+
+```bash
+# from the repository root, with .env HERE rather than in deploy/dc/
+docker compose --project-directory . \
+  -f deploy/dc/docker-compose.yml -f docker-compose.observability.yml up -d --wait --wait-timeout 180
+```
+
+Measured: with the `.env` at the root and `COMPOSE_PROJECT_NAME=dc` in it, all four hold
+together — the project is still `dc` and keeps `dc_postgres_data` / `dc_attachments_data`, the
+observability bind mounts resolve to `<repo>/observability/...`, every `MAIL_*` line in `.env`
+is delivered to the app container, and the profile is still `dc`. (`docker compose ls` shows
+which projects exist and `docker volume ls` which volumes; if you have already started a
+differently-named project, stop it with the same `-f` set and start again with the name
+pinned — the old volumes are untouched.)
+
+### Check that it is actually observing
+
+**Healthy is not the same as observing.** Every container here can be `healthy` while half the
+stack collects nothing — a misconfigured exporter is a *working* process that cannot log in,
+so `--wait` returns 0 and the only symptom is an empty dashboard beside a firing alert that
+names a component which is fine. Read it back:
+
+```bash
+# every job must report 1 — a job at 0 is scraping nothing
+docker exec dc-prometheus-1 wget -qO- 'http://localhost:9090/api/v1/query?query=up'
+# the database exporter specifically: 1 means it logged in, 0 means it did not
+docker exec dc-prometheus-1 wget -qO- 'http://localhost:9090/api/v1/query?query=pg_up'
+# which containers Loki is receiving logs from — expect app, postgres and the rest
+docker exec dc-loki-1 wget -qO- 'http://localhost:3100/loki/api/v1/label/container/values'
+curl -s localhost:3000/api/health
+```
+
+`up{job="postgres"}` reading **1** while `pg_up` reads **0** is exactly the shape above: the
+exporter is running and answering Prometheus, and is not connected to PostgreSQL. Confirm with
+`docker compose logs postgres-exporter`, which names the user it tried
+(`password authentication failed for user "…"`).
+
+**After this, the everyday commands in [`deploy/dc/README.md`](../deploy/dc/README.md) need
+the same treatment.** Run from `deploy/dc/` they no longer find the `.env` you moved, and
+`docker compose config -q` there exits 1 naming a value you have set. Either run them from the
+repository root with the full `-f` set, or keep a copy of `.env` in both places — and if you
+do the latter, remember there is now a second file to edit.
+
+**Do not keep the `.env` in `deploy/dc/` and reach for a flag.** Both failure modes are real
+and one of them is silent:
+
+- **without** `--project-directory .`, the project directory is `deploy/dc/`, so the stack
+  looks for `deploy/dc/observability/alloy/config.alloy` and the rest — none of which exist.
+  Docker creates a **directory** at every missing bind source, so Prometheus refuses
+  (`not a directory: Are you trying to mount a directory onto a file`) and Loki crash-loops
+  (`read /etc/loki/loki-config.yml: is a directory`). The `up` **exits 1** — this one is loud.
+  It leaves `deploy/dc/observability/{alloy,grafana,loki,prometheus}/` behind as empty
+  directories, so `rm -r deploy/dc/observability` before retrying, or the next attempt finds
+  them and repeats itself;
+- **with** `--project-directory .` but the `.env` still in `deploy/dc/`, Compose refuses the
+  `up` naming a value you have already set (it is reading the root `.env`, which is not
+  there); and if you then paper over that with `--env-file deploy/dc/.env`, interpolation
+  succeeds while **`env_file:` delivery still points at the root** — so every variable your
+  `.env` delivers *only* through `env_file:`, which is all seven `MAIL_*` lines, is dropped
+  in silence. The instance boots, reports healthy, and stops sending mail.
+
+If you run a compose file of your own rather than the bundled one, put its path in the first
+`-f` — and keep `--project-directory`, your `.env` and the `observability/` directory in the
+same place as each other. The observability file guards several variables of its own, so the
+first run refuses and names them one at a time, exactly as the base stack does.
 
 > **Always pass both `-f` files together** on every `up`/`pull`. Running
 > `up --remove-orphans` with only your base file would delete the observability
@@ -943,7 +1033,7 @@ matter only when you run the observability compose file.
 | `OBS_ALERT_EMAIL_TO` | — | stack | **required** when the stack runs (fail-fast, aborting the whole `docker compose` command); alert email recipient — an empty value removes the alert *rules*, not just the email, and leaves Grafana crash-looping |
 | `GF_SMTP_ENABLED` | `true` | stack | Grafana alert delivery on/off. `false` = rules still evaluate, nothing is sent (the no-SMTP self-hosted mode) |
 | `GF_SERVER_ROOT_URL` | `http://localhost:3000` | stack | external URL Grafana builds links with; the default matches the port-forward the runbooks assume |
-| `DB_MONITOR_USER` / `DB_MONITOR_PASSWORD` | — | stack | postgres-exporter login; falls back to `DB_USERNAME`/`DB_PASSWORD` |
+| `DB_MONITOR_USER` / `DB_MONITOR_PASSWORD` | — | stack | postgres-exporter login; falls back to `DB_USERNAME`/`DB_PASSWORD` **as Compose sees them, which is not the same as what the app uses**. With `docker-compose.prod.yml` both come from `.env` and the fallback works. With the DC stack `DB_USERNAME` is a compose literal that interpolation cannot read, so the fallback resolves to an **empty** user and the exporter cannot log in — put `DB_USERNAME=hamstrack` in the root `.env`, or set these two. Neither is guarded, so an absence is a warning and not a refusal |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_FROM` | — | app + stack | app email **and** Grafana alert SMTP. `MAIL_FROM` is the alert *sender* and deliberately keeps its default (see the comment on `GF_SMTP_FROM_ADDRESS` in the compose file) |
 
 **Least-privilege DB access for the exporter (recommended for prod):** create a
@@ -1005,7 +1095,8 @@ blank to fill in, where `a-strong-password` reads as a value that has already be
 | No logs in Loki | App not emitting JSON (needs `cloud`/`dc` profile in prod, or the dev file env vars) / Alloy can't read the docker socket. |
 | Alert emails not arriving | `MAIL_*` (Grafana SMTP) misconfigured, `GF_SMTP_ENABLED=false` (delivery deliberately off), or the address in `OBS_ALERT_EMAIL_TO` is wrong. Before blaming SMTP, check that the rules and the routing exist: Grafana → Alerting → Alert rules, and `/api/v1/provisioning/policies` → `{"receiver":"email","provenance":"file"}` (see [Alerts](#alerts)). A **lost** root policy is worse than a broken one — Grafana's unmanaged built-in `email receiver` points at a live third-party domain. |
 | Grafana keeps restarting; `up -d` said nothing was wrong | `up -d` exits 0 even when a container crash-loops. An empty `OBS_ALERT_EMAIL_TO` reaching Grafana makes alerting provisioning fail and Grafana exit 1 on every restart. `docker compose … ps` shows it; `docker compose … logs grafana` has `Failed to provision alerting … could not find addresses in settings`. |
-| `up` aborts immediately | A fail-fast var is missing — `GF_SECURITY_ADMIN_PASSWORD`, `OBS_ALERT_EMAIL_TO` (or `DB_USERNAME`/`DB_PASSWORD`). The error names the variable; set it in `.env`. Note this aborts the **entire** command, including `down`/`stop`/`ps`/`logs` with both `-f` files — but nothing is created, changed or stopped, so a running stack is unaffected. |
+| `up` aborts immediately | A fail-fast var is missing — `GF_SECURITY_ADMIN_PASSWORD` or `OBS_ALERT_EMAIL_TO`, the two this stack guards with `${VAR:?…}`. The error names the variable; set it in `.env`. Note this aborts the **entire** command, including `down`/`stop`/`ps`/`logs` with both `-f` files — but nothing is created, changed or stopped, so a running stack is unaffected. |
+| Everything is `healthy` and the PostgreSQL dashboard is empty, with a **critical `PostgresDown` alert firing** | **`DB_USERNAME` (or `DB_MONITOR_USER`) is unset.** These two are *not* guarded: unlike the pair above, an absence produces a Compose **warning** and the `up` proceeds, so `--wait` returns 0 and every container is healthy. The exporter starts with an empty user, libpq falls back to the container's OS user, and the login fails — `up{job="postgres"}` reads 1 while `pg_up` reads 0, and the only alert that fires names a component that is running. `docker compose logs postgres-exporter` shows `password authentication failed for user "…"`. Fix: `DB_USERNAME=hamstrack` in the root `.env` (see the layering instructions above), then `up -d` again. |
 | Container panels empty (dev) | Docker-Desktop/WSL2 limitation (see the dev caveats). Works on a real Linux host. |
 | Disk filling from telemetry | Lower `LOKI_RETENTION_PERIOD` / `PROMETHEUS_RETENTION_TIME` / `_SIZE`. |
 | `node_textfile_scrape_error{}` is `1`, or a `hamstrack_backup_*` or `hamstrack_config_*` series stops updating | node-exporter found a **malformed** `.prom` file in the textfile directory and skipped it, so whatever wrote it is publishing nothing while looking installed. It has no alert rule of its own on purpose — the writer replaces the file atomically (temp file in the same directory, then `mv`), which makes a half-written scrape nearly impossible, and a rule per near-impossibility is how a rule set becomes background noise. Check the directory listed in `--collector.textfile.directory`; `promtool check metrics < the-file.prom` names the bad line. A file that is *absent* rather than malformed leaves the error at `0` and the series simply missing — which is why neither `BackupStale` nor `ConfigDrift` can see a deleted `.prom`. |

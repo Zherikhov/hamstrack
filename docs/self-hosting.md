@@ -93,187 +93,78 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 
 ## Quick start
 
-Pin a released image line (`:0.4`), not `latest`. Written as `${APP_IMAGE_TAG:-0.4}` so the
-`APP_IMAGE_TAG` row in [Configuration](#configuration) is true of this file too: set the
-variable in `.env` to move the pin, set nothing and you get `0.4`.
-
-**The secrets below are `${VAR:?…}` rather than sample values, and that is deliberate**:
-Compose refuses to create anything at all until you put them in a `.env` beside this file,
-naming the one it wants. A sample secret in a copy-pasteable snippet is a working secret —
-see [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design).
-
-```yaml
-# docker-compose.yml
-services:
-  app:
-    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.4}
-    environment:
-      SPRING_PROFILES_ACTIVE: dc
-      DB_URL: jdbc:postgresql://postgres:5432/hamstrack
-      DB_USERNAME: hamstrack
-      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
-      # Min 32 bytes. Generate with: openssl rand -base64 48
-      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - openssl rand -base64 48}
-      APP_BASE_URL: https://tracker.example.com
-      # First administrator, created on startup — self-registration is closed on `dc`, so
-      # without these nobody can log in. Named here on purpose: a variable that is only in
-      # `.env` reaches this container if, and only if, a line like this one puts it there.
-      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL in .env beside this file}
-      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD in .env - your own, not one from these docs}
-      # SMTP — required for email verification (which doubles as login):
-      MAIL_HOST: smtp.example.com
-      MAIL_PORT: "587"
-      MAIL_USERNAME: tracker@example.com
-      MAIL_PASSWORD: <your SMTP password>
-      MAIL_SMTP_AUTH: "true"
-      MAIL_STARTTLS: "true"
-      # Compose reads this for `stop_grace_period` below, and the APP has to be told the
-      # same number — this line is what tells it, exactly as with SEED_ADMIN_* above.
-      # The app waits for queued mail at shutdown and then writes what is left to
-      # `failed_email`, and it refuses to start if both steps would not fit in this.
-      APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}
-    ports:
-      - "8080:8080"
-    # Not optional: the image sizes the heap at 50% of the CONTAINER limit, so
-    # without a limit here it sizes against host RAM. 1g → 512 MB heap. Spelled as a
-    # variable for the reason the `postgres` service below spells its dials that way —
-    # a literal here is a value your `.env` cannot reach.
-    mem_limit: ${APP_MEMORY_LIMIT:-1g}
-    # Also not optional: Docker's own default is TEN seconds between SIGTERM and
-    # SIGKILL, which is shorter than the 15 s the app spends flushing queued mail on
-    # shutdown. Without this line every `docker compose up -d` kills the JVM part-way
-    # through that flush and the queued password resets and verifications — rows already
-    # committed, users already told to check their inbox — are lost with nothing written
-    # down. Same variable as the environment line above, and for the same reason as
-    # `mem_limit`: a literal here is a value your `.env` cannot reach.
-    stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
-    volumes:
-      - attachments_data:/app/data/attachments
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/meta"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 40s   # Spring Boot startup grace
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_DB: hamstrack
-      POSTGRES_USER: hamstrack
-      # The same variable as the app's DB_PASSWORD above, on purpose: two literals can be
-      # edited apart, and then the app cannot log in to its own database.
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
-    # PostgreSQL's memory dials, spelled as variables for the same reason `APP_IMAGE_TAG`
-    # is: a literal here is a value your `.env` cannot reach, so setting it there later
-    # changes nothing and looks like it did. The image's own defaults are shared_buffers
-    # 128MB, work_mem 4MB and effective_cache_size 4GB — that last one tells the planner a
-    # 2 GB host has more cache than the machine has RAM, and because it is a belief rather
-    # than an allocation nothing ever refuses it. The POSTGRES_* rows under Configuration
-    # size all three from your own host, in both directions.
-    command:
-      - postgres
-      - -c
-      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
-      - -c
-      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
-      - -c
-      - work_mem=${POSTGRES_WORK_MEM:-4MB}
-    # A ceiling, not a reservation: it contains a runaway inside this container instead of
-    # letting the kernel pick a victim elsewhere. Keep it well above shared_buffers plus
-    # work_mem × sort nodes × connections, or you have converted a tuning value into a kill.
-    mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
-    # Docker gives every container a 64 MB /dev/shm, and PostgreSQL's parallel workers put
-    # their shared segments there — sized from work_mem. The default below is Docker's own,
-    # so this line changes nothing until you raise POSTGRES_WORK_MEM; it exists so that when
-    # you do, the matching dial is in `.env` rather than in a file a `git pull` replaces.
-    shm_size: ${POSTGRES_SHM_SIZE:-64m}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hamstrack -d hamstrack"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-    restart: unless-stopped
-
-volumes:
-  postgres_data:
-  attachments_data:
-```
-
-Beside it, a `.env` that Compose reads. **All four values ship empty, with the instruction
-in a comment above each** — because a filled-in sample in a copy-pasteable block *is* the
-defect this page is about. Whatever stands to the right of `=` here is a value every reader
-of this repository already has, and the `${VAR:?…}` guards above only fire while a value is
-**absent**. So this block cannot start the stack as it stands, on purpose: fill in the one
-the refusal names, run again, and the next names itself.
-
-```
-# .env — next to docker-compose.yml, never committed.
-
-# Any strong password you choose. The compose above uses this one line twice: it seeds the
-# Postgres container AND is what the app logs in with, so they cannot drift apart.
-DB_PASSWORD=
-# The output of:  openssl rand -base64 48
-# Minimum 32 bytes, and never a value copied out of any documentation — including this one.
-# The app refuses the placeholders this project has published, by name.
-JWT_SECRET=
-# Your own address. This becomes the first administrator.
-SEED_ADMIN_EMAIL=
-# A strong password you choose — not one from these docs, and not this variable's own name.
-# Once the administrator exists you can stop seeding: delete BOTH `SEED_ADMIN_*` lines here
-# AND the two `environment:` entries above that name them — together, because Compose
-# refuses to start while a `${VAR:?…}` it still mentions is unset. That also stops a
-# plaintext administrator password living in `.env` forever, and it leaves the account
-# itself exactly as it is.
-SEED_ADMIN_PASSWORD=
-```
-
-**`.env` is substituted into the compose file, not injected into the container.** Compose
-resolves `${…}` in the YAML above and passes on the result; it does **not** hand the
-container everything in `.env`. So a variable reaches the app only through a line in
-`environment:` (or an `env_file: .env`, which is what the bundled
-[`docker-compose.prod.yml`](../docker-compose.prod.yml) uses — there `.env` does both jobs).
-Adding a setting to `.env` and expecting the app to see it is the mistake this paragraph
-exists to prevent.
+The stack is a real file in this repository — [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml),
+with its template beside it at [`deploy/dc/.env.example`](../deploy/dc/.env.example). This
+page used to print a copy of it, which meant there were two stacks and no way to tell which
+one a given reader was running. Now there is one, and this section is about how to drive it.
 
 ```bash
-docker compose up -d
+git clone https://github.com/Zherikhov/hamstrack.git
+cd hamstrack/deploy/dc
+cp .env.example .env
+# Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD.
+# If you skip one, the next command refuses and names it.
+docker compose up -d --wait --wait-timeout 120
 ```
 
-Browse your instance at its `APP_BASE_URL`, reached through the TLS proxy you put
-in front (see [TLS & reverse proxy](#tls--reverse-proxy)). Public self-registration
-is **closed by default** on self-hosted installs, so the `SEED_ADMIN_EMAIL` +
-`SEED_ADMIN_PASSWORD` above create your first administrator on startup (see
-[First user](#first-user-the-administrator)). The schema is created and migrated automatically on
-startup (Flyway).
+Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` /
+`SEED_ADMIN_PASSWORD`. The schema is created and migrated automatically on startup (Flyway).
 
-> **Trying it out locally without a proxy?** Set `APP_BASE_URL=http://localhost:8080`
-> and open that. With an `https` base the session cookie is `Secure` and won't
-> survive plain HTTP — so an `https` base requires actually serving HTTPS.
+**No SMTP server, no domain and no TLS certificate are needed to get this far.** Public
+self-registration is closed on self-hosted installs, so the seeded administrator is the way
+in (see [First user](#first-user-the-administrator)); further people are added in `/admin`,
+which hands you a one-time setup link to pass on yourself and sends no mail. Configure
+[email](#email-smtp) when you want verification, invite and password-reset mail delivered.
 
-### Keeping secrets in a `.env` file
+**Why every required value ships empty.** The required values in that template are blank, and
+the compose file guards each of them with `${VAR:?…}`. A filled-in sample in a public
+repository is not a sample, it is a working credential — so the template cannot start the
+stack as it stands, on purpose. Compose names one missing value per run and which one comes
+first is not fixed: fill in the one it names, run again, and the next names itself. See
+[An unedited template is refused, by design](#an-unedited-template-is-refused-by-design).
 
-Rather than hard-coding secrets in `docker-compose.yml`, keep them in a `.env`
-file next to it and load it with `env_file`:
+**`--wait` is what makes the exit code mean something.** A plain `docker compose up -d`
+returns 0 even while a container is crash-looping, so a failed install looks exactly like a
+successful one. With `--wait` the command returns only once every service is healthy, and
+otherwise fails naming the service (`container dc-app-1 is unhealthy`). The timeout is not
+optional: these services declare `restart: unless-stopped`, so a bare `--wait` would sit
+there for as long as the container keeps being restarted. Measured — healthy in ~35s on a
+warm image, exit 1 on a planted bad value.
 
-```yaml
-  app:
-    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.4}
-    env_file: .env
-    # ...only non-secret / internal values remain inline
+A value the application refuses — a short `JWT_SECRET`, an over-long `SEED_ADMIN_PASSWORD` —
+is one of those failures, with the reason in `docker compose logs app`:
+
+```
+java.lang.IllegalStateException: jwt.secret (JWT_SECRET) must be at least 32 bytes for
+HMAC-SHA256; current value is 9 bytes. Generate one with: openssl rand -base64 48
 ```
 
-Docker Compose also substitutes `.env` values into the compose file itself (e.g.
-`${DB_PASSWORD}`). [`.env.prod.example`](../.env.prod.example) is a starting
-template — it targets the fuller reverse-proxy stack, so use the subset of
-variables that matches your setup (see [Configuration](#configuration)). Keep
-`.env` out of version control.
+> **Trying it out locally without a proxy?** Keep `APP_BASE_URL` on `http://localhost:8080`.
+> With an `https` base the session cookie is `Secure` and won't survive plain HTTP — so an
+> `https` base requires actually serving HTTPS. Put a proxy in front before you change it
+> (see [TLS & reverse proxy](#tls--reverse-proxy)).
+
+### How a value reaches the container
+
+Two mechanisms, and the difference is the one that catches people out. Compose resolves
+`${…}` **inside the compose file** and passes on the result; that is *substitution*, and it
+does not hand the container anything. An `env_file:` entry is *delivery*: every line of that
+file is handed to the container as an environment variable. So a variable reaches the
+application only through an `environment:` line or an `env_file:` — **the bundled stacks
+([`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) and
+[`docker-compose.prod.yml`](../docker-compose.prod.yml)) use `env_file:`, so anything you add
+to `.env` arrives; a compose file you write yourself probably does not, and then adding a
+setting to `.env` changes nothing while looking like it did.**
+
+The two jobs overlap in one useful way: a value the bundled stacks both substitute *and*
+deliver — `DB_PASSWORD` is the clearest case — is written once in `.env` and cannot drift
+between the database container and the application that logs in to it.
+
+[`.env.prod.example`](../.env.prod.example) is the **reference for every variable this
+application reads**, but it targets the fuller reverse-proxy production stack; for a
+self-hosted install start from [`deploy/dc/.env.example`](../deploy/dc/.env.example) and
+come back to the prod template when you need a variable it does not carry. Keep `.env` out
+of version control (it already is — the repository ignores it).
 
 ### An unedited template is refused, by design
 
@@ -437,8 +328,11 @@ short-lived, but an account created with one outlives every key rotation.
 
 ## Configuration
 
-All configuration is via environment variables; [`.env.prod.example`](../.env.prod.example)
-is a template to crib from (it's owner-oriented — take the subset you need).
+All configuration is via environment variables. For a self-hosted install start from
+[`deploy/dc/.env.example`](../deploy/dc/.env.example), which carries the subset that stack
+actually reads; [`.env.prod.example`](../.env.prod.example) is the fuller reference for
+every variable this application understands (it's owner-oriented and targets the
+reverse-proxy production stack — take the subset you need).
 
 > **A `$` in any `.env` value is an interpolation, not a character.** Docker Compose expands
 > `$NAME`/`${NAME}` inside `.env`, and an undefined name expands to *nothing* — so a
@@ -453,13 +347,13 @@ Full reference:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud` |
-| `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and the Quick-start snippet above (default `0.4`). **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
-| `APP_STOP_GRACE_SECONDS` | `30` | How many seconds the app container gets between `SIGTERM` and `SIGKILL`. **Read twice, which is the whole reason it is a variable**: Docker Compose puts it in `stop_grace_period`, and the application binds the same value as `app.mail.async.stop-grace-seconds` — it has to know its own grace, because it waits `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` for queued mail and then writes whatever is left to `failed_email`, and it **refuses to start** unless the whole of that shutdown fits inside this number — the drain, the connection the write must first obtain (`DB_CONNECTION_TIMEOUT_MS`), and the write itself, which costs with the number of rows queued. **Docker's own default is 10 s**, which is *shorter* than the 15 s drain, so a compose file with no `stop_grace_period` line kills the JVM mid-flush and loses the queued password resets and verifications with no row and no log line — see [Mail](#mail). **If you run your own Compose file rather than the bundled one, add the line there too** (the [Quick start](#quick-start) file shows both halves): setting this variable alone changes nothing Docker reads. Raise it before raising the drain, never after. **Valid range 1–600**; `900` is refused at boot, so a drain that needs more than ~598 s of grace is not expressible — which is well past anything the drain's own `@Max` of 120 s can ask for. **An empty value means different things depending on how it reaches the container, which is worth knowing before you blank the line rather than after.** In the bundled `docker-compose.prod.yml` the app reads it through `env_file: .env`, so `APP_STOP_GRACE_SECONDS=` arrives as an empty string, the `${…:30}` fallback in `application.properties` never applies, and **the app aborts the boot** (Compose still gives the container 30 s, so the two disagree). In the [Quick start](#quick-start) file on this page the app service names it explicitly as `APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}`, and Compose's `:-` substitutes for an empty value as well as an absent one — so there a blank renders `30` and the app boots normally. Either way the safe habit is the same: **leave the line out rather than blanking it**, because only one of the two arrangements tells you that you did something. Identical in `dc` and `cloud` |
+| `SPRING_PROFILES_ACTIVE` | — | `dc` (self-hosted) or `cloud`. **Read from `.env` by `docker-compose.prod.yml`; pinned as a literal by [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml)**, because there the directory already declares the model — so setting it in `deploy/dc/.env` changes nothing, deliberately. That asymmetry exists so a `.env` cribbed from `.env.prod.example` (which ships `SPRING_PROFILES_ACTIVE=cloud`) cannot silently turn a self-hosted install into a Cloud one. **It fixes the profile, not the file**: other values in a cribbed `.env` still reach the container verbatim, so `STORAGE_TYPE=s3` or `PUBLIC_SIGNUP_ENABLED=true` will take effect on a `dc` instance. Copy the lines you need rather than the file |
+| `APP_IMAGE_TAG` | `latest` | Which tag of `ghcr.io/zherikhov/hamstrack` a compose file that *reads it* runs — the bundled `docker-compose.prod.yml` (default `latest`) and [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml), which defaults to the current release line. **In those, this is where you pin a version** — `APP_IMAGE_TAG=0.4` for a release line, `0.4.3` for an exact one — rather than editing the `image:` line, which a `git pull` or a re-download of the compose file undoes. In a compose file of your own that hard-codes a tag, this variable is read by nothing and setting it is the mistake this row exists to prevent: pin in whichever of the two files *you* own, and make sure it is the one docker actually reads. Read by Docker Compose, never by the app, so like `APP_MEMORY_LIMIT` an **empty** value is harmless: it falls back to `latest` instead of stopping the boot. `latest` is not for production — see [Upgrading](#upgrading) for what it means and when it moves. Identical in `dc` and `cloud` |
+| `APP_STOP_GRACE_SECONDS` | `30` | How many seconds the app container gets between `SIGTERM` and `SIGKILL`. **Read twice, which is the whole reason it is a variable**: Docker Compose puts it in `stop_grace_period`, and the application binds the same value as `app.mail.async.stop-grace-seconds` — it has to know its own grace, because it waits `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS` for queued mail and then writes whatever is left to `failed_email`, and it **refuses to start** unless the whole of that shutdown fits inside this number — the drain, the connection the write must first obtain (`DB_CONNECTION_TIMEOUT_MS`), and the write itself, which costs with the number of rows queued. **Docker's own default is 10 s**, which is *shorter* than the 15 s drain, so a compose file with no `stop_grace_period` line kills the JVM mid-flush and loses the queued password resets and verifications with no row and no log line — see [Email (SMTP)](#email-smtp). **If you run your own Compose file rather than the bundled one, add the line there too** ([`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) shows both halves): setting this variable alone changes nothing Docker reads. Raise it before raising the drain, never after. **Valid range 1–600**; `900` is refused at boot, so a drain that needs more than ~598 s of grace is not expressible — which is well past anything the drain's own `@Max` of 120 s can ask for. **An empty value means different things depending on how it reaches the container, which is worth knowing before you blank the line rather than after.** In the bundled `docker-compose.prod.yml` the app reads it through `env_file: .env`, so `APP_STOP_GRACE_SECONDS=` arrives as an empty string, the `${…:30}` fallback in `application.properties` never applies, and **the app aborts the boot** (Compose still gives the container 30 s, so the two disagree). In [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) the app service names it explicitly as `APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}`, and Compose's `:-` substitutes for an empty value as well as an absent one — so there a blank renders `30` and the app boots normally. Either way the safe habit is the same: **leave the line out rather than blanking it**, because only one of the two arrangements tells you that you did something. Identical in `dc` and `cloud` |
 | `APP_MEMORY_LIMIT` | `1g` | Memory ceiling for the **app container**, read by Docker Compose (`mem_limit`) and never by the app — so it takes docker size suffixes (`1g`, `1536m`). **This is the heap dial**: the image runs the JVM with `-XX:MaxRAMPercentage=50`, i.e. half of the *container* limit, so `1g` here is a 512 MB heap and `2g` is a 1 GB heap. The other half is not slack — metaspace, thread stacks (Tomcat's request pool is capped at 200 threads by default, ~1 MB of stack each), the code cache, direct buffers and GC bookkeeping all live outside the heap, and squeezing them gets the container **OOM-killed by the kernel** (exit `137`, no stack trace) rather than the JVM throwing `OutOfMemoryError`. 512 MB is the reference heap `REPORTS_MAX_ROWS` below is costed against, so raising one is the occasion to re-read the other. **Upgrading from before 0.17.0 on a host bigger than 2 GB? The default is less heap than you had** — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). **If you run your own Compose file rather than the bundled one, set a limit there too** — with no container limit the percentage is taken against *host* RAM, which is the situation this setting exists to end. **Half is the right split near `1g` and wasteful well above it**, because the non-heap need is largely *constant* rather than proportional (metaspace and the code cache do not grow with the heap): from `4g` up, pair the bigger limit with an explicit heap, `JAVA_TOOL_OPTIONS=-Xmx…` at roughly the limit minus ~700 MB (at `2g` the waste is only ~300 MB and a second setting is not worth it). **`-Xmx` is the only form that works** — `JAVA_TOOL_OPTIONS=-XX:MaxRAMPercentage=75` loses to the image's own copy of that flag, and the JVM logs `Picked up JAVA_TOOL_OPTIONS: …` in both cases, which says the variable was *read* and not that it was *applied*; the percentage form therefore looks like it worked. Unlike the app's own settings in this table, an **empty** value is harmless here — Compose reads it, not Spring, so `APP_MEMORY_LIMIT=` falls back to `1g` instead of stopping the boot. **The container limit also chooses the garbage collector, and nothing else here says so.** At `1g` the JVM sits below its "server-class machine" threshold and ergonomically selects **SerialGC** — single-threaded, stop-the-world — where at `2g`, same image and same flags, it selects **G1** (measured 2026-09-01 on `eclipse-temurin:21-jre-alpine`, the tag the published image is built from, 2 CPUs). That is the most likely explanation of the 4.99 s GC pause the 2026-08-31 load run recorded on a `1g` container — the collector was not itself recorded that day, which is why the startup line names it now — so if long pauses rather than `OutOfMemoryError` are your symptom, this is the dial that changes the collector as well as the heap. The application's startup line names the collector it actually got — see [The heap is bounded from 0.17.0](#the-heap-is-bounded-from-0170). Identical in `dc` and `cloud`: how much memory a JVM may use is a property of the box it runs on, not of the plan. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
 | `POSTGRES_MEMORY_LIMIT` | `512m` | Memory ceiling for the **PostgreSQL container** in the bundled compose file. Read by Docker Compose, never by the app or by PostgreSQL, so it takes docker suffixes and an **empty** value falls back to the default. Until 0.18.0 this container had **no** limit while every observability container had one — which does not mean it was safe, it means that under host memory pressure the kernel chose which process to kill and the app, as the only bounded one, was as likely to be the victim as the container that grew. A limit is **containment**: the offender dies and restarts inside its own cgroup. It is emphatically **not** a promise that the host cannot run out of memory, because ceilings are maxima and not reservations — the bundled defaults declare more ceiling than a 2 GB host has RAM, which `docker-compose.prod.yml` states in full at the top. `512m` is ~2× the peak RSS measured on Hamstrack's own production box (~240 MB) at the `POSTGRES_*` settings below. **Raise it whenever you raise `POSTGRES_SHARED_BUFFERS`, `POSTGRES_WORK_MEM` or `DB_POOL_MAX_SIZE`, and never set it under the server's own dials**: a cgroup ceiling below what PostgreSQL is configured to use converts a tuning value into an OOM kill of a backend — or of the postmaster, which takes every session with it. **Those three are the list because they are the terms in what this ceiling has to contain**: `shared_buffers` is a floor under it, while `work_mem` and the pool are the two factors in `work_mem × sort nodes × backends` on top of it. The one derivation, quoted the same way in `.env.prod.example` and `docker-compose.prod.yml`: `4MB × ~4 nodes × ~12 backends` (a pool of 10, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB**; at `DB_POOL_MAX_SIZE=50` it is `4MB × 4 × 52` ≈ **830 MB**, which nothing else refuses. Docker gives a container with a `mem_limit` and no `memswap_limit` the same amount again in swap, so the first symptom is swapping rather than death. **Upgrading an existing install? This container had no ceiling before 0.18.0** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
 | `CADDY_MEMORY_LIMIT` | `128m` | Memory ceiling for the **Caddy container**, same mechanism as the row above. Deliberately ~5× its measured peak (~24 MB) where PostgreSQL gets ~2×: Caddy is the only container on ports 80/443, so an OOM kill here is a site-wide outage plus a TLS handshake surge when it returns, and unused ceiling costs nothing. Only relevant if you use the bundled compose file's Caddy; if you front the app with your own proxy this variable is read by nothing. Identical in `dc` and `cloud`. **`0` is not "the default"**: to Docker it means *unlimited*, and from 0.18.2 the applier's verify step **refuses** it rather than warning — the same for all three `*_MEMORY_LIMIT` variables. |
-| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required) |
+| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | — | PostgreSQL connection (required). **Which of the three you set depends on which stack you run.** With [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) you set **`DB_PASSWORD` only**: that one line seeds the PostgreSQL container *and* is what the app logs in with, so the two cannot drift, while `DB_URL` and `DB_USERNAME` are literals in the compose file (the database is a service on the compose network, not a host you choose) and setting them in `deploy/dc/.env` changes nothing. With `docker-compose.prod.yml` the same holds for `DB_URL`; `DB_USERNAME` and `DB_PASSWORD` come from `.env`. Pointing the app at an **external** PostgreSQL means editing `DB_URL` in the compose file itself, not in `.env` |
 | `DB_POOL_MAX_SIZE` / `DB_POOL_MIN_IDLE` | `10` / `5` | HikariCP pool sizing; raise the max for concurrency, keep (max × replicas) under Postgres `max_connections`. **The max is also a memory dial on the database, and `max_connections` is not the bound that bites first**: `POSTGRES_WORK_MEM` is charged per sort or hash node per *backend*, so this number is the `backends` in `work_mem × nodes × backends` — `4MB × ~4 × ~12` (this pool, plus the `postgres-exporter` and a `psql` session) ≈ **190 MB** at the defaults, and `4MB × 4 × 52` ≈ **830 MB** at a pool of 50, against a `POSTGRES_MEMORY_LIMIT` of `512m`. Fifty connections sits comfortably under a stock `max_connections` of 100 and comfortably over that cgroup ceiling, where the failure is an OOM-killed backend — or postmaster, which takes every session with it — rather than a refused connection. **Raise `POSTGRES_MEMORY_LIMIT`, or lower `POSTGRES_WORK_MEM`, in the same edit.** `DB_STATEMENT_TIMEOUT_MS` below is the other half of pool sizing: a longer statement bound holds each of these connections for longer. **Part of this pool is reserved, and the reservation is checked at startup**: `EXPENSIVE_READ_MAX_IN_FLIGHT` is the most of these connections the **expensive-read surface** — every read that holds a connection while it works — may hold at once, so the rest of the API always retains the difference. (Today that surface is reports, HQL search, saved filters, the storage breakdown and the **planning** reads; read it as the category, because the membership grows and an enumeration here goes stale one entry before the list does.) **While you leave that variable unset it is derived from this one** (60 % of it, capped at 6, with the per-user ceiling clamped to fit), so lowering the pool on its own is safe and an install that has never touched `EXPENSIVE_READ_*` cannot be stopped from booting by this row. **If you have set it explicitly it must stay strictly below this number or the app refuses to start**, and an explicit share above 60 % of this number logs a sizing WARN at every boot — so lowering the pool while pinning the share is an edit to make in one go |
 | `POSTGRES_EFFECTIVE_CACHE_SIZE` | `512MB` | What the PostgreSQL **planner believes is cached** — `shared_buffers` plus the OS page cache it can expect to reach. Passed to the server as `postgres -c effective_cache_size=…` by the bundled compose file, so it takes PostgreSQL's units (`512MB`, `2GB`). **It allocates nothing**; it changes which plans look cheap, and a value far above the truth makes the planner prefer index access it will actually have to read off disk. The PostgreSQL image's own default is **4GB**, which is why this row exists: on Hamstrack's 1909 MiB production host that claimed more than twice the machine's entire RAM, on a box measured swapping. The `512MB` default is `shared_buffers` (128 MB) plus the low end of the page cache measured there under load (387 MB). **Set it from your host, in both directions**: roughly `shared_buffers` + the page cache this database can really expect. The usual starting point of ~75% of RAM assumes a *dedicated* database host — a box that also runs the JVM, Caddy and the observability stack is not one. **And under ~1 GB of RAM, lower it — to about `192MB`**: `512MB` on a 512 MB VPS claims the whole machine as cache, which is the image's `4GB` mistake one order of magnitude down. `192MB` is the `64MB` of `shared_buffers` that row recommends plus a small real page cache; confirm the second half with `free -m` rather than copying the figure. That ~1 GB is the same threshold `POSTGRES_SHARED_BUFFERS` and `POSTGRES_WORK_MEM` use — one number for all three dials. A value the server cannot parse makes PostgreSQL refuse to start while `docker compose up -d` still exits `0`, so change one dial at a time and check `docker compose ps`. **Upgrading from before 0.18.0 on a host of 4 GB or more? This default is a planner regression for you** — see [PostgreSQL is bounded and tuned from 0.18.0](#postgresql-is-bounded-and-tuned-from-0180). Identical in `dc` and `cloud`: this is host sizing, not a deployment mode |
 | `POSTGRES_SHARED_BUFFERS` | `128MB` | PostgreSQL's own cache, and unlike the row above this one **is** an allocation — it comes out of `POSTGRES_MEMORY_LIMIT`, and on a single-box install it comes out of the JVM's share of the machine. Left at the image default deliberately: the stock advice of 25% of RAM assumes the database owns the host, and this memory is double-buffered against the very page cache `effective_cache_size` just told the planner to count on. Raise it with the host, and raise `effective_cache_size` and `POSTGRES_MEMORY_LIMIT` with it. **Under ~1 GB of RAM, lower it — to `64MB`**: there this allocation comes straight out of the JVM's share, and the page cache is doing the work anyway. Same ~1 GB threshold as `POSTGRES_EFFECTIVE_CACHE_SIZE` and `POSTGRES_WORK_MEM`. Identical in `dc` and `cloud` |
@@ -472,6 +366,8 @@ Full reference:
 | `JWT_SECRET` | — | HMAC key for access tokens, **min 32 bytes** (required). Generate it — `openssl rand -base64 48` — never reuse a value from any documentation: the app additionally refuses the placeholders this project has published, by name, because they are long enough to pass the length check and an instance signing tokens with one can be impersonated by anybody. See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design) |
 | `JWT_ACCESS_TOKEN_TTL` | `PT30M` | Access-token lifetime (ISO-8601 duration). Short by design — the refresh cookie renews it. Longer = a leaked token is replayable for longer |
 | `APP_BASE_URL` | `http://localhost:8080` | Public URL; used in emails, cookies (`Secure` when https), robots/sitemap — and, if you enable the CSP report sink, its **host** is what decides which violation reports are accepted (see [Content-Security-Policy (report-only)](#content-security-policy-report-only)) |
+| `APP_BIND` | `0.0.0.0` | **Which host interface the app's port is published on** — read by Docker Compose only, never by the application, so it exists in [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) and a compose file of your own has to spell the equivalent itself. `0.0.0.0` publishes on **every** interface: on a public server that means the internet can reach plain HTTP on `APP_PORT`, whatever else you put in front of it. Set `127.0.0.1` once a TLS proxy is on the same host, or while you are reaching the instance over an SSH tunnel; verify with `docker compose ps`, whose `PORTS` column then reads `127.0.0.1:8080->8080/tcp`. Changing it needs `docker compose up -d` to re-create the container. See [TLS & reverse proxy](#tls--reverse-proxy) |
+| `APP_PORT` | `8080` | **Host port** for that same publication — Compose-only, like `APP_BIND`; the container port is always `8080`. Change it when the host port is taken (`Bind for 0.0.0.0:8080 failed: port is already allocated`), or to run two instances on one host. It does **not** change `APP_BASE_URL`, which you set to match |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` / `MAIL_SMTP_AUTH` / `MAIL_STARTTLS` / `MAIL_FROM` | localhost:1025 | Outgoing SMTP (verification, invites, password reset) |
 | `MAIL_SMTP_CONNECT_TIMEOUT_MS` / `MAIL_SMTP_READ_TIMEOUT_MS` / `MAIL_SMTP_WRITE_TIMEOUT_MS` | `5000` / `10000` / `10000` | SMTP socket timeouts (ms) — a black-holed mail host fails a worker fast instead of hanging (connect / per-read / per-write) |
 | `MAIL_ASYNC_CORE_POOL` / `MAIL_ASYNC_MAX_POOL` / `MAIL_ASYNC_QUEUE_CAPACITY` | `2` / `5` / `100` | Bounded mail executor — mail can't starve other async work or spawn a thread-per-task under an SMTP stall. A full queue **drops and dead-letters** the message rather than sending it on the request thread, so a slow SMTP host cannot take Tomcat workers with it. Valid ranges 1–50 / 1–50 / 1–10000; the queue's practical ceiling is lower, because the drain plus a batch write of that many rows has to fit inside `APP_STOP_GRACE_SECONDS` — with the connection that write has to obtain first (`DB_CONNECTION_TIMEOUT_MS`) counted in. The refusal names every knob that can move the arithmetic, so read it rather than guessing which one to change. A **blank** value stops the boot rather than restoring the default — these bind as `int`, so `MAIL_ASYNC_MAX_POOL=` is not "unset". Identical in `dc` and `cloud` |
@@ -609,8 +505,22 @@ configuration surface — prefer them over setting Spring properties directly.
 Hamstrack serves plain HTTP on `8080`. Put a TLS-terminating reverse proxy in
 front and point `APP_BASE_URL` at the public HTTPS URL.
 
-**Caddy** (add to the compose stack — it gets Let's Encrypt certs automatically;
-drop the app's `ports: 8080:8080` so it's only reachable through Caddy):
+**Close the app's own port first.** Until you do, Caddy answers on 443 *and* the app goes on
+answering plain HTTP on `http://<your-public-ip>:8080`, which is the one failure that looks
+exactly like success. In [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml)
+that is one line in `.env` and no edit to the compose file:
+
+```
+APP_BIND=127.0.0.1
+```
+
+then `docker compose up -d` to re-create the container. The port is then published only on
+the loopback interface, so Caddy (on the same host) still reaches it and the internet does
+not. Check it with `docker compose ps` — the `PORTS` column reads `127.0.0.1:8080->8080/tcp`
+rather than `0.0.0.0:8080->8080/tcp`. If you run a compose file of your own that hard-codes
+`ports: ["8080:8080"]`, change that line to `["127.0.0.1:8080:8080"]` or remove it.
+
+**Caddy** (add to the compose stack — it gets Let's Encrypt certs automatically):
 
 ```yaml
   caddy:
@@ -740,8 +650,8 @@ writes whatever is still queued to `failed_email` in one batch and logs the coun
 raising `MAIL_ASYNC_QUEUE_CAPACITY` on its own is safe. What is **not** safe is a
 container stop grace shorter than the drain: the process is then killed part-way
 through and the queued mail is lost with no record. **Docker's own default grace is
-10 s — shorter than the drain** — so the bundled `docker-compose.prod.yml` and the
-[Quick start](#quick-start) file above both set
+10 s — shorter than the drain** — so the bundled `docker-compose.prod.yml` and
+[`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) both set
 `stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s` and pass the same variable to the
 app, which refuses to start if the drain plus the residue write would not fit inside
 it. Raise `APP_STOP_GRACE_SECONDS` first and `MAIL_ASYNC_SHUTDOWN_DRAIN_SECONDS`
@@ -754,7 +664,7 @@ what Docker will actually do), and every `docker compose up -d` SIGKILLs the JVM
 mid-drain. Add both lines to your `app` service: `stop_grace_period:
 ${APP_STOP_GRACE_SECONDS:-30}s`, and `APP_STOP_GRACE_SECONDS:
 ${APP_STOP_GRACE_SECONDS:-30}` under `environment:` so the application is told the same
-number. The [Quick start](#quick-start) file shows both.
+number. [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) shows both.
 
 **In-flight sends are outside all of this.** The drain recovers what is still
 *queued*; the handful of messages a worker has already started (up to
@@ -2240,7 +2150,8 @@ file. The command above is the only thing that answers it; a file cannot.
 **Running your own compose file rather than the bundled one?** Then nothing has
 capped your container and the percentage is taken against host RAM — which at 50% is
 *more* heap than before, and closer to the host's ceiling than is safe. Add a
-`mem_limit:` to the app service; the [Quick start](#quick-start) file shows one.
+`mem_limit:` to the app service;
+[`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) shows one.
 
 ### PostgreSQL is bounded and tuned from 0.18.0
 
@@ -2308,8 +2219,9 @@ Doubling `POSTGRES_WORK_MEM` doubles the same figure without touching the pool a
 
 **Running your own compose file?** None of this reaches you: both the ceiling and the dials
 live in `docker-compose.prod.yml`, so your database keeps the image's `4GB`
-`effective_cache_size` and no container limit. The [Quick start](#quick-start) file shows
-the form to copy, spelled with the same variables so `.env` can still drive it.
+`effective_cache_size` and no container limit.
+[`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) shows the form to copy,
+spelled with the same variables so `.env` can still drive it.
 
 ### Account addresses become case-insensitive in 0.18.0 (one query, before you pull)
 

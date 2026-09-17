@@ -362,8 +362,8 @@ public final class PublishedCredentials {
     }
 
     /**
-     * {@code docker-compose.yml} and {@code docker-compose.*.dev.yml} <strong>at the
-     * repository root</strong> — localhost, never a server.
+     * A compose file that <strong>says {@code .dev.} in its own name</strong>, at the
+     * repository root — localhost, never a server.
      *
      * <p>The root requirement is the whole of the path-awareness. This was a filename test
      * regardless of directory, so a tracked {@code docker-compose.yml} in <em>any</em>
@@ -371,13 +371,55 @@ public final class PublishedCredentials {
      * development, and every credential in it would join
      * {@link #localDevStackCredentials()}, which is exempt everywhere outside production
      * configuration. That is a repository-wide exemption granted by adding a file.
+     *
+     * <p><strong>The marker, not the filename (HD-314).</strong> This also matched a bare
+     * {@code docker-compose.yml}, i.e. it granted the exemption for <em>occupying a
+     * well-known name</em>. When the local helper was renamed to
+     * {@code docker-compose.dev.yml} — so that {@code deploy/dc/docker-compose.yml} could be
+     * the real self-hosted stack rather than a second file answering to one name — the old
+     * rule would have classified the unchanged dev stack as production configuration and the
+     * new install template as development, which is both halves of this rule backwards.
+     * Keying on the {@code .dev.} marker instead keeps the exempt set at the same two
+     * values, and <em>narrows</em> the rule in the direction that matters: re-adding a root
+     * {@code docker-compose.yml} later cannot silently re-open the exemption, because a
+     * development stack now has to declare itself in its name.
+     *
+     * <p><strong>Why "the same two values" is a weaker statement than it looks, and must not
+     * be written as "the renamed file contributes nothing".</strong> Measured after the
+     * rename, the exempt set is fed by THREE assignments in TWO files —
+     * {@code docker-compose.dev.yml:8} ({@code POSTGRES_PASSWORD}),
+     * {@code docker-compose.observability.dev.yml:44} ({@code GF_SECURITY_ADMIN_PASSWORD})
+     * and {@code :133} ({@code DATA_SOURCE_PASS}). The renamed stack <em>does</em>
+     * contribute; the set is unchanged only because its Postgres password happens to be the
+     * same string as the exporter's. Change the dev database password tomorrow and the set
+     * grows, so a sentence claiming this file is not a contributor would be false with no
+     * edit to itself. Enumerate the contributors from {@link #localDevStackCredentials()},
+     * which reads them out of whatever {@code docker compose up} creates — never from a name
+     * written here.
+     *
+     * <p>Note what does <em>not</em> hold that: {@code theDevelopmentStackExemptionIsPinnedToItsSize}
+     * pins the set's SIZE, so adding another variable whose value is already in the set — an
+     * {@code X_PASSWORD: hamstrack} in a dev compose file — keeps it at two and stays green.
+     * The pin is a tripwire on growth, not a proof of provenance.
+     *
+     * <p><strong>The asymmetry to keep in mind when editing this line.</strong> Widening
+     * this predicate widens a credential <em>exemption</em>, and every widening is silent,
+     * permanent and applies to every file in the repository. The clause above admits exactly
+     * the filenames that carry {@code .dev.}; a looser reading (matching {@code *dev*}, or
+     * re-adding a bare filename) is refused in review rather than measured, because nothing
+     * goes red when it is wrong.
+     *
+     * <p><strong>And this predicate does not seal itself.</strong> Renaming the dev stack
+     * left every assertion keyed on the old string literal green, because each was asking
+     * about a filename rather than about a file — measured, and the reason
+     * {@code DevComposeFileReferencesTest} exists.
      */
     public static boolean isDevelopmentCompose(Path file) {
         String path = repositoryPath(file);
         if (path.contains("/")) {
             return false;
         }
-        return path.equals("docker-compose.yml") || path.matches("docker-compose\\..*\\.dev\\.ya?ml");
+        return path.matches("docker-compose(\\..*)?\\.dev\\.ya?ml");
     }
 
     /**
@@ -403,6 +445,7 @@ public final class PublishedCredentials {
         return isEnvTemplate(file)
                 || OPERATOR_FACING_DOCUMENTS.contains(path)
                 || path.startsWith("ops/")
+                || path.startsWith("deploy/")
                 || file.getFileName().toString().matches("docker-compose.*\\.ya?ml")
                    && !isDevelopmentCompose(file);
     }
@@ -413,8 +456,15 @@ public final class PublishedCredentials {
      * path — but the enumeration is small and the failure message points at it, so the next
      * runbook is added here rather than worked around.
      *
-     * <p>{@code ops/**} is covered by prefix instead: those are scripts and systemd units
-     * that run on the production box, where nothing is ever illustrative.
+     * <p>{@code ops/**} and {@code deploy/**} are covered by prefix instead of by name.
+     * {@code ops/**} is scripts and systemd units that run on the production box, where
+     * nothing is ever illustrative. {@code deploy/**} is the installable stacks and the
+     * documents shipped beside them — and the prefix, rather than a fourth entry in the set
+     * below, is what this enumeration had to learn (HD-314): the set reaches an operator
+     * manual only when somebody remembers to add it, and the one manual it missed was
+     * {@code deploy/dc/README.md}, which is the first document a stranger installing this
+     * product actually opens. A directory whose whole purpose is "what you run on your own
+     * machine" cannot be opted into the credential scan one file at a time.
      */
     public static final Set<String> OPERATOR_FACING_DOCUMENTS = Set.of(
             "docs/self-hosting.md",

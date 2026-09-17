@@ -36,9 +36,24 @@ One codebase ships in two deployment models:
 
 ## Self-hosting (DC)
 
-Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. Pin a released image line (e.g. `APP_IMAGE_TAG=0.4`, not `latest`) in your `.env` and run `docker compose up -d`; the schema migrates itself on startup (Flyway).
+Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. The stack is in this repository at [`deploy/dc/`](deploy/dc/); the schema migrates itself on startup (Flyway).
 
-**→ Full walkthrough: [Self-hosting guide](docs/self-hosting.md)** — the Compose file, complete configuration reference, TLS / reverse proxy, email (SMTP), attachment storage, upgrades and backups.
+```bash
+git clone https://github.com/Zherikhov/hamstrack.git
+cd hamstrack/deploy/dc
+cp .env.example .env
+# Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD.
+# If you skip one, the next command refuses and names it.
+docker compose up -d --wait --wait-timeout 120
+```
+
+That command **exits non-zero if the stack does not come up**, so its exit code is the check: a plain `docker compose up -d` returns 0 even while a container is crash-looping. On success it returns once both services are healthy (~35s on a warm image). On failure it names the service — `container dc-app-1 is unhealthy` — and `docker compose logs app` carries the reason, because the application refuses a bad value by name at startup.
+
+Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. No SMTP server and no domain are needed for this.
+
+To pin a release line rather than track the current one, set `APP_IMAGE_TAG` in `deploy/dc/.env`; the template names the current line and says why `latest` is the wrong answer.
+
+**→ Full walkthrough: [Self-hosting guide](docs/self-hosting.md)** — complete configuration reference, TLS / reverse proxy, email (SMTP), attachment storage, upgrades and backups.
 
 ## Documentation & REST API
 
@@ -54,8 +69,10 @@ Markdown references per deployment model:
 
 Requirements: Java 21, Docker (PostgreSQL + [MailHog](https://github.com/mailhog/MailHog) for local email), Node is installed automatically by the Maven build.
 
+The development stack (PostgreSQL on port 15432 + MailHog) is a *different* file from the self-hosted one above — `docker-compose.dev.yml`, which has to be named explicitly:
+
 ```bash
-docker compose up -d postgres mailhog
+docker compose -f docker-compose.dev.yml up -d postgres mailhog
 
 # run the backend + built frontend (http://localhost:8080)
 DB_URL=jdbc:postgresql://localhost:15432/hamstrack \

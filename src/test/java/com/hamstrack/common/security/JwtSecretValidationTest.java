@@ -310,11 +310,13 @@ class JwtSecretValidationTest {
                         and it costs the reader nothing. If a working literal is genuinely required, that \
                         is a review conversation and not an edit to the pattern.
 
-                        Credentials of the local dev stack (docker-compose.yml, \
-                        docker-compose.*.dev.yml AT THE REPOSITORY ROOT) are exempt outside production \
-                        configuration, and the exempt VALUES are read out of those files - you cannot \
-                        widen that by editing a list here, only by changing what `docker compose up` \
-                        creates.
+                        Credentials of the local dev stack (a compose file whose name carries the \
+                        .dev. marker, AT THE REPOSITORY ROOT - docker-compose.dev.yml, \
+                        docker-compose.*.dev.yml) are exempt outside production configuration, and the \
+                        exempt VALUES are read out of those files - you cannot widen that by editing a \
+                        list here, only by changing what `docker compose up` creates. \
+                        deploy/dc/docker-compose.yml is the SELF-HOSTED stack and is production \
+                        configuration, which is why it guards its values instead of publishing them.
 
                         Published values that would work as configured:
                         """ + "  " + String.join("\n  ", offences))
@@ -480,8 +482,14 @@ class JwtSecretValidationTest {
                         "export " + assign("LOAD_PASSWORD_HASH", singleQuoted(bcryptDigest())), true,
                         "a bcrypt digest is not an interpolation, whatever its first character is"),
 
-                new Case("docker-compose.yml", yaml("POSTGRES_PASSWORD", "hamstrack"), false,
+                new Case("docker-compose.dev.yml", yaml("POSTGRES_PASSWORD", "hamstrack"), false,
                         "the local dev stack, in the file that creates it"),
+                // The same content one directory down is NOT the dev stack: the exemption is
+                // granted by the `.dev.` marker at the repository ROOT, never by a filename
+                // wherever it appears. Without this row the path-awareness of
+                // isDevelopmentCompose is asserted nowhere in the scan's own fixtures.
+                new Case("deploy/dc/docker-compose.dev.yml", yaml("POSTGRES_PASSWORD", "hamstrack"), true,
+                        "a .dev. name in a subdirectory is not the local dev stack"),
                 // The multi-word blank, in EVERY dialect that ends a value at a delimiter.
                 // The reasoning ("a blank contains spaces, so truncating it turns a
                 // placeholder into a word") was written out on the line dialect - the one
@@ -647,9 +655,10 @@ class JwtSecretValidationTest {
                         VALUE - so every string in it is acceptable in every non-production file in \
                         this repository, under any variable name at all.
 
-                        Name the container that needs it (docker-compose.yml or a \
-                        docker-compose.*.dev.yml at the repository ROOT - a compose file in a \
-                        subdirectory deliberately no longer counts), then update this count. If \
+                        Name the container that needs it (a compose file carrying the .dev. marker \
+                        at the repository ROOT - docker-compose.dev.yml or a \
+                        docker-compose.*.dev.yml; a compose file in a subdirectory deliberately does \
+                        not count, and neither does a bare filename), then update this count. If \
                         there is no such container, the value wants a dev-only-... label instead, \
                         which stays true wherever it is pasted.""")
                 .hasSize(2);
@@ -664,7 +673,11 @@ class JwtSecretValidationTest {
     void operatorFacingDocumentsAreProductionConfiguration() {
         for (String path : List.of("docs/self-hosting.md", "docs/observability.md",
                 "docs/ops-prod-hardening.md", "ops/backup/hamstrack-backup.sh",
-                ".env.prod.example", "docker-compose.prod.yml", "docker-compose.observability.yml")) {
+                ".env.prod.example", "docker-compose.prod.yml", "docker-compose.observability.yml",
+                // The install surface. deploy/dc/README.md is the document a stranger opens
+                // first, and it reached the scan through nothing until `deploy/` became a
+                // prefix clause - an operator manual that the enumerated set had missed.
+                "deploy/dc/README.md", "deploy/dc/docker-compose.yml", "deploy/dc/.env.example")) {
             assertThat(PublishedCredentials.isProductionConfiguration(Path.of(path)))
                     .withFailMessage("`%s` is no longer production configuration, so the local "
                             + "development stack's credentials became acceptable in it - which is how a "
@@ -677,16 +690,25 @@ class JwtSecretValidationTest {
                     .isTrue();
         }
 
-        assertThat(PublishedCredentials.isDevelopmentCompose(Path.of("docker-compose.yml")))
+        assertThat(PublishedCredentials.isDevelopmentCompose(Path.of("docker-compose.dev.yml")))
                 .withFailMessage("The repository's own development compose file stopped being one")
                 .isTrue();
-        assertThat(PublishedCredentials.isDevelopmentCompose(Path.of("examples/docker-compose.yml")))
+        assertThat(PublishedCredentials.isDevelopmentCompose(Path.of("docker-compose.yml")))
                 .withFailMessage("""
 
-                        A docker-compose.yml in a SUBDIRECTORY classifies as the local development \
-                        stack. That is a repository-wide exemption granted by adding a file: every \
-                        credential in it joins localDevStackCredentials(), which is exempt by value \
-                        everywhere outside production configuration.""")
+                        A bare `docker-compose.yml` classifies as the local development stack again. \
+                        The exemption is carried by the `.dev.` marker in the name, not by occupying \
+                        a well-known filename - deploy/dc/docker-compose.yml is the SELF-HOSTED \
+                        stack, and a rule that reads a bare name as "development" would exempt an \
+                        install template's credentials.""")
+                .isFalse();
+        assertThat(PublishedCredentials.isDevelopmentCompose(Path.of("examples/docker-compose.dev.yml")))
+                .withFailMessage("""
+
+                        A development compose file in a SUBDIRECTORY classifies as the local \
+                        development stack. That is a repository-wide exemption granted by adding a \
+                        file: every credential in it joins localDevStackCredentials(), which is \
+                        exempt by value everywhere outside production configuration.""")
                 .isFalse();
     }
 

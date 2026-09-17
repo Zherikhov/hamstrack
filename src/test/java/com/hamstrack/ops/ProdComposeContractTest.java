@@ -223,6 +223,75 @@ class ProdComposeContractTest {
                 .isGreaterThanOrEqualTo(6);
     }
 
+    /**
+     * <strong>The same ceiling rule, over the stacks this repository ships for a person to
+     * run on a real host — which is a wider set than the one a deploy places (HD-314).</strong>
+     *
+     * <p>The sibling above derives its population from {@code apply-config.sh}, and that is
+     * right for the claim it makes: those are the files a deploy puts on the production box.
+     * But the reason for the rule is not deployment, it is
+     * {@code -XX:MaxRAMPercentage=50} reading HOST RAM when a container has no limit — which
+     * is true of any container a person starts anywhere. When {@code deploy/dc/} shipped, the
+     * repository gained a stack that a newcomer runs on their own server, that is the file
+     * such a reader is most likely to edit, and that no ceiling test covered. It declares
+     * {@code mem_limit} on both services today; nothing kept it that way.
+     *
+     * <p><strong>Why a sibling rather than a widened population.</strong> The other test's
+     * name is quoted twice in {@code ops/deploy/apply-config.sh} — a file a deploy syncs to
+     * the box — as the place the policy lives. Widening it in place would either leave that
+     * name describing a population it no longer has, or require editing a synced production
+     * script to rename it. Two claims, two tests, and both names stay true.
+     *
+     * <p>Development stacks are excluded by the live {@code .dev.} marker rather than by a
+     * list ({@link PublishedCredentials#isDevelopmentCompose}): a localhost stack that runs
+     * two containers beside an IDE has no host to protect, and the day one of those files is
+     * renamed without its marker it joins this population and says so.
+     */
+    @Test
+    void everyServiceInEveryShippedComposeFileDeclaresAMemoryCeiling() throws IOException {
+        var unbounded = new ArrayList<String>();
+        var shipped = new ArrayList<Path>();
+        int scanned = 0;
+
+        for (Path file : PublishedCredentials.publishableFiles(".")) {
+            if (!file.getFileName().toString().matches("docker-compose.*\\.ya?ml")
+                    || PublishedCredentials.isDevelopmentCompose(file)) {
+                continue;
+            }
+            shipped.add(file);
+            for (var entry : services(file).entrySet()) {
+                scanned++;
+                var service = OpsYaml.map(entry.getValue());
+                Object memLimit = service.get("mem_limit");
+                Object nested = OpsYaml.map(OpsYaml.map(OpsYaml.map(service.get("deploy")).get("resources"))
+                        .get("limits")).get("memory");
+                if (memLimit == null && nested == null) {
+                    // ASCII: this is read off a console, where a `→` arrives as mojibake
+                    // under the default Windows code page.
+                    unbounded.add(PublishedCredentials.repositoryPath(file) + " -> " + entry.getKey());
+                }
+            }
+        }
+
+        assertThat(unbounded)
+                .withFailMessage(CEILING_CHECKLIST
+                        + "\nThis is the SHIPPED set — every compose file a reader of this repository "
+                        + "might run on a host, deployed or not, which includes deploy/dc/."
+                        + "\nWithout a ceiling: " + unbounded)
+                .isEmpty();
+        // Deliberately below the population, for the reason spelled out on the sibling: a floor
+        // equal to the count only ever fires on a deletion and then blames the scan.
+        assertThat(shipped)
+                .withFailMessage("Only %s shipped compose file(s) were found — the self-hosted stack and "
+                        + "the production one are both expected here, so this enumeration has stopped "
+                        + "seeing files rather than the repository having shrunk.", shipped)
+                .hasSizeGreaterThanOrEqualTo(2);
+        assertThat(scanned)
+                .withFailMessage("Only %d service(s) were scanned across %s — this scan has stopped seeing "
+                        + "services and the assertion above it is vacuous.", scanned, shipped)
+                .isGreaterThanOrEqualTo(6);
+    }
+
     /** The failure message is the propagation checklist, for the same reason {@link #CHECKLIST} is. */
     private static final String CEILING_CHECKLIST = """
 

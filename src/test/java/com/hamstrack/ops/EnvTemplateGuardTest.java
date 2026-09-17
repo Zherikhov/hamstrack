@@ -8,7 +8,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
@@ -86,20 +88,14 @@ class EnvTemplateGuardTest {
     private static final Set<String> SKIPPED_DIRECTORIES =
             Set.of(".git", ".gstack", ".idea", ".local", "target", "node_modules", "data", "logs");
 
-    /**
-     * Guarded variables that are deliberately NOT in the template, with the reason each is
-     * allowed to be missing. {@code DB_URL} is set by {@code docker-compose.prod.yml} in the
-     * app service's own {@code environment:} block ({@code jdbc:postgresql://postgres:5432/…},
-     * the compose network's internal address) and is never read from {@code .env} — putting
-     * it in the template would invite an operator to set a value that is then silently
-     * overridden, which is a worse failure than an absence.
-     *
-     * <p>Adding an entry here is a claim that a reader never has to set the variable. If
-     * they might, the entry is wrong: ship the line empty instead.
-     */
-    private static final Map<String, String> NOT_THE_OPERATOR_S_TO_SET = Map.of(
-            "DB_URL", "docker-compose.prod.yml sets it in the app service's own environment: block "
-                      + "(the compose network address) and never reads it from .env");
+    // "Not the operator's to set" used to be a hand-kept map, and its only entry was DB_URL,
+    // excused because docker-compose.prod.yml supplies it as a literal under `environment:`
+    // (the compose network address) so .env can never reach it. That reason is a PROPERTY of
+    // the compose file, and it is now read off the file itself — see literalEnvironmentNames.
+    // Measured when the derivation landed: emptying the map left this class green, i.e. the
+    // entry had become an exclusion excusing nothing, which is the kind that outlives its
+    // subject. Deleted rather than kept as a belt, because a list nothing needs is a list
+    // nobody re-checks.
 
     /** {@code ${VAR:?message}} — Compose's own fail-fast. */
     private static final Pattern COMPOSE_GUARD = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*):\\?");
@@ -127,6 +123,21 @@ class EnvTemplateGuardTest {
      * trips this is editing a template or adding a guard, and what they need is the rule
      * and what it costs to break it.
      */
+    /**
+     * The floor that stops the derived pairing from quietly matching nothing. Two is not a
+     * count of what exists — it is the statement that the rule is about a CATEGORY: one pair
+     * is indistinguishable from the hard-coded single path this replaced.
+     */
+    private static final String PAIRING_FLOOR = """
+
+            Fewer than two template/stack pairs were found, so this rule has collapsed back \
+            into a claim about one file - which is the shape that let a second stack ship \
+            with nothing checking its template at all.
+
+            A pair is an env template and the compose files in its OWN directory. If you \
+            moved a template away from its stack, move it back or teach pairs() how the two \
+            now find each other.""";
+
     private static final String CHECKLIST = """
 
             .env.prod.example is copied to .env by every self-hoster and by the production \
@@ -169,27 +180,33 @@ class EnvTemplateGuardTest {
 
     @Test
     void everyGuardedVariableShipsEmpty() throws IOException {
-        var guarded = guardedVariables();
-        var enabled = assignments(COMPOSE_TEMPLATE, ENABLED);
-        var disabled = assignments(COMPOSE_TEMPLATE, DISABLED);
         var offences = new ArrayList<String>();
+        List<Pair> pairs = pairs();
 
-        for (var entry : guarded.entrySet()) {
-            String name = entry.getKey();
-            String declaredBy = entry.getValue();
-            Assignment shipped = enabled.get(name);
-            if (shipped != null && !isEmptyValue(shipped.value())) {
-                offences.add(".env.prod.example:%d ships `%s=%s`, but %s guards it - ship `%s=`"
-                        .formatted(shipped.line(), name, render(shipped.value()), declaredBy, name));
-            }
-            Assignment hidden = disabled.get(name);
-            if (hidden != null) {
-                offences.add((".env.prod.example:%d comments out `%s`, which %s requires - a commented-out "
-                        + "line hides the variable's existence from the reader who has to set it; ship `%s=` "
-                        + "instead").formatted(hidden.line(), name, declaredBy, name));
+        for (Pair pair : pairs) {
+            var enabled = assignments(pair.template(), ENABLED);
+            var disabled = assignments(pair.template(), DISABLED);
+            for (var entry : guardedVariables(pair).entrySet()) {
+                String name = entry.getKey();
+                String declaredBy = entry.getValue();
+                Assignment shipped = enabled.get(name);
+                if (shipped != null && !isEmptyValue(shipped.value())) {
+                    offences.add("%s:%d ships `%s=%s`, but %s guards it - ship `%s=`"
+                            .formatted(pair.describe(), shipped.line(), name, render(shipped.value()),
+                                    declaredBy, name));
+                }
+                Assignment hidden = disabled.get(name);
+                if (hidden != null) {
+                    offences.add(("%s:%d comments out `%s`, which %s requires - a commented-out line hides "
+                            + "the variable's existence from the reader who has to set it; ship `%s=` instead")
+                            .formatted(pair.describe(), hidden.line(), name, declaredBy, name));
+                }
             }
         }
 
+        assertThat(pairs)
+                .withFailMessage(PAIRING_FLOOR)
+                .hasSizeGreaterThanOrEqualTo(2);
         assertThat(offences)
                 .withFailMessage(CHECKLIST + "\nOffending lines:\n  " + String.join("\n  ", offences))
                 .isEmpty();
@@ -203,29 +220,35 @@ class EnvTemplateGuardTest {
      */
     @Test
     void everyGuardedVariableIsNamedInTheTemplate() throws IOException {
-        var enabled = assignments(COMPOSE_TEMPLATE, ENABLED);
-        var disabled = assignments(COMPOSE_TEMPLATE, DISABLED);
         var offences = new ArrayList<String>();
+        List<Pair> pairs = pairs();
 
-        for (var entry : guardedVariables().entrySet()) {
-            String name = entry.getKey();
-            if (enabled.containsKey(name) || disabled.containsKey(name)) {
-                continue;
-            }
-            String exemption = NOT_THE_OPERATOR_S_TO_SET.get(name);
-            if (exemption == null) {
-                offences.add(("`%s` is guarded by %s but appears nowhere in .env.prod.example - add `%s=` "
-                        + "with a comment saying what it is. An operator who copies this template meets "
-                        + "that guard as a refusal naming a variable their file does not contain")
-                        .formatted(name, entry.getValue(), name));
+        for (Pair pair : pairs) {
+            var enabled = assignments(pair.template(), ENABLED);
+            var disabled = assignments(pair.template(), DISABLED);
+            for (var entry : guardedVariables(pair).entrySet()) {
+                String name = entry.getKey();
+                if (enabled.containsKey(name) || disabled.containsKey(name)) {
+                    continue;
+                }
+                offences.add(("`%s` is guarded by %s but appears nowhere in %s - add `%s=` with a "
+                        + "comment saying what it is. An operator who copies that template meets the "
+                        + "guard as a refusal naming a variable their file does not contain. (If the "
+                        + "stack supplies it itself, say so by setting it as a LITERAL under "
+                        + "`environment:` - that is read off the file and excuses it here.)")
+                        .formatted(name, entry.getValue(), pair.describe(), name));
             }
         }
 
+        assertThat(pairs)
+                .withFailMessage(PAIRING_FLOOR)
+                .hasSizeGreaterThanOrEqualTo(2);
+
         assertThat(offences)
                 .withFailMessage(CHECKLIST + "\nMissing lines:\n  " + String.join("\n  ", offences)
-                        + "\n\nIf a variable genuinely is not the operator's to set, add it to "
-                        + "NOT_THE_OPERATOR_S_TO_SET with the reason - that is a claim they never have to "
-                        + "set it, and it is wrong if they might.")
+                        + "\n\nIf a variable genuinely is not the operator's to set, the stack has to say "
+                        + "so where a reader can see it: give it a LITERAL value under `environment:` in "
+                        + "that directory's compose file. There is no list here to add it to, on purpose.")
                 .isEmpty();
     }
 
@@ -258,6 +281,306 @@ class EnvTemplateGuardTest {
         assertThat(offences)
                 .withFailMessage(CHECKLIST + "\nOffending lines:\n  " + String.join("\n  ", offences))
                 .isEmpty();
+    }
+
+    /**
+     * <strong>The literal exemption may shrink the property half and never the compose
+     * half.</strong>
+     *
+     * <p>The control that would have caught the leak described on
+     * {@link #literalEnvironmentNames}: a name a compose file refuses to start without has to
+     * survive into the guarded set, whatever any compose file supplies as a literal. Written
+     * as a comparison between the two computations rather than as a list of names, so it
+     * keeps holding as files are added.
+     *
+     * <p>It also prints the delta. That is deliberate and is the point of the whole round:
+     * the exemption is derived, so the only way anyone ever sees what it excuses is for a
+     * failure to say so.
+     *
+     * <p><strong>Cause-agnostic on purpose.</strong> It compares two computations and reports
+     * a name that did not survive; it does not claim to know WHY. That is its strength over a
+     * check for the known bug, and the reason the per-name line below states only what was
+     * measured — an earlier wording asserted "excused by a literal", and with a different drop
+     * mechanism planted it confidently blamed a literal for a name a filter had removed. The
+     * likely cause belongs in the prose, where it is advice; in the per-name line it would be
+     * a finding the control never established.
+     *
+     * <p>It carries BOTH floors. Its own population is the compose guards, but those are
+     * reached through {@link #pairs()} — so without the pairing floor it passes on one
+     * surviving pair's guards while the pairing has silently collapsed, and a control that
+     * leans on a sibling test to notice its own population shrinking is not a control.
+     */
+    @Test
+    void theLiteralExemptionNeverShrinksTheComposeHalf() throws IOException {
+        var lost = new ArrayList<String>();
+        int composeGuardCount = 0;
+        List<Pair> pairs = pairs();
+
+        for (Pair pair : pairs) {
+            Map<String, String> declared = composeGuards(pair);
+            Set<String> survived = guardedVariables(pair).keySet();
+            composeGuardCount += declared.size();
+            for (var entry : declared.entrySet()) {
+                if (!survived.contains(entry.getKey())) {
+                    lost.add(("%s: `%s` is guarded by %s but did not survive into the effective "
+                            + "guarded set").formatted(pair.describe(), entry.getKey(), entry.getValue()));
+                }
+            }
+        }
+
+        assertThat(pairs)
+                .withFailMessage(PAIRING_FLOOR)
+                .hasSizeGreaterThanOrEqualTo(2);
+        assertThat(composeGuardCount)
+                .withFailMessage("No compose ${VAR:?} guard was found in any pair, so this control is "
+                        + "comparing two empty sets and would pass over anything")
+                .isGreaterThanOrEqualTo(4);
+        assertThat(lost)
+                .withFailMessage("""
+
+                        A COMPOSE GUARD LEFT THE GUARDED SET. IT WILL STILL REFUSE THE `up`.
+
+                        ${VAR:?} is evaluated during interpolation, before any container exists, so \
+                        NOTHING supplied under `environment:` can satisfy it - not in another file, \
+                        not in another service, not in the same one. Dropping it removes the rule \
+                        that keeps the variable in the template, and the operator meets the refusal \
+                        with no line to fill in.
+
+                        The usual cause is the literal exemption reaching the compose half: it \
+                        exists for PROPERTY guards only (an unresolvable ${VAR} in \
+                        application.properties, which a literal really does satisfy). If you are \
+                        extending it, extend that half. But this check only measures that the name \
+                        left the set - if the exemption is not what dropped it, find what did.
+
+                        %s""".formatted(String.join("\n  ", lost)))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>Stripping comments never loses a guard.</strong>
+     *
+     * <p>{@link #withoutComments} is not a YAML parser, and its failure direction is the
+     * dangerous one: strip too much and a {@code ${VAR:?}} silently leaves the registry, which
+     * nothing else goes red for. Its javadoc names two shapes it would get wrong — a
+     * {@code #} inside a block scalar, and an escaped quote inside a double-quoted one. Naming
+     * them is weaker than checking them, and by that javadoc's own argument they would arrive
+     * in the same commit as the line that introduces them.
+     *
+     * <p><strong>Held by a table with a human oracle, not by a rule over the real files.</strong>
+     * The obvious shape — "every guard in the raw text survives, unless its line is a comment"
+     * — was tried and is measurably wrong: {@code docker-compose.observability.yml:39} carries
+     * {@code - -config.expand-env=true   # allow ${LOKI_RETENTION_PERIOD} substitution}, a
+     * LIVE line whose trailing comment legitimately contains an expansion, so that rule reds
+     * on correct behaviour. Refining it to "the occurrence lies before the comment" makes it a
+     * restatement of {@link #endOfContent} — it would agree with the implementation whatever
+     * the implementation did, which is the vacuous shape this project keeps finding. A table
+     * of inputs with answers written by hand is the only oracle here that is independent of
+     * the code under test.
+     */
+    @Test
+    void strippingCommentsNeverRemovesAGuardFromANonCommentLine() {
+        record Case(String line, String mustKeep, String why) {
+        }
+        var cases = List.of(
+                new Case("      FOO: ${GUARDED:?why}   # trailing comment", "${GUARDED:?why}",
+                        "a guard with a comment after it"),
+                new Case("      FOO: \"a # b ${QUOTED:?why}\"", "${QUOTED:?why}",
+                        "a hash inside a double-quoted scalar is content, not a comment"),
+                new Case("      FOO: 'a # b ${SINGLE:?why}'", "${SINGLE:?why}",
+                        "the same in a single-quoted scalar"),
+                new Case("      FOO: \"he said \\\" # ${ESCAPED:?why}\"", "${ESCAPED:?why}",
+                        "a backslash-escaped quote does not end the quote early"),
+                new Case("      URL: http://x/#frag${FRAGMENT:?why}", "${FRAGMENT:?why}",
+                        "a hash not preceded by whitespace does not start a comment"));
+
+        var lost = new ArrayList<String>();
+        for (Case one : cases) {
+            if (!withoutComments(one.line()).contains(one.mustKeep())) {
+                lost.add("`%s` was stripped from `%s` - %s".formatted(one.mustKeep(), one.line().strip(),
+                        one.why()));
+            }
+        }
+
+        // The block scalar needs its neighbours, so it is asserted over a fragment.
+        String block = """
+                  entrypoint: |
+                    # this hash is CONTENT, not a comment
+                    exec app --token ${BLOCK:?why}
+                  next: value""";
+        if (!withoutComments(block).contains("${BLOCK:?why}")) {
+            lost.add("`${BLOCK:?why}` was stripped from a block scalar body - a `#` inside `|` or `>` "
+                     + "is content, and treating it as a comment swallows the rest of the block");
+        }
+
+        assertThat(lost)
+                .withFailMessage("""
+
+                        THE COMMENT STRIPPER REMOVED A GUARD THAT IS NOT IN A COMMENT.
+
+                        This is the failure direction that costs something: the variable quietly \
+                        leaves the guarded registry, so nothing then requires it in any env \
+                        template, and the operator meets a refusal naming a variable their file \
+                        does not contain. Nothing else in this class goes red for it.
+
+                        Fix endOfContent() / withoutComments(); do not relax a row below. Each row \
+                        is a shape YAML gives a meaning to, and the answers are written by hand \
+                        precisely so this cannot agree with a broken implementation.
+
+                        (%d shapes checked.)
+
+                        %s""".formatted(cases.size() + 1, String.join("\n  ", lost)))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>A stack that guards values must ship the template those values go in.</strong>
+     *
+     * <p>The pairing is derived, which means a stack with no template beside it forms no pair
+     * and is therefore checked by nothing — silently, and exactly when a second stack is
+     * added, which is the moment this whole rule exists for. So the obligation is asserted
+     * from the compose side as well as the template side.
+     *
+     * <p>Deliberately over {@code publishableFiles}, not the index: a compose file that has
+     * been written but not staged is precisely the one whose template is easiest to forget,
+     * and holding it to this rule can only make the check stricter.
+     */
+    @Test
+    void everyStackThatGuardsAValueHasATemplateBesideIt() throws IOException {
+        var orphans = new ArrayList<String>();
+        int examined = 0;
+
+        for (Path compose : PublishedCredentials.publishableFiles(".")) {
+            if (!compose.getFileName().toString().matches("docker-compose.*\\.ya?ml")) {
+                continue;
+            }
+            if (!COMPOSE_GUARD.matcher(withoutComments(Files.readString(compose, StandardCharsets.UTF_8)))
+                    .find()) {
+                continue;
+            }
+            examined++;
+            String directory = directoryOf(compose);
+            boolean hasTemplate = PublishedCredentials.publishableFiles(".").stream()
+                    .filter(PublishedCredentials::isEnvTemplate)
+                    .anyMatch(template -> directoryOf(template).equals(directory));
+            if (!hasTemplate) {
+                orphans.add(PublishedCredentials.repositoryPath(compose));
+            }
+        }
+
+        assertThat(examined)
+                .withFailMessage("No compose file in this tree declares a ${VAR:?} guard, so the "
+                        + "pairing rule is checking nothing at all")
+                .isGreaterThanOrEqualTo(1);
+        assertThat(orphans)
+                .withFailMessage("""
+
+                        A compose file refuses to start without values an operator must supply, and \
+                        there is no env template beside it to tell them which.
+
+                        They meet the guard as a bare refusal naming a variable, with no file to put \
+                        it in. Add a `.env.example` in the same directory carrying every guarded \
+                        name, EMPTY - the two rules above then hold the pair together.
+
+                        (%d guarded stacks examined.)
+
+                        Stacks with no template: %s""".formatted(examined, orphans))
+                .isEmpty();
+    }
+
+    /**
+     * <strong>No template ships a value that would CREATE AN ACCOUNT.</strong>
+     *
+     * <p>{@link #noTemplateShipsACredential} holds the password half of that pair and cannot
+     * hold the address half: {@code CREDENTIAL_SHAPED} matches names ending {@code PASSWORD},
+     * {@code SECRET}, {@code TOKEN} and so on, and {@code SEED_ADMIN_EMAIL} ends in
+     * {@code EMAIL}. So the address shipped filled for as long as the file existed, and the
+     * reasoning written above it in {@code .env.prod.example} — <em>a filled address does not
+     * fail, it agrees</em> — was a claim nothing held. Measured at the time: restoring the
+     * placeholder left the whole suite green.
+     *
+     * <p><strong>Why a template rule and not a {@code ${VAR:?}} in the production
+     * stack.</strong> Guarding it there would refuse the {@code up} for every existing
+     * install that followed this project's own advice and deleted the seeding pair once the
+     * administrator existed — turning a first-install convenience into a permanently required
+     * value on a running production box. The DC stack guards it because it has a reason prod
+     * does not: on a fresh {@code dc} install with public signup closed, that address is the
+     * only door in. A template rule refuses the published value without changing what any
+     * stack demands.
+     *
+     * <p><strong>The members are derived from {@code DataSeeder}, and the exclusion is a
+     * property rather than a name.</strong> They are the {@code seed.admin.*} {@code @Value}
+     * keys whose default is EMPTY — the ones the seeder treats as "not configured" and
+     * returns on. {@code seed.admin.display-name} defaults to {@code Admin} and is therefore
+     * not a member, which is the right answer for the right reason: a display name is not an
+     * identity, and {@code #SEED_ADMIN_DISPLAY_NAME=Admin} in a template is fine. If someone
+     * gives it an empty default one day, it joins on that day.
+     *
+     * <p><strong>The floor below is a COUNT, and it is only tight because the category has
+     * exactly two members.</strong> At two, losing one to a reformat — a line-wrapped
+     * {@code @Value}, a space in {@code ${seed.admin.email: }} — takes it to one and reds. At
+     * three it would take it to two and pass, silently, with a member outside the rule. If a
+     * third member ever appears, replace the floor: count every {@code seed.admin.} key the
+     * file mentions and assert that the empty-default partition plus the defaulted one
+     * accounts for all of them, so the check is about the partition rather than about a
+     * number.
+     */
+    @Test
+    void noTemplateShipsAValueThatWouldCreateAnAccount() throws IOException {
+        Map<String, String> members = accountCreatingVariables();
+        var offences = new ArrayList<String>();
+
+        for (Path template : templates()) {
+            for (Pattern form : List.of(ENABLED, DISABLED)) {
+                var found = assignments(template, form);
+                for (var member : members.entrySet()) {
+                    Assignment shipped = found.get(member.getKey());
+                    if (shipped != null && !isEmptyValue(shipped.value())) {
+                        offences.add("%s:%d ships `%s=%s` (%s)".formatted(
+                                PublishedCredentials.repositoryPath(template), shipped.line(),
+                                member.getKey(), render(shipped.value()), member.getValue()));
+                    }
+                }
+            }
+        }
+
+        assertThat(members)
+                .withFailMessage("No account-creating variable was derived from DataSeeder, so this rule "
+                        + "is checking nothing. The members are the seed.admin.* @Value keys with an "
+                        + "EMPTY default - if that shape changed, teach accountCreatingVariables() the "
+                        + "new one rather than listing names here.")
+                .hasSizeGreaterThanOrEqualTo(2);
+        assertThat(offences)
+                .withFailMessage("""
+
+                        A TEMPLATE SHIPS A VALUE THAT WOULD CREATE AN ADMINISTRATOR ACCOUNT.
+
+                        A filled-in address does not FAIL, it AGREES. Together with a password it \
+                        makes an unedited copy seed a real, ACTIVE system administrator - and with \
+                        only one of the two filled it still decides WHO that account will be, at an \
+                        address the reader does not own and cannot receive a password reset at.
+
+                        Ship the line EMPTY. Empty is what the seeder reads as "not configured": it \
+                        logs that seeding was skipped and returns before touching the users table, \
+                        so an unedited copy creates nothing at all.
+
+                        A reserved example domain is not a fix - that was the previous answer here, \
+                        and it still produced an ACTIVE administrator nobody could receive mail for.
+
+                        %s""".formatted(String.join("\n  ", offences)))
+                .isEmpty();
+    }
+
+    /** {@code SEED_ADMIN_EMAIL} → why it matters, derived from {@code DataSeeder}'s own defaults. */
+    private static Map<String, String> accountCreatingVariables() throws IOException {
+        var members = new LinkedHashMap<String, String>();
+        Path seeder = Path.of("src/main/java/com/hamstrack/common/seed/DataSeeder.java");
+        Matcher m = Pattern.compile("@Value\\(\"\\$\\{(seed\\.admin\\.[a-z.\\-]+):}\"\\)")
+                .matcher(Files.readString(seeder, StandardCharsets.UTF_8));
+        while (m.find()) {
+            members.put(m.group(1).toUpperCase(Locale.ROOT).replace('.', '_').replace('-', '_'),
+                    "DataSeeder reads " + m.group(1) + " with an empty default");
+        }
+        return members;
     }
 
     /**
@@ -312,26 +635,257 @@ class EnvTemplateGuardTest {
 
     // ── enumeration ────────────────────────────────────────────────────────────────────
 
-    /** variable name → the file and the form that guards it, for the failure message. */
-    private static Map<String, String> guardedVariables() throws IOException {
-        var guarded = new LinkedHashMap<String, String>();
+    /**
+     * A template and the compose files it is the template FOR — the ones beside it in its own
+     * directory.
+     *
+     * <p><strong>The pairing used to be one hard-coded path</strong>, and the guarded set was
+     * GLOBAL: every {@code ${VAR:?}} in every compose file anywhere was demanded of
+     * {@code .env.prod.example}. So adding the self-hosted stack under {@code deploy/dc/} put
+     * its four guards onto the production template, where no reader of
+     * {@code docker-compose.prod.yml} will ever meet them — and, in the other direction, the
+     * new template was held to nothing at all. A rule keyed on one member cannot see a second
+     * pair arriving; this one is derived, so the next {@code deploy/<model>/} directory joins
+     * on the day it is created.
+     */
+    private record Pair(Path template, List<Path> composeFiles) {
+
+        String describe() {
+            return PublishedCredentials.repositoryPath(template);
+        }
+    }
+
+    private static List<Pair> pairs() {
+        var byDirectory = new LinkedHashMap<String, List<Path>>();
         for (Path compose : composeFiles()) {
-            var m = COMPOSE_GUARD.matcher(Files.readString(compose, StandardCharsets.UTF_8));
-            while (m.find()) {
-                guarded.putIfAbsent(m.group(1), compose.getFileName() + " (${" + m.group(1) + ":?...})");
+            byDirectory.computeIfAbsent(directoryOf(compose), unused -> new ArrayList<>()).add(compose);
+        }
+
+        var found = new ArrayList<Pair>();
+        for (Path template : PublishedCredentials.publishableFiles(".")) {
+            if (!PublishedCredentials.isEnvTemplate(template)) {
+                continue;
+            }
+            List<Path> beside = byDirectory.get(directoryOf(template));
+            if (beside != null && !beside.isEmpty()) {
+                found.add(new Pair(template.normalize(), beside));
             }
         }
+        return found;
+    }
+
+    private static String directoryOf(Path file) {
+        String path = PublishedCredentials.repositoryPath(file);
+        int slash = path.lastIndexOf('/');
+        return slash < 0 ? "" : path.substring(0, slash);
+    }
+
+    /**
+     * Variable name → the file and the form that guards it, for the failure message.
+     *
+     * <p>Property guards are global by nature: {@code application.properties} is read by
+     * whichever stack starts the application, so an unresolvable {@code ${VAR}} there refuses
+     * the boot of every one of them.
+     *
+     * <p><strong>Comments are stripped first (HD-314).</strong> This read the file as one
+     * string, so a line of PROSE spelling a live {@code ${NAME:?}} — explaining what the
+     * guards are — registered {@code NAME} as a variable every template then had to ship. The
+     * failure message offers two remedies and both are wrong for that input: emptying a line
+     * for a variable nothing reads, or installing a permanent exemption for a word that was
+     * never a variable, which the next real one then inherits as precedent.
+     */
+    private static Map<String, String> guardedVariables(Pair pair) throws IOException {
+        Map<String, String> compose = composeGuards(pair);
+
+        // The PROPERTY half, and the only half the literal exemption may touch.
+        var property = new LinkedHashMap<String, String>();
         for (Path properties : propertyFiles()) {
-            var m = PROPERTY_GUARD.matcher(Files.readString(properties, StandardCharsets.UTF_8));
+            var m = PROPERTY_GUARD.matcher(withoutComments(Files.readString(properties, StandardCharsets.UTF_8)));
             while (m.find()) {
-                guarded.putIfAbsent(m.group(1), properties.getFileName() + " (${" + m.group(1) + "}, no default)");
+                property.putIfAbsent(m.group(1), PublishedCredentials.repositoryPath(properties)
+                        + " (${" + m.group(1) + "}, no default)");
             }
         }
+        literalEnvironmentNames(pair.composeFiles()).forEach(property::remove);
+
+        var guarded = new LinkedHashMap<>(compose);
+        property.forEach(guarded::putIfAbsent);
         assertThat(guarded)
-                .withFailMessage("No guards were found at all - the enumeration is broken, which would "
-                        + "make every other assertion in this class vacuously true")
+                .withFailMessage("No guards were found at all for %s - the enumeration is broken, which "
+                        + "would make every other assertion in this class vacuously true", pair.describe())
                 .isNotEmpty();
         return guarded;
+    }
+
+    /** Every {@code ${VAR:?}} in this pair's compose files. Never reduced by an exemption. */
+    private static Map<String, String> composeGuards(Pair pair) throws IOException {
+        var guarded = new LinkedHashMap<String, String>();
+        for (Path compose : pair.composeFiles()) {
+            var m = COMPOSE_GUARD.matcher(withoutComments(Files.readString(compose, StandardCharsets.UTF_8)));
+            while (m.find()) {
+                guarded.putIfAbsent(m.group(1), PublishedCredentials.repositoryPath(compose)
+                        + " (${" + m.group(1) + ":?...})");
+            }
+        }
+        return guarded;
+    }
+
+    /**
+     * A {@code #} comment, in both formats this reads. YAML ends a value at an unquoted
+     * {@code #} preceded by whitespace, and a {@code .properties} comment is a line whose
+     * first non-blank character is {@code #} or {@code !}.
+     *
+     * <p><strong>Quoted scalars are tracked, because getting this wrong narrows guard
+     * DETECTION and nothing goes red for that.</strong> The first version cut at any
+     * {@code #} preceded by whitespace, so {@code VALUE: "a # b"} lost everything from the
+     * hash — and a {@code ${VAR:?}} written after one inside a quoted value would have
+     * stopped being seen as a guard. No line in this repository has that shape today, which
+     * is precisely why it had to be fixed rather than left as a note: the failure mode is a
+     * guard silently leaving the registry, and it would arrive with the line that introduces
+     * it.
+     *
+     * <p>Still not a YAML parser, but the two shapes that would make it strip MORE than it
+     * should are handled rather than merely named, because stripping too much hides a guard
+     * and nothing else goes red for that: a {@code #} inside a block scalar ({@code |} /
+     * {@code >}) is content, and a backslash-escaped quote inside a double-quoted scalar does
+     * not end the quote. {@code strippingCommentsNeverRemovesAGuardFromANonCommentLine} holds
+     * both.
+     */
+    private static String withoutComments(String text) {
+        var kept = new ArrayList<String>();
+        int blockIndent = -1;
+        for (String line : text.split("\n", -1)) {
+            String stripped = line.strip();
+            int indent = line.length() - line.stripLeading().length();
+
+            // Inside a block scalar every character is content, including `#`.
+            if (blockIndent >= 0) {
+                if (stripped.isEmpty() || indent > blockIndent) {
+                    kept.add(line);
+                    continue;
+                }
+                blockIndent = -1;
+            }
+            if (stripped.startsWith("#") || stripped.startsWith("!")) {
+                kept.add("");
+                continue;
+            }
+            String content = line.substring(0, endOfContent(line));
+            if (BLOCK_SCALAR_HEADER.matcher(content).find()) {
+                blockIndent = indent;
+            }
+            kept.add(content);
+        }
+        return String.join("\n", kept);
+    }
+
+    /** {@code key: |}, {@code key: >-}, {@code key: |2} — everything below it is content. */
+    private static final Pattern BLOCK_SCALAR_HEADER = Pattern.compile("[|>][+-]?[0-9]*[ \\t]*$");
+
+    /** Where a line's content stops: the first {@code #} that starts a comment, else its end. */
+    private static int endOfContent(String line) {
+        char quote = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (quote == '"' && ch == '\\') {
+                i++;                              // an escaped character, quote included
+            } else if (quote != 0) {
+                if (ch == quote) {
+                    quote = 0;
+                }
+            } else if (ch == '"' || ch == '\'') {
+                quote = ch;
+            } else if (ch == '#' && (i == 0 || line.charAt(i - 1) == ' ' || line.charAt(i - 1) == '\t')) {
+                return i;
+            }
+        }
+        return line.length();
+    }
+
+    /**
+     * {@code NAME: literal} under an {@code environment:} block — not an interpolation.
+     *
+     * <p><strong>This may only ever excuse a PROPERTY guard, never a Compose one, and the
+     * distinction is the whole correctness argument.</strong> A property guard
+     * ({@code ${DB_URL}} with no default in {@code application.properties}) is satisfied by
+     * the container <em>receiving</em> a value, and a literal under {@code environment:}
+     * really does deliver one whatever {@code .env} says — so the operator genuinely never
+     * has to set it. A Compose guard ({@code ${VAR:?}}) is refused by Compose during
+     * <em>interpolation</em>, before any container exists; no literal anywhere satisfies it,
+     * so excusing one hides a refusal that will still fire.
+     *
+     * <p>That is also why "only excuse a literal from the same FILE" is not the fix: within
+     * one file, service A's {@code ${FOO:?}} is not satisfied by service B's
+     * {@code FOO: literal} either. Compose still refuses. The split is by guard KIND because
+     * the difference is about when the guard is evaluated, not about where it is written.
+     *
+     * <p><strong>What this cost when it was wrong (HD-314, fix round 2).</strong> The
+     * exemption was applied to both halves, and {@link #pairs()} groups every compose file in
+     * a directory — so at the repository root, where four files sit together, a
+     * <em>development</em> literal cancelled a <em>production</em> guard:
+     * {@code docker-compose.observability.dev.yml} supplies
+     * {@code GF_SECURITY_ADMIN_PASSWORD} and {@code OBS_ALERT_EMAIL_TO} as literals, and both
+     * vanished from the guarded set of {@code docker-compose.observability.yml}, which guards
+     * them. An operator running only the production file still meets those refusals. Nothing
+     * broke, because both lines happen to be present and empty in the template — what was
+     * removed was the protection, and {@code OBS_ALERT_EMAIL_TO}'s own guard message says an
+     * empty value disables every alert rule rather than only its delivery.
+     *
+     * <p><strong>And the lesson that is bigger than the bug.</strong> This replaced a
+     * one-entry hand-kept map, whose single exemption carried a written reason a reviewer
+     * could argue with, by a derivation that excused SEVENTEEN names at the root pair —
+     * including two credential-shaped ones. Deleting the map was still right: a derived
+     * exclusion is auditable where a list is not. But it is only auditable if somebody
+     * actually audits it <em>when it lands</em>, and nothing in that change printed the
+     * delta, which is exactly why the suite stayed green over a removed guard.
+     * {@code theLiteralExemptionNeverShrinksTheComposeHalf} is that audit, made permanent.
+     *
+     * <p><strong>And here is the audit, which turns "derived, therefore fine" into a measured
+     * equivalence.</strong> {@code application.properties} declares exactly four no-default
+     * variables — {@code DB_PASSWORD}, {@code DB_URL}, {@code DB_USERNAME},
+     * {@code JWT_SECRET} — so once the exemption is confined to the property half, the
+     * seventeen literals intersect it in almost nothing. At the root pair it excuses
+     * {@code DB_URL} <em>and nothing else</em>: precisely the single entry the deleted
+     * hand-kept map carried. At {@code deploy/dc/} it additionally excuses
+     * {@code DB_USERNAME}, correctly, because that stack supplies it as a literal. The
+     * derivation is therefore equivalent to the map it replaced, plus one new case that is
+     * right — which is a far stronger claim than "it is derived".
+     *
+     * <p><strong>A structural gap on the other side of the split, noted rather than
+     * fixed.</strong> The compose half now has a permanent delta control; the property half
+     * has none, so a future change widening what counts as a literal could quietly excuse one
+     * of those four. The risk is small and bounded by that enumeration — four reachable names,
+     * all of them things an operator either must set or demonstrably must not — which is why
+     * this is a note and not a defect. If the property half ever stops being four names, it
+     * wants the same control the compose half has.
+     */
+    private static Set<String> literalEnvironmentNames(List<Path> composeFiles) throws IOException {
+        var names = new LinkedHashSet<String>();
+        for (Path compose : composeFiles) {
+            int blockIndent = -1;
+            for (String raw : withoutComments(Files.readString(compose, StandardCharsets.UTF_8)).split("\n", -1)) {
+                if (raw.isBlank()) {
+                    continue;
+                }
+                int indent = raw.length() - raw.stripLeading().length();
+                if (raw.strip().equals("environment:")) {
+                    blockIndent = indent;
+                    continue;
+                }
+                if (blockIndent < 0) {
+                    continue;
+                }
+                if (indent <= blockIndent) {
+                    blockIndent = -1;
+                    continue;
+                }
+                Matcher entry = Pattern.compile("^([A-Z_][A-Z0-9_]*):[ \\t]+(\\S.*)$").matcher(raw.strip());
+                if (entry.matches() && !PublishedCredentials.unquote(entry.group(2).strip()).startsWith("${")) {
+                    names.add(entry.group(1));
+                }
+            }
+        }
+        return names;
     }
 
     /**
