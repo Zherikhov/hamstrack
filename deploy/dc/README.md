@@ -3,6 +3,11 @@
 The application and PostgreSQL, and nothing else. No domain, no TLS and no SMTP server are
 needed to get an instance running and sign in to it.
 
+**Needs an x86-64 (`amd64`) host.** The published image has no `arm64` build, so the first
+command below fails on an Ampere or Graviton VPS, a Raspberry Pi or an ARM virtual machine —
+`no matching manifest for linux/arm64/v8`. Check with `docker version --format
+'{{.Server.Arch}}'` before you start.
+
 ```bash
 cp .env.example .env
 # Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD.

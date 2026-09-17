@@ -36,7 +36,7 @@ One codebase ships in two deployment models:
 
 ## Self-hosting (DC)
 
-Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. The stack is in this repository at [`deploy/dc/`](deploy/dc/); the schema migrates itself on startup (Flyway).
+Hamstrack self-hosts as a single Docker image (`ghcr.io/zherikhov/hamstrack`) plus PostgreSQL — `SPRING_PROFILES_ACTIVE=dc`, everything else via environment variables. The stack is in this repository at [`deploy/dc/`](deploy/dc/); the schema migrates itself on startup (Flyway). **The image is published for `linux/amd64` only** — there is no `arm64` build, so the commands below need an x86-64 host ([Requirements](docs/self-hosting.md#requirements)).
 
 ```bash
 git clone https://github.com/Zherikhov/hamstrack.git

@@ -60,6 +60,15 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 ## Requirements
 
 - Docker with the Compose plugin.
+- **An `x86-64` (`amd64`) host.** The published image is built for `linux/amd64`
+  only — there is no `arm64` build, so an Ampere or Graviton VPS, a Raspberry Pi
+  or an ARM virtual machine cannot run it as published. Apple Silicon works only
+  through Docker Desktop's emulation, which is slow and is not a supported
+  deployment. Building the image yourself on an arm64 host is the obvious way
+  round it and is **untested by this project** — the ingredients are there (both
+  `eclipse-temurin` base images this repository uses publish `arm64`, and the
+  Dockerfile fetches no architecture-specific binary), but nobody has run it, so
+  treat it as a lead rather than as instructions.
 - A PostgreSQL 16 database (the sample compose runs one for you).
 - For a public instance: a domain and a TLS-terminating reverse proxy (Caddy,
   nginx, Traefik…). HTTP-only on `localhost` works for trying it out.
@@ -3226,6 +3235,7 @@ Most S3-compatible stores expose the same two settings under different names.
 
 | Symptom | Likely cause & fix |
 |---|---|
+| `docker compose pull` or `up` fails with `no matching manifest for linux/arm64/v8`, or the container dies immediately with `exec format error` | Your host is **arm64** and the published image is `linux/amd64` only — see [Requirements](#requirements). Nothing in your configuration is wrong and no variable fixes it. Check with `docker version --format '{{.Server.Arch}}'`: anything other than `amd64` meets this. `exec format error` rather than a pull failure means Docker found *some* image to run — usually one built elsewhere, or a stale local one — and the kernel refused the binary. |
 | App exits at startup with a JWT/key error | `JWT_SECRET` is missing or shorter than 32 bytes — HMAC-SHA256 requires ≥32. Generate one: `openssl rand -base64 48`. |
 | App exits at startup saying `JWT_SECRET` is "a value published in Hamstrack's own documentation" | The secret is one of the placeholders this repository has shipped (they pass the length check, which is why they are refused by name). It is not newly unsafe — the upgrade only started saying so. Replace it with `openssl rand -base64 48`. That rejects every access token signed with the old key immediately but does **not** sign anyone out — clients re-issue from their refresh cookie — so if you think the published value was used against you, [there are two more steps](#what-rotating-jwt_secret-does-and-what-it-does-not). See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design). |
 | App exits at startup saying `SEED_ADMIN_PASSWORD` is "the value this project published" | Your `.env` carries the password the template used to ship, so the administrator account it seeded — named in the message — is signable-into by anyone who can read this repository. **Clearing the variable does not fix it**: seeding is idempotent, the account already exists and keeps that password. Reset or delete that user first, then set your own value or none — [step by step](#if-your-instance-has-the-published-admin-account). |
