@@ -89,7 +89,7 @@ public class ShadowedFieldStartupScan {
                      + "built-in search field '{}'. HQL `{} = …` answers from the built-in field, not from "
                      + "this one, and it is not offered in /search/schema. A taxonomy admin at that scope "
                      + "can rename its key (PATCH …/fields/{}); see "
-                     + "docs/self-hosting.md#shadowed-custom-field-keys-from-0180.",
+                     + "docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.",
                     oneLine(f.getName()), oneLine(f.getKey()), f.getId(), scopeOf(f),
                     registry.find(f.getKey()).map(FieldDescriptor::name).orElse("?"),
                     oneLine(f.getKey()), f.getId());

@@ -49,7 +49,7 @@ docker compose up -d --wait --wait-timeout 120
 
 That command **exits non-zero if the stack does not come up**, so its exit code is the check: a plain `docker compose up -d` returns 0 even while a container is crash-looping. On success it returns once both services are healthy (~35s on a warm image). On failure it names the service — `container dc-app-1 is unhealthy` — and `docker compose logs app` carries the reason, because the application refuses a bad value by name at startup.
 
-Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. No SMTP server and no domain are needed for this.
+Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. No SMTP server and no domain are needed for this. Your instance serves its own API reference at `/docs`, rendered from the OpenAPI spec at `/openapi.yaml`.
 
 To pin a release line rather than track the current one, set `APP_IMAGE_TAG` in `deploy/dc/.env`; the template names the current line and says why `latest` is the wrong answer.
 

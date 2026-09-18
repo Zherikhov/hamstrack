@@ -103,6 +103,14 @@ class UpgradeNotesCoverageTest {
     private static final String SELF_HOSTING = "docs/self-hosting.md";
     private static final String RELEASE_CHECKLIST = "docs/release-checklist.md";
 
+    /**
+     * Where the per-release notes live since HD-319. They were moved out of {@link #SELF_HOSTING}
+     * because they were about half of a 3300-line page that a first-time installer had to read
+     * past; the guide keeps the mechanics of upgrading (which tag to pin, applying repository
+     * configuration, why downgrades are not supported) and one link per release line.
+     */
+    private static final String UPGRADE_NOTES = "docs/self-hosting-upgrades.md";
+
     /** The section of {@code docs/self-hosting.md} whose subsections a release body must carry. */
     private static final String UPGRADING_HEADING = "## Upgrading";
 
@@ -114,26 +122,33 @@ class UpgradeNotesCoverageTest {
     private static final Pattern RELEASE_IN_HEADING = Pattern.compile("\\b\\d+\\.\\d+\\.\\d+\\b");
 
     /**
-     * Any reference to a fragment of the self-hosting page, in either form the checklist uses: the
-     * repository-relative {@code self-hosting.md#...} and the absolute
-     * {@code https://github.com/.../docs/self-hosting.md#...} that a Release body needs, since a
-     * relative link pasted into a Release body resolves against github.com and 404s.
+     * Any reference to a fragment of the upgrade notes, in either form the checklist uses: the
+     * repository-relative {@code self-hosting-upgrades.md#...} and the absolute
+     * {@code https://github.com/.../docs/self-hosting-upgrades.md#...} that a Release body needs,
+     * since a relative link pasted into a Release body resolves against github.com and 404s.
+     *
+     * <p>The {@code -upgrades} is required rather than optional, and that is load-bearing: a
+     * checklist blurb still pointing at {@code self-hosting.md#some-note} after HD-319 moved the
+     * note is a dead link in a Release body, and making the suffix optional here would match it and
+     * call it alive.
      */
     private static final Pattern SELF_HOSTING_ANCHOR =
-            Pattern.compile("self-hosting\\.md#([A-Za-z0-9._%-]+)");
+            Pattern.compile("self-hosting-upgrades\\.md#([A-Za-z0-9._%-]+)");
 
     /**
-     * The {@code ###} subsections under {@code ## Upgrading} that name no release, each with the
-     * reason it owes no blurb. Membership here is a decision somebody made; absence from it is the
-     * failure this test reports, so a new unversioned subsection stops the build until its author
-     * says which it is.
+     * The {@code ###} subsections of {@code docs/self-hosting-upgrades.md} that name no release,
+     * each with the reason it owes no blurb. Membership here is a decision somebody made; absence
+     * from it is the failure this test reports, so a new unversioned subsection stops the build
+     * until its author says which it is.
+     *
+     * <p>{@code Applying repository configuration} used to be a member and is deliberately not one
+     * any more: HD-319 moved the release notes out of the guide and that section <em>stayed</em>,
+     * because it is the evergreen procedure for the file half of any upgrade rather than a note
+     * about one release. It is now outside the scanned population entirely, which is the honest
+     * place for it — an exemption for a section this test no longer reads would be a line nobody
+     * could ever make fail.
      */
     private static final Map<String, String> UNVERSIONED_SUBSECTIONS = Map.of(
-            "Applying repository configuration",
-            "Evergreen procedure for the file half of any upgrade, not a change any one release "
-            + "makes. It is reached from the ## Upgrading prose, and a release body that repeated "
-            + "it every time would train its readers to skip the release body.",
-
             "Duplicate accounts after an upgrade (locale-dependent email folding)",
             "A remedy, not a change: it describes behaviour 0.16.0 fixed and is reached from the "
             + "0.18.0 address refusal, which is the only path that leads to it now and is where a "
@@ -194,7 +209,7 @@ class UpgradeNotesCoverageTest {
      */
     @Test
     void theScanResolvesTheSectionsItClaimsToRead() throws IOException {
-        for (var doc : List.of(SELF_HOSTING, RELEASE_CHECKLIST)) {
+        for (var doc : List.of(SELF_HOSTING, UPGRADE_NOTES, RELEASE_CHECKLIST)) {
             assertThat(Files.isRegularFile(Path.of(doc)))
                     .as("'%s' does not exist. Either it was renamed and this test did not move with "
                         + "it, or the working directory is not the project root (it is '%s').",
@@ -202,28 +217,34 @@ class UpgradeNotesCoverageTest {
                     .isTrue();
         }
 
+        // The guide keeps the MECHANICS of upgrading even though the notes left it, and it is the
+        // page every upgrader is sent to first, so its section still has to be there to route from.
         assertThat(read(SELF_HOSTING))
-                .as("'%s' no longer contains a '%s' heading, so the section this test pairs "
-                    + "against cannot be located. If it was renamed, rename it here too -- every "
-                    + "assertion below silently passes over an empty section.",
-                        SELF_HOSTING, UPGRADING_HEADING)
+                .as("'%s' no longer contains a '%s' heading, so the page that routes an upgrader to "
+                    + "'%s' has lost the section it routes from. If it was renamed, rename it here "
+                    + "too.", SELF_HOSTING, UPGRADING_HEADING, UPGRADE_NOTES)
                 .contains(UPGRADING_HEADING);
 
+        assertThat(read(SELF_HOSTING))
+                .as("'%s' no longer links to '%s' at all. The notes moved there (HD-319) and the "
+                    + "guide is where a reader looks first -- a move that leaves no route is a move "
+                    + "that hid them.", SELF_HOSTING, UPGRADE_NOTES)
+                .contains("self-hosting-upgrades.md");
+
         assertThat(upgradeSubsections())
-                .as("the '%s' section of '%s' yielded no '###' subsections at all", UPGRADING_HEADING,
-                        SELF_HOSTING)
+                .as("'%s' yielded no '###' subsections at all", UPGRADE_NOTES)
                 .isNotEmpty();
 
         assertThat(versionedSubsections())
-                .as("the '%s' section of '%s' yielded almost no release-versioned subsections, so "
-                    + "the coverage assertion is running on an empty set and passing for that "
-                    + "reason", UPGRADING_HEADING, SELF_HOSTING)
+                .as("'%s' yielded almost no release-versioned subsections, so the coverage "
+                    + "assertion is running on an empty set and passing for that reason",
+                        UPGRADE_NOTES)
                 .hasSizeGreaterThanOrEqualTo(5);
 
-        assertThat(headingAnchors(read(SELF_HOSTING)))
+        assertThat(headingAnchors(read(UPGRADE_NOTES)))
                 .as("no headings were parsed out of '%s', so the dead-link assertion cannot fail",
-                        SELF_HOSTING)
-                .hasSizeGreaterThan(20);
+                        UPGRADE_NOTES)
+                .hasSizeGreaterThan(10);
     }
 
     // ============================================================ 2. forward: subsection -> blurb
@@ -277,7 +298,7 @@ class UpgradeNotesCoverageTest {
      */
     @Test
     void everyAnchorTheChecklistPointsAtStillExists() throws IOException {
-        var anchors = headingAnchors(read(SELF_HOSTING));
+        var anchors = headingAnchors(read(UPGRADE_NOTES));
         var checklist = read(RELEASE_CHECKLIST).split("\\R", -1);
         var dead = new ArrayList<String>();
 
@@ -357,23 +378,22 @@ class UpgradeNotesCoverageTest {
 
     // ============================================================ scanning
 
-    /** Every {@code ###} heading between {@code ## Upgrading} and the next {@code ##}, in order. */
+    /**
+     * Every {@code ###} heading in {@code docs/self-hosting-upgrades.md}, in order.
+     *
+     * <p><strong>The notes moved (HD-319) and the rule did not.</strong> They used to sit under
+     * {@code ## Upgrading} in the self-hosting guide, where they were about half of a 3300-line
+     * page a first-time installer had to read past. What this test enforces is that an
+     * upgrade-visible change has an anchored section an operator reads <em>and</em> a paste-ready
+     * blurb pointing at it — not which file the section is in. So the address changed here and
+     * nothing else did: the floors, the exemption map, the dead-link walk and the two directions
+     * are untouched. The whole of the upgrades document is release notes, so there is no enclosing
+     * section to scan between; a {@code ####} is still subordinate to the subsection above it and
+     * is routed to through that one, never independently.
+     */
     private static List<String> upgradeSubsections() throws IOException {
         var found = new ArrayList<String>();
-        var inSection = false;
-        for (var line : read(SELF_HOSTING).split("\\R", -1)) {
-            if (line.equals(UPGRADING_HEADING)) {
-                inSection = true;
-                continue;
-            }
-            if (!inSection) {
-                continue;
-            }
-            if (line.startsWith("## ")) {
-                break;
-            }
-            // '###' only: a '####' is subordinate to the subsection above it and is routed to
-            // through that one, never independently.
+        for (var line : read(UPGRADE_NOTES).split("\\R", -1)) {
             if (line.startsWith("### ")) {
                 found.add(line.substring(4).trim());
             }

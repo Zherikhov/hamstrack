@@ -465,7 +465,7 @@ cannot see is indistinguishable from one that does not exist, and its existence 
   shadowed-field-def: custom field '<name>' (key '<key>', id <uuid>, scope <global|workspace <uuid>|project <uuid>>)
   is shadowed by the built-in search field '<canonical>'. HQL `<key> = …` answers from the built-in field, not from
   this one, and it is not offered in /search/schema. A taxonomy admin at that scope can rename its key
-  (PATCH …/fields/<uuid>); see docs/self-hosting.md#shadowed-custom-field-keys-from-0180.
+  (PATCH …/fields/<uuid>); see docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180.
   ```
   plus one summary line `shadowed-field-def: <n> custom field definition(s) are shadowed by built-in search names`.
 - It emits ids, keys, names and scope ids — **never issue data, never field values**.

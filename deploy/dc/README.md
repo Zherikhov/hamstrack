@@ -8,12 +8,11 @@ command below fails on an Ampere or Graviton VPS, a Raspberry Pi or an ARM virtu
 `no matching manifest for linux/arm64/v8`. Check with `docker version --format
 '{{.Server.Arch}}'` before you start.
 
-```bash
-cp .env.example .env
-# Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD.
-# If you skip one, the next command refuses and names it.
-docker compose up -d --wait --wait-timeout 120
-```
+**The install steps live once, in the [repository README](../../README.md#self-hosting-dc)** —
+copy the template beside this file, fill what the refusals name, and bring the stack up. You
+are already in the directory they `cd` into, so you can start at the copy. They are not
+repeated here on purpose: the same four commands in two files drift in their flags, and the
+flag below is the one that matters.
 
 `--wait` makes the exit code the check: it returns 0 only once both services are healthy
 (~35s on a warm image), and otherwise fails naming the service. Without it, `up -d` returns 0
@@ -55,7 +54,7 @@ docker compose down -v                        # stop AND DESTROY both volumes
 (every uploaded file). There is no undo.
 
 These commands assume you run them **from this directory**, with `.env` beside them. If you
-have added the [observability stack](../../docs/observability.md#observability-optional), its
+have added the [observability stack](../../docs/self-hosting.md#observability-optional), its
 instructions move `.env` to the repository root and run from there — these then fail with
 `required variable ... is missing a value`, naming something you have already set. Run the
 full `-f` set from the root instead, and keep pinning `COMPOSE_PROJECT_NAME=dc`.

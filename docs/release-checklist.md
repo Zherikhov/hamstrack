@@ -274,7 +274,7 @@ this change cannot stop a container starting.
 > **Saved filters are never rewritten.** Anyone whose stored query mentions the old
 > key edits it themselves; until they do it keeps answering from the built-in field,
 > exactly as it did before the rename. Details:
-> [Shadowed custom field keys from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#shadowed-custom-field-keys-from-0180).
+> [Shadowed custom field keys from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#shadowed-custom-field-keys-from-0180).
 
 ## Releases that change how a stored value is derived
 
@@ -289,7 +289,7 @@ section); this does not break at all.
 about tagging and rollback; nobody running a self-hosted instance reads it. The check
 queries, the remedy and the JVM flags go in **`docs/self-hosting.md` under `## Upgrading`**,
 which is the DC operator manual and states its audience in the first lines. 0.16.0's is
-[Duplicate accounts after an upgrade](self-hosting.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding);
+[Duplicate accounts after an upgrade](self-hosting-upgrades.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding);
 copy its shape.
 
 So for a release in this class, three things:
@@ -351,10 +351,10 @@ Watch for the shape where a default is *better* on the machine it was reasoned a
 quietly *takes something away* from every larger one — those releases read as an
 improvement in the PR and as a regression on the box. 0.17.0 is the worked example several
 times over, and its changes compound: `HD-152` bounded the JVM heap, which raises it on a 1 GB host and halves it on
-a 4 GB one ([The heap is bounded from 0.17.0](self-hosting.md#the-heap-is-bounded-from-0170));
+a 4 GB one ([The heap is bounded from 0.17.0](self-hosting-upgrades.md#the-heap-is-bounded-from-0170));
 `HD-151` bounded how long a statement may run, which is invisible on a small install and turns
 a slow report into a `422` on a large one
-([Statements are bounded from 0.17.0](self-hosting.md#statements-are-bounded-from-0170)); and
+([Statements are bounded from 0.17.0](self-hosting-upgrades.md#statements-are-bounded-from-0170)); and
 the same ticket widened `DB_LOCK_TIMEOUT_MS` from the handful of transactions that locked
 deliberately to **every** transaction, so a contended write that used to wait indefinitely now
 answers a retryable `409` — a changed default whose *value* never moved, which is why it is the
@@ -415,7 +415,7 @@ Ready to paste:
 > should retry. The two bounds ship together on purpose: `statement_timeout` counts lock-wait
 > time, so bounding statements alone would have answered that same collision with the
 > non-retryable `422` above. Details:
-> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#statements-are-bounded-from-0170).
+> [Statements are bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#statements-are-bounded-from-0170).
 
 And the heap line:
 
@@ -426,7 +426,7 @@ And the heap line:
 > `APP_MEMORY_LIMIT` in `.env` to about half the host (4 GB → `2g`, 8 GB → `4g`) and
 > `docker compose up -d`. On a host of 2 GB or less you gain heap and need do nothing.
 > Details:
-> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#the-heap-is-bounded-from-0170).
+> [The heap is bounded from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#the-heap-is-bounded-from-0170).
 
 And the taxonomy foreign keys — a line that can stop a **startup**, which is a shape rather
 than a slot: 0.18.0 has one of its own further down, and any release can add the next. What a
@@ -492,7 +492,7 @@ not be left to discover:
 > until this release there was no foreign key here, so those accumulated silently and were
 > already unshowable. Removing them is the correct outcome and is not a reason to hold the
 > upgrade. Details:
-> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#notifications-are-scoped-to-a-workspace-from-0170).
+> [Notifications are scoped to a workspace from 0.17.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#notifications-are-scoped-to-a-workspace-from-0170).
 
 0.18.0 changes resource defaults of its own — in the database container, and in settings that **did
 not exist before the release and arrive switched on**, which is the sharper member of this class:
@@ -522,7 +522,7 @@ that cannot work does to the container.
 > back. **Which default you get follows `SPRING_PROFILES_ACTIVE`, not the fact that you are
 > self-hosting** — `.env.prod.example` ships `cloud`, so an install that never changed that line
 > is on the 10 GB ceiling. Details:
-> [Attachment storage is capped per workspace from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#attachment-storage-is-capped-per-workspace-from-0180).
+> [Attachment storage is capped per workspace from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#attachment-storage-is-capped-per-workspace-from-0180).
 
 The database one is in this class for the reason the section opens with: it improves the small
 host it was measured on and takes something away from a larger one, and neither direction
@@ -547,7 +547,7 @@ produces an error.
 > pool size multiply straight into that ceiling: `4MB × ~4 nodes × ~12 backends` ≈ ~190 MB at
 > the defaults, and `DB_POOL_MAX_SIZE=50` makes it `4MB × 4 × 52` ≈ ~830 MB against `512m`.
 > Details:
-> [PostgreSQL is bounded and tuned from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#postgresql-is-bounded-and-tuned-from-0180).
+> [PostgreSQL is bounded and tuned from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#postgresql-is-bounded-and-tuned-from-0180).
 
 And the expensive-read bulkhead, which is in this class for a reason worth naming rather than
 inheriting: it does not merely resize something, it introduces a **refusal that did not exist**
@@ -586,7 +586,7 @@ box too small to have been slow yesterday is exactly the one that meets it today
 > share is derived narrows it with a WARN instead of refusing to boot. To
 > remove the bound: `EXPENSIVE_READ_LIMIT_ENABLED=false` — and note that
 > `RATE_LIMIT_ENABLED=false` deliberately does **not** turn it off. Details:
-> [Expensive reads are bounded by concurrency from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#expensive-reads-are-bounded-by-concurrency-from-0180).
+> [Expensive reads are bounded by concurrency from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#expensive-reads-are-bounded-by-concurrency-from-0180).
 
 And the connection-acquisition bound, which is the sharpest member of this class in the release:
 the two above turn a *slow* request into an error, while this one can turn a request that is not
@@ -626,7 +626,7 @@ The break-even is not a host size either; it is whether the instance ever runs o
 > arithmetic seen from the acquisition's end: the shutdown's mail drain plus one connection
 > acquisition must fit inside `APP_STOP_GRACE_SECONDS`, which you raise in the same edit if you
 > want longer. Details:
-> [Connection acquisition is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#connection-acquisition-is-bounded-from-0180).
+> [Connection acquisition is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#connection-acquisition-is-bounded-from-0180).
 
 And one line that changes no default but answers a question every one of the lines above
 makes an operator ask:
@@ -713,7 +713,7 @@ release blurb of its own:
 > you how much was actually looked at. If you provision the bundled Grafana alerting you also
 > get **`DeployVerifyFailed`** (critical, 5 m), quiet on a box that has never run the verifying
 > applier; `--verify-only` re-reads the box after a hand fix and is what clears it. Details:
-> [The deploy reads itself back from 0.18.2](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#the-deploy-reads-itself-back-from-0182).
+> [The deploy reads itself back from 0.18.2](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#the-deploy-reads-itself-back-from-0182).
 
 ## Releases that change a file the box runs from a COPY
 
@@ -863,10 +863,10 @@ Ready to paste. The account one first, because it is the one that can stop the u
 > upgrade halted by the address refusal has already deleted those invitations while every later
 > change in 0.18.0 has not run at all: "the upgrade failed" does not mean "nothing changed".
 > Details:
-> [Account addresses become case-insensitive in 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull).
+> [Account addresses become case-insensitive in 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#account-addresses-become-case-insensitive-in-0180-one-query-before-you-pull).
 
 The locale-folding procedure that line sends a reader to for a collision —
-[Duplicate accounts after an upgrade](self-hosting.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
+[Duplicate accounts after an upgrade](self-hosting-upgrades.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding)
 — deliberately gets **no line of its own**. It is a remedy rather than a change, it describes
 behaviour 0.16.0 already fixed, and in this release it is reachable only through the refusal above,
 which is where a reader needs it. One sentence of its reasoning is also false when it is arrived at
@@ -919,7 +919,7 @@ the two to leave out:
 > bytes** answers `422` (that is BCrypt's limit and it counts bytes, so about 37 characters of
 > Cyrillic or 19 of emoji reach it). Nothing that was accepted before is refused now except by
 > length. Details:
-> [Free text is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting.md#free-text-is-bounded-from-0180).
+> [Free text is bounded from 0.18.0](https://github.com/Zherikhov/hamstrack/blob/main/docs/self-hosting-upgrades.md#free-text-is-bounded-from-0180).
 
 
 ## Constraints on a populated table, and why they are free right now
