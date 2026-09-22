@@ -194,6 +194,118 @@ class ApplyConfigVerifyPhaseTest {
         assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
     }
 
+    /**
+     * <strong>HD-333 &mdash; a deploy that changes nothing must not destroy the inodes its
+     * containers are bind-mounted to.</strong>
+     *
+     * <p>{@code apply_path} replaces a path by renaming the old tree aside and {@code rm -rf}-ing
+     * it, so re-applying a path whose content is already identical is not a no-op: every inode
+     * under it is destroyed. A bind mount holds an <em>inode</em>, not a path, so each running
+     * container mounting into that tree is left reading something that no longer exists
+     * ({@code readdirent …: no such file or directory}) while {@code up -d} correctly does nothing
+     * and both drift scopes read {@code 0} &mdash; the definition really does match and the file on
+     * disk really is the released one. Every check agrees and the containers are detached.
+     *
+     * <p>The cause was two predicates where there should have been one: the apply loop ran over
+     * every manifest entry unconditionally while the compensating restart was armed only from the
+     * entries that <em>differed</em>. Measured on production to the second on 2026-09-18 &mdash;
+     * Grafana recreated by hand at 12:25:18 and provisioning cleanly, the next deploy applying its
+     * paths at 12:28:36, the first {@code readdirent} error at 12:28:50 and one every 30 s
+     * thereafter.
+     *
+     * <p><strong>Why this asserts the replacement and not the mount.</strong> The honest seal would
+     * read a bind mount from inside a container after a second apply. It is not written that way on
+     * purpose: the orphaning is a property of Linux bind-mount semantics, and it does
+     * <em>not</em> reproduce on Docker Desktop for Windows &mdash; measured, by performing exactly
+     * this swap under a running container there and watching it keep reading the files, because the
+     * VM's file sharing resolves the bind by path. A container-based assertion would therefore pass
+     * vacuously on a developer machine and fail only in CI, which is the shape of a test nobody can
+     * debug. What is asserted instead is the thing that was actually wrong and is true on every
+     * platform: <em>a path that does not differ is not replaced</em>. No replacement, no orphan.
+     */
+    @Test
+    void aDeployThatChangesNothingReplacesNoPathAtAll() throws Exception {
+        var failures = new ArrayList<String>();
+        var d = deployment("hd333");
+
+        var first = run(d, Map.of());
+        expect(failures, "the first deploy exits 0", first.exit() == 0, first);
+        expect(failures, "…and places every manifest entry, because the box has none of them yet",
+                first.output().contains("applied 2 of 2 path(s)"), first);
+
+        var second = run(d, Map.of());
+        expect(failures, "a second deploy from the same source exits 0", second.exit() == 0, second);
+        expect(failures, "…and replaces NOTHING, because nothing differs — this is the whole fix, "
+                        + "and `applied 2 of 2` here is the defect: it means every inode under both "
+                        + "paths was destroyed and re-created for no reason",
+                second.output().contains("applied 0 of 2 path(s)"), second);
+        expect(failures, "…and says so rather than reporting a count that hides it",
+                second.output().contains("the rest already matched the release"), second);
+        expect(failures, "…and restarts no bind-mounted service, having given it no reason to",
+                !second.dockerCalls().contains(" restart "), second);
+        expect(failures, "…and still verifies, so skipping the replacement skipped nothing else",
+                second.output().contains("verify: PASS"), second);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>HD-333, the other half: who gets restarted is read off the containers, never
+     * listed.</strong>
+     *
+     * <p>Step 7b used to carry {@code BIND_MOUNT_SERVICES=(grafana prometheus loki alloy)} with a
+     * comment asking whoever adds a service with a {@code ./observability/…} bind mount to add it
+     * here in the same commit. That is a rule held by memory, and it is the same shape of hazard as
+     * the scope mismatch this ticket is about, one layer up: a service added tomorrow would be
+     * silently outside the repair and nothing would go red. Each running container is now asked
+     * what it actually mounts.
+     *
+     * <p>This test is the reason that derivation is not shipped untested. It gives exactly one
+     * service a bind mount under a path the run replaces, and asserts three things that a list
+     * could not give you: the mounting service is restarted, the one that mounts nothing is not,
+     * and the log reports the population it examined rather than a number that hides it.
+     */
+    @Test
+    void onlyAServiceThatBindMountsAReplacedPathIsRestarted() throws Exception {
+        var failures = new ArrayList<String>();
+        var d = deployment("hd333mounts");
+
+        // A third synced entry that a container can plausibly mount, and a service list in which
+        // exactly one service will report mounting it.
+        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\nobservability/\n");
+        write(d.src().resolve("observability/rules.yml"), "groups: []\n");
+
+        var env = new java.util.LinkedHashMap<String, String>();
+        env.put("STUB_SERVICES", "app grafana");
+        env.put("STUB_MOUNT_SVC", "grafana");
+        env.put("STUB_BOX", posix(d.box()));
+        env.put("STUB_MOUNT_SUFFIX", "observability/rules.yml");
+
+        var first = run(d, env);
+        expect(failures, "the first deploy places all three entries", first.exit() == 0
+                && first.output().contains("applied 3 of 3 path(s)"), first);
+
+        // Now change ONLY the bind-mounted path, so the repair must fire for exactly one service.
+        write(d.src().resolve("observability/rules.yml"), "groups: [{name: changed}]\n");
+        var second = run(d, env);
+
+        expect(failures, "the second deploy exits 0", second.exit() == 0, second);
+        expect(failures, "…and replaces only the entry that differs",
+                second.output().contains("applied 1 of 3 path(s)"), second);
+        expect(failures, "…and asked the container what it mounts rather than consulting a list",
+                second.dockerCalls().contains("inspect -f {{range .Mounts}}"), second);
+        expect(failures, "…and restarts the service that bind-mounts it",
+                second.dockerCalls().contains("compose restart grafana")
+                || second.dockerCalls().contains(" restart grafana"), second);
+        expect(failures, "…and does NOT restart the service that mounts nothing — a restart it "
+                        + "does not need is downtime it does not need either",
+                !second.dockerCalls().contains(" restart app"), second);
+        expect(failures, "…and reports the population it examined, not just the count it acted on",
+                second.output().contains("restarted 1 of 2 running service(s)"), second);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
     @Test
     void environmentKeysAreDemandedByNameAndNeverByValue() throws Exception {
         var failures = new ArrayList<String>();
@@ -2217,6 +2329,23 @@ class ApplyConfigVerifyPhaseTest {
                       *RestartCount*)
                         n=$(cat "$STUB_STATE/restarts" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" > "$STUB_STATE/restarts"
                         set -- $STUB_RESTARTS; [ "$n" -le "$#" ] || n=$#; shift $((n - 1)); printf '%s\\n' "$1" ;;
+                      *Mounts*)
+                        # Only the container named by STUB_MOUNT_SVC reports a bind mount, so a
+                        # test can tell "this service mounts a replaced path" apart from "every
+                        # service does". The cid is `cid-<service>` (see the `ps -q` case above).
+                        #
+                        # The source is built here rather than passed whole, and that is not
+                        # decoration: apply-config.sh normalises its target with `cd … && pwd`,
+                        # which on MSYS turns `C:/Users/…/Temp/x` into `/tmp/x`. A test that passed
+                        # the Java-side spelling would compare two spellings of the same directory
+                        # and match on Linux while failing on Windows. Normalising the same way the
+                        # script does makes the fixture say "the box's own path" in whatever
+                        # spelling this platform uses.
+                        case "$4" in
+                          *"${STUB_MOUNT_SVC:-__no_such_service__}"*)
+                            printf '%s/%s\\n' "$(cd "$STUB_BOX" && pwd)" "${STUB_MOUNT_SUFFIX:-}" ;;
+                          *) printf '\\n' ;;
+                        esac ;;
                       *State.StartedAt*) printf '%s\\n' "2026-09-10T08:00:00.000000000Z" ;;
                       *State.Running*) printf '%s\\n' "${STUB_RUNNING:-true}" ;;
                       *) printf '\\n' ;;

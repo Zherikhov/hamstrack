@@ -1754,11 +1754,40 @@ write_verify_metrics 0
 trap 'apply_cleanup' EXIT
 trap 'apply_cleanup; exit 130' INT
 trap 'apply_cleanup; exit 143' TERM
-for entry in "${ENTRIES[@]}"; do
+# ONLY WHAT DIFFERS (HD-333). Replacing a path whose content is already identical is not a
+# no-op: apply_path renames the old tree aside and `rm -rf`s it, so every inode under it is
+# destroyed. A bind mount holds an INODE, not a path, so each running container mounting into
+# that tree is left pointing at something that no longer exists — `readdirent …: no such file
+# or directory` — while `docker compose up -d` correctly does nothing, both drift scopes read
+# 0, and the file on disk really is the released one. Every check agrees and the containers
+# are detached.
+#
+# The two halves used to be scoped differently: this loop ran over ENTRIES unconditionally
+# while step 7b's compensating restart was armed only from CHANGED, so a deploy whose push
+# touched nothing the box runs still destroyed the inodes and still skipped the restart.
+# Measured on production 2026-09-18, to the second: Grafana was recreated by hand at 12:25:18
+# and provisioned cleanly; the next deploy applied its paths at 12:28:36; the first
+# `readdirent` error appeared at 12:28:50, fourteen seconds later, and then once every 30 s
+# for as long as the container was left alone.
+#
+# The invariant, which is the whole fix: THE PREDICATE THAT DECIDES WHETHER A BIND-MOUNTED
+# PATH IS REPLACED AND THE PREDICATE THAT DECIDES WHETHER ITS READERS ARE RESTARTED MUST BE
+# THE SAME PREDICATE. It is `differs` for both now — CHANGED here, and OBS_CHANGED, which is
+# derived from CHANGED, in step 7b.
+#
+# ONE THING THIS GIVES UP, stated because it was a side effect nobody asked for and would
+# otherwise be discovered by its absence: `differs` compares CONTENT (`diff -rq`) and not
+# modes, so an unconditional re-apply used to repair a drifted permission bit for free. It no
+# longer does. Nothing on the synced surface is known to depend on a mode — the deploy invokes
+# `bash script.sh` rather than executing it, and the installed copies take their modes from
+# `install -m` — and the drift check compares checksums, so it could not see a mode either way.
+# If that ever stops being true, widen `differs` rather than widening this loop: a predicate
+# that says "identical" about a path whose modes differ is the thing that is wrong.
+for entry in ${CHANGED[@]+"${CHANGED[@]}"}; do
   apply_path "$entry"
 done
 trap - EXIT INT TERM
-log "applied ${#ENTRIES[@]} path(s) from $SRC"
+log "applied ${#CHANGED[@]} of ${#ENTRIES[@]} path(s) from $SRC (the rest already matched the release)"
 
 # --- step 6: stamp ------------------------------------------------------------
 # Relative names, produced from inside the target, so `sha256sum -c` works there unchanged.
@@ -1870,23 +1899,53 @@ step7_run up -d --remove-orphans
 # really is the released one. Every check agrees and the merged alert rule is not running:
 # HD-199's own failure class, one layer down.
 #
-# This was documented in prose, for Grafana only. Prometheus, Loki and Alloy are mounted
-# exactly the same way, so all four are here. A service that gains a `./observability/…`
-# bind mount belongs in this list in the same commit; one that has none must NOT, because a
-# restart it does not need is downtime it does not need either.
-BIND_MOUNT_SERVICES=(grafana prometheus loki alloy)
+# THE MEMBERS ARE READ OFF THE RUNNING CONTAINERS, NEVER LISTED (HD-333). This was a
+# hand-kept array — `(grafana prometheus loki alloy)` — carrying the note "a service that
+# gains a `./observability/…` bind mount belongs in this list in the same commit". That is a
+# rule enforced by whoever remembers it, and it is the same shape of hazard as the one this
+# whole step exists to compensate for, one layer up: a service added tomorrow with a bind
+# mount into a replaced path would be silently outside the repair, and nothing would go red.
+#
+# So each service's container is asked what it actually mounts. `docker inspect` is already
+# this script's structured reader (`inspect_field`), needs no jq, and answers about the
+# container that is really running rather than about a file somebody hoped matched it. A
+# service whose bind source lies under a path this run replaced is a member, by construction,
+# on the day it gains the mount. One that has none is not, because a restart it does not need
+# is downtime it does not need either.
+# $1 = a container id; 0 when it bind-mounts anything under a path THIS RUN replaced.
+# The entries are compared as they are stored, with no normalising here on purpose: the
+# manifest is normalised exactly once, where it is read (`./observability/` and
+# `observability` become one form there), and that block names this comparison as one of the
+# three that depend on it. Re-normalising here would be a second spelling rule to keep in
+# step with the first, which is how the two drift apart.
+bind_mounts_a_replaced_path() {
+  local cid src entry
+  cid="$1"
+  for entry in ${CHANGED[@]+"${CHANGED[@]}"}; do
+    while IFS= read -r src; do
+      [ -n "$src" ] || continue
+      case "$src" in
+        "$TARGET/$entry"|"$TARGET/$entry"/*) return 0 ;;
+      esac
+    done < <(inspect_field '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{println}}{{end}}{{end}}' "$cid")
+  done
+  return 1
+}
 restart_bind_mounted() {
-  local svc cid restarted=0
-  for svc in "${BIND_MOUNT_SERVICES[@]}"; do
-    # Absent from this deployment (no observability compose file) or simply not running:
-    # either way there is nothing to restart and nothing to warn about.
+  local svc cid restarted=0 examined=0
+  for svc in $SERVICES; do
+    # Not running: nothing to restart and nothing to warn about. A service that is declared
+    # and down is the `up -d` above's problem, not this step's.
     cid="$(run_compose ps -q "$svc" 2>/dev/null || true)"
     [ -n "$cid" ] || continue
+    cid="$(printf %s "$cid" | head -n 1)"
+    examined=$(( examined + 1 ))
+    bind_mounts_a_replaced_path "$cid" || continue
     run_compose restart "$svc" \
       || die "the configuration WAS applied and $svc could not be restarted, so it is still running the file that was replaced — its bind-mounted config is now a deleted inode and no drift scope can see it. Re-run 'docker compose restart $svc' in $TARGET."
     restarted=$(( restarted + 1 ))
   done
-  log "restarted $restarted service(s) whose configuration is bind-mounted"
+  log "restarted $restarted of $examined running service(s); a service is restarted when it bind-mounts a path this run replaced"
 }
 if [ "$OBS_CHANGED" = 1 ]; then
   log "a bind-mounted configuration path changed — restarting the services that mount it"

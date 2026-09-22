@@ -394,10 +394,21 @@ class ApplyConfigPinGuardTest {
             expect(failures, "[" + label + "] applies", r.exit() == 0, r);
             expect(failures, "[" + label + "] places the bind-mounted tree",
                     Files.exists(d.box().resolve("observability/grafana/grafana.ini")), r);
-            for (String svc : List.of("grafana", "prometheus", "loki", "alloy")) {
-                expect(failures, "[" + label + "] restarts " + svc,
-                        d.dockerCalls().contains("restart " + svc), r);
-            }
+            // WHAT THIS ASSERTS, AND WHY IT IS NO LONGER A LIST OF FOUR SERVICE NAMES (HD-333).
+            // The subject here is the SPELLING: `./observability/` and `observability` name the
+            // same path, and the entry is normalised once at read time so that every later
+            // comparison — including step 4's bind-mount test — sees one form. This line is that
+            // test's own output, so it fires exactly when the spelling was matched.
+            //
+            // It used to name grafana, prometheus, loki and alloy because step 7b carried them as
+            // a hand-kept array. They are now derived per run from what each container actually
+            // bind-mounts, which this fixture's deliberately minimal docker stub does not model —
+            // it answers `ps -q` and nothing else, and giving it a service list would switch on
+            // every verify check and need a whole box modelled to keep this test about spelling.
+            // Which services get restarted is asserted where the fixture does model containers:
+            // ApplyConfigVerifyPhaseTest#onlyAServiceThatBindMountsAReplacedPathIsRestarted.
+            expect(failures, "[" + label + "] reaches the bind-mount repair",
+                    r.output().contains("a bind-mounted configuration path changed"), r);
             // The stamp paths are uniform too, which is what keeps hamstrack-config-drift.sh
             // able to match `find <entry>` output against the lines this script wrote.
             expect(failures, "[" + label + "] stamps the path without a ./ prefix",
