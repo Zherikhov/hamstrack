@@ -1292,6 +1292,63 @@ what this particular release needs operationally.
   are authoritative**, and every ceiling and stranding check is re-derived inside the
   write's own transaction whether or not anyone previewed.
 
+## The install path, once per release line
+
+`InstallClaimsTest` holds the install documents to the tree on every build — every
+path they name exists, every pin names the current release line, the install
+command exists once, and the architecture requirement is stated. **Three things it
+structurally cannot do are yours, and they are the three that were wrong in
+0.18.3.** Do them once per *line* (0.18 → 0.19), not per patch.
+
+**1. Every tag the documents offer was actually published.** The sharper invariant
+is *names a tag that was published*, not *names the current line* — `0.4.3` and
+`0.5` were both written in this repository and neither has ever existed. A unit
+test cannot ask a registry (no network in the suite, and a test that needs one gets
+muted), so ask it here. Anonymous, no credentials:
+
+```bash
+TOKEN=$(curl -s "https://ghcr.io/token?scope=repository:zherikhov/hamstrack:pull&service=ghcr.io" \
+        | sed -E 's/.*"token":"([^"]+)".*/\1/')
+curl -s -H "Authorization: Bearer $TOKEN" \
+     "https://ghcr.io/v2/zherikhov/hamstrack/tags/list?n=200"
+```
+
+Compare that list against every literal the install documents offer. **`latest`
+moving off the line is normal** and must not be read as a fault: it tracks the
+newest build, the line tracks the newest patch on it, and they are equal only
+between releases.
+
+**2. The fresh-clone install, timed, on a host that is not this one.** The point is
+not that it works — the test proves the documents are self-consistent; the point is
+what a stranger *meets*. Clone from GitHub, follow `README.md` verbatim, and record
+**the wall-clock time and the host**:
+
+**Follow [`README.md`](../README.md#self-hosting-dc), do not copy its commands here.**
+That is not fussiness: `InstallClaimsTest#theInstallCommandExistsExactlyOnce`
+refuses a second copy anywhere in the tree, and it refused a draft of *this
+section* that quoted them — which is the rule working, because a copy here would
+drift from README's flags and the person following it would never know. Prefix the
+`up` with `time`, and afterwards read `curl -s localhost:8080/api/meta`.
+
+Measured 2026-09-23 on Windows/Docker Desktop, from a fresh clone: **33.2 s to both
+services healthy**, `/api/meta` 200, the seeded administrator signed in, and
+creating a second person returned a setup link with no mail server configured. That
+is the number to beat and the claim to keep honest — **it has never been run on a
+clean Linux host**, which is the gap the next line should close.
+
+**3. `docker compose config -q` on every compose file a document names.** Also a
+daemon, also not a unit test. Note it passes *with the documented variable set*, not
+bare: the `${VAR:?}` guards refuse an empty environment on purpose, and a checklist
+demanding a bare pass would push somebody to remove them.
+
+**Not on this list, deliberately: a freshness rule.** The idea was an install
+document whose newest edit predates the newest release line going red. It is not
+here because a document that needed no change would red for being correct, and a
+guard that reds on correct sentences is one its readers learn to switch off
+(`PublishedClaimsTest` names that failure by name). What replaces it is this
+section: the line moves, somebody runs these three, and the running is the
+freshness.
+
 ## Tracker bookkeeping
 
 Independent of git, and easy to forget:
