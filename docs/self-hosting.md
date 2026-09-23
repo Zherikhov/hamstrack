@@ -590,8 +590,20 @@ Two things to get right behind a proxy:
 
 ## Email (SMTP)
 
-Email verification **doubles as login**, so a working SMTP server is required
-for a usable instance — without it, no one can complete registration.
+**SMTP is optional on a self-hosted install, and the quick start above does not
+use it.** What needs it is self-service — a person acquiring or recovering their
+own account without an administrator:
+
+| Works with no mail server at all | Needs SMTP |
+|---|---|
+| The seeded administrator signs in (`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) — the account is created ACTIVE, with nothing to verify | **Self-service registration**, if you set `PUBLIC_SIGNUP_ENABLED=true`: verification doubles as login, so without the mail nobody completes it |
+| Adding people in `/admin`, which hands **you** a one-time setup link to pass on however you like — see [Adding more users](#adding-more-users) | **Forgot password**, which is the only way back in for somebody who has no administrator to ask |
+| Everything after sign-in: projects, issues, attachments, search, reports | **Workspace invitations by email** |
+
+So an instance with no SMTP is fully usable by the people an administrator
+onboards by hand; configure mail when you want them to onboard themselves. The
+trade is worth stating plainly, because it is the one that bites later: with no
+mail server, **you** are the password-reset mechanism for every account.
 
 Any SMTP server works — a transactional provider (Resend, Amazon SES, Postmark,
 Mailgun…) or your own relay. Configure:
