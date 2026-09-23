@@ -18,6 +18,15 @@ One codebase ships in two deployment models:
 | Setup | Sign up and go | Docker Compose, one container + PostgreSQL |
 | File storage | S3 | Local filesystem (or any S3-compatible store) |
 | Configuration | Managed | Fully under your control via environment variables |
+| Run it yourself | [`deploy/cloud/`](deploy/cloud/) — S3 via MinIO, no AWS account, no public DNS ([guide](docs/cloud-mode.md)) | [`deploy/dc/`](deploy/dc/) — the path below |
+
+**Either model is yours to run, for yourself or your organisation.** The licence
+([ELv2](LICENSE)) forbids one thing: offering Hamstrack to third parties as a managed
+service. The two profiles differ only in defaults — S3 storage, open registration,
+first-login onboarding, a smaller workspace quota — and every one of them is a plain
+environment variable you can set under either, which [the Cloud-model
+guide](docs/cloud-mode.md) sets out in a table. **Most people self-hosting want DC**,
+which is the path below.
 
 > **Status:** Hamstrack is in active development — breaking changes are called out in the release notes. Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay until they are deleted. The database is backed up daily and restoring from a backup has been tested; that is an operational practice, not a guaranteed service level. Every account starts with a demo workspace and a sample project to explore.
 

@@ -1,0 +1,149 @@
+# Hamstrack — the CLOUD model, runnable on one host (HD-317).
+#
+# WHAT THIS IS FOR. Hamstrack ships one codebase in two deployment models, and the
+# difference between them is entirely a set of DEFAULTS — measured, not asserted:
+# application-cloud.properties and application-dc.properties each carry the same
+# settings as `${VAR:default}` and disagree only about the default. So this stack
+# exists to let you run and evaluate the cloud model as it actually behaves, on a
+# laptop or one server, with **no AWS account and no public DNS**. Object storage is
+# MinIO, which speaks S3 and runs beside the app.
+#
+# WHAT THE CLOUD PROFILE CHANGES, all of it: attachments go to S3 rather than the
+# container's disk; self-registration is open; first-login onboarding is on; the
+# per-workspace storage quota is 10GB rather than 100GB; the CSP report sink is on.
+# Every one of those is reachable from the `dc` profile by setting its variable —
+# docs/cloud-mode.md has the table — so choose this stack when you want the cloud
+# model's shape, not because it is the only way to a particular feature.
+#
+# NOT the stack that runs hamstrack.com. That one is docker-compose.prod.yml: Caddy,
+# a public certificate, real S3, an owner's AWS account. This is the model, not the
+# deployment — see docs/cloud-mode.md.
+#
+# LICENCE, because this stack is the one that makes the question concrete: ELv2 lets
+# you run either model for yourself and for your organisation. What it forbids is
+# offering Hamstrack to third parties as a managed service. Running this is fine;
+# selling access to it is not.
+services:
+  app:
+    image: ghcr.io/zherikhov/hamstrack:${APP_IMAGE_TAG:-0.18}
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # A LITERAL, like the dc stack's own: the directory declares the model, so a
+      # `.env` cribbed from elsewhere cannot silently turn this into a dc instance.
+      SPRING_PROFILES_ACTIVE: cloud
+      DB_URL: jdbc:postgresql://postgres:5432/hamstrack
+      DB_USERNAME: hamstrack
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env - openssl rand -base64 48}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL in .env beside this file}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD in .env - your own, not one from these docs}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+      APP_STOP_GRACE_SECONDS: ${APP_STOP_GRACE_SECONDS:-30}
+      # MinIO, reached on the compose network. `path-style` is required for it and
+      # for every S3-compatible store that is not AWS; a region is required by the
+      # SDK even where the store ignores it.
+      STORAGE_TYPE: s3
+      STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-hamstrack-attachments}
+      STORAGE_S3_ENDPOINT: http://minio:9000
+      STORAGE_S3_PATH_STYLE: "true"
+      STORAGE_S3_REGION: ${STORAGE_S3_REGION:-us-east-1}
+      STORAGE_S3_ACCESS_KEY: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env beside this file}
+      STORAGE_S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env - at least 8 characters}
+    ports:
+      # 0.0.0.0 by default so an operator on a VPS can reach it at all; set
+      # APP_BIND=127.0.0.1 and tunnel before putting this on the internet, because
+      # THIS MODEL HAS OPEN REGISTRATION and a public port means public signup.
+      - "${APP_BIND:-0.0.0.0}:${APP_PORT:-8080}:8080"
+    mem_limit: ${APP_MEMORY_LIMIT:-1g}
+    stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/meta"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-bucket:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: hamstrack
+      POSTGRES_USER: hamstrack
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env beside this file}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-128MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-512MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-512m}
+    shm_size: ${POSTGRES_SHM_SIZE:-64m}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hamstrack -d hamstrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-09-07T16-13-09Z}
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env beside this file}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env - at least 8 characters}
+    ports:
+      # The console, for looking at what the app stored. NOT the API port: the app
+      # reaches that on the compose network, and publishing object storage on a
+      # public interface is a different decision from publishing the app.
+      - "${MINIO_CONSOLE_BIND:-127.0.0.1}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    mem_limit: ${MINIO_MEMORY_LIMIT:-512m}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Creates the bucket once and exits. The app REFUSES TO START without a bucket
+  # name, but it does not create one, and a bucket that does not exist turns every
+  # upload into a 500 long after the install looked successful. `depends_on:
+  # service_completed_successfully` above is what makes that a startup-time fact.
+  minio-bucket:
+    image: quay.io/minio/mc:${MINIO_CLIENT_IMAGE_TAG:-RELEASE.2025-08-13T08-35-41Z}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env beside this file}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env - at least 8 characters}
+      BUCKET: ${STORAGE_S3_BUCKET:-hamstrack-attachments}
+    # A ceiling even on a job that runs for two seconds and exits: the rule is that
+    # every service this repository ships declares one (HD-152), because a container
+    # with no limit sizes itself against HOST memory, and "it is short-lived" is an
+    # argument about today's image rather than a property of the service.
+    mem_limit: ${MINIO_CLIENT_MEMORY_LIMIT:-128m}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "local/$$BUCKET" &&
+        echo "bucket $$BUCKET is ready"
+    restart: "no"
+
+volumes:
+  postgres_data:
+  minio_data:

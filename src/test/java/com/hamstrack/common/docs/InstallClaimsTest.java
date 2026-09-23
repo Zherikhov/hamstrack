@@ -72,10 +72,12 @@ class InstallClaimsTest {
 
     /** Each member, with the reason it is one. A reader following the install path meets all four. */
     private static final Map<String, String> INSTALL_DOCUMENTS = new LinkedHashMap<>(Map.of(
-            "README.md", "the landing page, and where the install command lives",
+            "README.md", "the landing page, and where the DC install command lives",
             "docs/self-hosting.md", "the full walkthrough README delegates to",
             "deploy/dc/README.md", "what a stranger lands on in the stack's own directory",
-            "deploy/dc/.env.example", "the template the install command tells them to copy"));
+            "deploy/dc/.env.example", "the template the install command tells them to copy",
+            "docs/cloud-mode.md", "the cloud model's own guide, and where its install command lives",
+            "deploy/cloud/.env.example", "the template that guide tells them to copy"));
 
     /**
      * The command README prescribes. Matched on the distinctive part rather than the whole line, so
@@ -280,8 +282,29 @@ class InstallClaimsTest {
 
     // ============================================================ HD-314 / HD-319
 
+    /**
+     * <strong>One install command per installable stack — counted, not assumed.</strong>
+     *
+     * <p>This began as "the install command exists exactly once", which was right while there was
+     * one stack and became wrong the moment {@code deploy/cloud/} shipped (HD-317). Two stacks in
+     * different directories, filling different variables, legitimately need one command each; they
+     * are not copies of each other, they merely share a substring. The rule those two facts have in
+     * common is the one that was always meant: <em>each installable stack is prescribed in exactly
+     * one place</em>. It still refuses the duplication HD-319 removed — two commands for one stack —
+     * and it now also refuses the opposite, a stack nobody is told how to install, which the old
+     * count could not see at all.
+     *
+     * <p>The stack count is <strong>derived</strong>, from the {@code docker-compose.yml} under each
+     * {@code deploy/} model directory, so a third model is in scope on the day its directory exists
+     * rather than when somebody remembers this file.
+     */
     @Test
-    void theInstallCommandExistsExactlyOnce() {
+    void eachInstallableStackIsPrescribedInExactlyOnePlace() {
+        var stacks = new ArrayList<String>();
+        for (Path file : PublishedCredentials.publishableFiles("deploy/*/docker-compose.yml")) {
+            stacks.add(file.toString().replace('\\', '/'));
+        }
+
         var carriers = new LinkedHashSet<String>();
         var total = 0;
         for (Path file : PublishedCredentials.publishableFiles("*.md")) {
@@ -293,25 +316,31 @@ class InstallClaimsTest {
             }
         }
 
+        assertThat(stacks)
+                .withFailMessage("""
+                        NO INSTALLABLE STACK WAS FOUND under deploy/*/docker-compose.yml, so this
+                        rule has nothing to count against and would pass whatever the documents say.
+                        The stack being a real file in the tree is HD-314's whole deliverable.""")
+                .isNotEmpty();
+
         assertThat(total)
                 .withFailMessage("""
-                        THE INSTALL COMMAND APPEARS NOWHERE. Either it was reworded and
-                        INSTALL_COMMAND was not, or the install path lost the one command it is for.""")
-                .isGreaterThanOrEqualTo(1);
+                        THE INSTALL COMMAND IS PRESCRIBED %d TIME(S) FOR %d INSTALLABLE STACK(S).
 
-        assertThat(total)
-                .withFailMessage("""
-                        THE INSTALL COMMAND EXISTS IN MORE THAN ONE PLACE (%d occurrences, in %s).
+                        Prescribing it: %s
+                        Stacks in the tree: %s
 
-                        A duplicated command is the shape HD-313 is made of: what drifts is not the
-                        idea, it is the flags and the list of values, and the reader has no way to
-                        tell which copy they are following. It lived in three files before HD-319 -
-                        README, the guide's quick start and the stack's own README - and the flag
-                        that matters (`--wait`, without which a crash-looping stack exits 0) was
-                        already explained differently in two of them.
+                        TOO MANY means a duplicated command, which is the shape HD-313 is made of:
+                        what drifts is not the idea, it is the flags and the list of values, and the
+                        reader cannot tell which copy they are following. It lived in three files
+                        before HD-319, and `--wait` - without which a crash-looping stack exits 0 -
+                        was already explained differently in two of them.
 
-                        Keep it in README and have the others link to it.""", total, carriers)
-                .isEqualTo(1);
+                        TOO FEW means a stack the repository ships and no document tells anybody how
+                        to install, which is HD-317's shape: the Cloud model existed in the codebase
+                        for months with no install path anyone outside the owner could follow.""",
+                        total, stacks.size(), carriers, stacks)
+                .isEqualTo(stacks.size());
     }
 
     // ============================================================ HD-316
