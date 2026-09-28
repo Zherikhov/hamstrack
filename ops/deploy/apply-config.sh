@@ -323,8 +323,27 @@ fi
 
 SRC="$(cd "$SRC" && pwd)"
 TARGET="$(cd "$TARGET" && pwd)"
+# …AND THE PHYSICAL SPELLING OF EACH, because bash's `pwd` is LOGICAL: it prints the path the
+# caller typed, symlinks and all, while anything that resolves a directory for itself prints
+# the path the links point at. Every comparison in this script between a path IT built and a
+# path SOMETHING ELSE built has to survive that difference, and there are two of them:
+#
+#   * the source/target identity guard below — `deploy.sh /opt/hamstrack-release /opt/hamstrack`
+#     where the first is a symlink to the second passed it happily, staged the target's own
+#     tree beside itself and swapped it onto itself;
+#   * step 7b's comparison of a container's bind-mount Source against `$TARGET/<entry>`. That
+#     Source was stored by the daemon at container-creation time, from a project directory
+#     resolved by whatever ran `docker compose` then — possibly a hand run from the other
+#     spelling, possibly months ago. WHICH spelling it holds is not this script's to decide,
+#     so step 7b compares against BOTH roots rather than betting on one: a bet that loses is
+#     a repair that silently does not happen, which is the whole of HD-333.
+#
+# Not folded into TARGET itself on purpose: TARGET is what ~100 log lines, refusals and file
+# operations name, and an operator who typed /opt/hamstrack should read /opt/hamstrack back.
+SRC_PHYS="$(cd "$SRC" && pwd -P)"
+TARGET_PHYS="$(cd "$TARGET" && pwd -P)"
 if [ "$VERIFY_ONLY" = 0 ]; then
-  [ "$SRC" != "$TARGET" ] || die "source and target are the same directory ($TARGET) — there is nothing to apply"
+  [ "$SRC_PHYS" != "$TARGET_PHYS" ] || die "source and target are the same directory ($TARGET) — there is nothing to apply"
 fi
 
 # The box's own file, and the reason step 2 is a real check rather than a syntax pass.
@@ -371,9 +390,17 @@ while IFS= read -r line || [ -n "$line" ]; do
   # correctly while `case "$entry" in observability|observability/*)` at step 4 did not
   # match it, so the bind-mount restart was silently skipped. That is HD-199's own failure
   # class hiding behind a spelling: config on the box, Grafana holding a deleted inode,
-  # all three drift scopes reading 0. Anything that compares against an entry STRING —
-  # here, step 4's bind-mount test, and manifest_entries() in hamstrack-config-drift.sh,
-  # which must agree with the stamp this script writes — depends on this line.
+  # all three drift scopes reading 0.
+  #
+  # WHO DEPENDS ON THIS LINE: every comparison anywhere that puts a manifest entry STRING on
+  # one side of it — phrased as the category and deliberately not as a list, because a list
+  # here goes stale one entry before it is noticed and this one already did (step 7b's
+  # `"$TARGET/$entry"` against a container's bind-mount Source was added while the comment
+  # below still said "one of the three"). Members today, for a reader who wants them: the
+  # never-sync guards just below, step 7b's mount-source comparison, the checksum stamp, and
+  # manifest_entries() in hamstrack-config-drift.sh, which must agree with that stamp. A new
+  # one is written against the NORMALISED form and needs no edit here; one that normalises
+  # again for itself is a second spelling rule, which is how two of them drift apart.
   while [ "$entry" != "${entry#./}" ]; do
     entry="${entry#./}"
     # `.//observability` is `./observability`, so the redundant slashes go with the `./`
@@ -897,7 +924,25 @@ service_declares_ceiling_in_file() {
   printf '%s\n' "$FILE_DECLARATIONS" \
     | awk -F'\t' -v s="$1" '$1 == s && $2 == "mem" { found = 1 } END { exit !found }'
 }
-inspect_field() { docker inspect -f "$1" "$2" 2>/dev/null | tr -d '\r'; }
+# "THE DAEMON SAID NOTHING" AND "THERE IS NOTHING TO SAY" ARE DIFFERENT ANSWERS — the same
+# distinction read_service_containers draws for `compose ps -q`, drawn here for `docker
+# inspect`, because step 7b turns this answer into a decision not to repair a container. An
+# inspect that FAILS (no such object, daemon hiccup, a template this docker cannot render)
+# prints nothing, and a container that genuinely bind-mounts nothing prints nothing too; a
+# caller that cannot tell them apart fails open and skips the repair silently. INSPECT_RC is
+# how it tells: 0 means the container answered and the answer really is empty.
+# Globals rather than a printed value for read_service_containers' reason: `x="$(f)"` runs f
+# in a subshell and the exit code f recorded would die with it.
+INSPECT_OUT=''
+INSPECT_RC=0
+read_inspect_field() { # $1 = template, $2 = container id; sets INSPECT_OUT/INSPECT_RC
+  INSPECT_OUT="$(docker inspect -f "$1" "$2" 2>/dev/null | tr -d '\r')" && INSPECT_RC=0 || INSPECT_RC=$?
+}
+# Every OTHER call site keeps the value-returning shape and the exit status it has always had
+# (`set -e` still aborts a `x="$(inspect_field …)"` whose docker failed), because this change
+# is about one caller's decision and not about theirs — one reader underneath them both, so
+# the two cannot drift.
+inspect_field() { read_inspect_field "$1" "$2"; printf '%s\n' "$INSPECT_OUT"; return "$INSPECT_RC"; }
 REVISION_LABEL_TEMPLATE='{{index .Config.Labels "org.opencontainers.image.revision"}}'
 
 # --- the verify gauge ---------------------------------------------------------
@@ -1667,15 +1712,6 @@ for entry in "${ENTRIES[@]}"; do
   differs "$entry" && CHANGED+=("$entry")
 done
 
-# Whether anything a container BIND-MOUNTS changed — read by step 7b, computed here because
-# after step 5 the box and the release no longer differ and the answer would be lost.
-OBS_CHANGED=0
-if [ "${#CHANGED[@]}" -gt 0 ]; then
-  for entry in "${CHANGED[@]}"; do
-    case "$entry" in observability|observability/*) OBS_CHANGED=1 ;; esac
-  done
-fi
-
 if [ "${#CHANGED[@]}" -eq 0 ]; then
   log "no synced path differs from the release — skipping the backup"
 else
@@ -1772,8 +1808,16 @@ trap 'apply_cleanup; exit 143' TERM
 #
 # The invariant, which is the whole fix: THE PREDICATE THAT DECIDES WHETHER A BIND-MOUNTED
 # PATH IS REPLACED AND THE PREDICATE THAT DECIDES WHETHER ITS READERS ARE RESTARTED MUST BE
-# THE SAME PREDICATE. It is `differs` for both now — CHANGED here, and OBS_CHANGED, which is
-# derived from CHANGED, in step 7b.
+# THE SAME PREDICATE. It is `differs` for both, and CHANGED — the array this loop walks — is
+# literally the input to both: step 7b runs whenever it is non-empty and asks each running
+# container about the SAME entries.
+#
+# It was NOT, for one commit, and the way it failed is worth keeping: the fix deleted step
+# 7b's hand-kept `BIND_MOUNT_SERVICES=(grafana prometheus loki alloy)` and then re-created the
+# same list one layer up as `case "$entry" in observability|observability/*)`, gating the whole
+# repair on it. Nothing outside `observability/` is bind-mounted TODAY, so that was latent
+# rather than broken — but it is a hand-kept list of paths in place of a hand-kept list of
+# services, sitting under a comment saying the list is gone, which is worse than the list.
 #
 # ONE THING THIS GIVES UP, stated because it was a side effect nobody asked for and would
 # otherwise be discovered by its absence: `differs` compares CONTENT (`diff -rq`) and not
@@ -1907,48 +1951,117 @@ step7_run up -d --remove-orphans
 # mount into a replaced path would be silently outside the repair, and nothing would go red.
 #
 # So each service's container is asked what it actually mounts. `docker inspect` is already
-# this script's structured reader (`inspect_field`), needs no jq, and answers about the
+# this script's structured reader (`read_inspect_field`), needs no jq, and answers about the
 # container that is really running rather than about a file somebody hoped matched it. A
-# service whose bind source lies under a path this run replaced is a member, by construction,
-# on the day it gains the mount. One that has none is not, because a restart it does not need
-# is downtime it does not need either.
-# $1 = a container id; 0 when it bind-mounts anything under a path THIS RUN replaced.
+# service whose bind source meets a path this run replaced is a member, by construction, on
+# the day it gains the mount. One that has none is not, because a restart it does not need is
+# downtime it does not need either.
+#
+# $1 = a container id. 0 = restart it, 1 = nothing of this run's touches it, 2 = the daemon
+# could not be asked (a FINDING, never a "no").
+#
+# THREE WAYS A MOUNT AND A REPLACED ENTRY CAN MEET, and they do not cover the same failure:
+#   * the Source IS the replaced path, or lies UNDER it — ORPHANING. apply_path renamed the
+#     old tree aside and rm -rf'd it, so the inode this container holds is gone and it reads
+#     `no such file or directory` for as long as it is left alone. This is HD-333.
+#   * the replaced path lies UNDER the Source (entry `observability/grafana/provisioning/
+#     alerting/rules.yml`, Source `…/provisioning`) — RELOAD. Nothing is orphaned: the mount
+#     is the parent directory and it is still there. The container simply keeps serving the
+#     file it read at startup, which is HD-199's ORIGINAL symptom — a merged alert rule that
+#     is on the box and not running. The arm is latent today only because the manifest lists
+#     `observability/` whole, i.e. an ancestor of every mount source on the box; a manifest
+#     that ever names a file instead loses the repair without it, and the code that this one
+#     replaced covered it by accident (it restarted on any `observability` change at all).
+# Both are answered with a restart, which is the only lever this step has.
+#
 # The entries are compared as they are stored, with no normalising here on purpose: the
 # manifest is normalised exactly once, where it is read (`./observability/` and
-# `observability` become one form there), and that block names this comparison as one of the
-# three that depend on it. Re-normalising here would be a second spelling rule to keep in
-# step with the first, which is how the two drift apart.
+# `observability` become one form there), and this comparison is one of the consumers that
+# block names. Re-normalising here would be a second spelling rule to keep in step with the
+# first, which is how the two drift apart. The ROOT is the one thing compared in two
+# spellings, and for the opposite reason: see TARGET_PHYS at step 1 — the Source was written
+# by the daemon, not by this script, and betting on one spelling of a symlinked project
+# directory loses silently.
 bind_mounts_a_replaced_path() {
-  local cid src entry
+  local cid src entry root
   cid="$1"
+  read_inspect_field '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{println}}{{end}}{{end}}' "$cid"
+  # An empty answer with rc 0 is a real one — a container whose volumes are all NAMED ones
+  # reports no bind mount at all — and restarting those would be downtime for nothing. An
+  # UNREADABLE answer is the same empty string and means the opposite, so it never reaches
+  # the comparison below.
+  [ "$INSPECT_RC" -eq 0 ] || return 2
   for entry in ${CHANGED[@]+"${CHANGED[@]}"}; do
     while IFS= read -r src; do
       [ -n "$src" ] || continue
-      case "$src" in
-        "$TARGET/$entry"|"$TARGET/$entry"/*) return 0 ;;
-      esac
-    done < <(inspect_field '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{println}}{{end}}{{end}}' "$cid")
+      for root in "$TARGET" "$TARGET_PHYS"; do
+        # `"$root/$entry"/*` and not `"$root/$entry"*`: the second matches a SIBLING whose
+        # name merely starts the same (`observability-old`) and restarts a container this run
+        # did not touch.
+        case "$src" in
+          "$root/$entry"|"$root/$entry"/*) return 0 ;;   # orphaning
+        esac
+        case "$root/$entry" in
+          "$src"/*) return 0 ;;                          # reload
+        esac
+      done
+    done <<< "$INSPECT_OUT"
   done
   return 1
 }
+# WHAT THIS STEP MAY NOT DO IS FAIL OPEN. Every branch here that ends without a restart says
+# which of the three reasons it was: the service has no container (counted and named), its
+# containers mount nothing of this run's (counted as examined), or the box could not be read
+# — and the third is a refusal, not a skip. It used to be neither: `ps -q … 2>/dev/null ||
+# true` read a crash-looping container and an unanswering daemon both as "not running" and
+# skipped them without counting them, so a daemon answering nothing for every service printed
+# `restarted 0 of 0` and returned a green deploy with every container still orphaned. The
+# hardened reader for exactly that shape already existed (read_service_containers, one bounded
+# retry, an unanswered `ps -q` kept apart from an empty one) and this step was the one caller
+# that had its own copy.
 restart_bind_mounted() {
-  local svc cid restarted=0 examined=0
+  local svc cid rc restarted=0 examined=0 down=0 declared=0
   for svc in $SERVICES; do
-    # Not running: nothing to restart and nothing to warn about. A service that is declared
-    # and down is the `up -d` above's problem, not this step's.
-    cid="$(run_compose ps -q "$svc" 2>/dev/null || true)"
-    [ -n "$cid" ] || continue
-    cid="$(printf %s "$cid" | head -n 1)"
-    examined=$(( examined + 1 ))
-    bind_mounts_a_replaced_path "$cid" || continue
-    run_compose restart "$svc" \
-      || die "the configuration WAS applied and $svc could not be restarted, so it is still running the file that was replaced — its bind-mounted config is now a deleted inode and no drift scope can see it. Re-run 'docker compose restart $svc' in $TARGET."
-    restarted=$(( restarted + 1 ))
+    declared=$(( declared + 1 ))
+    read_service_containers "$svc"
+    if [ "$SERVICE_CONTAINERS_RC" -ne 0 ]; then
+      service_containers_unanswered "$svc"
+      die "step 7b: the configuration from $SHA IS APPLIED and the stack was brought up, and then this step could not be told which containers of '$svc' are running — $SERVICE_UNANSWERED_NOTE. A container that bind-mounts a path this run replaced is holding a DELETED INODE until it is restarted, and this run cannot say whether $svc holds one, so it is not claiming that it does not. Re-run this deploy (it is idempotent), or in $TARGET run 'docker compose restart $svc' and then 'bash $TARGET/ops/deploy/apply-config.sh $TARGET $TARGET $SHA --verify-only'."
+    fi
+    # Declared and not running: the `up -d` above's problem rather than this step's, but it is
+    # a container this step did NOT examine, so it is counted and said rather than dropped.
+    if [ -z "$SERVICE_CIDS" ]; then
+      down=$(( down + 1 ))
+      continue
+    fi
+    # EVERY container of the service, not the first: a scaled service has several and they do
+    # not have to agree, and one restart puts the whole service back either way.
+    while IFS= read -r cid; do
+      [ -n "$cid" ] || continue
+      examined=$(( examined + 1 ))
+      rc=0
+      bind_mounts_a_replaced_path "$cid" || rc=$?
+      if [ "$rc" -eq 2 ]; then
+        die "step 7b: the configuration from $SHA IS APPLIED and the stack was brought up, and then 'docker inspect' could not be asked what container $cid of '$svc' bind-mounts. An unreadable answer is not 'it mounts nothing': a container holding a path this run replaced is holding a DELETED INODE until it is restarted. Re-run this deploy (it is idempotent), or in $TARGET run 'docker compose restart $svc' and then 'bash $TARGET/ops/deploy/apply-config.sh $TARGET $TARGET $SHA --verify-only'."
+      fi
+      [ "$rc" -eq 0 ] || continue
+      run_compose restart "$svc" </dev/null \
+        || die "the configuration WAS applied and $svc could not be restarted, so it is still running the file that was replaced — its bind-mounted config is now a deleted inode and no drift scope can see it. Re-run 'docker compose restart $svc' in $TARGET."
+      restarted=$(( restarted + 1 ))
+      break
+    done <<< "$SERVICE_CIDS"
   done
-  log "restarted $restarted of $examined running service(s); a service is restarted when it bind-mounts a path this run replaced"
+  log "restarted $restarted of $examined running container(s) of $declared declared service(s); $down declared service(s) had no running container. A container is restarted when it bind-mounts a path this run replaced, or mounts a directory one of them lies inside"
 }
-if [ "$OBS_CHANGED" = 1 ]; then
-  log "a bind-mounted configuration path changed — restarting the services that mount it"
+# ARMED FROM CHANGED, WHICH IS THE ARRAY THE APPLY LOOP WALKED — the same predicate on both
+# halves, which is the invariant written at step 5. NOT from a list of paths anyone bind-mounts
+# today: `case "$entry" in observability|observability/*)` here would be the deleted
+# BIND_MOUNT_SERVICES array again in a different spelling, and it would be wrong on the day a
+# service mounts something else — ops/ is already synced and already mountable. The function is
+# a no-op for a container that mounts nothing of this run's, so the cost of asking every
+# running service is one `docker inspect` each, per deploy.
+if [ "${#CHANGED[@]}" -gt 0 ]; then
+  log "a synced configuration path changed — asking each running container whether it bind-mounts one"
   restart_bind_mounted
 fi
 

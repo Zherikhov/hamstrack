@@ -96,6 +96,48 @@ final class ScriptHarness {
         return Files.exists(p) ? Files.readString(p, StandardCharsets.UTF_8) : "";
     }
 
+    /**
+     * A directory at {@code link} that resolves to {@code target}, or {@code false} where this
+     * machine will not make one.
+     *
+     * <p>Needed by any case whose subject is the difference between a path's LOGICAL and PHYSICAL
+     * spelling — bash's {@code pwd} against {@code pwd -P}, and therefore a script's idea of a
+     * directory against the one a daemon stored. Without a real link the two spellings collapse
+     * into one string and the case passes while asserting nothing.
+     *
+     * <p>Two mechanisms, because Windows has two and they do not need the same rights (measured on
+     * this machine, 2026-09-28): {@code Files.createSymbolicLink} throws
+     * {@code FileSystemException: …} without {@code SeCreateSymbolicLinkPrivilege}, while a
+     * DIRECTORY JUNCTION ({@code mklink /J}) needs no privilege at all and is reported by Git Bash
+     * as a symlink — {@code cd link && pwd} prints the link, {@code pwd -P} prints the target. On
+     * Linux the first call succeeds and the second is never reached.
+     */
+    static boolean createDirectoryLink(Path link, Path target) {
+        try {
+            Files.createSymbolicLink(link, target);
+            return true;
+        } catch (IOException | UnsupportedOperationException e) {
+            // Windows without the privilege. A junction is the same thing for this purpose.
+        }
+        if (!System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win")) {
+            return false;
+        }
+        try {
+            var p = new ProcessBuilder("cmd", "/c", "mklink", "/J",
+                    link.toAbsolutePath().toString(), target.toAbsolutePath().toString())
+                    .redirectErrorStream(true)
+                    .start();
+            p.getInputStream().readAllBytes();
+            return p.waitFor(30, java.util.concurrent.TimeUnit.SECONDS) && p.exitValue() == 0
+                    && Files.isDirectory(link);
+        } catch (IOException e) {
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
     /** Forward slashes: Git Bash accepts {@code C:/x/y}, and a backslash is an escape. */
     static String posix(Path p) {
         return p.toAbsolutePath().toString().replace('\\', '/');

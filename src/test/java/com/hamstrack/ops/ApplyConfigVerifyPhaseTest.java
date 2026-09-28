@@ -260,26 +260,48 @@ class ApplyConfigVerifyPhaseTest {
      * silently outside the repair and nothing would go red. Each running container is now asked
      * what it actually mounts.
      *
-     * <p>This test is the reason that derivation is not shipped untested. It gives exactly one
-     * service a bind mount under a path the run replaces, and asserts three things that a list
-     * could not give you: the mounting service is restarted, the one that mounts nothing is not,
-     * and the log reports the population it examined rather than a number that hides it.
+     * <p>This test is the reason that derivation is not shipped untested — and the reason it is
+     * shipped a second time. The first version of it gave the mount to <strong>grafana</strong> and
+     * gave the other service <strong>no mounts at all</strong>, so every one of its assertions was
+     * also true of the array it was written to replace: grafana was a member of
+     * {@code (grafana prometheus loki alloy)} and {@code app} was not, so planting the array back
+     * turned the test red only through a changed <em>log string</em>. A seal whose redness comes
+     * from prose is prose.
+     *
+     * <p>The fixture therefore <em>discriminates</em>, in four ways, and each one is the answer the
+     * deleted array would have got wrong:
+     * <ul>
+     *   <li>the mounting service is {@code app} &mdash; never a member of the array &mdash; so an
+     *       array-shaped implementation fails to restart something it must;</li>
+     *   <li>the non-mounting service is {@code grafana} &mdash; the array's first member &mdash; so
+     *       an array-shaped implementation restarts something it must not;</li>
+     *   <li>{@code grafana} reports REAL mounts ({@code /var/run/docker.sock}, and a sibling whose
+     *       name merely starts like the replaced path: {@code …/observability-old/x}). An empty
+     *       mount list is a shape no daemon produces, and it cannot catch a predicate that matches
+     *       on a prefix;</li>
+     *   <li>the manifest spells the entry {@code ./observability/}, so the comparison also depends
+     *       on the entry having been normalised once where it was read &mdash; the property
+     *       {@link ApplyConfigPinGuardTest} can no longer observe through the repair now that the
+     *       step runs for any changed path.</li>
+     * </ul>
      */
     @Test
     void onlyAServiceThatBindMountsAReplacedPathIsRestarted() throws Exception {
         var failures = new ArrayList<String>();
         var d = deployment("hd333mounts");
 
-        // A third synced entry that a container can plausibly mount, and a service list in which
-        // exactly one service will report mounting it.
-        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\nobservability/\n");
+        // `./observability/` deliberately: the entry is normalised where the manifest is read, and
+        // this comparison is one of the consumers that depends on it.
+        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\n./observability/\n");
         write(d.src().resolve("observability/rules.yml"), "groups: []\n");
 
         var env = new java.util.LinkedHashMap<String, String>();
         env.put("STUB_SERVICES", "app grafana");
-        env.put("STUB_MOUNT_SVC", "grafana");
         env.put("STUB_BOX", posix(d.box()));
-        env.put("STUB_MOUNT_SUFFIX", "observability/rules.yml");
+        env.put("STUB_MOUNTS", String.join("\n",
+                "app|@BOX@/observability/rules.yml",
+                "grafana|/var/run/docker.sock",
+                "grafana|@BOX@/observability-old/x"));
 
         var first = run(d, env);
         expect(failures, "the first deploy places all three entries", first.exit() == 0
@@ -287,6 +309,7 @@ class ApplyConfigVerifyPhaseTest {
 
         // Now change ONLY the bind-mounted path, so the repair must fire for exactly one service.
         write(d.src().resolve("observability/rules.yml"), "groups: [{name: changed}]\n");
+        forgetDockerCalls(d);
         var second = run(d, env);
 
         expect(failures, "the second deploy exits 0", second.exit() == 0, second);
@@ -294,14 +317,262 @@ class ApplyConfigVerifyPhaseTest {
                 second.output().contains("applied 1 of 3 path(s)"), second);
         expect(failures, "…and asked the container what it mounts rather than consulting a list",
                 second.dockerCalls().contains("inspect -f {{range .Mounts}}"), second);
-        expect(failures, "…and restarts the service that bind-mounts it",
-                second.dockerCalls().contains("compose restart grafana")
-                || second.dockerCalls().contains(" restart grafana"), second);
-        expect(failures, "…and does NOT restart the service that mounts nothing — a restart it "
-                        + "does not need is downtime it does not need either",
-                !second.dockerCalls().contains(" restart app"), second);
+        expect(failures, "…and restarts `app`, which bind-mounts the replaced path and was NEVER a "
+                        + "member of the deleted BIND_MOUNT_SERVICES array",
+                second.dockerCalls().contains(" restart app"), second);
+        expect(failures, "…and does NOT restart `grafana`, whose two real bind mounts (the docker "
+                        + "socket, and a SIBLING directory whose name starts like the replaced one) "
+                        + "are none of this run's business — it was the array's first member",
+                !second.dockerCalls().contains(" restart grafana"), second);
         expect(failures, "…and reports the population it examined, not just the count it acted on",
-                second.output().contains("restarted 1 of 2 running service(s)"), second);
+                second.output().contains("restarted 1 of 2 running container(s) of 2 declared service(s)"), second);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>The repair is armed by the same predicate as the replacement &mdash; CHANGED &mdash;
+     * and by nothing else.</strong>
+     *
+     * <p>The commit that deleted {@code BIND_MOUNT_SERVICES=(grafana prometheus loki alloy)}
+     * replaced it one layer up with {@code case "$entry" in observability|observability/*)}, and
+     * gated the whole repair on that: a hand-kept list of <em>paths</em> in place of a hand-kept
+     * list of <em>services</em>, under a comment saying the list was gone. Nothing outside
+     * {@code observability/} is bind-mounted today, so it was latent — which is exactly how the
+     * original defect got six weeks: no witness, no red, and a true-sounding sentence in the way.
+     *
+     * <p>Here the only path that changes is {@code ops/}, which no container in the fixture mounts
+     * and which the path list would have excluded outright. The step must still run and still ask.
+     */
+    @Test
+    void theRepairIsArmedByWhatChangedAndNotByAListOfPathsSomebodyMounts() throws Exception {
+        var failures = new ArrayList<String>();
+        var d = deployment("hd333armed");
+
+        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\nobservability/\n");
+        write(d.src().resolve("observability/rules.yml"), "groups: []\n");
+
+        var env = new java.util.LinkedHashMap<String, String>();
+        env.put("STUB_SERVICES", "app grafana");
+        env.put("STUB_BOX", posix(d.box()));
+        // `app` mounts a path under ops/ — which is synced, and which nothing on the real box
+        // mounts TODAY. "Today" is the whole of the hazard.
+        env.put("STUB_MOUNTS", String.join("\n",
+                "app|@BOX@/ops/drift",
+                "grafana|@BOX@/observability/rules.yml"));
+
+        var first = run(d, env);
+        expect(failures, "the first deploy places every entry", first.exit() == 0
+                && first.output().contains("applied 3 of 3 path(s)"), first);
+
+        // A release that touches nothing under observability/ at all.
+        write(d.src().resolve("ops/drift/hamstrack-config-drift.sh"),
+                ScriptHarness.read(d.src().resolve("ops/drift/hamstrack-config-drift.sh")) + "# changed\n");
+        forgetDockerCalls(d);
+        var second = run(d, env);
+
+        expect(failures, "the second deploy exits 0", second.exit() == 0, second);
+        expect(failures, "…and replaces only ops/", second.output().contains("applied 1 of 3 path(s)"), second);
+        expect(failures, "…and still runs the bind-mount repair, because a path CHANGED — not "
+                        + "because the path was one somebody had listed as mountable",
+                second.output().contains("restarted 1 of 2 running container(s)"), second);
+        expect(failures, "…restarting the container that mounts inside ops/",
+                second.dockerCalls().contains(" restart app"), second);
+        expect(failures, "…and not the one whose mount this run did not touch",
+                !second.dockerCalls().contains(" restart grafana"), second);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>A mount that is an ANCESTOR of the replaced entry is not orphaned &mdash; and is
+     * still stale.</strong>
+     *
+     * <p>Two different failures share one lever. When the replaced entry is at or under the mount
+     * Source the container's inode is destroyed (HD-333). When the entry is <em>deeper</em> than the
+     * Source — entry {@code observability/grafana/provisioning/alerting/rules.yml}, Source
+     * {@code …/provisioning} — nothing is orphaned: the directory the container mounts is still
+     * there, and the container simply keeps serving the file it read at start. That is HD-199's
+     * ORIGINAL symptom, a merged alert rule sitting on the box and not running, and the code this
+     * ticket replaced covered it by accident because it restarted on any {@code observability}
+     * change whatsoever.
+     *
+     * <p>It is latent today only because the manifest lists {@code observability/} whole, i.e. an
+     * ancestor of every mount source on the box. A manifest that ever names a file instead — which
+     * is a one-line edit to a text file, by someone reading a comment about paths and not about
+     * inodes — loses the repair silently without this arm.
+     */
+    @Test
+    void anEntryDeeperThanTheMountItLivesUnderStillRestartsTheContainer() throws Exception {
+        var failures = new ArrayList<String>();
+        var d = deployment("hd333deeper");
+
+        var rules = "observability/grafana/provisioning/alerting/rules.yml";
+        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\n" + rules + "\n");
+        write(d.src().resolve(rules), "groups: []\n");
+
+        var env = new java.util.LinkedHashMap<String, String>();
+        env.put("STUB_SERVICES", "app grafana");
+        env.put("STUB_BOX", posix(d.box()));
+        env.put("STUB_MOUNTS", String.join("\n",
+                // The ancestor of the replaced entry — the shape the real grafana service has.
+                "app|@BOX@/observability/grafana/provisioning",
+                "grafana|/var/run/docker.sock"));
+
+        var first = run(d, env);
+        expect(failures, "the first deploy places the deep entry", first.exit() == 0
+                && first.output().contains("applied 3 of 3 path(s)"), first);
+
+        write(d.src().resolve(rules), "groups: [{name: changed}]\n");
+        forgetDockerCalls(d);
+        var second = run(d, env);
+
+        expect(failures, "the second deploy exits 0", second.exit() == 0, second);
+        expect(failures, "…and replaces only the deep entry",
+                second.output().contains("applied 1 of 3 path(s)"), second);
+        expect(failures, "…and restarts the container that mounts the DIRECTORY the entry lives "
+                        + "in — nothing is orphaned here, it is holding the file it read at start",
+                second.dockerCalls().contains(" restart app"), second);
+        expect(failures, "…and still leaves alone the one that mounts the docker socket",
+                !second.dockerCalls().contains(" restart grafana"), second);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>The Source the daemon stored and the path this script builds are produced
+     * INDEPENDENTLY, so the fixture makes them disagree.</strong>
+     *
+     * <p>{@code apply-config.sh} normalises its target with {@code cd "$TARGET" && pwd}, which is
+     * bash's <em>logical</em> pwd: it prints the path the operator typed, symlinks and all. The
+     * daemon's {@code .Mounts[].Source} was written at container-creation time by whatever resolved
+     * the project directory then, possibly through the other spelling and possibly months ago. The
+     * comparison at step 7b is between those two strings, and a divergence does not fail loudly —
+     * it reads as "this container mounts nothing of ours" and skips the repair, which is the exact
+     * failure this whole step exists to prevent.
+     *
+     * <p>Every other case here feeds the stub {@code @BOX@}, the box spelled the way the script
+     * spells it, because on MSYS a Java-side path and a bash-side path are two names for one
+     * directory and a fixture that ignored that would pass on Linux only. That is also what made
+     * those cases unable to see this: the one thing that can diverge was made identical by
+     * construction. This case points the deploy at a SYMLINK to the box and has the stub report the
+     * RESOLVED spelling, so the two strings really are different, and asserts the repair still
+     * fires. It measures its own precondition first (a platform where the link is not a link
+     * collapses the two spellings and would pass vacuously) and skips with a witness rather than
+     * pretending.
+     */
+    @Test
+    void aBoxReachedThroughASymlinkStillMatchesTheSourceTheDaemonStored() throws Exception {
+        var failures = new ArrayList<String>();
+        var d = deployment("hd333symlink");
+
+        // The box becomes `realbox`, and `box` — the path the deploy is pointed at — becomes a
+        // link to it. Every fixture file was already written through `box`, so nothing moves.
+        var realBox = d.box().resolveSibling("realbox");
+        Files.move(d.box(), realBox);
+        var linked = ScriptHarness.createDirectoryLink(d.box(), realBox);
+        ScriptHarness.assumeWithWitness("apply-config-symlink", linked,
+                "this filesystem would not take a directory symlink or junction — the case needs a box "
+                        + "whose logical and physical spellings differ, and without one it would assert "
+                        + "that two identical strings match");
+        var logical = bashEval("cd " + posix(d.box()) + " && pwd");
+        var physical = bashEval("cd " + posix(d.box()) + " && pwd -P");
+        ScriptHarness.assumeWithWitness("apply-config-symlink", !logical.equals(physical),
+                "bash resolves this link before it reports the directory (" + logical + " == " + physical
+                        + "), so the two spellings this case exists to tell apart are one string here");
+
+        write(d.src().resolve("ops/deploy/synced-paths.txt"), "docker-compose.prod.yml\nops/\nobservability/\n");
+        write(d.src().resolve("observability/rules.yml"), "groups: []\n");
+
+        var env = new java.util.LinkedHashMap<String, String>();
+        env.put("STUB_SERVICES", "app grafana");
+        env.put("STUB_BOX", posix(d.box()));
+        // @BOXPHYS@: the spelling a daemon stores for a project directory reached through a link,
+        // and the one spelling the script cannot arrive at by repeating its own normalisation.
+        env.put("STUB_MOUNTS", "app|@BOXPHYS@/observability/rules.yml");
+
+        var first = run(d, env);
+        expect(failures, "the first deploy through the link places every entry", first.exit() == 0
+                && first.output().contains("applied 3 of 3 path(s)"), first);
+
+        write(d.src().resolve("observability/rules.yml"), "groups: [{name: changed}]\n");
+        forgetDockerCalls(d);
+        var second = run(d, env);
+
+        expect(failures, "the second deploy exits 0", second.exit() == 0, second);
+        expect(failures, "…and the log names the box as the operator spelled it",
+                second.output().contains(logical), second);
+        expect(failures, "…and the repair still matches a Source the daemon stored RESOLVED — the "
+                        + "two spellings are `" + logical + "` and `" + physical + "`",
+                second.dockerCalls().contains(" restart app"), second);
+
+        // THE OTHER MEMBER OF THE SAME CATEGORY, sealed here because it is the same mistake:
+        // the source/target identity guard compared two spellings too. Pointed at the box under
+        // its RESOLVED name with the target still spelled through the link, it saw two different
+        // strings, let the run proceed, and `cp -a`'d the target's own tree beside itself before
+        // swapping each entry onto itself. The box after the first deploy carries the manifest
+        // (ops/ is synced), so this really does reach the guard rather than stopping at step 1.
+        var itself = runFrom(d, env, physical);
+        expect(failures, "a source and a target that are one directory under two spellings is refused",
+                itself.exit() != 0 && itself.output().contains("source and target are the same directory"), itself);
+
+        assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
+    }
+
+    /**
+     * <strong>Step 7b may not fail open: a box it could not read is a refusal, never a "no".</strong>
+     *
+     * <p>Both reads it makes returned the same value for "nothing" and for "could not ask".
+     * {@code cid="$(run_compose ps -q "$svc" 2>/dev/null || true)"} read a crash-looping container
+     * and an unanswering daemon alike as "not running", skipped them without counting them, and a
+     * daemon that answered nothing for every service produced {@code restarted 0 of 0} and a green
+     * deploy with every container still holding a deleted inode. {@code docker inspect}'s empty
+     * output was read as "bind-mounts nothing" for the same reason.
+     *
+     * <p>The hardened reader for the first shape already existed — {@code read_service_containers},
+     * one bounded retry, an unanswered {@code ps -q} kept apart from an empty one, used by every
+     * other per-service read in the script. This step was the one caller carrying its own copy.
+     */
+    @Test
+    void aStepSevenBThatCannotReadTheBoxRefusesInsteadOfSkipping() throws Exception {
+        var failures = new ArrayList<String>();
+
+        var env = new java.util.LinkedHashMap<String, String>();
+        env.put("STUB_SERVICES", "app grafana");
+        env.put("VERIFY_POLL_SECONDS", "0");
+        env.put("STUB_INSPECT_MOUNTS_EXIT", "1");
+
+        // The `ps -q` half: the daemon answers nothing about what is running. The other five
+        // per-service reads in this script already told that apart from "nothing IS running";
+        // this step was the one that did not, and answered `restarted 0 of 0`.
+        var unanswerable = run(deployment("hd333psfail"),
+                Map.of("STUB_PS_EXIT", "1", "VERIFY_POLL_SECONDS", "0"));
+        expect(failures, "an unanswerable `compose ps` refuses rather than reading as 'not running'",
+                unanswerable.exit() != 0 && unanswerable.output().contains("step 7b:"), unanswerable);
+        expect(failures, "…through the shared hardened reader, so it is retried once first",
+                unanswerable.output().contains("retrying once in 0s"), unanswerable);
+        expect(failures, "…and never claims a population it could not count",
+                !unanswerable.output().contains("restarted 0 of 0"), unanswerable);
+
+        var unreadableMounts = run(deployment("hd333inspectfail"), env);
+        expect(failures, "an inspect that failed is NOT 'this container mounts nothing'",
+                unreadableMounts.exit() != 0, unreadableMounts);
+        expect(failures, "…and says which container could not be asked",
+                unreadableMounts.output().contains("could not be asked what container cid-app of 'app' bind-mounts"),
+                unreadableMounts);
+        expect(failures, "…and names an action its reader can perform",
+                unreadableMounts.output().contains("docker compose restart app")
+                        && unreadableMounts.output().contains("--verify-only"), unreadableMounts);
+
+        // A service that is simply DOWN is not this step's finding — `up -d` above owns that, and
+        // the grafana check refuses this particular run a few lines later for its own reasons. But
+        // it IS a container this step did not examine, so it is counted and named rather than
+        // dropped: `restarted 0 of 0` over a box where nothing could be asked was the shape.
+        var down = run(deployment("hd333down"), Map.of("STUB_DOWN", "grafana"));
+        expect(failures, "a declared service with no container is counted and named by step 7b",
+                down.output().contains("1 declared service(s) had no running container"), down);
+        expect(failures, "…and step 7b is not what refuses the run — it says nothing fatal about it",
+                !down.output().contains("step 7b:"), down);
 
         assertThat(failures).withFailMessage(CHECKLIST + "\nFailed: " + failures).isEmpty();
     }
@@ -2330,22 +2601,32 @@ class ApplyConfigVerifyPhaseTest {
                         n=$(cat "$STUB_STATE/restarts" 2>/dev/null || echo 0); n=$((n + 1)); printf '%s' "$n" > "$STUB_STATE/restarts"
                         set -- $STUB_RESTARTS; [ "$n" -le "$#" ] || n=$#; shift $((n - 1)); printf '%s\\n' "$1" ;;
                       *Mounts*)
-                        # Only the container named by STUB_MOUNT_SVC reports a bind mount, so a
-                        # test can tell "this service mounts a replaced path" apart from "every
-                        # service does". The cid is `cid-<service>` (see the `ps -q` case above).
+                        # A FAILING inspect and a container that mounts nothing are the same empty
+                        # string on stdout and differ only in the exit code, which is the whole of
+                        # the fail-open shape step 7b closes — so the stub can produce both.
+                        [ -z "${STUB_INSPECT_MOUNTS_EXIT:-}" ] || exit "$STUB_INSPECT_MOUNTS_EXIT"
+                        # STUB_MOUNTS is one `<service>|<source>` per line and a service may carry
+                        # SEVERAL, because that is what a daemon reports: node-exporter mounts `/`,
+                        # cadvisor five host paths, alloy the docker socket. A fixture whose
+                        # non-mounting service reports an EMPTY list cannot tell "mounts nothing of
+                        # this run's" from "mounts nothing at all", and a predicate that matched on
+                        # a sibling prefix or on the socket would pass it.
                         #
-                        # The source is built here rather than passed whole, and that is not
-                        # decoration: apply-config.sh normalises its target with `cd … && pwd`,
-                        # which on MSYS turns `C:/Users/…/Temp/x` into `/tmp/x`. A test that passed
-                        # the Java-side spelling would compare two spellings of the same directory
-                        # and match on Linux while failing on Windows. Normalising the same way the
-                        # script does makes the fixture say "the box's own path" in whatever
-                        # spelling this platform uses.
-                        case "$4" in
-                          *"${STUB_MOUNT_SVC:-__no_such_service__}"*)
-                            printf '%s/%s\\n' "$(cd "$STUB_BOX" && pwd)" "${STUB_MOUNT_SUFFIX:-}" ;;
-                          *) printf '\\n' ;;
-                        esac ;;
+                        # Two tokens, and the difference between them is a test case rather than an
+                        # assumption. @BOX@ is the box as the SCRIPT spells it (`cd … && pwd`,
+                        # logical) — needed because on MSYS the Java-side `C:/Users/…/Temp/x` and
+                        # bash's `/tmp/x` are the same directory under two names, so a fixture that
+                        # passed the Java spelling would compare two spellings and pass on Linux
+                        # only. @BOXPHYS@ is the same directory RESOLVED (`pwd -P`), which is what a
+                        # daemon stores for a project directory reached through a symlink: the one
+                        # source the script cannot produce by repeating its own normalisation.
+                        printf '%s\\n' "${STUB_MOUNTS:-}" | while IFS='|' read -r svc src; do
+                          [ -n "$svc" ] || continue
+                          [ "$4" = "cid-$svc" ] || continue
+                          src="${src//@BOX@/$(cd "${STUB_BOX:-/nonexistent}" && pwd)}"
+                          src="${src//@BOXPHYS@/$(cd "${STUB_BOX:-/nonexistent}" && pwd -P)}"
+                          printf '%s\\n' "$src"
+                        done ;;
                       *State.StartedAt*) printf '%s\\n' "2026-09-10T08:00:00.000000000Z" ;;
                       *State.Running*) printf '%s\\n' "${STUB_RUNNING:-true}" ;;
                       *) printf '\\n' ;;
@@ -2441,6 +2722,32 @@ class ApplyConfigVerifyPhaseTest {
                 .withFailMessage("apply-config.sh did not finish within 120s — output so far:\n%s\n%s", out, err)
                 .isTrue();
         return new Run(p.exitValue(), out, err, ScriptHarness.read(d.dockerLog()), d);
+    }
+
+    /**
+     * Forgets every {@code docker} call made so far, so that what a LATER run did can be asserted.
+     *
+     * <p>The log accumulates across runs on purpose (a case that asks "was this ever invoked" wants
+     * the whole history), and for a two-run case that is a trap: the first deploy of a fixture
+     * replaces every entry and therefore restarts every container that mounts one, so
+     * {@code second.dockerCalls().contains(" restart app")} would be satisfied by the FIRST run and
+     * hold even if the second did nothing at all. Every HD-333 case whose subject is what the
+     * second deploy did clears the log between them.
+     */
+    private static void forgetDockerCalls(Deployment d) throws IOException {
+        Files.deleteIfExists(d.dockerLog());
+    }
+
+    /**
+     * One expression through the same bash the script runs under, trimmed. Used to ask the shell
+     * what it thinks a path is spelled like, rather than assuming Java's answer travels.
+     */
+    private String bashEval(String expression) throws Exception {
+        ScriptHarness.assumeWithWitness("apply-config-verify", bash != null, "no bash on PATH");
+        var p = new ProcessBuilder(bash, "-c", expression).redirectErrorStream(true).start();
+        var out = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        p.waitFor(30, TimeUnit.SECONDS);
+        return out.strip();
     }
 
     /** {@link Result}'s shape for {@link ScriptHarness#expect}, from a {@link Run}. */
