@@ -352,8 +352,9 @@ public class DataSeeder implements ApplicationRunner {
                 + "everything the account owns and only takes its password away. Then start up and set a new "
                 + "one from 'Forgot password' on that address, or from another system administrator, Admin "
                 + "console → Users → reset it; or delete the account there if it should never have existed. "
-                + "Only then set a password of your own here — or remove seed.admin.email/seed.admin.password "
-                + "entirely, which leaves the repaired account exactly as it is.");
+                + "Only then set a password of your own here — or remove seed.admin.email and "
+                + "seed.admin.password (SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD in your .env) entirely, "
+                + "which leaves the repaired account exactly as it is.");
     }
 
     /**
@@ -593,11 +594,11 @@ public class DataSeeder implements ApplicationRunner {
             // is what takes an operator to the row, and they are at a database prompt anyway.
             throw new IllegalStateException(
                     "Admin seeding refused: a users row (id " + existing.getId() + ") holds the "
-                            + "folded form of seed.admin.email with a different spelling. This "
-                            + "seeder did not write it and will not grant it system ADMIN. Either "
-                            + "correct that row's address or point seed.admin.email at the account "
-                            + "you mean; see docs/self-hosting.md, section \"Duplicate accounts "
-                            + "after an upgrade\".");
+                            + "folded form of seed.admin.email (SEED_ADMIN_EMAIL) with a different "
+                            + "spelling. This seeder did not write it and will not grant it system "
+                            + "ADMIN. Either correct that row's address or point SEED_ADMIN_EMAIL at "
+                            + "the account you mean; see docs/self-hosting.md, section \"Duplicate "
+                            + "accounts after an upgrade\".");
         }
         if (existing != null) {
             // Accounts seeded before system roles existed must still get ADMIN

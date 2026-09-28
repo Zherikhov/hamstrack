@@ -127,7 +127,8 @@ public class MailSendEventRetention {
             throw new IllegalStateException(
                     "AuthMailProperties.ANONYMOUS_EVENT_RETENTION is "
                     + AuthMailProperties.ANONYMOUS_EVENT_RETENTION + ", which is longer than the "
-                    + "lowest app.invites.event-retention-days an operator may set ("
+                    + "lowest app.invites.event-retention-days (INVITE_EVENT_RETENTION_DAYS) an "
+                    + "operator may set ("
                     + InviteProperties.MIN_EVENT_RETENTION_DAYS + " days). The general sweep has no "
                     + "sender predicate, so at that setting the anonymous rows would be deleted by "
                     + "it and not by their own cutoff — every statement that anonymous rows are "

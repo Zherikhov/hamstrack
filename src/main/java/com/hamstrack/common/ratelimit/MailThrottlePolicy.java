@@ -215,7 +215,8 @@ public record MailThrottlePolicy(EmailType type,
             throw new IllegalArgumentException(
                     "the ceiling window for " + type + " is " + ceilingWindow + ", wider than "
                     + MAX_CEILING_WINDOW + ". mail_send_events rows are swept on "
-                    + "app.invites.event-retention-days, and that retention is asserted at startup "
+                    + "app.invites.event-retention-days (INVITE_EVENT_RETENTION_DAYS), and that "
+                    + "retention is asserted at startup "
                     + "against MailThrottlePolicy.MAX_CEILING_WINDOW — so a wider window here would "
                     + "count rows the sweep has already deleted, and the ceiling would silently "
                     + "shorten to the retention with no error and no log line. Raise this constant "
