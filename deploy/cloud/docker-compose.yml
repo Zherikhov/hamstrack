@@ -1,12 +1,13 @@
 # Hamstrack — the CLOUD model, runnable on one host (HD-317).
 #
 # WHAT THIS IS FOR. Hamstrack ships one codebase in two deployment models, and the
-# difference between them is entirely a set of DEFAULTS — measured, not asserted:
-# application-cloud.properties and application-dc.properties each carry the same
-# settings as `${VAR:default}` and disagree only about the default. So this stack
-# exists to let you run and evaluate the cloud model as it actually behaves, on a
-# laptop or one server, with **no AWS account and no public DNS**. Object storage is
-# MinIO, which speaks S3 and runs beside the app.
+# difference between them is a set of DEFAULTS rather than a fork — measured, not
+# asserted: every behaviour the two models disagree about is reachable from either
+# profile by setting one variable, and the only difference no variable can move is
+# the `deployment` label on structured log lines. So this stack exists to let you
+# run and evaluate the cloud model as it actually behaves, on a laptop or one
+# server, with **no AWS account and no public DNS**. Object storage is MinIO, which
+# speaks S3 and runs beside the app.
 #
 # WHAT THE CLOUD PROFILE CHANGES, all of it: attachments go to S3 rather than the
 # container's disk; self-registration is open; first-login onboarding is on; the
@@ -14,6 +15,13 @@
 # Every one of those is reachable from the `dc` profile by setting its variable —
 # docs/cloud-mode.md has the table — so choose this stack when you want the cloud
 # model's shape, not because it is the only way to a particular feature.
+#
+# The two profile files are NOT line-for-line twins, and one asymmetry is worth
+# knowing: each declares some of those settings and leaves the rest at the base
+# default in application.properties. Self-registration is declared only by the `dc`
+# profile, so OPEN SIGNUP is what the base default gives — this stack, a run with no
+# profile at all, and any third profile added later all get it unless somebody sets
+# PUBLIC_SIGNUP_ENABLED=false.
 #
 # NOT the stack that runs hamstrack.com. That one is docker-compose.prod.yml: Caddy,
 # a public certificate, real S3, an owner's AWS account. This is the model, not the
@@ -44,6 +52,13 @@ services:
       # MinIO, reached on the compose network. `path-style` is required for it and
       # for every S3-compatible store that is not AWS; a region is required by the
       # SDK even where the store ignores it.
+      #
+      # STORAGE_TYPE is a LITERAL here, so this stack's `.env` cannot move it — the
+      # variable is settable on any install, but not on this one: the endpoint,
+      # credentials and bucket below all point at the MinIO container, and
+      # STORAGE_TYPE=local in `.env` would leave them configured and unused while
+      # attachments went to a container filesystem with no volume behind it. Want
+      # local-disk storage? That is the DC stack, in ../dc/.
       STORAGE_TYPE: s3
       STORAGE_S3_BUCKET: ${STORAGE_S3_BUCKET:-hamstrack-attachments}
       STORAGE_S3_ENDPOINT: http://minio:9000
@@ -96,9 +111,50 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Refuses the `up` for the values MinIO itself refuses only once the stack already
+  # looks like it is starting. It enforces a minimum length on both root credentials and it
+  # does so by exiting FATAL at startup — measured on the pinned image, with a 7
+  # character password: `Unable to validate credentials inherited from the shell
+  # environment` and exit 1. That refusal names the variable, but nobody reads it:
+  # `minio` carries `restart: unless-stopped`, so the FATAL becomes a restart loop,
+  # the container never turns healthy, and `up -d --wait` sits there until the
+  # timeout and then reports a DEPENDENCY it was waiting for rather than a value you
+  # typed. A one-shot job with `restart: "no"` fails in seconds and names itself, so
+  # the guide can point at `docker compose logs preflight`.
+  #
+  # This is why the check cannot live in `minio-bucket`: that job waits for minio to
+  # be HEALTHY, which on a short password never happens, so it would never run.
+  preflight:
+    # The mc image, because it is already part of this stack - no third image to pull
+    # to find out that a value is too short.
+    image: quay.io/minio/mc:${MINIO_CLIENT_IMAGE_TAG:-RELEASE.2025-08-13T08-35-41Z}
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env beside this file}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env - at least 8 characters}
+    mem_limit: ${MINIO_CLIENT_MEMORY_LIMIT:-128m}
+    # `$$` is one literal `$` after Compose interpolation, so the shell gets ${#VAR}.
+    # Both bounds are MinIO's own, from the HINT it prints when it refuses.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ $${#MINIO_ROOT_USER} -lt 3 ]; then
+          echo "MINIO_ROOT_USER is $${#MINIO_ROOT_USER} character(s). MinIO requires at least 3 and refuses to start below that. Set a longer MINIO_ROOT_USER in .env beside this file, then run the up again." >&2
+          exit 1
+        fi
+        if [ $${#MINIO_ROOT_PASSWORD} -lt 8 ]; then
+          echo "MINIO_ROOT_PASSWORD is $${#MINIO_ROOT_PASSWORD} character(s). MinIO requires at least 8 and refuses to start below that, which would otherwise look like a storage service that just never comes up. Set a longer MINIO_ROOT_PASSWORD in .env beside this file - openssl rand -base64 24 - then run the up again." >&2
+          exit 1
+        fi
+        echo "preflight: MINIO_ROOT_USER and MINIO_ROOT_PASSWORD are long enough for MinIO"
+    restart: "no"
+
   minio:
     image: quay.io/minio/minio:${MINIO_IMAGE_TAG:-RELEASE.2025-09-07T16-13-09Z}
     command: ["server", "/data", "--console-address", ":9001"]
+    depends_on:
+      preflight:
+        condition: service_completed_successfully
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?set MINIO_ROOT_USER in .env beside this file}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env - at least 8 characters}

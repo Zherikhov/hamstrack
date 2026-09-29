@@ -1707,10 +1707,23 @@ docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' 
 
 (Or snapshot the `postgres_data` volume while the container is stopped.)
 
-**Attachments** — with `STORAGE_TYPE=local`, back up the `attachments_data`
-volume (files under `/app/data/attachments`); with `s3`, see
-[Attachments on S3](#attachments-on-s3-turn-versioning-on) below. Take a backup
-**before every minor upgrade**.
+**Attachments** — the question is *where the bytes are*, and `STORAGE_TYPE` only
+tells you which client writes them:
+
+- **`local`** — back up the `attachments_data` volume (files under
+  `/app/data/attachments`).
+- **`s3` against a managed store** (AWS, or a provider you do not run) — the bytes
+  are theirs to keep and yours to protect against deletion: see
+  [Attachments on S3](#attachments-on-s3-turn-versioning-on) below.
+- **`s3` against a store you run yourself** — MinIO, SeaweedFS, Ceph, anything in a
+  container or on a disk you own, which includes the bundled Cloud-model stack in
+  [`deploy/cloud/`](../deploy/cloud/). **The bytes are on your host and nothing in
+  the `s3` row above reaches them.** Back up that store's data the way you back up
+  the database: for the bundled stack that is the `minio_data` volume, and
+  [the Cloud-model guide](cloud-mode.md#backups-what-this-stack-keeps-and-where) has
+  the commands.
+
+Take a backup **before every minor upgrade**.
 
 ### On a schedule
 
@@ -2014,6 +2027,15 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$ATTACH_BUCKET" \
 ```
 
 Most S3-compatible stores expose the same two settings under different names.
+
+**If the store is one you run, versioning is not the whole answer — it is the smaller
+half.** Turning it on protects you from a *delete*; it does nothing about the disk the
+objects are on, which is now yours. MinIO's equivalent is `mc version enable
+local/<bucket>` plus an ILM rule for the noncurrent versions, and it belongs on the same
+host that also needs a copy of the data taken off it. The bundled Cloud-model stack is
+exactly this case: attachments live in the `minio_data` volume, and
+[its guide](cloud-mode.md#backups-what-this-stack-keeps-and-where) names both volumes a
+backup of that stack has to include.
 
 ## Troubleshooting
 

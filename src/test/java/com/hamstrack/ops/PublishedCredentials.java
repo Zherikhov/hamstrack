@@ -273,7 +273,12 @@ public final class PublishedCredentials {
         return value;
     }
 
-    private static int lineOf(String text, int offset) {
+    /**
+     * The 1-based line {@code offset} falls on. Public because a second scanner needs exactly this
+     * arithmetic to point a reader at a line ({@code InstallClaimsTest} attributes each install
+     * command to a {@code file:line}), and two copies of it are two things to get off by one.
+     */
+    public static int lineOf(String text, int offset) {
         int line = 1;
         for (int i = 0; i < offset; i++) {
             if (text.charAt(i) == '\n') {

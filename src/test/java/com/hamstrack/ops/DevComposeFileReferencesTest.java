@@ -97,7 +97,12 @@ class DevComposeFileReferencesTest {
             "docker-compose.yml",
             "the bare root name is asserted NOT to be the development stack - the exemption is "
             + "carried by the .dev. marker. A file here would put that assertion's subject back "
-            + "in the tree and change what the rule is being asked");
+            + "in the tree and change what the rule is being asked",
+            "docker-compose.override.yml",
+            "named as what an UNTRACKED local file would be called, to say that the guarded set "
+            + "is read from the index and not from the working tree. Compose merges this name "
+            + "automatically, so a TRACKED one would contribute guards to every checkout and "
+            + "invert the sentence that names it");
 
     private static Set<String> publishable() {
         var out = new TreeSet<String>();

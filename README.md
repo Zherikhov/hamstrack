@@ -22,11 +22,12 @@ One codebase ships in two deployment models:
 
 **Either model is yours to run, for yourself or your organisation.** The licence
 ([ELv2](LICENSE)) forbids one thing: offering Hamstrack to third parties as a managed
-service. The two profiles differ only in defaults — S3 storage, open registration,
-first-login onboarding, a smaller workspace quota — and every one of them is a plain
-environment variable you can set under either, which [the Cloud-model
-guide](docs/cloud-mode.md) sets out in a table. **Most people self-hosting want DC**,
-which is the path below.
+service. The two profiles differ only in defaults, and **every behaviour they disagree
+about is a plain environment variable you can set under either** — the one thing no
+variable moves is the `deployment` label on log lines. [The Cloud-model
+guide](docs/cloud-mode.md) carries the current table of those defaults, which is where
+the list lives so that it cannot go stale in two places. **Most people self-hosting want
+DC**, which is the path below.
 
 > **Status:** Hamstrack is in active development — breaking changes are called out in the release notes. Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay until they are deleted. The database is backed up daily and restoring from a backup has been tested; that is an operational practice, not a guaranteed service level. Every account starts with a demo workspace and a sample project to explore.
 

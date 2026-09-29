@@ -1295,10 +1295,11 @@ what this particular release needs operationally.
 ## The install path, once per release line
 
 `InstallClaimsTest` holds the install documents to the tree on every build — every
-path they name exists, every pin names the current release line, the install
-command exists once, and the architecture requirement is stated. **Three things it
-structurally cannot do are yours, and they are the three that were wrong in
-0.18.3.** Do them once per *line* (0.18 → 0.19), not per patch.
+path they name exists, every pin names the current release line, each installable stack
+is prescribed by exactly one document, and the architecture requirement is stated.
+**What it structurally cannot do is yours, and everything below was wrong in 0.18.3 or
+0.18.4.** The shape of each item is the same: it needs the network or a daemon, which a
+unit test may not. Do them once per *line* (0.18 → 0.19), not per patch.
 
 **1. Every tag the documents offer was actually published.** The sharper invariant
 is *names a tag that was published*, not *names the current line* — `0.4.3` and
@@ -1324,10 +1325,15 @@ what a stranger *meets*. Clone from GitHub, follow `README.md` verbatim, and rec
 **the wall-clock time and the host**:
 
 **Follow [`README.md`](../README.md#self-hosting-dc), do not copy its commands here.**
-That is not fussiness: `InstallClaimsTest#theInstallCommandExistsExactlyOnce`
-refuses a second copy anywhere in the tree, and it refused a draft of *this
-section* that quoted them — which is the rule working, because a copy here would
-drift from README's flags and the person following it would never know. Prefix the
+That is not fussiness: `InstallClaimsTest` charges every copy of the install command
+to the stack whose directory is named before it, and refuses a stack prescribed more
+than once (`eachInstallableStackIsPrescribedByExactlyOneDocument`) as well as any one
+document prescribing it twice (`noDocumentPrescribesTheInstallCommandTwice`). It
+refused a draft of *this section* that quoted README's commands — which is the rule
+working, because a copy here would drift from README's flags and the person following
+it would never know. (Those two started life as one count of occurrences, which let a
+missing command pay for a duplicated one; the pair exists because the sum could not
+tell the two directions apart.) Prefix the
 `up` with `time`, and afterwards read `curl -s localhost:8080/api/meta`.
 
 Measured 2026-09-23 on Windows/Docker Desktop, from a fresh clone: **33.2 s to both
@@ -1341,12 +1347,30 @@ daemon, also not a unit test. Note it passes *with the documented variable set*,
 bare: the `${VAR:?}` guards refuse an empty environment on purpose, and a checklist
 demanding a bare pass would push somebody to remove them.
 
+**4. Every value a stack refuses inside a container is refused, on a run.** `config -q`
+sees interpolation and nothing else: a `MINIO_ROOT_PASSWORD` of 7 characters passes it
+with exit 0 and then stops the whole Cloud stack from ever coming up, which is why
+`deploy/cloud/` ships a `preflight` job that refuses it by name. A shell script inside a
+compose file has no unit test — the escaping (`$${#VAR}`) and the exit code only exist at
+run time — so check it here, per stack, with a deliberately bad value:
+
+```bash
+cd deploy/cloud    # with a .env whose MINIO_ROOT_PASSWORD is 7 characters
+docker compose up --wait minio          # must exit non-zero, naming the job
+docker compose logs preflight           # must name the variable and the minimum
+```
+
+Measured 2026-09-29 on Docker Compose v5.1.0: exit 1 in about a second,
+`service "preflight" didn't complete successfully: exit 1`, MinIO never started. The
+general rule is the one to carry to the next stack: **a value checked by a container is
+checked by nothing until a container runs.**
+
 **Not on this list, deliberately: a freshness rule.** The idea was an install
 document whose newest edit predates the newest release line going red. It is not
 here because a document that needed no change would red for being correct, and a
 guard that reds on correct sentences is one its readers learn to switch off
 (`PublishedClaimsTest` names that failure by name). What replaces it is this
-section: the line moves, somebody runs these three, and the running is the
+section: the line moves, somebody runs the items above, and the running is the
 freshness.
 
 ## Tracker bookkeeping

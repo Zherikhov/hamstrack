@@ -101,6 +101,13 @@ class EnvTemplateGuardTest {
     private static final Pattern COMPOSE_GUARD = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*):\\?");
 
     /**
+     * {@code ${VAR:-default}} — Compose's other half: a DIAL the stack offers, rather than a value
+     * it refuses to start without. Nothing goes red when one of these is missing from the template,
+     * which is exactly how eight of them shipped invisible in {@code deploy/cloud/} (HD-317).
+     */
+    private static final Pattern COMPOSE_DIAL = Pattern.compile("\\$\\{([A-Za-z_][A-Za-z0-9_]*):-");
+
+    /**
      * {@code ${VAR}} with no {@code :-default} in a Spring properties file: an unset value
      * is an unresolvable placeholder and the context refuses to start. Restricted to
      * SHOUTING_CASE so it matches environment variables and not property references.
@@ -249,6 +256,114 @@ class EnvTemplateGuardTest {
                         + "\n\nIf a variable genuinely is not the operator's to set, the stack has to say "
                         + "so where a reader can see it: give it a LITERAL value under `environment:` in "
                         + "that directory's compose file. There is no list here to add it to, on purpose.")
+                .isEmpty();
+    }
+
+    /**
+     * <strong>Every dial a shipped stack offers is named in that stack's template.</strong>
+     *
+     * <p>The two rules above are about {@code ${VAR:?}} — values the stack refuses to start
+     * without, where the operator meets a refusal. This one is about {@code ${VAR:-default}}, and
+     * its failure is silent in both directions: the stack starts, the default applies, and the
+     * variable that would move it exists nowhere the operator can see. Setting it in {@code .env}
+     * does nothing they can tell apart from setting it correctly, because they never learn the name.
+     *
+     * <p>{@code deploy/dc/docker-compose.yml} states the rule in its own words, about the Postgres
+     * memory dials: <em>"as variables rather than literals: a literal here is a value your .env
+     * cannot reach"</em>, and <em>"it exists so the matching dial is in .env when you do"</em>. It
+     * then shipped with every one of them in its template while {@code deploy/cloud/} shipped with
+     * <strong>eight</strong> interpolated names appearing nowhere in its own — the Postgres dials,
+     * the shared-memory size, the stop grace, both MinIO image pins and the client's memory ceiling.
+     * Measured at the time: the set difference was 8 for cloud and 0 for dc, and nothing in the
+     * suite was looking, because {@link #everyGuardedVariableIsNamedInTheTemplate} only ever asked
+     * about the {@code :?} half.
+     *
+     * <p><strong>The one exclusion, and it is checked rather than asserted.</strong> A development
+     * compose file's dials are localhost values nobody sets in a shipped template
+     * ({@code docker-compose.dev.yml} offers {@code POSTGRES_PASSWORD} and {@code POSTGRES_USER}
+     * with the throwaway credentials {@code docker compose up} creates), and at the repository root
+     * {@link #pairs()} groups the development files together with the production ones. So a
+     * development compose file is excluded — by {@link PublishedCredentials#isDevelopmentCompose},
+     * the same predicate the credential scan uses, never by a filename here — and the set it
+     * admits is printed by every failure message below, including the one that fires when it
+     * admits nothing at all. An exclusion excusing nothing is not a belt; it is a line nobody
+     * re-reads.
+     */
+    @Test
+    void everyDialAStackOffersIsNamedInItsTemplate() throws IOException {
+        var offences = new ArrayList<String>();
+        var admittedByTheExclusion = new LinkedHashMap<String, String>();
+        int examined = 0;
+        List<Pair> pairs = pairs();
+
+        for (Pair pair : pairs) {
+            var enabled = assignments(pair.template(), ENABLED);
+            var disabled = assignments(pair.template(), DISABLED);
+            for (Path compose : pair.composeFiles()) {
+                boolean development = PublishedCredentials.isDevelopmentCompose(compose);
+                var dial = COMPOSE_DIAL.matcher(
+                        withoutComments(Files.readString(compose, StandardCharsets.UTF_8)));
+                while (dial.find()) {
+                    String name = dial.group(1);
+                    if (development) {
+                        admittedByTheExclusion.putIfAbsent(
+                                name, PublishedCredentials.repositoryPath(compose));
+                        continue;
+                    }
+                    examined++;
+                    if (enabled.containsKey(name) || disabled.containsKey(name)) {
+                        continue;
+                    }
+                    offences.add("%s offers `${%s:-...}` and %s never names it".formatted(
+                            PublishedCredentials.repositoryPath(compose), name, pair.describe()));
+                }
+            }
+        }
+
+        assertThat(pairs)
+                .withFailMessage(PAIRING_FLOOR)
+                .hasSizeGreaterThanOrEqualTo(2);
+        assertThat(examined)
+                .withFailMessage("""
+                        Fewer than 30 dials were examined across every shipped stack, so this rule \
+                        is looking at a fraction of the stacks and passing for that reason. Every \
+                        stack in this repository offers a dozen or more ${VAR:-default}s; if they \
+                        are being written some other way, teach COMPOSE_DIAL rather than lowering \
+                        this. (%d examined; the development-stack exclusion admitted %d name(s): \
+                        %s.)""", examined, admittedByTheExclusion.size(), admittedByTheExclusion)
+                .isGreaterThanOrEqualTo(30);
+        assertThat(admittedByTheExclusion)
+                .withFailMessage("""
+                        THE DEVELOPMENT-STACK EXCLUSION NOW ADMITS NOTHING, so it is prose \
+                        excusing an empty set - delete it, or find out what stopped a development \
+                        compose file from reaching this rule (a rename would do it: the predicate \
+                        keys on a `.dev.` marker in the name, at the repository root).""")
+                .isNotEmpty();
+        assertThat(offences)
+                .withFailMessage("""
+
+                        A STACK OFFERS A DIAL ITS OWN TEMPLATE NEVER NAMES.
+
+                        %s
+
+                        `${VAR:-default}` is a promise that `.env` can move this value. When the \
+                        template does not carry the line, the operator cannot know the name - so \
+                        the promise is kept by the file and broken by the documentation, silently, \
+                        with the stack running on the default and looking configured.
+
+                        This is HD-317: eight names in deploy/cloud/docker-compose.yml, including \
+                        both MinIO image pins - so an operator could not pin their object store at \
+                        all, on the stack that keeps their attachments. The dc stack's own comment \
+                        already said why ("a literal here is a value your .env cannot reach... it \
+                        exists so the matching dial is in .env when you do").
+
+                        Add the line COMMENTED, with the shipped default as its value, in the \
+                        section it belongs to. A commented line delivers nothing to the container, \
+                        so the compose default still stands - it is there to be findable.
+
+                        (%d dials examined; the development-stack exclusion admitted %d name(s): \
+                        %s.)""", String.join("\n  ", offences), examined,
+                        admittedByTheExclusion.size(), admittedByTheExclusion)
                 .isEmpty();
     }
 
