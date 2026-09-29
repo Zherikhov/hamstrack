@@ -1314,6 +1314,14 @@ is prescribed by exactly one document, and the architecture requirement is state
 0.18.4.** The shape of each item is the same: it needs the network or a daemon, which a
 unit test may not. Do them once per *line* (0.18 → 0.19), not per patch.
 
+**Every numbered step below ends in a `Measured <date>` line, and that is not decoration.**
+`InstallClaimsTest#theInstallChecklistStepsWereRunOnThisReleaseLine` reads this section,
+finds the steps, and fails the build when a step carries no such line or carries one older
+than the newest release tag — so a step is run on the line, or the line does not ship.
+Record what the run actually did, including where it departed from what the documents
+prescribe: the date is the claim, and a date with no output behind it is the failure this
+whole section exists to catch.
+
 **1. Every tag the documents offer was actually published.** The sharper invariant
 is *names a tag that was published*, not *names the current line* — `0.4.3` and
 `0.5` were both written in this repository and neither has ever existed. A unit
@@ -1330,7 +1338,26 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 Compare that list against every literal the install documents offer. **`latest`
 moving off the line is normal** and must not be read as a fault: it tracks the
 newest build, the line tracks the newest patch on it, and they are equal only
-between releases.
+between releases — **and `tags/list` cannot show you that**, because it answers
+names and nothing else. Whether `latest` has moved is a comparison of *digests*,
+one request per tag:
+
+```bash
+for TAG in latest "$LINE" "$PATCH"; do      # LINE=0.18 and PATCH=0.18.2 on the 0.18 line
+  curl -sI -H "Authorization: Bearer $TOKEN" \
+       -H "Accept: application/vnd.oci.image.index.v1+json" \
+       "https://ghcr.io/v2/zherikhov/hamstrack/manifests/$TAG" \
+    | tr -d '\r' | sed -n "s/^[Dd]ocker-[Cc]ontent-[Dd]igest: /$TAG /p"
+done
+```
+
+Measured 2026-09-29: the token came back 56 characters and the list carried
+`0.18`, `0.18.2`, `0.17.0` and `latest`, while neither `0.4.3` nor `0.5` has ever
+existed (`0.4`, `0.4.5` and `0.4.6` do — which is how those two were written and
+never noticed). The digests: `0.18` and `0.18.2` are the same image,
+`sha256:61a9a6f5fa20…`, and `latest` is a different one, `sha256:b666c55bb36b…` —
+the line pointing at its newest patch while `latest` has run ahead of it. That is
+the normal state, and this is the only command in this step that can tell you so.
 
 **2. The fresh-clone install, timed, on a host that is not this one.** The point is
 not that it works — the test proves the documents are self-consistent; the point is
@@ -1352,13 +1379,31 @@ tell the two directions apart.) Prefix the
 Measured 2026-09-23 on Windows/Docker Desktop, from a fresh clone: **33.2 s to both
 services healthy**, `/api/meta` 200, the seeded administrator signed in, and
 creating a second person returned a setup link with no mail server configured. That
-is the number to beat and the claim to keep honest — **it has never been run on a
-clean Linux host**, which is the gap the next line should close.
+run used `--wait-timeout 180`, not README's `120` — the wall clock is the wall clock
+either way, but it is *not* evidence that 120 is enough on a slower host, and the
+person who repeats this on Linux should follow README verbatim so that it is. **It
+has never been run on a clean Linux host**, which is the gap the next line should
+close.
 
 **3. `docker compose config -q` on every compose file a document names.** Also a
 daemon, also not a unit test. Note it passes *with the documented variable set*, not
 bare: the `${VAR:?}` guards refuse an empty environment on purpose, and a checklist
-demanding a bare pass would push somebody to remove them.
+demanding a bare pass would push somebody to remove them. Each file needs a
+*different* set, so here they are rather than "the documented one" — read off the
+`:?` guards in each file, which is where they will still be true next line:
+
+| File | What it refuses to interpolate without |
+| --- | --- |
+| `deploy/dc/docker-compose.yml` | `DB_PASSWORD`, `JWT_SECRET`, `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD` |
+| `deploy/cloud/docker-compose.yml` | those four, plus `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` |
+| `docker-compose.dev.yml` | nothing — it is the local database and mail catcher |
+| `docker-compose.prod.yml` | `DB_USERNAME`, `DB_PASSWORD`, `GITHUB_OWNER`, `SITE_ADDRESS`, and an `.env` **file** that exists (`env_file: .env` is read before any of them) |
+| `docker-compose.observability.yml` | prod's set, plus `GF_SECURITY_ADMIN_PASSWORD`, `OBS_ALERT_EMAIL_TO` — it is an overlay and is validated with the file it overlays |
+
+Measured 2026-09-29 on Docker Compose v5.1.0: all five exit 0 with the sets above,
+`deploy/dc/docker-compose.yml` exits 1 with an empty environment naming
+`SEED_ADMIN_EMAIL` (the guards work), and `docker-compose.observability.dev.yml` —
+the one file in the tree no document names — exits 0 over `docker-compose.dev.yml`.
 
 **4. Every value a stack refuses inside a container is refused, on a run.** `config -q`
 sees interpolation and nothing else: a `MINIO_ROOT_PASSWORD` of 7 characters passes it
@@ -1385,6 +1430,12 @@ guard that reds on correct sentences is one its readers learn to switch off
 (`PublishedClaimsTest` names that failure by name). What replaces it is this
 section: the line moves, somebody runs the items above, and the running is the
 freshness.
+
+**That objection does not cover the running, which is why the running IS enforced.**
+A step whose `Measured` date predates the newest tag is not a correct sentence that
+happens to be old — it is an assertion nobody has made about the thing being shipped.
+The date moves when somebody runs the command, never when somebody edits the prose
+around it, so the only way to turn this guard green is to do the work it names.
 
 ## Tracker bookkeeping
 
