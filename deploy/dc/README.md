@@ -6,7 +6,9 @@ needed to get an instance running and sign in to it.
 **Needs an x86-64 (`amd64`) host.** The published image has no `arm64` build, so the first
 command below fails on an Ampere or Graviton VPS, a Raspberry Pi or an ARM virtual machine —
 `no matching manifest for linux/arm64/v8`. Check with `docker version --format
-'{{.Server.Arch}}'` before you start.
+'{{.Server.Arch}}'` before you start, and see
+[Requirements](../../docs/self-hosting.md#requirements) for what to do if that is what you
+have.
 
 **The install steps live once, in the [repository README](../../README.md#self-hosting-dc)** —
 copy the template beside this file, fill what the refusals name, and bring the stack up. You

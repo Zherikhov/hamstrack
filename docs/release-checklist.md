@@ -1351,6 +1351,32 @@ for TAG in latest "$LINE" "$PATCH"; do      # LINE=0.18 and PATCH=0.18.2 on the 
 done
 ```
 
+**And the same response body carries the architectures, which nothing else in this
+repository reads.** Every prose install document tells a reader the image is `amd64`
+only; `InstallClaimsTest` holds that the architecture is *addressed* and, by design,
+cannot judge whether the sentence is true; and `.github/workflows/build.yml` names no
+`platforms:` key at all, so amd64-only is a consequence of the runner rather than a
+decision anything holds. Add the one-line `platforms:` and every one of those documents
+turns an arm64 operator away from an image that now exists, with every test still green.
+So ask the index what it actually contains, and compare it with what the documents say:
+
+```bash
+for TAG in latest "$LINE" "$PATCH"; do
+  echo -n "$TAG "
+  curl -s -H "Authorization: Bearer $TOKEN" \
+       -H "Accept: application/vnd.oci.image.index.v1+json" \
+       "https://ghcr.io/v2/zherikhov/hamstrack/manifests/$TAG" \
+    | tr -d ' \n' | grep -o '"architecture":"[^"]*","os":"[^"]*"' | sort -u | tr '\n' ' '
+  echo
+done
+```
+
+**Ask for the set, never for a count.** A `buildx` push adds an *attestation* manifest
+whose platform is `unknown/unknown` and which no client ever selects, so counting
+`manifests[]` reads one higher than the number of runnable images and would read "2
+platforms" off a single-architecture index. What the documents must agree with is the set
+left after dropping `unknown/unknown`.
+
 Measured 2026-09-29: the token came back 56 characters and the list carried
 `0.18`, `0.18.2`, `0.17.0` and `latest`, while neither `0.4.3` nor `0.5` has ever
 existed (`0.4`, `0.4.5` and `0.4.6` do — which is how those two were written and
@@ -1358,6 +1384,10 @@ never noticed). The digests: `0.18` and `0.18.2` are the same image,
 `sha256:61a9a6f5fa20…`, and `latest` is a different one, `sha256:b666c55bb36b…` —
 the line pointing at its newest patch while `latest` has run ahead of it. That is
 the normal state, and this is the only command in this step that can tell you so.
+The platforms: `latest`, `0.18` and `0.18.2` each carry exactly one real platform,
+`amd64`/`linux`, plus the `unknown`/`unknown` attestation manifest — so
+"`linux/amd64` only" is what the install documents should still say, and does not
+become wrong until this line reads otherwise.
 
 **2. The fresh-clone install, timed, on a host that is not this one.** The point is
 not that it works — the test proves the documents are self-consistent; the point is

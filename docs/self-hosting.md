@@ -51,13 +51,22 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - Docker with the Compose plugin.
 - **An `x86-64` (`amd64`) host.** The published image is built for `linux/amd64`
   only — there is no `arm64` build, so an Ampere or Graviton VPS, a Raspberry Pi
-  or an ARM virtual machine cannot run it as published. Apple Silicon works only
-  through Docker Desktop's emulation, which is slow and is not a supported
-  deployment. Building the image yourself on an arm64 host is the obvious way
-  round it and is **untested by this project** — the ingredients are there (both
-  `eclipse-temurin` base images this repository uses publish `arm64`, and the
-  Dockerfile fetches no architecture-specific binary), but nobody has run it, so
-  treat it as a lead rather than as instructions.
+  or an ARM virtual machine cannot run it as published. **Check with `docker
+  version --format '{{.Server.Arch}}'`** before you start: anything other than
+  `amd64` meets this. Apple Silicon works only through Docker Desktop's
+  emulation, which is slow and is not a supported deployment. Building the image
+  yourself on an arm64 host is the obvious way round it, it is **untested by this
+  project**, and one ingredient is known to be *missing* rather than merely
+  unverified: the image build runs the frontend build, which downloads the Node
+  release pinned in `pom.xml` (`v22.13.0`), and for the musl (Alpine) base images
+  this repository uses, that release publishes an `x64` tarball and **no `arm64`
+  one at all** — measured 2026-09-29, `node-v22.13.0-linux-x64-musl.tar.gz`
+  answers `200`, `node-v22.13.0-linux-arm64-musl.tar.gz` answers `404`, and that
+  version's whole directory of musl builds is `x64`. The `eclipse-temurin` base
+  images themselves do publish `arm64`, so it is that pin and not the JDK that
+  stops you: expect to change the Node version or the base image before anything
+  builds. What exactly the build does when it gets there has not been measured.
+  This is where the wall is, not a set of instructions for getting past it.
 - A PostgreSQL 16 database (the sample compose runs one for you).
 - For a public instance: a domain and a TLS-terminating reverse proxy (Caddy,
   nginx, Traefik…). HTTP-only on `localhost` works for trying it out.
