@@ -144,7 +144,9 @@ SQL
 rows — in full, content included — into a table called `notifications_unresolvable_v20`, so
 you can still look at them afterwards. That table is created **only** when there is something
 to put in it, so on a clean upgrade it never appears. Nothing in Hamstrack reads it; it is
-there for you. Once you have your answer, drop it:
+there for you. Once you have your answer, drop it — it is the only copy of those rows that
+will exist, so take a backup first if you may want them again
+([Backups](self-hosting.md#backups)); nothing below this line is undone by the product:
 
 ```bash
 docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' <<'SQL'
@@ -153,12 +155,20 @@ DROP TABLE notifications_unresolvable_v20;
 SQL
 ```
 
-If you would rather have the rows as a file before you upgrade, export them first:
+If you would rather have the rows as a file before you upgrade, export them first. **That
+file is notification content — comment text from every affected workspace — in the clear**,
+so the redirect below writes it to your home directory rather than the current one: the
+documented working directory is the clone, and a file left there sits inside the tree your
+next `git pull` touches and inside any directory-level backup of the deploy. Lock it down
+when it lands, and delete it when you are done with it:
 
 ```bash
-docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' > unresolvable-notifications.csv <<'SQL'
+docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' > ~/unresolvable-notifications.csv <<'SQL'
 \copy (SELECT n.* FROM notifications n LEFT JOIN workspaces w ON w.id = substring(n.link from '^/w/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})/')::uuid WHERE w.id IS NULL) TO STDOUT WITH CSV HEADER
 SQL
+chmod 600 ~/unresolvable-notifications.csv
+# and when you have your answer:
+# rm ~/unresolvable-notifications.csv
 ```
 
 A backup taken as [Backups](self-hosting.md#backups) describes covers you either way, and is the general
@@ -665,6 +675,11 @@ HAVING count(*) > 1;
 SQL
 ```
 
+**Take a backup before you run any of what follows** — [Backups](self-hosting.md#backups)
+describes how. Everything below this line writes to `users`, and none of it is undone by the
+product: there is no "revert" for a retired account or a folded address, and a delete is
+refused by a foreign key or would destroy that person's history.
+
 **Fix them in this order. The order is load-bearing, not a preference.**
 
 1. **Resolve every collision first.** Only you can decide which of two accounts survives,
@@ -856,7 +871,9 @@ spellings, **oldest first**.
 has since re-created it — nobody re-registered, and it was not the seed admin — there
 is no pair, no group, and nothing above finds it. The symptom is a single person
 unable to log in. There is no duplicate to retire here, so fix the row directly — set
-it to what the current build folds their typed address to. For a dotless `ı` row that
+it to what the current build folds their typed address to. **Take a backup first**
+([Backups](self-hosting.md#backups)): this overwrites the stored address, and the
+product does not undo it. For a dotless `ı` row the statement
 is `UPDATE users SET email = translate(email, U&'\0131', 'i') WHERE id = '<their id>';`
 and here `translate` *is* correct, because that case's lookup key and group key
 coincide.
@@ -911,6 +928,11 @@ so a retyped address can look identical and still not match.
 > may be the *wrong* one of the two. The mechanics of the block are unchanged — decide
 > which address the pair should end up on first, and use it wherever the block says
 > "the duplicate's address".
+
+**Take a backup before you run this block** — [Backups](self-hosting.md#backups) describes
+how. It disables one account and rewrites both addresses; nothing in it is undone by the
+product, and its own halfway state (statement 1 applied, statement 2 not) is a live account
+that cannot log in.
 
 **Run this block in one interactive session**, in the order printed:
 

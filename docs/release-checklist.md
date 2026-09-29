@@ -189,14 +189,22 @@ tenant the loud half is that `key = "…"` stops resolving their stored values
 their field disappears from search vocabulary with no error, no log line and no
 UI affordance, while continuing to work everywhere else in the product.
 
-Nothing detects that after the fact, so run this **before** the release and
-record the answer in the release notes — once per name the release registers:
+Nothing detects that after the fact, so run this **before** the release — once per
+name the release registers:
 
 ```sql
 SELECT id, key, name, scope_workspace_id, scope_project_id
   FROM field_defs
  WHERE lower(key) = '<the new field name>' AND archived_at IS NULL;
 ```
+
+**Record the COUNT in the release notes, and only the count** — "no field on this
+instance holds that key", or "three do". A GitHub Release body is public, and so is
+this repository: `name` is a tenant's own wording and `scope_workspace_id` /
+`scope_project_id` identify whose instance-mate is affected. Those belong in the
+remedy conversation with that tenant, never in a published note. The count is what
+tells every other reader whether the release touched anybody, which is all a release
+note is for.
 
 Archived defs are already out of resolution and are harmless. A row with
 `scope_workspace_id IS NULL` is a **global** def: the blast radius is every
@@ -287,17 +295,20 @@ section); this does not break at all.
 
 **The operator-facing note does not belong in this file.** This is a maintainer runbook
 about tagging and rollback; nobody running a self-hosted instance reads it. The check
-queries, the remedy and the JVM flags go in **`docs/self-hosting.md` under `## Upgrading`**,
-which is the DC operator manual and states its audience in the first lines. 0.16.0's is
+queries, the remedy and the JVM flags go in **`docs/self-hosting-upgrades.md`**, which is
+the DC operator's per-release note page and states its audience in the first lines. Every
+`###` there is one release's note; the guide keeps the mechanics of upgrading and links to
+each note from its own `### Release notes` list. 0.16.0's is
 [Duplicate accounts after an upgrade](self-hosting-upgrades.md#duplicate-accounts-after-an-upgrade-locale-dependent-email-folding);
 copy its shape.
 
 So for a release in this class, three things:
 
-1. **Write the operator section** in `docs/self-hosting.md`, with a `## Contents` entry and
-   a pointer from any other section the failure touches (0.16.0's also hangs off
-   `## First run & the admin account`, because a duplicated seed admin is a first-run
-   problem).
+1. **Write the operator section** in `docs/self-hosting-upgrades.md` as a `###`, with its
+   `## Contents` entry there, a line in `docs/self-hosting.md`'s `### Release notes` list —
+   that is the route from the page every upgrader opens first — and a pointer from any
+   other section the failure touches (0.16.0's is also reached from `## First run & the
+   admin account` in the guide, because a duplicated seed admin is a first-run problem).
 2. **Verify it, three checks, five minutes** — not "confirm it shipped", which is the
    sentence a reviewer skips. 0.16.0 passed a review with the anchor swallowed and the
    remedy SQL wrong, so this item failed its own release:
@@ -367,15 +378,16 @@ as well: a count goes stale one entry before its list does, in the paragraph tha
 Three steps, and **step 3 is the one that gets skipped**, because the first two feel like
 the work:
 
-1. **Write the operator section** in `docs/self-hosting.md` under `## Upgrading`, with a
-   `## Contents` entry. Say which direction the change moves *for which size of host*: a
-   default is not one change, it is one change per box it lands on. Give a break-even so a
+1. **Write the operator section** in `docs/self-hosting-upgrades.md` as a `###`, with its
+   `## Contents` entry there. Say which direction the change moves *for which size of host*:
+   a default is not one change, it is one change per box it lands on. Give a break-even so a
    reader can tell in a single line whether they are affected, and give the remedy as a
    value they can type rather than a method they must apply — a worked table beats a
    subtraction rule, and a rule that disagrees with its own worked numbers is worse than
    no rule.
-2. **Route to it from where the reader already is.** The setting's row in the configuration
-   table, `## Requirements`, and — the one that is always forgotten — the `## Upgrading`
+2. **Route to it from where the reader already is**, which is `docs/self-hosting.md`: the
+   setting's row in the configuration table, `## Requirements`, that page's
+   `### Release notes` list, and — the one that is always forgotten — the `## Upgrading`
    prose carrying the `docker compose pull` command, because that command is what an
    upgrader copies *instead of* reading on.
 3. **Write the line into the GitHub Release body by hand.** `generate_release_notes: true`
@@ -814,9 +826,10 @@ mechanism is worth recording because it is not carelessness: this file had a sec
 default and a section for a changed derivation, and a change that fits neither has nowhere to be
 written down. **A blurb with no home is a blurb nobody writes.** It was also the second time this
 link was found broken by hand, so the correspondence is now a test rather than a review item —
-`UpgradeNotesCoverageTest` pairs every versioned `## Upgrading` subsection of
-`docs/self-hosting.md` with the blurb carrying its anchor, in both directions, and its failure
-message is the checklist.
+`UpgradeNotesCoverageTest` pairs every release-versioned `###` note of
+`docs/self-hosting-upgrades.md` with the blurb carrying its anchor, in both directions, and its
+failure message is the checklist. It also refuses a versioned `###` left under `## Upgrading` in
+`docs/self-hosting.md`, because a note written into the guide is a note outside that pairing.
 
 Ready to paste. The account one first, because it is the one that can stop the upgrade:
 
@@ -1119,8 +1132,8 @@ link literal — so the second bullet is not expected. It is written down becaus
 expected" is exactly the state the first version of this section mistook for "impossible",
 and it prescribed an action (reopen the design question) that no DC operator can perform.
 
-`docs/self-hosting.md` carries the same queries, an export statement and the user-facing
-wording for DC operators.
+[Notifications are scoped to a workspace from 0.17.0](self-hosting-upgrades.md#notifications-are-scoped-to-a-workspace-from-0170)
+carries the same queries, an export statement and the user-facing wording for DC operators.
 
 **A zero from an empty table is not evidence.** The development database held **no
 notification rows at all** when `V20` was written, so its pre-flight returned `0` for the
@@ -1185,7 +1198,7 @@ already has them.
 added, nothing was rejected, and the diff reads as configuration. **So does a rule applied to
 data somebody already has**, which is missed the same way and for the opposite reason: the
 diff reads as validation. Each class section above carries its own release's lines ready to
-paste, and every anchored `## Upgrading` subsection of `docs/self-hosting.md` must be reachable
+paste, and every anchored release note in `docs/self-hosting-upgrades.md` must be reachable
 from one of them — `UpgradeNotesCoverageTest` fails when one is not, in either direction, so
 the question "did every change get a line" is answered by the suite rather than by re-reading
 two files side by side.

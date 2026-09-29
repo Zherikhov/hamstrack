@@ -625,8 +625,8 @@ class ShadowedFieldKeyRenameTest {
      * single-line at the edge.</strong>
      *
      * <p>{@code ShadowedFieldStartupScan} prints {@code shadowed-field-def: custom field '<name>'
-     * …} once per boot, and {@code docs/self-hosting.md} tells operators to key their alerting on
-     * that prefix. {@code UpsertFieldRequest.name} was bounded only in length, so a taxonomy admin
+     * …} once per boot, and {@code docs/self-hosting-upgrades.md} ("Shadowed custom field keys from
+     * 0.18.0") tells operators to key their alerting on that prefix. {@code UpsertFieldRequest.name} was bounded only in length, so a taxonomy admin
      * who owns a live shadowed field — exactly the population that gets printed — could put a line
      * terminator in the <em>display name</em> and forge a second line under the prefix at every
      * boot, for ever, in somebody else's alerting.

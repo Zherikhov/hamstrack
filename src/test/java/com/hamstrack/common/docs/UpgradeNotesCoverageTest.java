@@ -23,10 +23,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>The correspondence being sealed</h2>
  * {@code docs/self-hosting.md} tells a self-hosted operator that the normal upgrade is
- * {@code docker compose pull && docker compose up -d}, and its {@code ## Upgrading} section carries
- * one anchored subsection per release change that this procedure would otherwise deliver silently.
+ * {@code docker compose pull && docker compose up -d}, and since HD-319
+ * {@code docs/self-hosting-upgrades.md} carries one anchored {@code ###} note per release change
+ * that this procedure would otherwise deliver silently (the guide keeps the mechanics of upgrading
+ * and links to each note from its {@code ### Release notes} list).
  * {@code docs/release-checklist.md} carries the <em>other half</em>: a paste-ready blurb per such
- * subsection, written by hand into the GitHub Release body because
+ * note, written by hand into the GitHub Release body because
  * {@code generate_release_notes: true} lists merged PRs and says nothing about behaviour. The
  * self-hosting page sends every upgrader to the Releases page before a minor upgrade, so that body
  * is the only text that reaches somebody who upgrades without opening a manual.
@@ -40,15 +42,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <h2>What it asserts, in both directions</h2>
  * <ul>
- *   <li><strong>Forward &mdash; a subsection with no blurb.</strong> Every {@code ###} subsection
- *       under {@code ## Upgrading} whose heading <em>names a release</em> must have its GitHub
- *       anchor quoted on a <strong>blockquote</strong> line of {@code docs/release-checklist.md}.
+ *   <li><strong>Forward &mdash; a note with no blurb.</strong> Every {@code ###} note of
+ *       {@code docs/self-hosting-upgrades.md} whose heading <em>names a release</em> must have its
+ *       GitHub anchor quoted on a <strong>blockquote</strong> line of
+ *       {@code docs/release-checklist.md}.
  *       The blockquote is the load-bearing part: that file's prose links these anchors too, and a
  *       mention in the maintainer narrative is not a line anybody pastes into a Release body. What
  *       has to exist is the paste-ready text.</li>
  *   <li><strong>Mirror &mdash; a blurb pointing at nothing.</strong> Every anchor any
- *       {@code self-hosting.md#...} reference in the checklist names must resolve to a real heading
- *       in {@code docs/self-hosting.md}. This is the failure the forward direction cannot see: a
+ *       {@code self-hosting-upgrades.md#...} reference in the checklist names must resolve to a
+ *       real heading in that file. This is the failure the forward direction cannot see: a
  *       renamed heading leaves the blurb in place and turns its "Details:" link into a dead
  *       fragment <em>in a published Release body</em>, where it can never be corrected. GitHub
  *       silently lands a bad fragment at the top of the page, so it looks like a working link to
@@ -58,6 +61,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       {@link #UNVERSIONED_SUBSECTIONS} with the reason. Otherwise the rule would carry its own
  *       loophole: a new subsection titled without a version number would be silently outside the
  *       check, which is precisely the class of omission this test exists to end.</li>
+ *   <li><strong>The population and the instruction are the same file, by mechanism.</strong> No
+ *       {@code ###} under {@code ## Upgrading} in {@code docs/self-hosting.md} may name a release.
+ *       HD-319 moved the notes and repointed nine link targets in the checklist without repointing
+ *       its three authoring instructions, so for one commit the next release author was told to
+ *       write the note into the guide while the scan read only the new file &mdash; a versioned
+ *       section with no blurb, in a place nothing looks, which is HD-228's defect exactly. Prose
+ *       at both ends is two things that can drift; this is one thing that cannot.</li>
+ *   <li><strong>A destructive procedure meets its backup sentence first.</strong> Every note in
+ *       {@code docs/self-hosting-upgrades.md} that prescribes a statement deleting, overwriting or
+ *       dropping the operator's own data names {@code self-hosting.md#backups} <em>above</em> that
+ *       statement. The same move separated three such procedures from the backup advice that used
+ *       to share a page with them, and their reader is by design somebody who arrived from a
+ *       Release-body deep link and passed no other section.</li>
  * </ul>
  *
  * <h2>Why the rule keys on the heading rather than on a list of releases</h2>
@@ -96,6 +112,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li><strong>Anchors in any other document.</strong> Only the checklist&rarr;self-hosting pair is
  *       walked. {@code docs/self-hosting.md}'s own internal links, the API references and the ops
  *       runbook are out of scope.</li>
+ *   <li><strong>A SECOND backup line inside an already-guarded anchor.</strong> The backup rule
+ *       fires on the <em>first</em> write below each anchor, because that is where a deep-link
+ *       reader meets one. The retire block in "Duplicate accounts after an upgrade" carries its own
+ *       line even though the lone-row remedy above it already satisfies the rule &mdash; deliberate
+ *       redundancy for a reader who scrolled, and measured: removing it leaves this test green.
+ *       Do not read that green as permission to delete it; read it as this rule being about the
+ *       anchor and not about every statement.</li>
  * </ul>
  */
 class UpgradeNotesCoverageTest {
@@ -136,6 +159,42 @@ class UpgradeNotesCoverageTest {
             Pattern.compile("self-hosting-upgrades\\.md#([A-Za-z0-9._%-]+)");
 
     /**
+     * The link a destructive procedure has to carry above its first write. It is the guide's
+     * {@code ## Backups} section, in the relative form the upgrades page uses for every other
+     * cross-reference to its sibling &mdash; and a relative one is right here, because unlike a
+     * blurb this text is read on GitHub's rendering of the file itself and never pasted elsewhere.
+     */
+    private static final String BACKUPS_REFERENCE = "self-hosting.md#backups";
+
+    /**
+     * A heading a published Release body can deep-link straight into. {@code ###} and {@code ####}
+     * both produce a GitHub fragment, so both are places a reader starts reading from &mdash; which
+     * is why the backup rule resets at either and not only at the note.
+     */
+    private static final Pattern ANCHORABLE_HEADING = Pattern.compile("^#{3,6} ");
+
+    /**
+     * A statement that removes a row, overwrites one, or drops an object. Written as the rule
+     * rather than as a list of today's procedures with exclusions beside it: an exclusion list for
+     * prose goes stale on the next note, while this predicate classifies one that has not been
+     * written yet.
+     *
+     * <p>Three details are load-bearing. It is <strong>case-sensitive</strong>, because these notes
+     * write SQL keywords in upper case and discuss the same words in lower case ("a single update
+     * over every issue"). Every verb must be followed by an <strong>identifier</strong>
+     * ({@code [a-z_]…}), which is what keeps it off the narrative's {@code report "UPDATE 1"}. And
+     * {@code UPDATE} accepts its table at end-of-line, because the retire block writes
+     * {@code UPDATE users} on one line and {@code SET …} on the next, and a same-line-only pattern
+     * would read the most destructive procedure in the file as harmless.
+     */
+    private static final Pattern DESTRUCTIVE_STATEMENT = Pattern.compile(
+            "\\bUPDATE\\s+[a-z_][a-z0-9_]*(\\s+SET\\b|\\s*$)"
+            + "|\\bDELETE\\s+FROM\\s+[a-z_]"
+            + "|\\bDROP\\s+(TABLE|INDEX|DATABASE|COLUMN)\\s+[a-z_]"
+            + "|\\bTRUNCATE\\s+[a-z_]"
+            + "|\\bINSERT\\s+INTO\\s+[a-z_]");
+
+    /**
      * The {@code ###} subsections of {@code docs/self-hosting-upgrades.md} that name no release,
      * each with the reason it owes no blurb. Membership here is a decision somebody made; absence
      * from it is the failure this test reports, so a new unversioned subsection stops the build
@@ -164,11 +223,13 @@ class UpgradeNotesCoverageTest {
     private static final String CHECKLIST = String.join("\n",
             "HD-228: an upgrade-visible change needs BOTH halves, and they live in two files.",
             "",
-            "  1. docs/self-hosting.md, under '## Upgrading': the anchored subsection an operator",
-            "     reads -- what changed, who is affected, the query that answers 'am I', the remedy",
-            "     as a value they can type. Add a '## Contents' entry and route to it from where",
-            "     the reader already is (the setting's row in the configuration table, and the",
-            "     '## Upgrading' prose carrying the docker compose pull command).",
+            "  1. docs/self-hosting-upgrades.md, as a '###': the anchored note an operator reads",
+            "     -- what changed, who is affected, the query that answers 'am I', the remedy as a",
+            "     value they can type. Add its '## Contents' entry THERE, and route to it from",
+            "     where the reader already is, which is docs/self-hosting.md: that page's",
+            "     '### Release notes' list, the setting's row in the configuration table, and the",
+            "     '## Upgrading' prose carrying the docker compose pull command. A note written",
+            "     into the guide instead is outside this test's population entirely.",
             "",
             "  2. docs/release-checklist.md: a PASTE-READY blurb, inside a blockquote, ending in a",
             "     'Details:' link to that subsection's anchor as an ABSOLUTE github.com URL. The",
@@ -263,7 +324,7 @@ class UpgradeNotesCoverageTest {
 
         versionedSubsections().forEach((heading, anchor) -> {
             if (!quoted.contains("#" + anchor)) {
-                orphans.add("  %s%n    anchor: %s#%s".formatted(heading, SELF_HOSTING, anchor));
+                orphans.add("  %s%n    anchor: %s#%s".formatted(heading, UPGRADE_NOTES, anchor));
             }
         });
 
@@ -271,18 +332,18 @@ class UpgradeNotesCoverageTest {
                 .as("""
                     %s
 
-                    These '## Upgrading' subsections of %s name a release and have NO paste-ready
-                    blurb in %s -- nothing quotes their anchor inside a blockquote, so an operator
-                    whose whole upgrade is 'docker compose pull && docker compose up -d' is never
-                    told about them:
+                    These release notes in %s name a release and have NO paste-ready blurb in %s --
+                    nothing quotes their anchor inside a blockquote, so an operator whose whole
+                    upgrade is 'docker compose pull && docker compose up -d' is never told about
+                    them:
 
                     %s
 
-                    Write one blurb per subsection listed above, in the blockquote that ends with
-                    its 'Details:' link. If a subsection genuinely owes no line -- it is a remedy or
-                    an evergreen procedure rather than a change -- that is what a heading naming no
+                    Write one blurb per note listed above, in the blockquote that ends with its
+                    'Details:' link. If a note genuinely owes no line -- it is a remedy or an
+                    evergreen procedure rather than a change -- that is what a heading naming no
                     release means; retitle it and record the reason in UNVERSIONED_SUBSECTIONS.
-                    """.formatted(CHECKLIST, SELF_HOSTING, RELEASE_CHECKLIST,
+                    """.formatted(CHECKLIST, UPGRADE_NOTES, RELEASE_CHECKLIST,
                         String.join("\n", orphans)))
                 .isEmpty();
     }
@@ -324,7 +385,7 @@ class UpgradeNotesCoverageTest {
                     than a broken link in a document: that text is pasted into a GitHub Release
                     body, where an unknown fragment silently lands the reader at the top of the page
                     and can never be corrected afterwards. Fix the anchors, or restore the heading.
-                    """.formatted(CHECKLIST, RELEASE_CHECKLIST, SELF_HOSTING, String.join("\n", dead)))
+                    """.formatted(CHECKLIST, RELEASE_CHECKLIST, UPGRADE_NOTES, String.join("\n", dead)))
                 .isEmpty();
     }
 
@@ -351,28 +412,221 @@ class UpgradeNotesCoverageTest {
                 .as("""
                     %s
 
-                    These '## Upgrading' subsections of %s name no release in their heading, so the
-                    coverage rule above does not reach them, and nothing here says that was
-                    intended:
+                    These '###' notes of %s name no release in their heading, so the coverage rule
+                    above does not reach them, and nothing here says that was intended:
 
                     %s
 
                     Decide, and record it. Either it describes a change a release makes -- put the
                     version in the heading, which is what routes it to a release body -- or it is a
-                    remedy or an evergreen procedure reached from a versioned section, in which case
+                    remedy or an evergreen procedure reached from a versioned note, in which case
                     add it to UNVERSIONED_SUBSECTIONS with that reason. Silence is the one answer
-                    this test refuses, because a subsection nobody classified is a subsection nobody
-                    checked.
-                    """.formatted(CHECKLIST, SELF_HOSTING, String.join("\n", undeclared)))
+                    this test refuses, because a note nobody classified is a note nobody checked.
+                    """.formatted(CHECKLIST, UPGRADE_NOTES, String.join("\n", undeclared)))
                 .isEmpty();
 
         for (var declared : UNVERSIONED_SUBSECTIONS.keySet()) {
             assertThat(upgradeSubsections())
                     .as("'%s' is exempted from the blurb rule by UNVERSIONED_SUBSECTIONS but is no "
-                        + "longer a '###' subsection of '%s' in %s. A stale exemption is how a "
-                        + "renamed section leaves the check without anybody deciding that it should.",
-                            declared, UPGRADING_HEADING, SELF_HOSTING)
+                        + "longer a '###' note in %s. A stale exemption is how a renamed section "
+                        + "leaves the check without anybody deciding that it should.",
+                            declared, UPGRADE_NOTES)
                     .contains(declared);
+        }
+    }
+
+    // ============================================================ 5. the population is the file
+
+    /**
+     * <strong>A release note written into the guide is a release note nobody checks.</strong>
+     *
+     * <p>This is the assertion HD-319 made necessary and did not ship. The move repointed nine link
+     * <em>targets</em> in {@code docs/release-checklist.md} and none of its three authoring
+     * <em>instructions</em>, so the next release author was told to add the subsection under
+     * {@code ## Upgrading} in {@link #SELF_HOSTING} while {@link #upgradeSubsections()} had already
+     * moved to {@link #UPGRADE_NOTES}. The result is green and empty-handed: the forward check never
+     * sees the subsection (wrong file), the mirror check never sees a blurb (there is none), the
+     * tripwire's floors stay satisfied by the notes that did move, and an upgrade-visible change
+     * ships with no paste-ready line &mdash; HD-228's defect, reintroduced by the fix to something
+     * else.
+     *
+     * <p>The instructions were repointed in the same change. This is what stops them drifting apart
+     * again: two pieces of prose can disagree, and a scan and the heading it refuses cannot.
+     */
+    @Test
+    void noReleaseVersionedNoteRemainsInTheGuide() throws IOException {
+        var stragglers = new ArrayList<String>();
+        var examined = new ArrayList<String>();
+        var guide = read(SELF_HOSTING).split("\\R", -1);
+        var inUpgrading = false;
+
+        for (int i = 0; i < guide.length; i++) {
+            var line = guide[i];
+            if (line.startsWith("## ")) {
+                inUpgrading = line.equals(UPGRADING_HEADING);
+            }
+            if (inUpgrading && line.startsWith("### ")) {
+                examined.add(line.substring(4).trim());
+                if (RELEASE_IN_HEADING.matcher(line).find()) {
+                    stragglers.add(
+                            "  %s:%d  %s".formatted(SELF_HOSTING, i + 1, line.substring(4).trim()));
+                }
+            }
+        }
+
+        assertThat(stragglers)
+                .as("""
+                    %s
+
+                    These headings under '%s' in %s name a release, and a versioned note in the
+                    guide is OUTSIDE this test's population -- which scans %s and nothing else:
+
+                    %s
+
+                    Move each one to %s, keep its heading, add its '## Contents' entry there and a
+                    line in the guide's '### Release notes' list pointing at it, and write the
+                    paste-ready blurb in %s. Left here it has no blurb, no dead-link check and no
+                    way to fail: the release ships and the operator is never told.
+                    """.formatted(CHECKLIST, UPGRADING_HEADING, SELF_HOSTING, UPGRADE_NOTES,
+                        String.join("\n", stragglers), UPGRADE_NOTES, RELEASE_CHECKLIST))
+                .isEmpty();
+
+        // Granularity control: the walk must actually enter the section it filters on, or the
+        // assertion above is over an empty scan and passes for that reason. The guide keeps the
+        // evergreen halves of upgrading -- applying repository configuration, and the release-notes
+        // index -- so this section is never empty; an empty one means the walk is not entering it.
+        assertThat(examined)
+                .as("no '###' heading at all was read under '%s' in %s, so the assertion above "
+                    + "scanned nothing and passed for that reason. Either the section was renamed "
+                    + "(rename %s here too) or its evergreen subsections were removed, in which "
+                    + "case decide deliberately what this check is still reading.",
+                        UPGRADING_HEADING, SELF_HOSTING, UPGRADING_HEADING)
+                .isNotEmpty();
+    }
+
+    // ============================================================ 6. destructive procedures
+
+    /**
+     * <strong>A note that tells an operator to destroy data names the backup first.</strong>
+     *
+     * <p>The reader of these procedures is, by design, somebody who arrived from a deep link in a
+     * published GitHub Release body straight at one anchor. They pass no other section of any
+     * document. Before HD-319 the procedures shared a page with {@code ## Backups} and with the
+     * sentence telling an upgrader to take one; the move left the statements in one file and both
+     * backup sentences in the other, and the deep-link reader meets neither.
+     *
+     * <p>What is checked is the <em>order a reader meets things in</em>: within one {@code ###}
+     * note, a reference to {@code self-hosting.md#backups} must appear on a line <em>before</em> the
+     * first line prescribing a write. A backup sentence at the foot of the section is a backup
+     * sentence the operator reads after running the statement.
+     *
+     * <p>{@link #DESTRUCTIVE_STATEMENT} is the rule rather than a list with exclusions, so nothing
+     * here can go stale by omission: it matches what removes a row, overwrites one or drops an
+     * object. {@code REINDEX} and {@code ALTER DATABASE … REFRESH COLLATION VERSION} &mdash; the two
+     * other statements these notes prescribe &mdash; are deliberately outside it, because they
+     * rebuild an index and stamp a catalog version, losing no row and dropping nothing; the last
+     * assertion holds that predicate live rather than leaving it as this sentence.
+     */
+    @Test
+    void everyDestructiveNoteNamesABackupBeforeItsFirstWrite() throws IOException {
+        var unguarded = new ArrayList<String>();
+        var guarded = new ArrayList<String>();
+        var lines = read(UPGRADE_NOTES).split("\\R", -1);
+
+        var section = "(before the first heading)";
+        var backupSeen = false;
+        var reported = false;
+        var subAnchors = 0;
+
+        for (int i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (ANCHORABLE_HEADING.matcher(line).find()) {
+                section = line.replaceFirst("^#{3,6} ", "").trim();
+                backupSeen = false;
+                reported = false;
+                if (line.startsWith("#### ")) {
+                    subAnchors++;
+                }
+            }
+            if (line.contains(BACKUPS_REFERENCE)) {
+                backupSeen = true;
+            }
+            if (!reported && DESTRUCTIVE_STATEMENT.matcher(line).find()) {
+                reported = true;
+                var where = "  %s%n    first write at %s:%d".formatted(section, UPGRADE_NOTES, i + 1);
+                if (backupSeen) {
+                    guarded.add(where);
+                } else {
+                    unguarded.add(where);
+                }
+            }
+        }
+
+        assertThat(unguarded)
+                .as("""
+                    A destructive procedure must name the backup BEFORE the statement, not after.
+
+                    These notes in %s prescribe a statement that removes, overwrites or drops the
+                    operator's own data, and nothing above it in the same note links '%s':
+
+                    %s
+
+                    Add one line above the first such statement, in the register the file already
+                    uses: take a backup first -- [Backups](self-hosting.md#backups); nothing below
+                    is undone by the product. The reader of these sections arrived from a deep link
+                    in a published Release body and passed neither the guide's '## Backups' section
+                    nor its upgrade advice. %d of these procedures already carry that line.
+                    """.formatted(UPGRADE_NOTES, BACKUPS_REFERENCE, String.join("\n", unguarded),
+                        guarded.size()))
+                .isEmpty();
+
+        assertThat(guarded)
+                .as("""
+                    Too few notes in %s were found to prescribe a destructive statement, so this
+                    check is running over a population it cannot fail on. Either the remedies moved
+                    again or DESTRUCTIVE_STATEMENT stopped matching them. The population it found:
+
+                    %s
+                    """.formatted(UPGRADE_NOTES,
+                        guarded.isEmpty() ? "  (none)" : String.join("\n", guarded)))
+                .hasSizeGreaterThanOrEqualTo(3);
+
+        // Granularity control. The unit is the anchor a deep link can LAND on, which is any '###'
+        // or '####' -- not the '###' note. A reader sent to a '####' from a Release body starts
+        // reading there and never sees a backup sentence written above it in the parent. If this
+        // walk stopped resetting at '####' the rule would silently coarsen back to the note, so
+        // the finer boundary is asserted to be real rather than theoretical.
+        assertThat(subAnchors)
+                .as("no '####' heading was found in %s, so the finer-than-a-note boundary this walk "
+                    + "resets on is not exercised by any content and a future '####' carrying a "
+                    + "destructive statement could be excused by its parent's backup line",
+                        UPGRADE_NOTES)
+                .isGreaterThanOrEqualTo(1);
+
+        // The predicate is the rule, so the predicate is what gets proven -- it must fire on each
+        // shape it claims and stay silent on the two writes these notes prescribe that lose nothing.
+        for (var destructive : List.of(
+                "UPDATE users SET email = lower(email) WHERE email <> lower(email);",
+                "UPDATE users",
+                "DROP TABLE notifications_unresolvable_v20;",
+                "DELETE FROM password_resets WHERE used_at IS NULL;",
+                "TRUNCATE mail_send_events;",
+                "INSERT INTO users (id, email) VALUES ('x', 'y');")) {
+            assertThat(DESTRUCTIVE_STATEMENT.matcher(destructive).find())
+                    .as("DESTRUCTIVE_STATEMENT no longer matches '%s', so a note prescribing it "
+                        + "would be excused by this test while destroying data", destructive)
+                    .isTrue();
+        }
+        for (var harmless : List.of(
+                "REINDEX INDEX users_email_lower_uk;",
+                "ALTER DATABASE hamstrack REFRESH COLLATION VERSION;",
+                "    nothing, report \"UPDATE 1\", and leave the account locked out",
+                "because the expensive part is a single update over every issue")) {
+            assertThat(DESTRUCTIVE_STATEMENT.matcher(harmless).find())
+                    .as("DESTRUCTIVE_STATEMENT now matches '%s', which removes no row and drops no "
+                        + "object. Demanding a backup line above a statement that cannot lose "
+                        + "anything is how a guard teaches its readers to ignore it.", harmless)
+                    .isFalse();
         }
     }
 

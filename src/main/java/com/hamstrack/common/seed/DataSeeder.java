@@ -540,8 +540,9 @@ public class DataSeeder implements ApplicationRunner {
         // deployment that once folded differently (a tr_TR/az/lt JVM: IT-Admin@corp.com became
         // <dotless-i>t-admin@corp.com) has a stale row this build can no longer find.
         //
-        // Detection and remedy live in docs/self-hosting.md, "Duplicate accounts after an
-        // upgrade" - the DC operator manual, because the person who has to run those queries
+        // Detection and remedy live in docs/self-hosting-upgrades.md, "Duplicate accounts after
+        // an upgrade" - the DC operator's release-note page (the notes moved out of
+        // docs/self-hosting.md in HD-319), because the person who has to run those queries
         // is an operator and not a maintainer. (It was first written into the release
         // checklist, which is a runbook about tagging that no self-hoster opens; a remedy
         // filed where its reader never looks is not a remedy.) The image pins the JVM locale
@@ -597,8 +598,8 @@ public class DataSeeder implements ApplicationRunner {
                             + "folded form of seed.admin.email (SEED_ADMIN_EMAIL) with a different "
                             + "spelling. This seeder did not write it and will not grant it system "
                             + "ADMIN. Either correct that row's address or point SEED_ADMIN_EMAIL at "
-                            + "the account you mean; see docs/self-hosting.md, section \"Duplicate "
-                            + "accounts after an upgrade\".");
+                            + "the account you mean; see docs/self-hosting-upgrades.md, section "
+                            + "\"Duplicate accounts after an upgrade\".");
         }
         if (existing != null) {
             // Accounts seeded before system roles existed must still get ADMIN

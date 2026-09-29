@@ -182,7 +182,10 @@ class RegisteredSearchNameLedgerTest {
                 Before you add %s to RECORDED below:
                   1. Run the collision query in docs/release-checklist.md -> "Releases that \
                 register a new HQL field name", against production AND against any instance you \
-                support. Record the answer in the release notes even when it is zero.
+                support. Record the COUNT in the release notes even when it is zero - the count \
+                only. A Release body is public: the field's name is a tenant's own wording and \
+                the scope ids say whose, and both belong in the remedy conversation with that \
+                tenant instead.
                   2. If it finds rows: those tenants' fields become unsearchable on upgrade. They \
                 keep working everywhere else. The remedy they have is a key rename (HD-275) - say \
                 so in the release notes.

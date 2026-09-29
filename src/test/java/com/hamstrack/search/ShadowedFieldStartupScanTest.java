@@ -147,7 +147,8 @@ class ShadowedFieldStartupScanTest {
     /**
      * <strong>AC-6 (the scan's half) — an ARCHIVED claimed-key row is not shadowed.</strong>
      *
-     * <p>This is the same predicate {@link #aCleanInstanceLogsNothingAtWarn()} relies on, stated
+     * <p>This is the same predicate {@link #v3sArchivedSeedPlaceholdersProduceNoWarning()} relies
+     * on, stated
      * about a row this test controls rather than about seed data, so a future migration that
      * un-archives or re-seeds a placeholder cannot quietly turn that test into a tautology.
      */
