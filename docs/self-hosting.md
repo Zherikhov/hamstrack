@@ -287,6 +287,10 @@ The application starts again immediately. Then:
 
 1. Use **Forgot password** on that address to set one of your own (requires working SMTP) —
    or, from another system administrator, Admin console → **Users** → that user → reset it.
+   **If you have neither — one administrator, no mail server — both of those are empty, and
+   the statement above has just locked you out of your own instance.** Seed a second
+   administrator, which needs neither: [If you are the only administrator and cannot sign
+   in](#if-you-are-the-only-administrator-and-cannot-sign-in).
 2. If the account was never meant to exist (you only ever wanted your own), delete it there
    instead. An install that was never logged into as the seeded admin owns nothing, so
    nothing is orphaned.
@@ -606,13 +610,16 @@ own account without an administrator:
 | Works with no mail server at all | Needs SMTP |
 |---|---|
 | The seeded administrator signs in (`SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`) — the account is created ACTIVE, with nothing to verify | **Self-service registration**, if you set `PUBLIC_SIGNUP_ENABLED=true`: verification doubles as login, so without the mail nobody completes it |
-| Adding people in `/admin`, which hands **you** a one-time setup link to pass on however you like — see [Adding more users](#adding-more-users) | **Forgot password**, which is the only way back in for somebody who has no administrator to ask |
-| Everything after sign-in: projects, issues, attachments, search, reports | **Workspace invitations by email** |
+| Adding people in `/admin`, which hands **you** a one-time setup link to pass on however you like — see [Adding more users](#adding-more-users) | **Forgot password** — the way back in for anybody who would otherwise have to come and ask you. The person with nobody to ask is *you*: see [If you are the only administrator and cannot sign in](#if-you-are-the-only-administrator-and-cannot-sign-in) |
+| Everything after sign-in: projects, issues, attachments, search, reports | **The invitation _email_** — not the invitation itself. An invitation is matched by the invitee's *address*, so somebody you created in `/admin` can accept one without ever seeing the emailed link, at `/welcome/invites`. **But nothing links them there on a DC install**: that page belongs to first-login onboarding, which is a Cloud feature and off here by default (`ONBOARDING_ENABLED`, see [Cloud mode](cloud-mode.md)) — so in practice you hand over that URL along with the setup link, or the invitation waits for mail |
 
 So an instance with no SMTP is fully usable by the people an administrator
 onboards by hand; configure mail when you want them to onboard themselves. The
 trade is worth stating plainly, because it is the one that bites later: with no
-mail server, **you** are the password-reset mechanism for every account.
+mail server, **you** are the password-reset mechanism for everybody else — and
+nobody is yours. That is recoverable and it needs neither a mail server nor a
+colleague: [If you are the only administrator and cannot sign
+in](#if-you-are-the-only-administrator-and-cannot-sign-in).
 
 Any SMTP server works — a transactional provider (Resend, Amazon SES, Postmark,
 Mailgun…) or your own relay. Configure:
@@ -774,6 +781,33 @@ accumulated set at once, and it is what "revoke every unused setup link" means t
 > Prefer open registration? Set `PUBLIC_SIGNUP_ENABLED=true` and anyone can
 > register + verify their email themselves (SMTP required for the verification
 > mail). New accounts are regular users until an admin promotes them.
+
+### If you are the only administrator and cannot sign in
+
+**Forgot password** needs a mail server, and "ask another administrator" needs another
+administrator — so on a single-administrator install with no SMTP the two remedies this
+guide offers everywhere else are both empty, and the console that would fix it is behind
+the sign-in you cannot pass. The way out needs neither: **seed a second administrator.**
+
+Point `SEED_ADMIN_EMAIL` at an address that has **no account yet**, set
+`SEED_ADMIN_PASSWORD` to a password of your own, and restart the app. Seeding only ever
+*creates* — it never re-passwords an existing account, which is the same idempotence
+described under [First user](#first-user-the-administrator) — so the new address gets a
+fresh active system administrator while the locked-out account is left exactly as it is,
+with everything it owns.
+
+Then sign in as the new administrator, open **Users** in `/admin`, and regenerate the
+locked-out account's setup link: it sets that account's password, and there is no mail
+server on that path either (see [Adding more users](#adding-more-users)). Afterwards
+decide what the second administrator is for — keep it, demote it or disable it — and
+clear or re-point the seeding variables, because the password you just typed is now
+sitting in `.env` in plaintext.
+
+*Measured 2026-09-30 against an install with one active administrator whose
+`password_hash` had been cleared: the restart logged `Admin account created from
+seed.admin.email`, sign-in as the new address answered `200` while the old address still
+answered `401`, and the admin console minted a `/reset-password?token=…` link for that
+old account with no `MAIL_*` variable set anywhere.*
 
 ## Attachment storage
 
@@ -2054,7 +2088,7 @@ backup of that stack has to include.
 | App exits at startup with a JWT/key error | `JWT_SECRET` is missing or shorter than 32 bytes — HMAC-SHA256 requires ≥32. Generate one: `openssl rand -base64 48`. |
 | App exits at startup saying `JWT_SECRET` is "a value published in Hamstrack's own documentation" | The secret is one of the placeholders this repository has shipped (they pass the length check, which is why they are refused by name). It is not newly unsafe — the upgrade only started saying so. Replace it with `openssl rand -base64 48`. That rejects every access token signed with the old key immediately but does **not** sign anyone out — clients re-issue from their refresh cookie — so if you think the published value was used against you, [there are two more steps](#what-rotating-jwt_secret-does-and-what-it-does-not). See [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design). |
 | App exits at startup saying `SEED_ADMIN_PASSWORD` is "the value this project published" | Your `.env` carries the password the template used to ship, so the administrator account it seeded — named in the message — is signable-into by anyone who can read this repository. **Clearing the variable does not fix it**: seeding is idempotent, the account already exists and keeps that password. Reset or delete that user first, then set your own value or none — [step by step](#if-your-instance-has-the-published-admin-account). |
-| App exits at startup saying a **system administrator HAS** the published password | Read from the database, not from `.env` — so it fires even when your configuration mentions no seeding at all, and it keeps firing after you change `SEED_ADMIN_PASSWORD`, because seeding never re-passwords an existing user. The account named in the message is signable-into by anyone who can read this repository. The app is down, so start from SQL: `UPDATE users SET password_hash = NULL WHERE email = '<the address named>';` — then boot and set a new password via **Forgot password** or another administrator. [Step by step](#if-your-instance-has-the-published-admin-account). |
+| App exits at startup saying a **system administrator HAS** the published password | Read from the database, not from `.env` — so it fires even when your configuration mentions no seeding at all, and it keeps firing after you change `SEED_ADMIN_PASSWORD`, because seeding never re-passwords an existing user. The account named in the message is signable-into by anyone who can read this repository. The app is down, so start from SQL: `UPDATE users SET password_hash = NULL WHERE email = '<the address named>';` — then boot and set a new password via **Forgot password** (needs SMTP) or another administrator; with neither of those, [seed a second administrator](#if-you-are-the-only-administrator-and-cannot-sign-in), which needs neither. [Step by step](#if-your-instance-has-the-published-admin-account). |
 | App exits at startup saying `SEED_ADMIN_PASSWORD` is *N* bytes and the maximum is 72 | The value is over **BCrypt's** 72-UTF-8-byte ceiling, which is the cap on every password the application stores — not a rule this project chose, and not one you can raise. Bytes are not characters: accented, Greek and Cyrillic letters cost 2 each, most other scripts 3, emoji 4, so a 40-character Cyrillic passphrase is 80 bytes. Shorten it (`openssl rand -base64 48` is 64 ASCII characters and stronger than BCrypt can use), or clear `SEED_ADMIN_EMAIL` if you did not mean to seed an administrator. It only fires where the value would actually **create** the account, so it cannot be triggered by an install whose administrator already exists. |
 | Registration never completes / no email arrives | **Two causes, and the second produces an identical symptom with no error anywhere.** (1) SMTP misconfigured — check `MAIL_*` and your provider; test locally with MailHog (`http://localhost:8025`). (2) The per-recipient ceiling on verification mail refused it. That one is only silent on `POST /api/auth/resend-verification`; `POST /api/auth/register` answers `429` with `Retry-After`, so check which endpoint the user actually reached. Note the ceiling counts the destination **inbox**, not the address — several accounts at one inbox (`a+1@`, `a+2@`, `a.1@googlemail.com`) share one allowance. Diagnose with the queries under [Optional toggles](#optional-toggles), not by changing `MAIL_*`. |
 | Password-reset links stop arriving for **one person**, everybody else is fine, and nothing is logged | The per-recipient ceiling on reset mail refused them, silently — `POST /api/auth/forgot-password` answers `200` either way by design, so the user is told a link was sent and no error exists anywhere in your stack. Often this is somebody *deliberately* holding that address's allowance full; an attacker who paces themselves is never refused, so the refusal metrics read zero too. The one thing that sees it is `mail_send_events` — run the six-hour concentration query under [Optional toggles](#optional-toggles). **Do not lower `AUTH_MAIL_MAX_PER_RECIPIENT_PER_WINDOW`**: it would shorten the victim's own allowance as well. Block the source at your proxy. |

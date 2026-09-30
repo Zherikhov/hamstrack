@@ -46,8 +46,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>{@link #theInstallPathStatesTheArchitectureRequirement} &mdash; HD-316, which is the hard
  *       one: an <em>absence</em>. A scan for wrong text cannot see a fact nobody wrote, so this
  *       rule asserts presence instead.</li>
- *   <li>{@link #theInstallChecklistStepsWereRunOnThisReleaseLine} &mdash; the perimeter around the
- *       four items this class hands to a human. Deleting the whole section left 80 tests across 9
+ *   <li>{@link #theInstallChecklistStepsWereRunOnThisReleaseLine} &mdash; the perimeter around
+ *       the items this class hands to a human. Deleting the whole section left 80 tests across 9
  *       classes green (measured, HD-324 fix loop): nothing anywhere made anybody run them, so the
  *       second half of this ticket was a promise with no holder.</li>
  * </ul>
@@ -65,7 +65,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       not a thing a unit test may require. Also on the checklist, also held by its date.</li>
  *   <li><strong>It cannot see a contradiction between two true-looking sentences</strong> &mdash;
  *       HD-320's "SMTP is required" against a quick start that does not use it. Both halves are
- *       ordinary prose; only a reader can tell they disagree.</li>
+ *       ordinary prose; only a reader can tell they disagree. So that read-through is a numbered
+ *       step of the checklist section too, dated like the rest &mdash; and a grep rule on the word
+ *       was refused for the reason every such rule fails here: the word is correct on dozens of
+ *       lines, and the exemption list it would need is where the next blanket claim would hide.</li>
  *   <li><strong>It cannot judge whether a sentence is <em>correct</em></strong>, only whether the
  *       things it names exist. A command that runs and does the wrong thing passes.</li>
  * </ul>
@@ -214,12 +217,15 @@ class InstallClaimsTest {
     private static final Pattern MEASURED = Pattern.compile("\\bMeasured (\\d{4}-\\d{2}-\\d{2})\\b");
 
     /**
-     * The four things this class structurally cannot do, which is why they are somebody's job: the
-     * registry, the fresh-clone install, {@code compose config -q}, and the values only a running
-     * container refuses. Written as a number because there is nothing in the tree to derive it from
-     * &mdash; and it only ever has to catch the direction that deletes.
+     * What this class structurally cannot do, which is why each of them is somebody's job: the
+     * registry, the fresh-clone install, {@code compose config -q}, the values only a running
+     * container refuses, and &mdash; since HD-320 &mdash; whether everything the install documents
+     * say about mail agrees with itself. Written as a number because there is nothing in the tree to
+     * derive it from &mdash; and it only ever has to catch the direction that deletes, so adding a
+     * step raises it in the same commit as the step, which is a deliberate edit rather than a
+     * maintenance chore.
      */
-    private static final int CHECKLIST_STEPS = 4;
+    private static final int CHECKLIST_STEPS = 5;
 
     // ============================================================ the population
 
@@ -739,9 +745,10 @@ class InstallClaimsTest {
 
                         Expected a heading '%s' in %s.
 
-                        It carries the four checks this class structurally cannot make - the
-                        registry, the fresh-clone install, `docker compose config -q`, and the values
-                        only a running container refuses. Deleting it left every other test in this
+                        It carries the checks this class structurally cannot make - the registry, the
+                        fresh-clone install, `docker compose config -q`, the values only a running
+                        container refuses, and whether the documents agree with each other about
+                        mail. Deleting it left every other test in this
                         repository green (measured), which is why this one exists. If the section
                         moved, move this constant with it; if a step is genuinely obsolete, delete
                         that step and its reason, not the section.""",
@@ -799,11 +806,12 @@ class InstallClaimsTest {
                         Newest release tag: %s (%s). Every step carries a `Measured <date>` line no
                         older than that.
 
-                        These are the checks a unit test may not make: they need the network or a
-                        daemon. Nothing else in this repository will ever tell you that `0.4.3` was
-                        published (it was not), that the fresh-clone install still works, or that a
-                        compose file still interpolates. Run the step, record what it said including
-                        where the run departed from what the documents prescribe, and date it.
+                        These are the checks a unit test may not make: they need the network, a
+                        daemon, or a reader. Nothing else in this repository will ever tell you that
+                        `0.4.3` was published (it was not), that the fresh-clone install still works,
+                        that a compose file still interpolates, or that two documents agree about
+                        whether mail is required. Run the step, record what it said including where
+                        the run departed from what the documents prescribe, and date it.
 
                         Do NOT date a step you did not run: the date is the claim.""",
                         String.join("\n", stale), release.tag(), release.date())

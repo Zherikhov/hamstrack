@@ -404,7 +404,15 @@ complete enough to paste, with the account's own address in it, and it is assert
 - `UPDATE users SET password_hash = NULL WHERE email = '…'` — keeps the account and everything it
   owns, and takes only its password away;
 - then boot, then **Forgot password** on that address, or a reset from another system
-  administrator, or delete the account if it should never have existed;
+  administrator, or delete the account if it should never have existed — **and every one of
+  those three is unavailable to a sole administrator with no mail server**, who has just
+  cleared the password of the only account that could reach the console. The remedy that
+  needs neither is seeding a second administrator (`SEED_ADMIN_EMAIL` at an address with no
+  account, restart), written up in `docs/self-hosting.md`, "If you are the only
+  administrator and cannot sign in". **The refusal messages this section is about still
+  prescribe only the first three** (`DataSeeder.rejectPublishedPassword`,
+  `DataSeeder.rejectPublishedAdminHash`), which is this same §8.2 rule outstanding against
+  them (HD-320);
 - and treat it as a compromise rather than a misconfiguration — the account has carried the
   published password for as long as it has existed, and every release before the one printing the
   refusal served requests with it active, so "*if* the instance was ever reachable with that

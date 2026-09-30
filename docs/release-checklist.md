@@ -1311,8 +1311,9 @@ what this particular release needs operationally.
 path they name exists, every pin names the current release line, each installable stack
 is prescribed by exactly one document, and the architecture requirement is stated.
 **What it structurally cannot do is yours, and everything below was wrong in 0.18.3 or
-0.18.4.** The shape of each item is the same: it needs the network or a daemon, which a
-unit test may not. Do them once per *line* (0.18 → 0.19), not per patch.
+0.18.4.** Most of these items need the network or a daemon, which a unit test may not; the
+last one needs the thing a test has even less of — a reader who can see that two
+individually true sentences disagree. Do them once per *line* (0.18 → 0.19), not per patch.
 
 **Every numbered step below ends in a `Measured <date>` line, and that is not decoration.**
 `InstallClaimsTest#theInstallChecklistStepsWereRunOnThisReleaseLine` reads this section,
@@ -1452,6 +1453,69 @@ Measured 2026-09-29 on Docker Compose v5.1.0: exit 1 in about a second,
 `service "preflight" didn't complete successfully: exit 1`, MinIO never started. The
 general rule is the one to carry to the next stack: **a value checked by a container is
 checked by nothing until a container runs.**
+
+**5. What the documents, read in order, tell a stranger about mail.** Neither a
+network check nor a daemon check — the third kind of thing a test here cannot make.
+`InstallClaimsTest`'s own javadoc states the limit ("It cannot see a contradiction
+between two true-looking sentences"), and a grep rule on `SMTP` would be worse than
+nothing: the word is correct on dozens of lines across the install documents, so such
+a rule needs an exemption list, and that list is exactly where the next blanket claim
+would sit. So read them, in the order a reader meets them, and write down the answer
+the set gives **together**:
+
+| Read | Looking for |
+| --- | --- |
+| [Requirements](../docs/self-hosting.md#requirements) | whether a mail server is listed as one |
+| [Quick start](../docs/self-hosting.md#quick-start) | whether the path it prescribes uses mail |
+| [Email (SMTP)](../docs/self-hosting.md#email-smtp) | what it says is impossible without mail, and *for whom* |
+| each stack template, plus [`.env.prod.example`](../.env.prod.example) | the same claim, in the file an operator copies |
+
+HD-320 is the shape to expect: a blanket "SMTP is required for a usable instance"
+three lines above a quick start that never uses it. And when that sentence was
+deleted from the guide, its twin lived on in `.env.prod.example` — which the guide
+names three times as the reference for every variable the application reads, so a
+reader reaches it from 250 lines below the table that contradicts it. **A claim is
+not removed until its copies are**, which is why this step reads the templates and
+not only the guide.
+
+Measured 2026-09-30: the three sections agree. Requirements lists Docker, an `amd64`
+host, PostgreSQL 16 and a proxy *for a public instance*, and mentions mail nowhere
+(no `mail`/`SMTP` match in that section at all). The quick start says "No SMTP
+server, no domain and no TLS certificate are needed to get this far", names the
+`/admin` setup-link path, and points at the email section for what mail adds. The
+email section opens "SMTP is optional on a self-hosted install, and the quick start
+above does not use it" and then answers *for whom* with a table. Both stack templates
+head their block "Optional: email (SMTP)" / "NOT REQUIRED TO INSTALL". **The one
+document that did not agree was `.env.prod.example`**, still carrying "In prod set a
+real SMTP server, otherwise email verification (which doubles as login) fails" — the
+twin of the sentence the guide had already dropped; rewritten in this ticket to state
+what is true and to point at the table rather than copy it. Two more departures found
+by the same read, both in the guide and both corrected: the table's third row said
+"Workspace invitations by email", which reads as *inviting needs mail* when an
+invitation is matched by the invitee's **address** and is acceptable with no token at
+all — measured against a running instance with `spring.mail.host` pointed at a dead
+`127.0.0.1:2`: `POST …/workspaces/{ws}/invites` answered `201` (the send failed
+afterwards, loudly, `WARN … Best-effort INVITE email … failed`), `GET /api/invites` as
+the invited user answered `200` with the row, and `POST /api/invites/{id}/accept`
+answered `200` and granted `myRole: MEMBER`. **What is *not* true is the screen**: the
+only surface for that flow is `/welcome/invites`, which belongs to first-login
+onboarding — `app.onboarding.enabled` defaults to **false** and is set `true` only in
+`application-cloud.properties`, and `GET /api/auth/me` returned
+`needsOnboarding: false` for both a seeded administrator and a freshly `/admin`-created
+user on a default install, so nothing on DC ever sends anybody to that page. The row
+now says that, naming `ONBOARDING_ENABLED`. And the guide's closing sentence, "you are
+the password-reset mechanism for every account", was false for the operator's own
+sole-administrator account, which has no administrator above it — the guide now carries
+the remedy that needs no mail server and no colleague (seed a second administrator;
+measured the same day, see that section).
+
+**Left outstanding, deliberately, because it is production code and not a document:**
+`DataSeeder`'s two boot refusals still prescribe only "Forgot password" or "another
+system administrator" (`DataSeeder.java:353`, `:495`), neither of which a sole
+administrator with no mail server has — the §8.2 rule in
+`docs/design/published-credentials-proposal.md` ("a refusal may only prescribe an
+action its reader can perform") outstanding against the very messages that section
+is about.
 
 **Not on this list, deliberately: a freshness rule.** The idea was an install
 document whose newest edit predates the newest release line going red. It is not
