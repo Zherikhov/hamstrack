@@ -81,12 +81,25 @@ cp .env.example .env
 # Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD,
 # MINIO_ROOT_USER, MINIO_ROOT_PASSWORD. If you skip one, the next command
 # refuses and names it.
-docker compose up -d --wait --wait-timeout 240
+docker compose up -d --wait --wait-timeout 420
 ```
 
 `--wait` makes the exit code the check — a plain `up -d` returns 0 while a
-container is crash-looping. The timeout is longer than the DC stack's because
-there are two more images to pull and a bucket to create.
+container is crash-looping. **The timeout is a ceiling on waiting rather than a
+wait**: a healthy stack returns the moment it is healthy, measured at 48.2s here.
+It is longer than the DC stack's 300 because this stack does strictly more before
+the application container starts at all — two more images to pull, `preflight`,
+MinIO's own healthcheck, and the bucket job the app waits on.
+
+**It is not the dial for a slow first boot**, and that is worth knowing before you
+reach for it: if the `up` fails naming the app while `docker compose logs app` shows
+the application still starting, raise `APP_START_PERIOD_SECONDS` in `.env` instead
+(default `180`, allowing the app 230s to answer before it is called unhealthy).
+Raising the timeout cannot help there — the container has already been marked
+unhealthy, and waiting longer for an unhealthy container is the same failure later.
+The window is the same number as the DC stack's, because everything extra above
+happens *before* the app container starts and so is bounded by the timeout rather
+than by the window.
 
 Then open <http://localhost:8080>. Measured on a first install with cold images,
 2026-09-23: **48.2 s** until the `up` returned, `/api/meta` reporting
@@ -169,8 +182,18 @@ docker compose logs minio-bucket    # created the bucket, or said why it could n
 docker compose logs app             # the app refuses bad values by name at startup
 ```
 
-Two failures are worth knowing in advance:
+Three failures are worth knowing in advance:
 
+- **The app is named, and its log shows it still starting — or already started — with no
+  error.** The install worked; the healthcheck gave up too early. Docker marks the container
+  unhealthy after `APP_START_PERIOD_SECONDS` plus five failures ten seconds apart, so 230s at
+  the defaults, and the app has been measured starting in **96.4s** on a modest Linux server.
+  Raise `APP_START_PERIOD_SECONDS` in `.env` and run the `up` again. To tell it apart from a
+  genuine failure, read the log: a refusal names a value and arrives within seconds, while a
+  slow boot logs `Starting HamstrackApplication …` and then `Started HamstrackApplication in
+  <N> seconds` with nothing resembling an error between them — and `curl -s
+  localhost:8080/api/meta` answering `200` settles it. **Raising `--wait-timeout` is not the
+  remedy for this one**, because the container was unhealthy before the command gave up.
 - **`MINIO_ROOT_PASSWORD` shorter than 8 characters, or `MINIO_ROOT_USER` shorter than
   3.** MinIO enforces both and exits at startup when they are not met, so nothing in the
   stack would come up and the `up` would only ever tell you which *dependency* it gave

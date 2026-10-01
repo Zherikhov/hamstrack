@@ -9,11 +9,24 @@
 # the reader it exists for. TLS is a later step — docs/self-hosting.md § TLS & reverse proxy.
 #
 # Start it with:   cp .env.example .env   # then fill the required values
-#                  docker compose up -d --wait --wait-timeout 120
+#                  docker compose up -d --wait --wait-timeout 300
 #
 # `--wait` is what makes the exit code mean something: a plain `up -d` returns 0 while a
 # container is crash-looping. The timeout is required, not tidy — both services below declare
 # `restart: unless-stopped`, so a bare `--wait` waits as long as the restarting continues.
+#
+# THE TIMEOUT IS A CEILING ON WAITING, NOT A DURATION: a healthy stack returns the moment it
+# is healthy (measured 34 s on a warm image) and a value the app refuses is reported in
+# seconds (measured 27 s on a 9-byte JWT_SECRET — the container exits, and `--wait` fails on
+# the restart rather than on the healthcheck). What it must exceed is the time to ACTUAL
+# HEALTH on a slow host; 300 additionally clears `start_period + retries × interval` = 230 s,
+# the moment the healthcheck itself gives up, so that the one failure which reaches it — an
+# app that neither serves nor exits — is still reported as `container dc-app-1 is unhealthy`
+# rather than as a bare timeout.
+#
+# IT IS NOT THE DIAL FOR A SLOW FIRST BOOT. See start_period on the app service: once the
+# container has been marked unhealthy, a longer wait is a longer wait for the same failure,
+# which is why raising this to 480 against a 90 s window changed nothing.
 services:
   app:
     # Lowercase and literal. No ${GITHUB_OWNER}: that is a production-deploy concern, and
@@ -81,10 +94,60 @@ services:
       - attachments_data:/app/data/attachments
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/meta"]
+      # UNCHANGED, AND THAT IS A DECISION. `interval` is how often the probe runs, which is
+      # also how late health is NOTICED — up to 10 s after the app starts answering, inside
+      # the start window as well as after it. Shortening it would make a successful install
+      # return a few seconds sooner and would also shorten the unhealthy moment below by
+      # five times as much, which is the opposite of what this change is for. Docker's
+      # `start_interval` (a faster probe during the start period only) would buy the first
+      # without the second, and is deliberately not used: it is a later addition to the
+      # Engine than anything else this stack relies on, and adopting it would introduce a
+      # minimum Docker version — which no document here states, so the failure would land on
+      # an operator with an older Engine as a healthcheck that silently never probes early.
       interval: 10s
       timeout: 5s
+      # Five consecutive failures AFTER the window below — a failure inside it counts
+      # against nothing. So `retries` and `interval` are the tolerance for an app that is
+      # already serving and stumbles (a GC pause, a saturated pool), which is a different
+      # property from how long a first boot takes, and they are left alone on purpose:
+      # buying first-boot time out of `retries` would buy it by making a RUNNING app's
+      # outage five times slower to notice, and buying it out of `interval` makes every
+      # health verdict coarser. The window is the dial that costs nothing else.
       retries: 5
-      start_period: 40s
+      # HOW LONG THE APPLICATION MAY TAKE TO ANSWER /api/meta ON ITS FIRST BOOT. A variable
+      # for the reason the postgres dials below are: a literal here is a value your .env
+      # cannot reach, so a host slower than this default has no way to say so.
+      #
+      # THE ARITHMETIC, because the number it replaces was chosen without it. Docker marks
+      # the container `unhealthy` after `start_period + retries × interval` of consecutive
+      # failures, and `up -d --wait` then exits non-zero:
+      #     was:  40s + 5 × 10s =  90s
+      #     now: 180s + 5 × 10s = 230s
+      # 40 was measured on Windows/Docker Desktop — 33.2 s warm, 54.0 s cold — where both
+      # fit, so it looked generous. On a real stranger's Linux server (2026-09-24) the app
+      # logged `Started HamstrackApplication in 96.378 seconds (process running for
+      # 100.404)`: 90 < 100.4, so the healthcheck failed an install that had WORKED, and the
+      # only knob the documentation offered could not help — `--wait-timeout` bounds how long
+      # the COMMAND waits, and the container was already unhealthy. Raising it to 480 was
+      # tried and met the same result.
+      #
+      # 230 s is ~2.3× the slowest first boot measured on anybody's host, and that multiple
+      # is the margin — stated rather than implied, and chosen against the slowest reading
+      # rather than the fastest. A smaller or throttled VPS can be slower still; that host
+      # sets this line, which is the whole reason it is a line.
+      #
+      # IT DOES NOT SLOW A SUCCESSFUL INSTALL, and it does not slow a REFUSAL either —
+      # both measured on this file, 2026-10-01, a host that boots the app in 27.2 s:
+      #   * window 180 s, healthy stack          -> `up -d --wait` exited 0 in 34 s.
+      #     Probes run inside the window and the first success marks the container healthy
+      #     at once, so a fast host pays nothing for a window sized for a slow one.
+      #   * window 180 s, 9-byte JWT_SECRET      -> exit 1 in 27 s, `container ... is
+      #     unhealthy`. The app exits, the container restarts, and `--wait` fails on THAT
+      #     rather than on the healthcheck — so a value the app refuses is still reported
+      #     in seconds whatever this window says.
+      # The only failure that waits out the full 230 s is an app that neither serves nor
+      # exits. That is the case this window is spent on, and it is worth the wait.
+      start_period: ${APP_START_PERIOD_SECONDS:-180}s
     depends_on:
       postgres:
         condition: service_healthy

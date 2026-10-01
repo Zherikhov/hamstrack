@@ -19,7 +19,17 @@ flag below is the one that matters.
 `--wait` makes the exit code the check: it returns 0 only once both services are healthy
 (~35s on a warm image), and otherwise fails naming the service. Without it, `up -d` returns 0
 while a container is crash-looping. The timeout is required rather than tidy — these services
-restart themselves, so a bare `--wait` waits for as long as the restarting continues.
+restart themselves, so a bare `--wait` waits for as long as the restarting continues — and it
+is a **ceiling on waiting, not a wait**: a healthy stack returns as soon as it is healthy.
+
+**When it fails naming the app, there are two different answers and the timeout is neither.**
+Read `docker compose logs app`: a refused value is named there within seconds, and no setting
+makes it start. But if the log shows the application *still starting* — or already started,
+with no error — then the install worked and the healthcheck gave up too early: raise
+`APP_START_PERIOD_SECONDS` in `.env` (default `180`, which allows the app 230s to answer
+before it is called unhealthy) and run the `up` again. The app has been measured starting in
+96s on a modest Linux server. **A bigger `--wait-timeout` cannot fix that one** — it bounds
+how long the command waits, and the container was marked unhealthy before it gave up.
 
 Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` /
 `SEED_ADMIN_PASSWORD`. Public self-registration is closed on a self-hosted install, so that

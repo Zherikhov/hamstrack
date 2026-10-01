@@ -54,10 +54,12 @@ cd hamstrack/deploy/dc
 cp .env.example .env
 # Fill DB_PASSWORD, JWT_SECRET, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD.
 # If you skip one, the next command refuses and names it.
-docker compose up -d --wait --wait-timeout 120
+docker compose up -d --wait --wait-timeout 300
 ```
 
-That command **exits non-zero if the stack does not come up**, so its exit code is the check: a plain `docker compose up -d` returns 0 even while a container is crash-looping. On success it returns once both services are healthy (~35s on a warm image). On failure it names the service — `container dc-app-1 is unhealthy` — and `docker compose logs app` carries the reason, because the application refuses a bad value by name at startup.
+That command **exits non-zero if the stack does not come up**, so its exit code is the check: a plain `docker compose up -d` returns 0 even while a container is crash-looping. On success it returns once both services are healthy (~35s on a warm image) — the timeout is a ceiling on waiting, not a wait. On failure it names the service — `container dc-app-1 is unhealthy` — and `docker compose logs app` carries the reason, because the application refuses a bad value by name at startup.
+
+**If that failure names the app while `docker compose logs app` shows it still starting — or already started — the stack is fine and the healthcheck gave up too early.** Raise `APP_START_PERIOD_SECONDS` in `.env` (default `180`, which allows the app 230s to answer before it is called unhealthy) and run the command again. **Raising `--wait-timeout` cannot fix that one**: it bounds how long the command waits, and by then the container has already been marked unhealthy. The app has been measured starting in 96s on a modest Linux server, so a slower or CPU-throttled host is the case this variable exists for — [Troubleshooting](docs/self-hosting.md#troubleshooting) has the two symptoms side by side.
 
 Then open <http://localhost:8080> and sign in with `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. No SMTP server and no domain are needed for this. Your instance serves its own API reference at `/docs`, rendered from the OpenAPI spec at `/openapi.yaml`.
 

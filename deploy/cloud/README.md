@@ -23,7 +23,16 @@ already in the directory they `cd` into, so you can start at the copy. They are 
 on purpose: the same four commands in two files drift in their flags, and the flag that matters is
 `--wait`, which is what makes the exit code the check — without it `up -d` returns 0 while a
 container is crash-looping. The timeout is required rather than tidy: these services restart
-themselves, so a bare `--wait` waits for as long as the restarting continues.
+themselves, so a bare `--wait` waits for as long as the restarting continues. It is a ceiling
+on waiting rather than a wait, and a healthy stack returns as soon as it is healthy.
+
+**When the `up` fails naming the app, the timeout is not the dial.** Read `docker compose logs
+app`: a refused value is named there within seconds. But if the log shows the application
+*still starting* — or already started, with no error — the install worked and the healthcheck
+gave up too early: raise `APP_START_PERIOD_SECONDS` in `.env` (default `180`, allowing the app
+230s to answer before it is called unhealthy) and run the `up` again. The app has been measured
+starting in 96s on a modest Linux server. Raising `--wait-timeout` cannot rescue a container
+that is already unhealthy.
 
 **This model's sign-up page is open to anybody who can reach the port**, which is the one thing
 about it that surprises somebody who installed the DC stack first. The app port is published on

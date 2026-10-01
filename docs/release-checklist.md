@@ -1410,11 +1410,24 @@ tell the two directions apart.) Prefix the
 Measured 2026-09-23 on Windows/Docker Desktop, from a fresh clone: **33.2 s to both
 services healthy**, `/api/meta` 200, the seeded administrator signed in, and
 creating a second person returned a setup link with no mail server configured. That
-run used `--wait-timeout 180`, not README's `120` — the wall clock is the wall clock
-either way, but it is *not* evidence that 120 is enough on a slower host, and the
-person who repeats this on Linux should follow README verbatim so that it is. **It
-has never been run on a clean Linux host**, which is the gap the next line should
-close.
+run used `--wait-timeout 180`, where README said `120` at the time — the wall clock
+is the wall clock either way, but it was *not* evidence that README's number was
+enough on a slower host, and the paragraph said so while noting that the step **had
+never been run on a clean Linux host**.
+
+**It has now, and the gap that line named was real.** Reported 2026-09-24 (HD-344),
+following README verbatim on a stranger's Linux server: `Started
+HamstrackApplication in 96.378 seconds (process running for 100.404)` — and the `up`
+**reported failure on an install that worked**, because the healthcheck's
+`start_period: 40s` plus five retries ten seconds apart called the container
+unhealthy at 90 s. Raising `--wait-timeout` to 480 did not help and could not: it
+bounds how long the command waits, and the container was already unhealthy. The
+window is now `APP_START_PERIOD_SECONDS` (default `180`, so 230 s) and README's
+timeout is `300`. **The lesson for this step is about the reading, not the number:**
+a wall clock from a developer machine is three to four times faster than a modest
+server, so a run here that fits comfortably says nothing about the host this
+product is installed on. Record the `Started HamstrackApplication in …` line, not
+only the wall clock — it is the figure the window is sized against.
 
 **3. `docker compose config -q` on every compose file a document names.** Also a
 daemon, also not a unit test. Note it passes *with the documented variable set*, not

@@ -563,13 +563,20 @@ check_containers() {
     # A dependency that is `starting` makes the dry run WAIT for its healthcheck to settle,
     # exactly as `up -d` waits — measured on the same pair of containers, a 30 s
     # `start_period` held the plan 29 s before the same exit 1. That is the state this box
-    # is in during EVERY app restart: `app`
-    # declares start_period 40s / interval 10s / retries 5 and `caddy` waits on `app` being
-    # healthy, so a check landing mid-restart can sit for a minute or two, plus postgres's
-    # own window. It is bounded rather than open-ended, and that is what makes it acceptable
-    # in an hourly job: TimeoutStartSec=300 on the unit, and SIGTERM is trapped like any
-    # other exit, so even a run systemd kills publishes a truthful 1 rather than leaving
-    # yesterday's reading in place.
+    # is in during EVERY app restart: `app` declares interval 10s / retries 5 and a
+    # start_period of APP_START_PERIOD_SECONDS (180s by default since HD-344, up from 40s —
+    # unhealthy fires at start_period + retries × interval, and the old pair gave a 96.4s
+    # first boot only 90s), and `caddy` waits on `app` being healthy, so a check landing
+    # mid-restart can sit out that window plus postgres's own. It is bounded rather than
+    # open-ended, and that is what makes it acceptable in an hourly job. WHAT IT WAITS FOR
+    # IS THE HEALTHCHECK SETTLING, NOT THE WINDOW: a restart that succeeds settles when the
+    # app answers (24 s measured warm, 96.4 s on a modest host), and the full
+    # start_period + retries × interval is reached only by an app that never comes back —
+    # i.e. during an outage, where publishing 1 is the right answer anyway. TimeoutStartSec
+    # on the unit is 300, which still covers the default window's 230; a box that RAISES
+    # APP_START_PERIOD_SECONDS past ~240 should raise that unit's timeout with it. SIGTERM is
+    # trapped like any other exit, so even a run systemd kills publishes a truthful 1 rather
+    # than leaving yesterday's reading in place.
     #
     # This scope then publishes 1 for the duration of a HEALTH incident, which is not a
     # configuration one. That is deliberate and must not be "fixed" by ignoring the exit

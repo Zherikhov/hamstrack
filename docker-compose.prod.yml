@@ -197,7 +197,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s   # give Spring Boot time to start before counting failures
+      # How long Spring Boot may take to answer before failures start counting. A variable
+      # for the reason mem_limit and the logging dials above are — a literal is a value your
+      # .env cannot reach — and the same default and the same arithmetic as the two
+      # installable stacks, which deploy/dc/docker-compose.yml carries in full: unhealthy
+      # fires at `start_period + retries × interval`, the 40 s this replaces put that at
+      # 90 s, and a first boot of 96.4 s has been measured on a real host.
+      #
+      # IT COSTS MORE HERE THAN IT DOES THERE, which is why this file is not excused from
+      # the change: `caddy` below waits on `condition: service_healthy`, so an app marked
+      # unhealthy while it is still starting keeps the PROXY down, and the symptom is the
+      # whole site rather than one confusing exit code. The deploy's own verify step does
+      # not depend on this window — it polls /api/meta itself with VERIFY_APP_TIMEOUT_SECONDS
+      # (default 180) — so the two bounds are independent and neither rescues the other.
+      start_period: ${APP_START_PERIOD_SECONDS:-180}s
     depends_on:
       postgres:
         condition: service_healthy

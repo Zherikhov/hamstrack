@@ -78,7 +78,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 40s
+      # SAME WINDOW AND SAME DEFAULT AS ../dc/docker-compose.yml, which carries the
+      # arithmetic: unhealthy fires at `start_period + retries × interval`, the old 40 s
+      # literal put that at 90 s, and a real stranger's Linux server booted the app in
+      # 96.4 s - so a working install was reported as a failure, and `--wait-timeout`
+      # could not rescue it.
+      #
+      # WHY THIS STACK NEEDS NO LONGER WINDOW THOUGH IT IS SLOWER OVERALL. Everything
+      # this stack has that dc does not - two more images to pull, `preflight`, MinIO's
+      # own healthcheck, the bucket job - happens BEFORE this container starts, because
+      # of the `depends_on: minio-bucket: service_completed_successfully` below. The
+      # window is a clock on THIS container, started when it starts, so that chain lands
+      # on `--wait-timeout` (which is why docs/cloud-mode.md's is larger than README's)
+      # and not here. What this window must cover is one Spring Boot startup from the
+      # same image dc runs.
+      start_period: ${APP_START_PERIOD_SECONDS:-180}s
     depends_on:
       postgres:
         condition: service_healthy

@@ -887,8 +887,15 @@ better still — see the `DB_MONITOR_*` row under
 ```bash
 # from the repository root, with .env HERE rather than in deploy/dc/
 docker compose --project-directory . \
-  -f deploy/dc/docker-compose.yml -f docker-compose.observability.yml up -d --wait --wait-timeout 180
+  -f deploy/dc/docker-compose.yml -f docker-compose.observability.yml up -d --wait --wait-timeout 360
 ```
+
+That timeout is the DC stack's `300` plus room for the services this file adds. It is a ceiling
+on waiting rather than a wait, and it is **not** the dial for a slow first boot: if the command
+fails naming `app` while `docker compose logs app` shows the application still starting, raise
+`APP_START_PERIOD_SECONDS` in `.env` — the DC stack's healthcheck window, documented in
+[the self-hosting guide](self-hosting.md#configuration). Raising the timeout cannot rescue a
+container Docker has already marked unhealthy.
 
 Measured: with the `.env` at the root and `COMPOSE_PROJECT_NAME=dc` in it, all four hold
 together — the project is still `dc` and keeps `dc_postgres_data` / `dc_attachments_data`, the

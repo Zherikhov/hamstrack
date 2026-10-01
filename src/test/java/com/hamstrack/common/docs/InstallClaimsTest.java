@@ -140,8 +140,11 @@ class InstallClaimsTest {
     /**
      * The install command, matched on the part every stack's version of it shares rather than on a
      * whole line: a reformat does not break the rule, a second copy cannot hide behind whitespace,
-     * and the timeout (120s for dc, 240s for cloud) is deliberately outside the pattern, since it
-     * is the one flag the two stacks are expected to disagree about.
+     * and the {@code --wait-timeout} is deliberately outside the pattern, since it is the one flag
+     * the two stacks are expected to disagree about — the cloud stack does strictly more before its
+     * app container starts. No number is written here on purpose: the two values moved in HD-344
+     * (they were 120 and 240) and a javadoc naming them would have gone stale in that commit while
+     * reading as a check.
      */
     private static final Pattern INSTALL_COMMAND = Pattern.compile("docker compose up -d --wait");
 
