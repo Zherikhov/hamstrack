@@ -48,7 +48,45 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 
 ## Requirements
 
-- Docker with the Compose plugin.
+**This list is what to check before the first `up`**, not a tutorial — each item is a fact
+about your host that the install either meets or does not.
+
+**Any Linux distribution with a current Docker: the product is a container.** There is no
+package to install, no system Java and no system PostgreSQL, so the same image runs the same
+way on Debian, Ubuntu, RHEL, Fedora, Rocky, Alma, SUSE, Arch or Alpine, and nothing on this
+page is written per distribution. What *is* distribution-specific is two things about the
+**host**, and both have their own item below: how Docker itself is installed — in particular
+whether it is the **rootless** flavour — and whether **SELinux** is enforcing, which the
+RHEL/Fedora family ships on and the Debian/Ubuntu family does not. If you are deciding
+whether you can run Hamstrack at all, those two are the only questions your distribution
+gets to answer.
+
+- **Docker with the Compose plugin, Compose `2.24.0` or newer.** The shipped stacks declare
+  `env_file:` in its long form — `- path: .env` with `required: false` — and a Compose that
+  does not know that form rejects the file before it reads anything else. Measured on this
+  repository's own [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) on
+  2026-10-01, by running the two releases either side of the boundary:
+
+  ```
+  $ docker compose version               # the standalone v2.23.3 binary
+  Docker Compose version v2.23.3
+  $ docker compose config -q
+  validating .../docker-compose.yml: services.app.env_file.0 must be a string   # exit 15
+
+  $ docker compose version               # v2.24.0, the next release
+  Docker Compose version v2.24.0
+  $ docker compose config -q             # exit 0
+  ```
+
+  **Check yours with `docker compose version`.** The version number is the convenient form of
+  this requirement and the *feature* is the durable one: whatever version it prints, a Compose
+  that answers `env_file.0 must be a string` on a shipped stack is too old for it, and one
+  that accepts `- path:` under `env_file` is new enough. (The documented install command also
+  passes `--wait-timeout`, which arrived in Compose 2.17.0, so the `env_file` form is the
+  binding constraint.) `docker compose` **with a space** is the plugin; a `docker-compose`
+  with a hyphen is either a v1 Python release, which cannot read these files at all, or a
+  standalone v2+ binary, which can — `docker compose version` tells you which you have, and
+  `docker: 'compose' is not a docker command` means the plugin is not installed.
 - **An `x86-64` (`amd64`) host.** The published image is built for `linux/amd64`
   only — there is no `arm64` build, so an Ampere or Graviton VPS, a Raspberry Pi
   or an ARM virtual machine cannot run it as published. **Check with `docker
@@ -70,6 +108,66 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 - A PostgreSQL 16 database (the sample compose runs one for you).
 - For a public instance: a domain and a TLS-terminating reverse proxy (Caddy,
   nginx, Traefik…). HTTP-only on `localhost` works for trying it out.
+- **The host ports the stack publishes must be free**, and which ports those are is a
+  property of the stack you chose rather than of the product:
+
+  | Stack | Published on the host | Yours to change? |
+  |---|---|---|
+  | [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) — self-hosted | `8080`, the application | Yes: `APP_PORT`, and `APP_BIND` picks the interface (`0.0.0.0` by default) |
+  | [`deploy/cloud/docker-compose.yml`](../deploy/cloud/docker-compose.yml) — the cloud model on one host | `8080`, the application, **and `9001`**, the MinIO console (on `127.0.0.1` by default) | Yes: `APP_PORT` / `APP_BIND` and `MINIO_CONSOLE_PORT` / `MINIO_CONSOLE_BIND` |
+  | [`docker-compose.prod.yml`](../docker-compose.prod.yml) — the reverse-proxy production stack | `80` and `443` TCP, plus **`443/udp`** (HTTP/3) | **No** — they are literals in that file. ACME and browsers go to those ports; nothing else will do |
+
+  **Only the DC stack's one port matters for a first install.** Nothing else is published by
+  it: PostgreSQL listens on the compose network only, and in the cloud stack MinIO's *API*
+  port is not published at all — the application reaches it over that network. Two of these
+  are worth a second look before you open a firewall: `9001` is a second port a DC operator
+  will not expect, and `443/udp` is the one people miss, because a rule written for "443"
+  usually means TCP and HTTP/3 then simply never connects (nothing breaks; you lose HTTP/3).
+  `ss -lptn 'sport = :8080'` says whether a port is taken, and the failure if one is taken
+  anyway is in [Troubleshooting](#troubleshooting).
+- **Disk: a few GB, and at the start it is almost all images.** Measured on a fresh DC install
+  on 2026-10-01: the application image is **447 MB** unpacked (≈150 MB to pull),
+  `postgres:16-alpine` is **420 MB** unpacked (≈116 MB), the `postgres_data` volume is
+  **51 MB** the moment the first boot has migrated the schema and seeded the administrator,
+  and `attachments_data` is **0 B**. So roughly **0.9 GB before any of your content**, and
+  every upgrade pulls another ~450 MB image that stays on the disk until you
+  `docker image prune`. **5 GB free is comfortable** for the install plus several upgrades.
+  Growth after that is yours and is dominated by attachments — size the `attachments_data`
+  volume (or your S3 bucket) for expected uploads — followed by the database and by container
+  logs, which `docker-compose.prod.yml` caps per container and the DC stack leaves on Docker's
+  default of unbounded.
+- **Root: needed to install Docker, not to run this.** Driving the stack needs membership of
+  the `docker` group or a rootless Docker; `sudo docker …` works too. Note what that group
+  is: **membership of `docker` is equivalent to root on the host**, so it is a decision rather
+  than a convenience. Two things to know before choosing **rootless** Docker:
+  - **Rootless cannot bind a port below 1024 without extra host configuration.** That rules
+    out `docker-compose.prod.yml` (80/443) until you arrange it; the DC and cloud stacks
+    publish `8080` and are unaffected. The ways round it are to lower the unprivileged floor
+    (`sysctl net.ipv4.ip_unprivileged_port_start=80`, persisted under `/etc/sysctl.d/`), to
+    grant the capability (`setcap cap_net_bind_service=ep $(which rootlesskit)`), or to
+    publish a high port and let a root-owned proxy on 80/443 forward to it.
+  - Attachments, backups and `docker exec` all behave the same way under rootless; what
+    changes is the uid files are owned by on the host, which matters if you back up a bind
+    mount from outside the container.
+
+  This project has not tested a rootless install — the two commands above are the standard
+  remedies, not a measurement of ours.
+- **SELinux, if you are on the RHEL/CentOS Stream/Fedora/Rocky/Alma family.** The shipped
+  stacks mount **named volumes**, which Docker labels for the container itself, so an install
+  that follows this page has nothing to do and needs no `setenforce` and no policy change.
+  Where it bites is the first edit most operators make: replacing the named volume with a
+  **bind mount** to put attachments on a bigger disk. A bind mount keeps the host's label, the
+  container cannot write it, and every upload answers `500` while `ls -l` shows a directory
+  that looks perfectly writable. Add a label option to that mount instead of disabling
+  SELinux — `:Z` relabels it private to this container, `:z` shares it between containers:
+
+  ```yaml
+  volumes:
+    - /srv/hamstrack/attachments:/app/data/attachments:Z
+  ```
+
+  This project has not tested an enforcing host either; `:Z` is Docker's documented answer and
+  `sudo ausearch -m avc -ts recent` is how you confirm SELinux is what refused you.
 - **Resources:** the app is a JVM service — budget ~1 GB RAM for it (2 GB is
   comfortable, and on a **4 GB host or larger** `APP_MEMORY_LIMIT=2g` is what
   actually hands it that second gigabyte — the default caps the container at 1 GB
@@ -94,9 +192,8 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   sum to ~1 GB — takes it to ~2.6 GB, more than a 2 GB box has at all. Those maxima
   are not reached together, which is why the smaller figure still works in practice;
   the larger one is why the full stack does not belong on a 2 GB host. Run it on
-  4 GB. Disk
-  is dominated by attachments — size the `attachments_data` volume (or your S3
-  bucket) for expected uploads.
+  4 GB. (Disk is the item above; the optional observability stack adds an image per
+  service to it, and those have not been measured here.)
 
 ## Quick start
 
@@ -2095,8 +2192,22 @@ backup of that stack has to include.
 
 ## Troubleshooting
 
+The first block of rows is the **first ten minutes** — failures that happen before the
+application has ever run, and therefore before any variable in `.env` is the explanation. The
+rest of the table is an instance that started at least once. Every row names the symptom in
+the words you will actually see; where the wording of a message belongs to Docker rather than
+to Hamstrack, the stable part is called out, because engines reword these between releases
+(the first row is an example: the same failure is `not found` on Docker 29 and
+`manifest unknown` on older ones).
+
 | Symptom | Likely cause & fix |
 |---|---|
+| The pull fails: `failed to resolve reference "ghcr.io/zherikhov/hamstrack:<tag>": … not found` — or, on an older engine, `manifest unknown` | **That tag does not exist.** The stable part is the tag, not the wording. Almost always `APP_IMAGE_TAG` in `.env` naming a line that was never published (`0.4`, `0.5`, a guessed patch number): comment the line out to take the stack's own default, or copy the value the template beside it offers. Measured 2026-10-01 on Docker 29.2.1 — a deliberately wrong tag answers `failed to resolve reference … not found`, where older engines and other clients print `manifest unknown` for the same thing. **This is not the arm64 row below**: a missing *tag* says `not found` / `manifest unknown`, while an image that exists for other architectures says `no matching manifest`. |
+| The pull fails with `Error response from daemon: error from registry: denied` and nothing else | **The registry refused to say whether it exists**, which is what it does for a repository you cannot read. The published image is public and needs no `docker login`, so a `denied` means you are asking for a different repository than the one that is published — a typo in the owner or the name (measured 2026-10-01: `ghcr.io/zherikhov/hamstrak`, one letter short, answers exactly this). Compare the `image:` line you are running against [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml). A `docker login ghcr.io` cannot help and is not required. |
+| `docker: 'compose' is not a docker command`, or `validating …: services.app.env_file.0 must be a string` | **Compose is absent or too old**, and neither is a configuration problem. The first means the Compose plugin is not installed (`docker compose version` prints nothing useful); the second means it is older than `2.24.0` and does not understand the `env_file:` long form these stacks use — measured on v2.23.3, exit 15, where v2.24.0 accepts the same file unchanged. Install or upgrade the plugin; see [Requirements](#requirements). A hyphenated `docker-compose` v1 cannot read these files at all. |
+| `Bind for 0.0.0.0:8080 failed: port is already allocated` (Docker 29 wraps it in `failed to set up container networking: driver failed programming external connectivity on endpoint dc-app-1 …`) | **Something else on the host already has that port** — frequently a previous Hamstrack project started from a second clone, since the containers are not named and so collide only here. The stable part is `port is already allocated`; older engines say `address already in use` instead. Free the port (`ss -lptn 'sport = :8080'` names the process) or move Hamstrack: set `APP_PORT` in `.env`, and `APP_BASE_URL` to match it, then run the `up` again — the app container is re-created on the new port. Measured 2026-10-01: with 8080 held by an unrelated container, the `up` failed in this exact wording; `APP_PORT=8099` and `APP_BASE_URL=http://localhost:8099` then brought the same stack up healthy in 26s with 8080 still occupied. |
+| Uploads answer `500`, or the app logs a permission error on `/app/data/attachments`, on a directory that `ls -l` shows as writable | You replaced the stack's **named volume** with a **bind mount**. On the RHEL/Fedora family the cause is usually SELinux rather than ownership — the mount keeps the host's label and the container is denied regardless of the mode bits. Add `:Z` (or `:z`) to that mount, or go back to the named volume, which Docker labels for you; `sudo ausearch -m avc -ts recent` confirms SELinux is the refuser. See [Requirements](#requirements). Not reproduced by this project on an enforcing host. |
+| A value you put in `.env` arrives at the application **truncated**, so the seeded administrator password you typed is rejected, or PostgreSQL refuses the app's login, with no error anywhere about the value itself | **A `$` in the value.** Compose reads `$` as the start of a variable name and expands an undefined one to nothing, so the value silently becomes a prefix of itself — and because the DC stack feeds `DB_PASSWORD` to both the database and the app, both sides get the same truncated value and the stack *starts*, leaving only the password you cannot use. Measured 2026-10-01, read back inside the container: `pa$word` arrives as `pa`, `Secret$HOME9` arrives as `Secret`, and the doubled form `pa$$word` arrives correctly as `pa$word`. So write `$$` for every literal `$`, or generate values that cannot contain one (`openssl rand -base64 48` emits only `A-Za-z0-9+/=`). The same applies to the cloud stack, and to any value in any `.env` Compose reads. |
 | `docker compose pull` or `up` fails with `no matching manifest for linux/arm64/v8`, or the container dies immediately with `exec format error` | Your host is **arm64** and the published image is `linux/amd64` only — see [Requirements](#requirements). Nothing in your configuration is wrong and no variable fixes it. Check with `docker version --format '{{.Server.Arch}}'`: anything other than `amd64` meets this. `exec format error` rather than a pull failure means Docker found *some* image to run — usually one built elsewhere, or a stale local one — and the kernel refused the binary. |
 | `docker compose up -d` with `--wait` exits non-zero saying `container dc-app-1 is unhealthy`, and `docker compose logs app` shows the application **still starting, or already started**, with no error in it | **The install worked and the healthcheck gave up too early.** Docker marks the container unhealthy after `APP_START_PERIOD_SECONDS + retries × interval`, which is **230s** at the defaults; the app has been measured starting in **96.4s** on a modest Linux server and a cheaper or CPU-throttled host can be slower again. Raise `APP_START_PERIOD_SECONDS` in `.env` and run the command again — the containers are re-created with the new value. **How to tell this apart from a genuine failure:** read `docker compose logs app`. A refusal is a *named* value and a stack trace (`jwt.secret (JWT_SECRET) must be at least 32 bytes…`), arrives within seconds, and no amount of window helps it; a slow boot logs `Starting HamstrackApplication …`, nothing resembling an error, and then `Started HamstrackApplication in <N> seconds` — if that line is there, or appears while you are reading, your window is short by roughly `N + 10 − 230` seconds. `curl -s localhost:8080/api/meta` answering `200` settles it: the instance is up and only the *report* was wrong. **Do not reach for `--wait-timeout`** — it bounds how long the command waits and the container was already unhealthy, so a longer wait is the same failure later (480 was tried; identical result). |
 | App exits at startup with a JWT/key error | `JWT_SECRET` is missing or shorter than 32 bytes — HMAC-SHA256 requires ≥32. Generate one: `openssl rand -base64 48`. |

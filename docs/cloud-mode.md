@@ -74,6 +74,18 @@ an ARM virtual machine. Check with `docker version --format '{{.Server.Arch}}'`
 before you start, and see [Requirements](self-hosting.md#requirements) for what to
 do if that is what you have.
 
+**Two more things are specific to this stack rather than to the product.** It needs
+**two free host ports** where the DC stack needs one — `8080` for the application
+(`APP_PORT`, `APP_BIND`) and **`9001` for the MinIO console**, bound to `127.0.0.1`
+by default (`MINIO_CONSOLE_PORT`, `MINIO_CONSOLE_BIND`); MinIO's S3 *API* port is not
+published at all, because the app reaches it on the compose network. And it pulls
+**two images the DC stack does not** — MinIO and its client — so budget more disk
+than the DC figures in Requirements. Everything else before the first `up` is shared
+and lives there once: the Compose minimum (`2.24.0`, because
+[`deploy/cloud/docker-compose.yml`](../deploy/cloud/docker-compose.yml) uses the same
+`env_file:` long form), root versus rootless Docker, and SELinux —
+[Requirements](self-hosting.md#requirements).
+
 ```bash
 git clone https://github.com/Zherikhov/hamstrack.git
 cd hamstrack/deploy/cloud
@@ -204,6 +216,13 @@ Three failures are worth knowing in advance:
 - **A `$` in any value in `.env`.** Compose reads it as the start of a variable and an
   undefined name expands to nothing, so a password becomes a prefix of itself with no
   warning from anything. Write `$$` for one literal `$`, or generate values without one.
+  (This stack hands `DB_PASSWORD` to the database *and* to the application from that
+  one line, so a mangled value agrees with itself and the stack comes up — leaving only
+  a password you cannot use. The measured before/after values are in the guide's
+  [Troubleshooting](self-hosting.md#troubleshooting) — the whole first block of rows
+  there is the first ten minutes of any install, including this one: a tag that does
+  not exist, a registry `denied`, a Compose that is too old, and a host port already
+  taken.)
 
 ## Backups (what this stack keeps, and where)
 

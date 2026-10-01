@@ -45,13 +45,39 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DevComposeFileReferencesTest {
 
     /**
-     * A compose path as a source or document spells one. Glob patterns
-     * ({@code docker-compose.*.dev.yml}, the regexes inside {@code PublishedCredentials})
-     * do not match and are not meant to: a {@code *} is not a path, and the character class
-     * after {@code docker-compose} stops at one.
+     * A compose path as a source or document spells one, <strong>including a pathspec with a
+     * wildcard segment</strong> &mdash; the shape {@code InstallClaimsTest} uses to select each
+     * installable stack's compose file under the deploy directory.
+     *
+     * <p><strong>This character class used to omit the wildcard, and the javadoc above it
+     * claimed that was deliberate</strong> &mdash; "a glob is not a path, and the character
+     * class after {@code docker-compose} stops at one". That held for a wildcard at the END of
+     * a reference and was false for one in the MIDDLE: the match simply started after it, so a
+     * per-stack pathspec was read as a bare absolute compose path and reported as dangling.
+     * Measured on HD-318, the first time a source naming that pathspec joined this population
+     * ({@code InstallClaimsTest}, when it began calling {@code isDevelopmentCompose}): two
+     * dangling references, neither of them a real reference, in a rule whose whole subject is
+     * references that are not real.
+     *
+     * <p>So a wildcard is now <em>matched</em> and then held to the question that fits it: a
+     * plain path must be a file in the tree, and a pathspec must select at least one. A
+     * pathspec that selects nothing is this test's own failure mode wearing a wildcard &mdash;
+     * it is how a derivation quietly starts enumerating an empty set &mdash; so neither is
+     * excused. A regex literal stays outside, because the trailing class stops before a
+     * backslash (measured: the dev-marker regexes in {@code PublishedCredentials} match
+     * nothing here).
+     *
+     * <p>Nothing in this file may spell a wildcarded compose reference in prose, and the reason
+     * is mechanical rather than stylistic: a block comment cannot contain a wildcard followed
+     * by a slash, and every way of splitting one around that leaves a fragment this very
+     * pattern then reads as an absolute path to a file nobody has. Describe the shape; the
+     * population reads the real spelling out of the sources.
      */
     private static final Pattern COMPOSE_PATH =
-            Pattern.compile("[A-Za-z0-9_./-]*docker-compose[A-Za-z0-9_.-]*\\.ya?ml");
+            Pattern.compile("[A-Za-z0-9_./*-]*docker-compose[A-Za-z0-9_.-]*\\.ya?ml");
+
+    /** What makes a reference a pathspec rather than a path. */
+    private static final Pattern GLOB = Pattern.compile("[*?]");
 
     /** {@code spring.docker.compose.file=<path>} in Spring's always-loaded configuration. */
     private static final Pattern COMPOSE_FILE_PROPERTY =
@@ -143,6 +169,16 @@ class DevComposeFileReferencesTest {
                 String named = m.group();
                 pairs.add(path + " -> " + named);
                 if (COUNTERFACTUAL.containsKey(named)) {
+                    continue;
+                }
+                if (GLOB.matcher(named).find()) {
+                    // A PATHSPEC, held to the question that fits it: it must select something.
+                    // A glob that selects nothing is a derivation enumerating an empty set,
+                    // which is this rule's own subject rather than an exception to it.
+                    if (PublishedCredentials.publishableFiles(named).isEmpty()) {
+                        dangling.add(path + " names the pathspec `" + named
+                                + "`, which selects no file in the tree");
+                    }
                     continue;
                 }
                 realPaths.add(named);

@@ -46,6 +46,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>{@link #theInstallPathStatesTheArchitectureRequirement} &mdash; HD-316, which is the hard
  *       one: an <em>absence</em>. A scan for wrong text cannot see a fact nobody wrote, so this
  *       rule asserts presence instead.</li>
+ *   <li>{@link #everyHostPortAShippedStackPublishesIsNamedWhereThatStackIsDocumented} &mdash;
+ *       HD-318, the same absence one dimension over: Requirements asked for Docker, PostgreSQL
+ *       and RAM and never said which host ports must be free, so the first failure of an install
+ *       on a busy host was a Docker message no document had prepared anybody for. Derived from
+ *       the compose files, keyed on (stack, port), because the ports belong to the stack and not
+ *       to the product.</li>
  *   <li>{@link #theInstallChecklistStepsWereRunOnThisReleaseLine} &mdash; the perimeter around
  *       the items this class hands to a human. Deleting the whole section left 80 tests across 9
  *       classes green (measured, HD-324 fix loop): nothing anywhere made anybody run them, so the
@@ -714,6 +720,153 @@ class InstallClaimsTest {
                 .isEmpty();
     }
 
+    // ============================================================ HD-318
+
+    /**
+     * <strong>Every host port a stack publishes is named where that stack is documented.</strong>
+     *
+     * <p>HD-318: Requirements asked for Docker, PostgreSQL and RAM and said nothing about which
+     * ports must be free &mdash; so the first failure of an install on a host that already runs
+     * something on {@code 8080} was a Docker message the documents had never mentioned. The ports
+     * are not a property of the product, they are a property of the <em>stack</em>: the cloud
+     * stack publishes a second one ({@code 9001}, the MinIO console) and the production stack
+     * publishes {@code 443} over <em>UDP</em> as well as TCP, which is the one a firewall rule
+     * written for "443" silently misses.
+     *
+     * <p>Both halves are <strong>derived</strong>. The ports come out of the compose files, so a
+     * newly published port is in scope on the day it is published; the documents charged with
+     * naming them are the prose install members that name that compose file, so one table can
+     * serve several stacks and a stack nobody documents is reported rather than skipped.
+     *
+     * <p><strong>The population excludes one shipped stack, by a live property rather than by
+     * name:</strong> a compose file is a member when it runs a service on the {@code /hamstrack}
+     * image. {@code docker-compose.observability.yml} publishes {@code 3000} and runs none, which
+     * is why it is out &mdash; it is an add-on to an instance that is already installed, with its
+     * own operator guide. The day it starts running the application it joins this population and
+     * says so, which a written exclusion list could not do.
+     *
+     * <p><strong>Granularity.</strong> The unit is (stack, port), not port: {@code 8080} is
+     * published by two different stacks and each must be answered for separately, or one
+     * sentence in one guide would satisfy both. The control at the end of the test fires if the
+     * population ever collapses onto the port alone &mdash; which is exactly what a future
+     * "deduplicate the ports" tidy-up would do, while reading as a simplification.
+     *
+     * <p>What this cannot see: whether the prose <em>attributes</em> a port to the right stack.
+     * It asks that the number be reachable from the stack's own documentation; that the sentence
+     * around it says "cloud" is a reader's job, and is why the table names the stack per row.
+     */
+    @Test
+    void everyHostPortAShippedStackPublishesIsNamedWhereThatStackIsDocumented() {
+        List<String> models = installableStackModels();
+        assertThat(models).withFailMessage(NO_STACK_FOUND).hasSizeGreaterThanOrEqualTo(2);
+
+        List<String> stacks = stacksThatRunTheApplication();
+        assertThat(stacks)
+                .withFailMessage("""
+                        FEWER STACKS THAT RUN THE APPLICATION WERE FOUND THAN THE TREE SHIPS, so
+                        this rule is holding less than the set of ways to run Hamstrack.
+
+                        Found: %s
+                        Installable stacks under deploy/: %s, plus the production stack.
+
+                        Membership is "a compose file with a service on the /hamstrack image",
+                        read from the file. If one was renamed, nothing here needs editing; if the
+                        `image:` line was reshaped, teach the pattern rather than lowering this
+                        floor - an empty population is a rule that cannot fail.""",
+                        stacks, models)
+                .hasSizeGreaterThanOrEqualTo(models.size() + 1);
+
+        List<String> prose = requireProseMembers();
+        var offences = new ArrayList<String>();
+        var examined = new LinkedHashMap<String, List<String>>();
+        var pairs = new ArrayList<String>();
+        int members = 0;
+
+        for (String stack : stacks) {
+            List<String> ports = publishedHostPorts(stack);
+            examined.put(stack, ports);
+            if (ports.isEmpty()) {
+                offences.add(("  %s publishes no host port at all, so either it stopped being "
+                        + "reachable or the `ports:` shape changed and this derivation is blind")
+                        .formatted(stack));
+                continue;
+            }
+            List<String> documents = prose.stream().filter(member -> read(member).contains(stack)).toList();
+            if (documents.isEmpty()) {
+                offences.add("  %s publishes %s and no install document names that file".formatted(stack, ports));
+                continue;
+            }
+            for (String port : ports) {
+                members++;
+                pairs.add(stack + PAIRED + port);
+                if (!port.matches("\\d+(?:/[a-z]+)?")) {
+                    offences.add("  %s publishes `%s`, which this rule could not reduce to a port"
+                            .formatted(stack, port));
+                } else if (documents.stream().noneMatch(member -> namesPort(read(member), port))) {
+                    offences.add("  %s publishes %s on the host - unnamed by %s".formatted(stack, port, documents));
+                }
+            }
+        }
+
+        assertThat(offences)
+                .withFailMessage("""
+                        A STACK PUBLISHES A HOST PORT THAT ITS OWN DOCUMENTATION DOES NOT NAME.
+
+                        %s
+
+                        Per stack: %s
+
+                        An operator cannot free a port nobody told them about, and the failure they
+                        meet instead is a Docker message about an endpoint - `port is already
+                        allocated` - which says nothing about Hamstrack and nothing about what to
+                        change. This is HD-318: Requirements asked for Docker, PostgreSQL and RAM
+                        and never said which ports must be free.
+
+                        Name it where that stack is documented, with the stack: the ports are a
+                        property of the stack and not of the product, so a reader of the cloud
+                        guide must learn about `9001` and a reader of the production stack about
+                        `443/udp`, which is the one a firewall rule for "443" misses. Say whether
+                        it is configurable, and by which variable.""",
+                        String.join("\n", offences), examined)
+                .isEmpty();
+
+        // THE GRANULARITY CONTROL, in two halves, because one is not enough: the first proves the
+        // control is LIVE (some port really is published twice, so the two keyings differ at all)
+        // and the second proves the population is keyed on the PAIR. The first version of this was
+        // a single `pairs.size() > distinct(port).count()`, and it passed with the defect planted -
+        // dropping the stack from the key leaves the duplicate entry in the list, so a size-against-
+        // distinct comparison answers a question about the LIST while claiming to answer one about
+        // the KEY. Measured: planted, green, inside the control written to catch it.
+        var portsOnly = pairs.stream()
+                .map(pair -> pair.substring(pair.indexOf(PAIRED) + PAIRED.length()))
+                .toList();
+        assertThat(portsOnly.stream().distinct().count())
+                .withFailMessage("""
+                        NO PORT IS PUBLISHED BY TWO STACKS, so the control below cannot tell a
+                        population keyed on (stack, port) from one keyed on the port alone.
+
+                        Members: %s
+
+                        While both installable stacks publish `8080`, keying on the port would merge
+                        two members into one and let a single sentence in a single guide answer for
+                        both. If the stacks have genuinely stopped sharing a port, that is a
+                        deliberate edit here - say so, and keep the key on the pair.""", pairs)
+                .isLessThan(members);
+        assertThat(new LinkedHashSet<>(pairs))
+                .withFailMessage("""
+                        THIS RULE HAS STOPPED ASKING ITS QUESTION PER (STACK, PORT).
+
+                        Members charged: %d
+                        Distinct keys:   %s
+
+                        Fewer distinct keys than members means two members have merged, and the one
+                        that merges is the shared `8080`: one guide naming it would then answer for
+                        every stack that publishes it, while every count above still agreed. Key the
+                        population on the stack AND the port.""",
+                        members, new LinkedHashSet<>(pairs))
+                .hasSize(members);
+    }
+
     // ============================================================ the perimeter: HD-324's other half
 
     /**
@@ -1031,6 +1184,143 @@ class InstallClaimsTest {
                     .toString().replace('\\', '/'));
         }
         return List.copyOf(guides);
+    }
+
+    /**
+     * How a member of the port rule is spelled: {@code <stack> -> <port>}. A constant because the
+     * rule's own granularity control splits a member back apart on it, and the two halves drifting
+     * is how that control would stop looking at the key it claims to check. ASCII, like
+     * {@code ProdComposeContractTest}'s: these messages are read off a console where a
+     * {@code U+2192} arrives as mojibake under the default Windows code page.
+     */
+    private static final String PAIRED = " -> ";
+
+    /**
+     * A service running the product, which is what makes a compose file a way to install
+     * Hamstrack rather than an add-on beside one. Deliberately matched on the image repository
+     * and not on a service name: {@code docker-compose.prod.yml} interpolates its owner
+     * ({@code ghcr.io/${GITHUB_OWNER:?…}/hamstrack:…}), spaces and all.
+     */
+    private static final Pattern RUNS_THE_APPLICATION =
+            Pattern.compile("^\\s*image:\\s*.*/hamstrack:", Pattern.MULTILINE);
+
+    /**
+     * Every shipped compose file that runs the application: the installable stacks under
+     * {@code deploy/} and the production stack. Development stacks are out through the live
+     * {@code .dev.} marker, and {@code docker-compose.observability.yml} is out because it runs
+     * no Hamstrack service &mdash; a property of the file, re-read on every run.
+     */
+    private static List<String> stacksThatRunTheApplication() {
+        var stacks = new ArrayList<String>();
+        for (Path file : PublishedCredentials.publishableFiles(".")) {
+            if (!file.getFileName().toString().matches("docker-compose.*\\.ya?ml")
+                    || PublishedCredentials.isDevelopmentCompose(file)) {
+                continue;
+            }
+            String path = PublishedCredentials.repositoryPath(file);
+            if (RUNS_THE_APPLICATION.matcher(read(path)).find()) {
+                stacks.add(path);
+            }
+        }
+        return stacks;
+    }
+
+    /**
+     * The host ports a compose file publishes, as a reader would have to open them:
+     * {@code 8080}, {@code 9001}, {@code 443/udp}. A container port with no host side is not
+     * one. The block is found by indentation rather than by a whole-file regex so that a
+     * {@code ports:} comment elsewhere cannot contribute.
+     */
+    private static List<String> publishedHostPorts(String composePath) {
+        var ports = new ArrayList<String>();
+        int blockIndent = -1;
+        for (String line : read(composePath).split("\\R", -1)) {
+            String trimmed = line.strip();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                continue;
+            }
+            int indent = line.length() - line.stripLeading().length();
+            if (blockIndent >= 0 && indent <= blockIndent) {
+                blockIndent = -1;
+            }
+            if (trimmed.equals("ports:")) {
+                blockIndent = indent;
+            } else if (blockIndent >= 0 && trimmed.startsWith("- ")) {
+                String port = hostPortOf(trimmed.substring(2).strip());
+                if (port != null) {
+                    ports.add(port);
+                }
+            }
+        }
+        return ports;
+    }
+
+    /**
+     * The host side of one {@code ports:} entry, with its protocol when the entry names one.
+     * {@code ${APP_PORT:-8080}} reduces to its default, because the default is what an operator
+     * who sets nothing must open; a variable with no default is returned unreduced so the rule
+     * reports it rather than dropping it silently.
+     */
+    private static String hostPortOf(String entry) {
+        String value = entry;
+        int open = value.indexOf('"');
+        if (open >= 0) {
+            int close = value.indexOf('"', open + 1);
+            value = close > open ? value.substring(open + 1, close) : "";
+        } else {
+            int comment = value.indexOf('#');
+            value = (comment >= 0 ? value.substring(0, comment) : value).strip();
+        }
+        List<String> parts = splitOutsideBraces(value);
+        if (parts.size() < 2) {
+            return null;                                  // container port only - not published
+        }
+        String last = parts.get(parts.size() - 1);
+        int slash = last.indexOf('/');
+        String protocol = slash >= 0 ? last.substring(slash) : "";
+        String host = parts.get(parts.size() - 2);
+        var defaulted = DEFAULTED_VARIABLE.matcher(host);
+        return (defaulted.matches() ? defaulted.group(1) : host) + protocol;
+    }
+
+    /** {@code ${APP_PORT:-8080}} - a variable carrying the value an unset install gets. */
+    private static final Pattern DEFAULTED_VARIABLE =
+            Pattern.compile("\\$\\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)}");
+
+    /**
+     * Splits on {@code :} outside {@code ${…}}, because the bind half of a mapping carries a
+     * default of its own ({@code ${APP_BIND:-0.0.0.0}}) and a naive split turns one mapping
+     * into five fields.
+     */
+    private static List<String> splitOutsideBraces(String value) {
+        var parts = new ArrayList<String>();
+        var current = new StringBuilder();
+        int depth = 0;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+            }
+            if (c == ':' && depth == 0) {
+                parts.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        parts.add(current.toString());
+        return parts;
+    }
+
+    /**
+     * Whether a document names a port. Bounded on both sides so {@code 80} is not found inside
+     * {@code 8080} (measured: it is not) and not found inside {@code 443/udp} either, which
+     * would let one entry answer for a port nobody wrote.
+     */
+    private static boolean namesPort(String text, String port) {
+        return Pattern.compile("(?<![\\d/])" + Pattern.quote(port) + "(?!\\d)").matcher(text).find();
     }
 
     private static String read(String path) {
