@@ -29,6 +29,8 @@ guide](docs/cloud-mode.md) carries the current table of those defaults, which is
 the list lives so that it cannot go stale in two places. **Most people self-hosting want
 DC**, which is the path below.
 
+**What is in the repository.** The operator documentation is [`docs/`](docs/) — start with the [Self-hosting guide](docs/self-hosting.md) — and the stacks you install from are under [`deploy/`](deploy/). [`CLAUDE.md`](CLAUDE.md), [`PLAN.md`](PLAN.md), [`DESIGN.md`](DESIGN.md) and `.claude/` are not part of installing or running Hamstrack: they are how it is built — the engineering conventions, the roadmap, the visual system, and the agents and review gates every change goes through. They are tracked on purpose, so if you came for how the product is made rather than what it does, start there instead.
+
 > **Status:** Hamstrack is in active development — breaking changes are called out in the release notes. Hamstrack Cloud does not reset user data. Your workspaces, projects and issues stay until they are deleted. The database is backed up daily and restoring from a backup has been tested; that is an operational practice, not a guaranteed service level. Every account starts with a demo workspace and a sample project to explore.
 
 ## Features
