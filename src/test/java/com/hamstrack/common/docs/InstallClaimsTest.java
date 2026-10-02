@@ -228,13 +228,15 @@ class InstallClaimsTest {
     /**
      * What this class structurally cannot do, which is why each of them is somebody's job: the
      * registry, the fresh-clone install, {@code compose config -q}, the values only a running
-     * container refuses, and &mdash; since HD-320 &mdash; whether everything the install documents
-     * say about mail agrees with itself. Written as a number because there is nothing in the tree to
+     * container refuses, whether everything the install documents say about mail agrees with itself
+     * (HD-320), and &mdash; since HD-321 &mdash; whether the JAR asset on a Release is the JAR
+     * inside the image of the same tag, which no unit test can ask because the artefact does not
+     * exist until a tag is cut. Written as a number because there is nothing in the tree to
      * derive it from &mdash; and it only ever has to catch the direction that deletes, so adding a
      * step raises it in the same commit as the step, which is a deliberate edit rather than a
      * maintenance chore.
      */
-    private static final int CHECKLIST_STEPS = 5;
+    private static final int CHECKLIST_STEPS = 6;
 
     // ============================================================ the population
 
@@ -865,6 +867,116 @@ class InstallClaimsTest {
                         population on the stack AND the port.""",
                         members, new LinkedHashSet<>(pairs))
                 .hasSize(members);
+    }
+
+    // ============================================================ HD-321
+
+    /** Where the management port's default is declared, and where the claim this arm holds lives. */
+    private static final String APPLICATION_PROPERTIES = "src/main/resources/application.properties";
+
+    /**
+     * {@code management.server.port=${MANAGEMENT_PORT:9090}}, or a bare literal if the placeholder
+     * is ever dropped. The port is <strong>derived</strong> and never written here: a rule with
+     * {@code 9090} in it stops being about the management port on the day somebody changes the
+     * default, while still passing.
+     */
+    private static final Pattern MANAGEMENT_PORT_DECLARATION = Pattern.compile(
+            "^management\\.server\\.port=(?:\\$\\{[A-Za-z_][A-Za-z0-9_]*:(\\d+)}|(\\d+))\\s*$",
+            Pattern.MULTILINE);
+
+    /**
+     * <strong>No shipped stack publishes the management port.</strong>
+     *
+     * <p>HD-321: {@code application.properties} says of the no-publish rule that it "holds for every
+     * shipped stack". True when it was written (measured: {@code dc} publishes 8080, {@code cloud}
+     * 8080 and 9001, the production stack 80, 443 and 443/udp) and held by nothing &mdash; a stack
+     * growing a {@code "9090:9090"} line would have failed no test in this repository.
+     * {@code ManagementPortTest} is about the application's own filter chain and never reads a
+     * compose file; the port rule above would be satisfied by <em>documenting</em> 9090, which is
+     * the opposite of what this one wants.
+     *
+     * <p>It matters because the chain on that port is {@code permitAll}: publishing it puts
+     * {@code /actuator/prometheus} and {@code /actuator/health} on the host's interfaces with no
+     * authentication. The endpoint set keeps that a scrape-surface exposure rather than a secret
+     * one, which is why this is a rule about the <em>stacks</em> and not a boot refusal.
+     *
+     * <p><strong>Population: the stacks that run the application</strong>, which is the same
+     * derivation the port rule above uses. Deliberately not every compose file: Prometheus itself
+     * listens on 9090, so {@code docker-compose.observability.yml} publishing that number would be
+     * a statement about Prometheus and not about this listener.
+     */
+    @Test
+    void noShippedStackPublishesTheManagementPort() {
+        String port = managementPortDefault();
+        List<String> stacks = stacksThatRunTheApplication();
+        assertThat(stacks)
+                .withFailMessage("""
+                        FEWER STACKS THAT RUN THE APPLICATION WERE FOUND THAN THE TREE SHIPS, so this
+                        rule is holding less than the set of ways to run Hamstrack.
+
+                        Found: %s; installable stacks under deploy/: %s, plus the production stack.""",
+                        stacks, installableStackModels())
+                .hasSizeGreaterThanOrEqualTo(installableStackModels().size() + 1);
+
+        var offences = new ArrayList<String>();
+        var examined = new LinkedHashMap<String, List<String>>();
+        for (String stack : stacks) {
+            List<String> ports = publishedHostPorts(stack);
+            examined.put(stack, ports);
+            if (ports.isEmpty()) {
+                offences.add(("  %s publishes no host port at all, so this derivation is blind "
+                        + "rather than satisfied").formatted(stack));
+                continue;
+            }
+            for (String published : ports) {
+                if (published.equals(port) || published.startsWith(port + "/")) {
+                    offences.add("  %s publishes `%s` on the host".formatted(stack, published));
+                }
+            }
+        }
+
+        assertThat(offences)
+                .withFailMessage("""
+                        A SHIPPED STACK PUBLISHES THE MANAGEMENT PORT (%s).
+
+                        %s
+
+                        Per stack: %s
+
+                        The management chain is `permitAll` - publishing this port serves
+                        /actuator/prometheus and /actuator/health to anything that can reach the
+                        host, with no authentication. In a stack the port is reached by in-network
+                        Prometheus and needs no mapping; the claim in `%s` that the no-publish rule
+                        "holds for every shipped stack" is this test.
+
+                        Remove the mapping. If an operator really must reach it from the host, that
+                        is an SSH tunnel or `docker compose exec`, both of which are in
+                        docs/observability.md - not a published port in a file strangers copy. The
+                        container-free path is the other half and is NOT this rule: there the
+                        listener is open by default and MANAGEMENT_SERVER_ADDRESS closes it.""",
+                        port, String.join("\n", offences), examined, APPLICATION_PROPERTIES)
+                .isEmpty();
+    }
+
+    /**
+     * The port an install gets when nothing sets {@code MANAGEMENT_PORT}, read out of
+     * {@code application.properties}. Refused rather than defaulted if it cannot be read: a
+     * derivation that silently answers "no port" turns the rule above into a rule that cannot fail.
+     */
+    private static String managementPortDefault() {
+        var matcher = MANAGEMENT_PORT_DECLARATION.matcher(read(APPLICATION_PROPERTIES));
+        assertThat(matcher.find())
+                .withFailMessage("""
+                        THE MANAGEMENT PORT'S DEFAULT COULD NOT BE READ out of %s, so the rule that
+                        no stack publishes it has no port to look for and would pass over a stack
+                        that published one.
+
+                        Expected a line `management.server.port=${MANAGEMENT_PORT:<n>}` or a literal.
+                        If the declaration moved or was reshaped, teach the pattern - do not write
+                        the number here, which is the drift this derivation exists to avoid.""",
+                        APPLICATION_PROPERTIES)
+                .isTrue();
+        return matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
     }
 
     // ============================================================ the perimeter: HD-324's other half

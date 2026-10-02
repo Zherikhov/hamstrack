@@ -164,8 +164,14 @@ internal:
   - `GET :9090/actuator/info` — build info (env dump is disabled).
 - `health.show-details=never` — health returns status only, no DB/disk internals.
 - A dedicated Spring Security filter chain (`@Order(0)`,
-  `EndpointRequest.toAnyEndpoint()`) permits the management endpoints — this is
-  safe **because 9090 is never published**; only in-network Prometheus reaches it.
+  `EndpointRequest.toAnyEndpoint()`) permits the management endpoints. **In a stack**
+  nothing publishes 9090, so only in-network Prometheus reaches it. That is a property
+  of the deployment and not of the port: running the JAR directly binds this listener
+  on every interface until the operator sets `MANAGEMENT_SERVER_ADDRESS` (`docs/self-hosting.md`
+  § *Without Docker*). What makes `permitAll` acceptable on **both** paths is the
+  surface: the `MANAGEMENT_ENDPOINTS` set above plus `health.show-details=never`
+  below — widening that set (`env`, `heapdump`, `threaddump`) is what would turn a
+  scrape and cardinality exposure into a secret one.
 - On the public `:8080`, `/actuator/**` is **not served** — the SPA fallback
   explicitly 404s it. Metrics are never reachable on the public port.
 
@@ -549,7 +555,8 @@ test — silence squared, given that the counter is the only witness.
 out of this file and fails if any policy declares a kind none of them matches.
 
 **On a self-hosted install with no observability stack there is neither of these**, since it
-is optional and the management port is not published. `docs/self-hosting.md` carries the two
+is optional and, in a stack, the management port is not published (on the container-free path
+nothing scrapes it either, for want of a Prometheus rather than for want of a mapping). `docs/self-hosting.md` carries the two
 things that still work: reading the counters out of the container
 (`docker compose exec app wget -qO- http://localhost:9090/actuator/prometheus | grep ratelimit_hit`
 — `wget`, because the `eclipse-temurin:21-jre-alpine` app image has no `curl`, which is also why
@@ -849,7 +856,9 @@ you choose whether to run Grafana/Loki/Prometheus.
 **Prerequisites:** your compose must define services named **`app`** and
 **`postgres`** on a shared network (the bundled
 [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) does), the app must be reachable on
-its management port `9090` **inside** the network (do **not** publish 9090), and
+its management port `9090` **inside** the network (this is the container path, so do
+**not** publish 9090 and do **not** set `MANAGEMENT_SERVER_ADDRESS` — see the
+Prometheus-target row under [Operations & troubleshooting](#operations--troubleshooting)), and
 you need the `docker-compose.observability.yml` file plus the `observability/`
 config directory next to your compose file (both are in the repo).
 
@@ -1029,7 +1038,7 @@ matter only when you run the observability compose file.
 |---|---|---|---|
 | `LOG_LEVEL` | `INFO` | app | root log level |
 | `LOG_LEVEL_APP` | `INFO` | app | `com.hamstrack` log level |
-| `MANAGEMENT_PORT` | `9090` | app | actuator/metrics port — **never publish or proxy it** |
+| `MANAGEMENT_PORT` | `9090` | app | actuator/metrics port — **in a stack, never publish or proxy it** (running the JAR directly has no mapping to omit: there the listener is open until `MANAGEMENT_SERVER_ADDRESS` closes it — `docs/self-hosting.md` § *Without Docker*) |
 | `MANAGEMENT_ENDPOINTS` | `health,prometheus,info` | app | exposed actuator endpoints — keep minimal, never `*` |
 | `METRICS_EXPORT_ENABLED` | `true` | app | Prometheus registry on/off |
 | `GF_SECURITY_ADMIN_PASSWORD` | — | stack | **required** when the stack runs (fail-fast) |
@@ -1086,7 +1095,9 @@ blank to fill in, where `a-strong-password` reads as a value that has already be
   alert.
 - **Retention caps** bound how long logs/metrics (and any sensitive fields in
   them) live.
-- **Operator misconfig to avoid:** publishing 9090, proxying `/actuator` in Caddy,
+- **Operator misconfig to avoid**, this list being about a stack: publishing 9090
+  (the container-free path has no mapping to publish and is covered by
+  `MANAGEMENT_SERVER_ADDRESS` instead), proxying `/actuator` in Caddy,
   setting `MANAGEMENT_ENDPOINTS=*` (exposes `env`/`heapdump`/`threaddump`), or
   exposing Grafana publicly without auth. None of these are in the shipped config.
 
@@ -1098,7 +1109,7 @@ blank to fill in, where `a-strong-password` reads as a value that has already be
 |---|---|
 | Grafana `localhost:3000` refused | Stack not up / images still pulling. `docker compose ... ps`; wait for `grafana` to be healthy. Cloud: ensure the SSM port-forward session is running. |
 | Grafana login fails | `GF_SECURITY_ADMIN_PASSWORD` changed in the UI ≠ env. Reset: `docker exec <grafana> grafana cli admin reset-admin-password <pw>`. |
-| Prometheus target `DOWN` | Check the target: `hamstrack-app` needs the app reachable on `:9090` inside the network (don't publish it, don't set `management.server.address`); `postgres` needs valid `DB_MONITOR_*`/`DB_*`. |
+| Prometheus target `DOWN` | Check the target: `hamstrack-app` needs the app reachable on `:9090` inside the network — **in a stack**, that means not publishing it and **not** setting `MANAGEMENT_SERVER_ADDRESS`, which would bind the listener to the *container's* loopback and leave the in-network scrape with nothing to talk to. (On the container-free path the opposite holds: `docs/self-hosting.md` § *Without Docker* tells a JAR operator to export exactly that variable, because there nothing else keeps the port off the network. Scraping a JAR means binding an address Prometheus can reach, not loopback.) `postgres` needs valid `DB_MONITOR_*`/`DB_*`. |
 | No logs in Loki | App not emitting JSON (needs `cloud`/`dc` profile in prod, or the dev file env vars) / Alloy can't read the docker socket. |
 | Alert emails not arriving | `MAIL_*` (Grafana SMTP) misconfigured, `GF_SMTP_ENABLED=false` (delivery deliberately off), or the address in `OBS_ALERT_EMAIL_TO` is wrong. Before blaming SMTP, check that the rules and the routing exist: Grafana → Alerting → Alert rules, and `/api/v1/provisioning/policies` → `{"receiver":"email","provenance":"file"}` (see [Alerts](#alerts)). A **lost** root policy is worse than a broken one — Grafana's unmanaged built-in `email receiver` points at a live third-party domain. |
 | Grafana keeps restarting; `up -d` said nothing was wrong | `up -d` exits 0 even when a container crash-loops. An empty `OBS_ALERT_EMAIL_TO` reaching Grafana makes alerting provisioning fail and Grafana exit 1 on every restart. `docker compose … ps` shows it; `docker compose … logs grafana` has `Failed to provision alerting … could not find addresses in settings`. |

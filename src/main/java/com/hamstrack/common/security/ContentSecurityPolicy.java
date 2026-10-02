@@ -25,8 +25,10 @@ import java.util.Locale;
  * {@code SecurityConfig} installs it on the main chain, so every response Spring answers carries
  * it — including {@code index.html} and {@code /assets/**}, which the repository {@code Caddyfile}
  * does not serve (it has no {@code file_server}; it is {@code reverse_proxy app:8080}). The
- * management chain (:9090) deliberately gets none: the port is never published or proxied and
- * nothing on it is a document.
+ * management chain (:9090) deliberately gets none, and the reason is the <em>content</em> rather
+ * than the reachability: nothing served on that port is a document. (In a stack the port is also
+ * neither published nor proxied; on the container-free path it binds every interface until the
+ * operator closes it, which changes who can reach it and not what it answers.)
  *
  * <p>A response written <strong>outside</strong> that chain carries the header only if it asks, via
  * {@link #applyTo}, and the ones that must ask are the ones that answer a request for a

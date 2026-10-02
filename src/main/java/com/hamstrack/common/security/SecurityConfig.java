@@ -38,12 +38,24 @@ public class SecurityConfig {
      * Actuator endpoints are only ever served on the management port, so matching
      * {@link EndpointRequest#toAnyEndpoint()} scopes this chain to that port's traffic.
      * It runs at higher priority than the main :8080 chain so actuator requests never
-     * fall through to the app's auth rules. permitAll is safe: :9090 is never published
-     * or proxied by Caddy — only in-network Prometheus reaches it (see observability spec).
+     * fall through to the app's auth rules.
      *
-     * <p><strong>No Content-Security-Policy here, deliberately</strong> (HD-264): the port is never
-     * published or proxied, and nothing served on it is a document that could execute script. A
-     * policy is a statement about the JavaScript bundle, and no bundle is reachable from here.
+     * <p><strong>Why permitAll is acceptable, stated as what actually holds rather than as a
+     * property of the port.</strong> In a stack nothing publishes :9090 and Caddy never proxies it,
+     * so only in-network Prometheus reaches it (see observability spec). That sentence is about the
+     * deployment, not about this chain: on the container-free path
+     * ({@code docs/self-hosting.md} § <em>Without Docker</em>) this listener binds every interface
+     * by default and the operator closes it with {@code MANAGEMENT_SERVER_ADDRESS=127.0.0.1}. What
+     * holds on <em>both</em> paths is the surface: {@code management.endpoints.web.exposure.include}
+     * is {@code health,prometheus,info} and {@code health.show-details} is {@code never}, so an
+     * exposed port is a scrape and cardinality exposure rather than a secret one. Widening that
+     * include list ({@code env}, {@code heapdump}, {@code threaddump}) is what would make permitAll
+     * wrong, and it is the thing to refuse.
+     *
+     * <p><strong>No Content-Security-Policy here, deliberately</strong> (HD-264): nothing served on
+     * this port is a document that could execute script. A policy is a statement about the
+     * JavaScript bundle, and no bundle is reachable from here — which is a property of the endpoint
+     * set above and therefore true on the JAR path too, where the port may well be reachable.
      */
     @Bean
     @Order(0)

@@ -248,6 +248,23 @@ jobs:
       contents: read
       packages: write           # needed to push to ghcr.io
 
+    # Published so `github-release` can name the exact image it extracts the JAR from
+    # without re-deriving any part of that name. The tag branch of the `ver` step below is
+    # one line (`${GITHUB_REF_NAME#v}`) and copying it here would be a second answer to
+    # "which version is this build" the day somebody changes either copy — the repository
+    # has already paid for that shape (`latest` moving, HD-115). One derivation, one value,
+    # three times over:
+    #
+    #   * `version` — the asset FILENAME and the job summary. Not the pull reference.
+    #   * `owner`   — the registry owner, lowercased ONCE (see the step).
+    #   * `digest`  — the `sha256:…` of the manifest this job pushed. This is what the
+    #     release job pulls by, and the reason is in the long comment on that step: a TAG
+    #     is mutable and, for some tag shapes, is not even published by this run.
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      owner: ${{ steps.owner.outputs.name }}
+      digest: ${{ steps.push.outputs.digest }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -296,6 +313,37 @@ jobs:
           echo "publish_latest=$LATEST" >> "$GITHUB_OUTPUT"
           echo "APP_VERSION=\`$V\` · publish latest: \`$LATEST\` ($WHY)" >> "$GITHUB_STEP_SUMMARY"
 
+      # `github.repository_owner` IS THE ACCOUNT LOGIN VERBATIM, AND THIS ACCOUNT'S LOGIN IS
+      # `Zherikhov`. A registry reference must be lowercase — `docker pull
+      # ghcr.io/Zherikhov/hamstrack:0.18` answers `invalid reference format: repository name
+      # (Zherikhov/hamstrack) must be lowercase` (measured 2026-10-01) — and there is no
+      # `toLower` in the GitHub expression language, so the fold happens here, in a shell, once
+      # (`${var,,}`; `tr '[:upper:]' '[:lower:]'` is the other accepted form).
+      #
+      # It happens here rather than at the two use sites because of HOW the bug it fixes
+      # hid. `docker/metadata-action` lowercases its `images:` input, so the raw expression was
+      # correct in the one place that fed that action and WRONG in the one place that fed a bare
+      # `docker pull` — the same seven characters, permitted or fatal depending on which key they
+      # sat under. Folding at the source deletes that distinction instead of documenting it, and
+      # leaves `WorkflowImageReferenceTest` one rule with no exclusion to keep alive: every
+      # reference spells `ghcr.io/<this output>/hamstrack`, and this is the only place in
+      # .github/workflows where the login is read.
+      #
+      # The equally important half: a LOCAL rehearsal of any step below that substitutes a
+      # hand-typed `zherikhov` for this expression tests everything except the thing that was
+      # broken. The expression layer is where the only defect lived.
+      - name: Resolve the registry owner (lowercased)
+        id: owner
+        run: |
+          set -euo pipefail
+          # The login and its fold are ONE line on purpose: a reader, and
+          # WorkflowImageReferenceTest, can then see them together, and no edit can leave the
+          # raw login standing while the fold moves. `${var,,}` is bash's own lowercase
+          # expansion (the default shell for a `run:` on ubuntu-latest).
+          raw='${{ github.repository_owner }}'; name="${raw,,}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          [ "$raw" = "$name" ] || echo "Registry owner folded to lowercase: \`$raw\` -> \`$name\`" >> "$GITHUB_STEP_SUMMARY"
+
       # Required for the GitHub Actions cache below: the default `docker` driver
       # cannot export build cache, only the docker-container driver buildx sets
       # up here can. Without this step `cache-to: type=gha` silently does nothing.
@@ -313,7 +361,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/hamstrack
+          images: ghcr.io/${{ steps.owner.outputs.name }}/hamstrack
           flavor: latest=false     # `latest` is controlled explicitly below (main + stable release tags)
           tags: |
             type=raw,value=latest,enable=${{ steps.ver.outputs.publish_latest }}
@@ -321,7 +369,14 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
+      # `id:` is load-bearing, not decoration: it is what makes `steps.push.outputs.digest`
+      # — the `sha256:…` of the manifest this push created — reachable as a job output, and
+      # that digest is the only name for this image that cannot resolve to a different one
+      # later. The action declares the output (`digest: Image digest` in its action.yml) and
+      # sets it from the build result metadata (`src/main.ts`: `resolveDigest()` →
+      # `core.setOutput('digest', …)`), both read at tag `v5` on 2026-10-01.
       - name: Build and push Docker image
+        id: push
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -340,17 +395,141 @@ jobs:
           cache-to: type=gha,mode=max
 
   # Cut the GitHub Release for a tag — gated on the image actually being
-  # published, so a Release never advertises a version nobody can pull.
+  # published, so a Release never advertises a version nobody can pull — and
+  # attach the runnable JAR plus its SHA-256 (HD-321).
   # Re-running the workflow on the same tag updates the existing Release
   # instead of failing (the action is upsert-shaped).
+  #
+  # SINCE HD-321 THE CONVERSE IS TRUE AND IS NOT A BUG: a version can be pullable with no
+  # Release. The JAR extraction below runs BEFORE the Release step, so a tag whose image
+  # publishes and whose extraction then fails leaves the images on ghcr.io and cuts no
+  # Release at all — and, because deploy.yml fires on `workflow_run` with
+  # `conclusion == 'success'`, skips that tag's own deploy too. That is deliberate (a
+  # correct checksum of a wrong JAR is worse than no asset), it is the one failure this
+  # job adds, and it is written down as such in docs/release-checklist.md
+  # § "What still fails (deliberately)" — the remedy is Actions → Build → Run workflow on
+  # the same tag, which re-runs the extraction against the same digest.
   github-release:
     needs: build-and-push
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: write           # creating a Release writes to the repo
+      packages: read            # pulling the image the JAR is taken OUT of
 
     steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # THE JAR IS TAKEN OUT OF THE PUBLISHED IMAGE, not rebuilt and not taken from the
+      # runner's `target/`. Three reasons, in order of how much they matter.
+      #
+      # (1) THE RUNNER'S JAR IS VERSIONED `0.0.0-DEV`. pom.xml carries that placeholder and
+      #     the real version is injected INSIDE the image build (Dockerfile: ARG APP_VERSION
+      #     → `versions:set`), so `build-and-test`'s artifact names and self-reports
+      #     0.0.0-DEV. Publishing it against tag vX.Y.Z would ship an asset that denies its
+      #     own version in the About dialog and in /api/meta. Measured on a locally built
+      #     image: `--build-arg APP_VERSION=0.18.3-hd321` produced a JAR whose
+      #     META-INF/build-info.properties reads `build.version=0.18.3-hd321`, and the
+      #     released `0.18` image's JAR reads `build.version=0.18.2`.
+      #
+      # (2) BYTE-IDENTICAL TO WHAT THE CONTAINER RUNS, which is the whole diagnostic value
+      #     of the bare-JAR path: "run the JAR directly to separate the application from its
+      #     container" is only true of the same bytes. A rebuild here would be a different
+      #     JAR (timestamps, build-info, dependency resolution) that merely claims to be the
+      #     same one. Asserted by nothing and PROVEN per run by the digest comparison below.
+      #
+      # (3) It is taken from the image this job's `needs:` has already PUSHED — BY DIGEST, and
+      #     that is the whole of the third reason rather than a detail of it. A TAG does not
+      #     identify the image this run produced:
+      #
+      #       * it is mutable — `0.18` is a moving `{{major}}.{{minor}}` pointer that a later
+      #         `0.18.3` build moves out from under this job;
+      #       * and for some accepted tag shapes this run does not publish it at all. The
+      #         trigger filter accepts a two-component tag, so `v0.18` is a legal tag; `ver`
+      #         then yields `version=0.18`; `docker/metadata-action`'s `type=semver` cannot
+      #         parse `0.18` and skips BOTH semver tags, so that run pushes no `0.18` image —
+      #         while `ghcr.io/zherikhov/hamstrack:0.18` EXISTS, carrying some earlier
+      #         release's bytes (`build.version=0.18.2` when this was written).
+      #
+      #         That run does NOT succeed quietly, which this bullet used to read as though it
+      #         did. Two sub-cases: tagged at main's tip, the only surviving tag is `latest`
+      #         (`type=sha` is off for a tag ref), so the run publishes `latest` and no
+      #         version tag at all; tagged anywhere else, `steps.meta.outputs.tags` is EMPTY
+      #         and `push: true` with no tags fails inside buildx — Build reds and this job
+      #         never runs. Traced 2026-10-02 from the tag expressions above, not observed on
+      #         a real run; pre-existing either way, and pulling by digest makes it moot.
+      #
+      #     Pull by tag and the identity check below cannot notice either case, because it
+      #     compares the extracted file against the same file inside whatever it pulled: it is
+      #     self-consistent by construction. It would have written a CORRECT CHECKSUM OF THE
+      #     WRONG JAR and attached it to the Release. `needs.build-and-push.outputs.digest` is
+      #     the `sha256:…` of the manifest that job pushed, so this reference has no name
+      #     resolution left in it to be wrong — and it removes the malformed-reference case
+      #     (an uppercase owner) from this step as a side effect, though the owner is folded
+      #     at its source anyway because a digest reference still carries a repository name.
+      #
+      # The checksum exists because the image carries a provenance attestation in its OCI
+      # index and a bare file on a Releases page carries nothing; without it this ticket
+      # would ship a weaker artifact than the one the project already ships.
+      #
+      # WHAT THIS STEP CANNOT DO: it cannot prove the asset reached the Release. That is
+      # `fail_on_unmatched_files` below, and the first observation of it is the first tag
+      # cut after this change.
+      - name: Take the JAR out of the image and checksum it
+        env:
+          # The owner is folded to lowercase once, in build-and-push; the digest is that job's
+          # own push. `version` is used ONLY for the asset's filename — never to resolve bytes.
+          IMAGE: ghcr.io/${{ needs.build-and-push.outputs.owner }}/hamstrack@${{ needs.build-and-push.outputs.digest }}
+          JAR: hamstrack-${{ needs.build-and-push.outputs.version }}.jar
+        run: |
+          set -euo pipefail
+          # An absent digest would make this `…/hamstrack@` and fail inside `docker pull` with
+          # a reference-parse error that names neither this job nor the cause. The action sets
+          # the output only when a digest resolves, so name the cause here instead.
+          case "$IMAGE" in
+            *@sha256:*) ;;
+            *) echo "::error title=The pushed image has no digest::\
+          build-and-push published no \`digest\` output, so this job has no way to name the \
+          image that run produced and will not fall back to a mutable tag. Check that the \
+          'Build and push Docker image' step still carries \`id: push\` and that the image \
+          was pushed (reference was: $IMAGE)."
+               exit 1 ;;
+          esac
+          docker pull -q "$IMAGE"
+          # The digest of the file as it sits in the image, read by the image's own
+          # sha256sum (busybox, present in eclipse-temurin:21-jre-alpine — verified).
+          # --entrypoint, because the image's ENTRYPOINT is `java -jar app.jar`.
+          inside=$(docker run --rm --entrypoint sha256sum "$IMAGE" /app/app.jar | cut -d' ' -f1)
+          cid=$(docker create "$IMAGE")
+          docker cp "$cid:/app/app.jar" "$JAR"
+          docker rm -v "$cid" >/dev/null
+          outside=$(sha256sum "$JAR" | cut -d' ' -f1)
+          if [ "$inside" != "$outside" ]; then
+            echo "::error title=The published JAR is not the one in the image::\
+          $JAR hashes $outside, /app/app.jar inside $IMAGE hashes $inside. The asset would \
+          claim to be the container's own artifact while being a different file, so this \
+          release publishes nothing until the copy is fixed."
+            exit 1
+          fi
+          # `sha256sum`'s own format, so an operator checks it with `sha256sum -c <file>`
+          # in the directory they downloaded into. Written AFTER the comparison: a checksum
+          # of a file that failed the identity check would be a correct hash of a wrong JAR.
+          sha256sum "$JAR" > "$JAR.sha256"
+          {
+            echo "Release asset \`$JAR\` ($(stat -c%s "$JAR") bytes)"
+            echo ""
+            echo "Taken from \`$IMAGE\` — the digest build-and-push pushed, so this line is the"
+            echo "record of WHICH image the asset came out of. Nothing else in the run says it."
+            echo ""
+            echo "SHA-256 \`$outside\` — equal to \`/app/app.jar\` inside that image, so the"
+            echo "asset and the container run the same bytes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create / update the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -362,3 +541,14 @@ jobs:
           # `v1.0.0-rc1` / `0.13.0-beta` → pre-release, so `latest` on the
           # Releases page keeps pointing at the last stable tag.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          # The container-free install path (docs/self-hosting.md § Without Docker) tells a
+          # reader to download these two. Before this change `gh release view` on v0.18.2
+          # answered `"assets": []`, so that instruction would have named nothing.
+          files: |
+            hamstrack-${{ needs.build-and-push.outputs.version }}.jar
+            hamstrack-${{ needs.build-and-push.outputs.version }}.jar.sha256
+          # NOT the default. The default for an unmatched entry is a warning and a green
+          # job, which is the one failure mode nobody would notice: a Release that cut
+          # cleanly, published no JAR, and left the install path pointing at an absent file.
+          # With this, a missing asset is a red release instead.
+          fail_on_unmatched_files: true

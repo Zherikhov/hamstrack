@@ -47,7 +47,11 @@ EXPOSE 8080
 # no correct reason to make it one.
 #
 # This reaches installs that run this image, and nothing else. An install that runs the JAR
-# directly gets no pin - see docs/self-hosting.md, "Duplicate accounts after an upgrade".
+# directly gets no pin, and since HD-321 that is a documented path rather than a hypothetical
+# one - docs/self-hosting.md, "Without Docker", carries the row that
+# hands this flag to the operator, with the measured Russian refusal it prevents. (The pointer
+# here used to name docs/self-hosting.md, "Duplicate accounts after an upgrade", which has
+# lived in docs/self-hosting-upgrades.md since that file was split out.)
 #
 # Bound the heap (HD-152). A bare `java -jar` leaves heap sizing to ergonomics, which claims
 # ~25% of whatever memory the JVM can see - so the budget a request allocates against was a

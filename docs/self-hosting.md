@@ -28,6 +28,7 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
   - [An unedited template is refused, by design](#an-unedited-template-is-refused-by-design)
     - [If your instance has the published admin account](#if-your-instance-has-the-published-admin-account)
     - [What rotating `JWT_SECRET` does, and what it does not](#what-rotating-jwt_secret-does-and-what-it-does-not)
+  - [Without Docker: the JAR, and what you take on with it](#without-docker-the-jar-and-what-you-take-on-with-it) — not a second supported model; the container's work, listed, so you can decide whether you want it
 - [Configuration](#configuration)
 - [TLS & reverse proxy](#tls--reverse-proxy)
 - [Email (SMTP)](#email-smtp)
@@ -50,6 +51,14 @@ as Cloud; the differences are config/profile-gated (`SPRING_PROFILES_ACTIVE=dc`)
 
 **This list is what to check before the first `up`**, not a tutorial — each item is a fact
 about your host that the install either meets or does not.
+
+**Every item here is a requirement of the container**, which is what Hamstrack ships and what
+this page is about. There is one container-free way to run it — the published JAR, for an
+operator who already runs JVM services and is taking the container's work on deliberately —
+and it needs a *different* and shorter list, which lives with it in
+[Without Docker](#without-docker-the-jar-and-what-you-take-on-with-it) rather than here. If
+that is you, nothing below applies: Compose, its minimum version, the published ports, the
+rootless decision and the SELinux note are all facts about running containers.
 
 **Any Linux distribution with a current Docker: the product is a container.** There is no
 package to install, no system Java and no system PostgreSQL, so the same image runs the same
@@ -447,6 +456,185 @@ docker compose -f docker-compose.prod.yml exec postgres sh -c \
 Anyone mid-signup or mid-reset simply asks for a new link. …Then audit your system
 administrators (Admin console → Users) and the users list generally: a forged token is
 short-lived, but an account created with one outlives every key rotation.
+
+### Without Docker: the JAR, and what you take on with it
+
+**This is not the other way to install Hamstrack. It is the same application with the
+container's job handed to you.** Everything above — one command, a refusal that names the
+variable it wants, a healthcheck, a memory ceiling, a database that comes up beside the app —
+is the *stack* doing work on your behalf. Take the JAR instead and that work does not
+disappear; it moves onto your host, your init system and your firewall. The table below is
+what moves, enumerated from the files that do it today rather than from memory, and it is the
+content of this section: if you read it and think "yes, I already do all of that", this path
+is a reasonable choice. If any row is new to you, the container is the better answer and
+nothing here is a downgrade.
+
+Two reasons this project publishes the JAR at all, and they are the only two it claims:
+
+- **Diagnosis.** A published asset is the *same file* the container runs — byte for byte — so
+  starting it by hand is how you tell "the application is broken" apart from "the container is
+  broken". Nothing else here makes that distinction. **Two different things check that, at two
+  different rates, and it is worth knowing which is which:** every release, automatically, the
+  job compares the JAR it extracted against `/app/app.jar` inside the image it extracted it
+  *from*, and refuses to publish anything if they differ — that is the identity of the *file it
+  built the asset out of*. Whether the asset you **download** is still that file is checked by
+  hand, once per release line, by a numbered step of `docs/release-checklist.md`: a download is
+  a different file in a different place, and the checksum published beside it was produced by
+  the same job, so verifying it against that checksum cannot catch a swap of both.
+- **A host that already has answers** for supervision, TLS, log shipping and memory limits:
+  a fleet with a systemd convention, a box where Docker is not permitted, an environment
+  where a JVM service is the ordinary unit of deployment.
+
+**It is not the lighter path.** Same JVM, same heap, same PostgreSQL. What you save is about
+450 MB of image on disk; what you spend is every row of the table.
+
+#### What this path needs
+
+- **A Java 21 runtime.** `pom.xml` sets `<java.version>21</java.version>` and the image runs
+  the JAR on Temurin 21 (`Dockerfile`, `eclipse-temurin:21-jre-alpine`). `java -version` tells
+  you what you have. Verified on `OpenJDK 21.0.12.1`.
+- **A PostgreSQL 16 that you provision, run and back up**, reachable from wherever the JAR
+  runs. The stack's `postgres` service — including its `shared_buffers`, `work_mem` and
+  `effective_cache_size` dials and its own memory ceiling — is one of the things you take over.
+- **An S3-compatible object store with a bucket already in it — on the `cloud` profile only.**
+  Nothing here is needed for `dc`: its attachments go to a local directory (`STORAGE_LOCAL_DIR`
+  in [Configuration](#configuration)). On `cloud` the application refuses to start without a
+  bucket *name* and never creates the bucket itself, so both the store and the bucket are yours
+  to provision before the first boot — what `deploy/cloud/` does with MinIO and a one-shot job,
+  and what [Running it](#running-it) hands back to you here.
+- **One free port for the application (`8080`), and a decision about a second one (`9090`)** —
+  see the `9090` row of the table. There are two listeners, and only one of them was ever
+  meant to be reachable.
+- **An `amd64` host is NOT required here.** This is the single requirement the container path
+  has that this one does not: a JAR is bytecode, so the `linux/amd64`-only image is not what
+  stops you on an Ampere, Graviton or Raspberry Pi host. **This project has not run it on
+  arm64**, so the honest form of the claim is that nothing known blocks it and nobody here has
+  measured it — not that it is supported.
+- **Nothing else in [Requirements](#requirements) applies to you.** That list is about the
+  stacks: the minimum Compose version, the per-stack published-port table, the root-versus-
+  rootless Docker decision and the SELinux volume-label note are all properties of running
+  containers, not of running Hamstrack.
+
+#### Where the JAR comes from, and how to check it
+
+A release on the [Releases page](https://github.com/Zherikhov/hamstrack/releases) that carries
+this path publishes two assets: `hamstrack-<version>.jar` and `hamstrack-<version>.jar.sha256`.
+The Releases page lists each asset's size beside it; no size is quoted here, because nobody has
+had a published asset to weigh.
+
+<!-- marker: no-published-jar-assets-yet -->
+**Which releases those are, as a date rather than a tense: measured 2026-10-02, none of them.**
+`v0.18.2` — the newest — and every release before it answer `assets: []`; the publishing step
+exists in `.github/workflows/build.yml` but the assets appear only on the **next tag cut after
+it**, because a Release's files are produced by the run that cuts it and no such run has
+happened. So if the newest release lists no files, this path has no published artefact yet and
+the container above is the one that works today; building the JAR from a clone is reachable but
+gives you a `0.0.0-DEV` version string (see below) and none of the identity guarantees here.
+Delete this paragraph once a release carries the two files — do not re-date it. It is not the only
+copy of this warning: every copy carries the HTML comment marker above, the first tag that publishes
+the assets deletes all of them in one commit, and `UnpublishedAssetWarningTest` names the rest.
+
+From the directory you downloaded into:
+
+```bash
+sha256sum -c hamstrack-<version>.jar.sha256      # -> hamstrack-<version>.jar: OK
+```
+
+On Windows, `(Get-FileHash .\hamstrack-<version>.jar -Algorithm SHA256).Hash.ToLower()` and
+compare it with the hash in that file by eye. Both forms were run against a real asset-shaped
+pair and agree.
+
+**That JAR is taken out of the container image of the same tag**, not built separately — the
+release job extracts `/app/app.jar` from the image it has just published and refuses to
+release anything if the extracted file's SHA-256 differs from the one inside the image. Two
+consequences worth knowing:
+
+- It **self-reports the right version**. `pom.xml` carries a `0.0.0-DEV` placeholder and the
+  real version is injected during the image build, so a JAR built straight from a clone calls
+  itself `0.0.0-DEV` in the About dialog and in `/api/meta` — the published one does not.
+- The diagnostic argument above is **true rather than approximately true**: a rebuild would be
+  a different file that merely claims to be the container's.
+
+**The checksum is not a signature.** It catches a truncated or altered *download*; it does not
+prove who produced the file, because whoever could replace the asset could replace the hash
+beside it. The container image carries a provenance attestation in its OCI index and is the
+stronger artefact of the two — one more reason this path is not a peer of the one above.
+
+#### Running it
+
+Five variables, and all five are on you: four because the application declares no default for
+them, and `SPRING_PROFILES_ACTIVE` because **an unset profile is not `dc`** — the DC stack pins
+it as a literal under `environment:` precisely so nothing can flip an install onto the Cloud
+defaults, and here there is no such literal. A sixth is in the block below and is not one of
+the five: it closes a port, and a safe default belongs in the command rather than in a table
+further down the page.
+
+```bash
+export DB_URL=jdbc:postgresql://your-db-host:5432/hamstrack
+export DB_USERNAME=hamstrack
+export DB_PASSWORD=...                 # the password of that database's role
+export JWT_SECRET=...                  # at least 32 bytes: openssl rand -base64 48
+export SPRING_PROFILES_ACTIVE=dc
+
+# Not optional-by-omission: WITHOUT this the management port serves /actuator/prometheus
+# to every interface, because nothing but the container was ever keeping it off the
+# network. See the `9090` row of the table below before you widen it again.
+export MANAGEMENT_SERVER_ADDRESS=127.0.0.1
+
+java -Xmx512m -Duser.language=en -Duser.country=US -jar hamstrack-<version>.jar
+```
+
+Measured on the JAR extracted from the published `0.18` image — the same file a Release will
+carry, and the only one that exists today — against an empty PostgreSQL 16: Flyway migrated the
+schema, `Started HamstrackApplication in 26.538 seconds`, and `GET /api/meta` answered
+`{"publicLandingEnabled":true,"termsAcceptanceRequired":true,"publicSignupEnabled":false,
+"privacyContactEmail":"","version":"0.18.2"}`. Add `SEED_ADMIN_EMAIL` and
+`SEED_ADMIN_PASSWORD` to get a first administrator — on `dc` public self-registration is
+closed, so without them nobody can sign in (see [First user](#first-user-the-administrator)).
+
+**A missing variable is a worse error here than it is in the stack**, and this is the first
+thing you own rather than an aside. The named refusals an operator meets above —
+`set DB_PASSWORD in .env beside this file` — come from the `${VAR:?…}` guards in the compose
+file, not from the application. With no `DB_URL` at all, the same JAR exits 1 with
+`'url' must start with "jdbc"` buried in a Spring stack trace that never mentions `DB_URL`
+(measured). The application's own checks still fire and still name themselves — a `JWT_SECRET`
+under 32 bytes is refused by name — but the variable-presence guards do not exist on this path.
+
+**The five are five because this block runs `dc`, and the other profile is a page rather than a
+footnote.** The same JAR runs `cloud` — `SPRING_PROFILES_ACTIVE` takes whatever you give it — and
+[Cloud mode](cloud-mode.md#what-this-stack-is-and-what-it-is-not) says what that costs away from a
+container: on that profile attachments default to S3, so you also supply `STORAGE_S3_BUCKET`,
+`STORAGE_S3_REGION`, `STORAGE_S3_ENDPOINT`, `STORAGE_S3_PATH_STYLE`, `STORAGE_S3_ACCESS_KEY` and
+`STORAGE_S3_SECRET_KEY`, and you **create the bucket yourself** — the application refuses to start
+without a bucket *name* and never creates one, which is a thing `deploy/cloud/` does for you and
+nothing on this path does. Read the two sections as a pair; this one is written for `dc` throughout.
+**The mitigating half, and it is the opposite of the row below:** getting this wrong is a named
+fail-fast refusal rather than a silent trap — the app exits 1 naming `STORAGE_S3_BUCKET`, and you
+find out before it serves a request.
+
+#### What the container was doing, and now you are
+
+| The container did this | Where it is declared | On the JAR path |
+|---|---|---|
+| **Started it again** after a crash and after a reboot | `restart: unless-stopped` in [`deploy/dc/docker-compose.yml`](../deploy/dc/docker-compose.yml) | A service unit of your own (`Restart=always`, enabled at boot). A `java -jar` in a shell dies with the shell |
+| **Bounded the heap** against a container limit | `-XX:MaxRAMPercentage=50.0` in the image `ENTRYPOINT`, plus `mem_limit` | **Do not copy that flag.** It is read against the cgroup limit, so with no container it is 50% of *host* RAM — worse than the ~25% default it replaces. Use an explicit `-Xmx512m`, which is the figure `app.reports.max-rows` is reasoned against, or give the process a cgroup limit first and then use the percentage |
+| **Contained a runaway** inside one ceiling | `mem_limit: ${APP_MEMORY_LIMIT:-1g}` | `MemoryMax=1G` on your unit, or nothing — and then the kernel's OOM killer picks a victim from across the whole box |
+| **Pinned the JVM locale** so refusals are searchable | `-Duser.language=en -Duser.country=US` in the image `ENTRYPOINT` | Put both on your command line. **Measured, same JAR, same bad value, `ru-RU` host:** the refusal reads `должно быть не больше 2000` without them and `must be less than or equal to 2000` with them. A boot refusal in the host's language is one the operator cannot search for, and it is the reason this row is not cosmetic |
+| **Kept the management port off the network** | nothing published `9090`; `management.server.port` in [`src/main/resources/application.properties`](../src/main/resources/application.properties) is marked internal-only | **Measured: a bare `java -jar` listens on `0.0.0.0:9090`** and serves `/actuator/health` and `/actuator/prometheus` to anyone who can reach the host. The container never exposed it; nothing but the container was stopping it. Set `MANAGEMENT_SERVER_ADDRESS=127.0.0.1` (measured: the listener moves to loopback) or block the port |
+| **Chose the interface for `8080`** | `${APP_BIND:-0.0.0.0}` in the stack's `ports:` | `SERVER_ADDRESS=127.0.0.1` does the same thing (measured). The default is all interfaces on both paths, so this is a parity row, not a loss |
+| **Gave shutdown 30 seconds** to flush queued mail | `stop_grace_period: ${APP_STOP_GRACE_SECONDS:-30}s`, the same variable the app reads | `TimeoutStopSec=30` or your supervisor's equivalent. The app spends up to 15 s draining queued mail; a shorter kill drops password-reset and verification messages users have already been told to expect |
+| **Noticed it had stopped serving** | the `healthcheck` block: `wget` on `/api/meta`, every 10 s, 5 retries, a 180 s start window | Nothing watches a JAR. Point whatever monitoring you have at `/api/meta`; `/actuator/health` on the management port is richer and is the port you just closed, so decide in which order |
+| **Forced the deployment model** | `SPRING_PROFILES_ACTIVE: dc` under `environment:`, which outranks any `.env` | Yours — and the two ways of getting it wrong fail in **opposite** directions, so the dangerous one is not the one you would guess. **Unset or misspelled** is the quiet one, and it is not "Cloud defaults": no profile file is read at all, so the install runs the **base** defaults — a third configuration no shipped stack runs. Measured: `No active profile set` in the log, `/api/meta` answering `"publicSignupEnabled":true` — **public self-registration is open**, which is the posture `application-dc.properties` exists to close — local storage (so it boots clean, with no bucket error to warn you), a 100 GB quota, plain console logging rather than JSON, and metrics tagged `deployment="cloud"`. Nothing announces it; the two things you can check are `GET /api/meta` and that label. **A literal `cloud`** is the loud one: `app.storage.type` defaults to `s3` on that profile and the app exits 1 with `app.storage.type=s3 (STORAGE_TYPE) requires app.storage.s3.bucket (STORAGE_S3_BUCKET), which is empty or unset`, having served nothing. That one cannot be missed — and if you meant it, see the pointer at the end of [Running it](#running-it) |
+| **Resolved the database address internally** | `DB_URL` as a literal pointing at the compose service | Yours, and now a real host and port that must stay reachable |
+| **Gave attachments a volume** | `volumes:` — `attachments_data:/app/data/attachments` | `STORAGE_LOCAL_DIR`. **The default is `./data/attachments`, relative to the working directory the process starts in** — so the same JAR launched from two directories looks for two different attachment stores. Set it to an absolute path and include it in your backups |
+| **Terminated TLS and bounded the request body at the edge** | `docker-compose.prod.yml` plus `Caddyfile` (`request_body` / `max_size {$ATTACHMENT_MAX_UPLOAD_SIZE:25MB}`) | Your proxy — and the ceiling now lives in two places you keep equal by hand. In that stack one variable feeds both the proxy and the application's own multipart limit, which is what stopped them drifting |
+| **Rotated the logs** | `logging:` with `max-size`/`max-file` in `docker-compose.prod.yml` | journald or logrotate of your own. The DC stack does not rotate either (Docker's default is unbounded), so this one was already yours if you were following this page |
+| **Fetched the next version** | `docker compose pull` | Download the next JAR, verify its checksum, restart. Flyway still migrates the schema on startup, so the *database* half of an upgrade is identical; [Upgrading](#upgrading) and every release note are written in Compose commands, and translating them is yours |
+
+**What you also give up, and it is not in the table because it is not a setting:** the install
+command's exit code. `--wait` turns "the stack is up" into something a script can check; a
+backgrounded `java -jar` tells you nothing, and the equivalent is to poll `/api/meta` yourself
+until it answers.
 
 ## Configuration
 
@@ -1263,8 +1451,8 @@ HAVING count(*) > 20
 ```
 
 **If you did not deploy the observability stack, you have neither of those by default** —
-it is optional, so there is no Grafana, and the app's management port (9090) is not
-published, so nothing scrapes the metrics either. Two things still work, and they are worth
+it is optional, so there is no Grafana, and in a stack the app's management port (9090) is
+not published, so nothing scrapes the metrics either. Two things still work, and they are worth
 knowing before you need them. The counters can be read straight out of the container:
 
 ```sh
@@ -1370,8 +1558,11 @@ The **App Overview**, **JVM & DB**, **Host & Containers**, **Postgres** and
 **Product** (registrations, active users, issues/projects/workspaces created,
 logins, invites, email, attachments) dashboards are auto-provisioned alongside
 **Logs**. The app serves metrics on a
-separate internal management port (`MANAGEMENT_PORT`, default `9090`) that is
-**never published or proxied** — only in-network Prometheus reaches it.
+separate internal management port (`MANAGEMENT_PORT`, default `9090`) that **no shipped
+stack publishes or proxies** — in a stack, only in-network Prometheus reaches it. That is a
+property of the compose files rather than of the listener: run the JAR directly and it binds
+every interface until you close it, which is the `9090` row of
+[Without Docker](#without-docker-the-jar-and-what-you-take-on-with-it).
 
 Set in your `.env` (see [`.env.prod.example`](../.env.prod.example)):
 

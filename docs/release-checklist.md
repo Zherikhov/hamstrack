@@ -43,6 +43,18 @@ build, else `git describe --tags`) and passes it as a Docker build-arg that the
 build stage applies with `versions:set`. That is what `/api/meta` and the About
 dialog report.
 
+**Since HD-321 that is also why a tag publishes a JAR, and why it publishes *that*
+one.** A tag cut from here on carries two assets beside its images — `hamstrack-X.Y.Z.jar`
+and `hamstrack-X.Y.Z.jar.sha256`; releases cut before it carry none, and measured
+2026-10-02 that is all of them — and the `github-release` job takes the JAR out
+of the image it has just pushed rather than off the runner. The runner's own
+artifact is versioned `0.0.0-DEV` by the paragraph above, so publishing it would
+ship an asset that denies its own version; taking it from the image also makes the
+asset byte-identical to what the container runs, which is what the container-free
+install path in `docs/self-hosting.md` rests on. The job compares the extracted
+file's SHA-256 with the one inside the image and refuses the release if they
+differ.
+
 What changed is which builds may publish the `latest` tag that prod pulls:
 
 - **Both** a `main` push and a stable release tag publish `latest` now (it used
@@ -70,7 +82,8 @@ served `0.12.5-16-g94fac7d` for a tree that was already 0.13.0.
 ## What still fails (deliberately)
 
 **Tagging a commit that is not `main`'s tip.** The tag build publishes its
-`X.Y.Z` / `X.Y` images and cuts the GitHub Release, but it refuses to move
+`X.Y.Z` / `X.Y` images, cuts the GitHub Release and attaches that image's JAR and
+checksum to it, but it refuses to move
 `latest` — otherwise it would publish an *older* tree as `latest` and roll
 production back. The same guard trips if `main` moved on while the release was
 building. The Build's job summary prints the reason:
@@ -82,11 +95,36 @@ Actions → Build → **Run workflow** on `main`.
 
 **Pre-release tags** (`v1.0.0-rc1`, `0.13.0-beta` — anything containing `-`)
 publish their semver images and a pre-release GitHub Release, but never touch
-`latest` and never deploy. That is the point of them.
+`latest` and never deploy. That is the point of them. **The JAR assets are
+attached to a pre-release too** — deliberately, since trying a release candidate
+is the one time somebody wants the artefact without adopting it.
 
 **A red tag Build.** If the tag's `build-and-test` fails (flaky test) while
 main's passed, prod keeps the `git describe` label. Fix: Actions → Build → *Run
 workflow* on the tag.
+
+**A tag whose JAR extraction fails cuts NO Release — and skips its own deploy.** This is the
+failure mode HD-321 added, and it is the one on this list whose blast radius is widest, so it is
+written down rather than discovered. The extraction step runs *inside* `github-release`,
+**before** the Release step: it pulls the image by the digest `build-and-push` published, reads
+`/app/app.jar`, copies it out and compares the two SHA-256s. Anything in there going wrong —
+`packages: read` revoked, a registry outage, an absent `digest` output, a mismatch — exits
+non-zero, so the Release step never runs. Consequences, in the order they surprise you:
+
+- the `X.Y.Z` / `X.Y` images **are** published and pullable; only the Release is missing. The
+  invariant in the `github-release` comment ("a Release never advertises a version nobody can
+  pull") still holds; its converse does not and never did;
+- `deploy.yml` fires on `workflow_run` with `conclusion == 'success'`, so a red
+  `github-release` job **also means that tag does not deploy** — prod keeps whatever `latest`
+  it had;
+- a re-run fails identically if the cause is the reference or the permission rather than the
+  network.
+
+Recovery: Actions → Build → **Run workflow** on the tag. The re-run recomputes the same digest
+for the same commit, so it extracts the same bytes — this is not a "hope it is flaky" retry. If
+it fails twice, read the step's own error: all four of its refusals name what to check. This is
+deliberate in the sense that matters — a correct checksum attached to the wrong JAR is worse
+than a tag with no assets, so the step refuses rather than falling back.
 
 **One residual race, and it is irreducible.** Each build bakes the version it
 computed *at the start of its `build-and-push` job* — roughly 6 minutes after
@@ -1529,6 +1567,65 @@ administrator with no mail server has — the §8.2 rule in
 `docs/design/published-credentials-proposal.md` ("a refusal may only prescribe an
 action its reader can perform") outstanding against the very messages that section
 is about.
+
+**6. The JAR on the Release is the JAR inside the image of the same tag.** HD-321 added
+two assets per release — `hamstrack-X.Y.Z.jar` and `hamstrack-X.Y.Z.jar.sha256` — and
+[Without Docker](../docs/self-hosting.md#without-docker-the-jar-and-what-you-take-on-with-it)
+tells a reader to download them, verify the checksum, and trust that the file runs the
+same bytes as the container. The release job proves that identity for the file it
+*extracts*; nothing anywhere proves it for the file an operator *downloads*, which is a
+different file in a different place. Needs the network, a daemon and the `gh` CLI, so it
+is here. Three commands, in this order:
+
+```bash
+gh release view vX.Y.Z --json assets --jq '.assets[].name'   # both names, and nothing else
+cd "$(mktemp -d)" && gh release download vX.Y.Z -p 'hamstrack-*' \
+  && sha256sum -c hamstrack-*.jar.sha256                     # -> ...jar: OK
+docker run --rm --entrypoint sha256sum \
+  ghcr.io/zherikhov/hamstrack:X.Y.Z /app/app.jar             # the SAME digest
+```
+
+The third line is the one that cannot be skipped: an asset whose checksum verifies only
+proves the download matched the hash published beside it, and both were produced by the
+same job — so a wrong file with a correct hash passes the second line and fails the third.
+Also read the asset's own `META-INF/build-info.properties`: `build.version` must be the
+tag with no `v`, never `0.0.0-DEV`.
+
+**Use the digest, not the tag, if the Build summary gives you one.** The job records the exact
+reference it took the JAR out of (`Taken from ghcr.io/…/hamstrack@sha256:…`), and pasting that in
+place of `:X.Y.Z` on the third line removes the one thing a hand check can still get wrong — a
+`X.Y` or otherwise moving tag pointing somewhere else by the time you run it. That is the same
+reason the job itself stopped pulling by tag.
+
+> **STANDING LINE — DELETE THIS BLOCK, DO NOT RE-DATE IT.** The *published* half of this step —
+> commands 1 and 2, the two that touch a real Release — **has never been run, on any date.** The
+> step has two halves and only one of them has a subject today, so a re-run of the identity half
+> plus a fresh `Measured` date below would read exactly like a run of the whole step. Whoever
+> first runs commands 1 and 2 against a Release that actually carries the two files deletes this
+> block and writes the readings in its place. While it is here, this step is half-verified
+> however recent the date under it looks. <!-- marker: no-published-jar-assets-yet -->
+
+**The block above is one copy of that warning, and every copy is deleted together.** README,
+`docs/self-hosting.md` and `docs/self-hosting-upgrades.md` each tell a reader that no release
+carries the two assets yet; every copy carries the same HTML comment marker, and
+`UnpublishedAssetWarningTest` refuses a tree where some carry it and some do not — its failure
+message lists them. So the first tag that publishes the assets deletes all of them in one commit,
+this block included, which is why re-dating the `Measured` line below cannot quietly turn this
+step into a fully-run one.
+
+Measured 2026-10-02, and **the departure is the first two commands**: `gh release view
+v0.18.2 --json assets` answers `{"assets":[],"tagName":"v0.18.2"}`, and all ten releases the
+repository has (`v0.13.0` … `v0.18.2`) answer `assets` of length `0` — no tag has yet been cut
+with the publishing step in place, so the *published* half of this step has nothing to read and
+is the first thing to run on the first tag that carries it.
+What was run is the identity half, against two real images. The released `0.18` image:
+`/app/app.jar` hashes `79784f5244257c78ac67b0417ccdfb5050f7c77a1abd03fbe31155bfd45ec82d`,
+`docker create` + `docker cp` produced a file with that same digest, `sha256sum -c` answered
+`hamstrack-0.18.2.jar: OK`, and the extracted JAR's `build.version` reads `0.18.2`. One
+appended byte planted after the copy turned the job's own comparison red, naming both
+digests and writing no checksum file. A locally built image
+(`--build-arg APP_VERSION=0.18.3-hd321`) behaved identically and its JAR self-reported
+`build.version=0.18.3-hd321`.
 
 **Not on this list, deliberately: a freshness rule.** The idea was an install
 document whose newest edit predates the newest release line going red. It is not

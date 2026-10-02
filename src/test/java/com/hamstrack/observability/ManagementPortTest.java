@@ -52,8 +52,8 @@ class ManagementPortTest {
 
     /**
      * <strong>The management chain carries no Content-Security-Policy</strong> (HD-264). Deliberate
-     * rather than overlooked: :9090 is never published or proxied, nothing served on it is a
-     * document that could execute script, and a policy is a statement about the JavaScript bundle —
+     * rather than overlooked: nothing served on :9090 is a document that could execute script, and
+     * a policy is a statement about the JavaScript bundle —
      * which is not reachable from here. Asserted so the exclusion is a decision on the record
      * instead of something a future reader "fixes" by adding a header block to
      * {@code managementFilterChain}.

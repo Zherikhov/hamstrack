@@ -802,12 +802,17 @@ Two consequences, and the second is why this section exists:
 itself (`-Duser.language=en -Duser.country=US`), identically for every deployment.
 That pin reaches the container and nothing else.
 
-If you run the JAR directly you need those flags on your own command line — but be
-clear about what that path is before you take it: **there is no published JAR asset
-and no documented bare-JAR install.** Releases ship the container image, and
-`docker compose` is the documented way to run Hamstrack. Building from source and
-launching the JAR yourself is reachable, and this paragraph exists for that case; it
-is not a second supported deployment model. If that is you:
+If you run the JAR directly you need those flags on your own command line — and that
+path is now documented, which this paragraph used to say it was not.
+[Without Docker](self-hosting.md#without-docker-the-jar-and-what-you-take-on-with-it)
+is the section for it: **still not a second supported deployment model**, but a listed
+hand-over of what the container does, this locale pin among it.
+
+<!-- marker: no-published-jar-assets-yet -->
+HD-321 also made each release *publish* the JAR and its SHA-256 as assets — **from the
+next tag onwards, not retrospectively: measured 2026-10-02, every existing release
+answers `assets: []`**, so until one carries them the JAR you run is one you built. If
+that is you:
 
 ```bash
 java -Duser.language=en -Duser.country=US -jar target/hamstrack-<version>.jar

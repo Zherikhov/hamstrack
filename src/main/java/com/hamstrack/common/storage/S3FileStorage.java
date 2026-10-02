@@ -32,10 +32,11 @@ public class S3FileStorage implements FileStorage {
             throw new IllegalStateException(
                     "app.storage.type=s3 (STORAGE_TYPE) requires app.storage.s3.bucket "
                     + "(STORAGE_S3_BUCKET), which is empty or unset. Set STORAGE_S3_BUCKET to the "
-                    + "bucket name, or set STORAGE_TYPE=local to keep attachments on the "
-                    + "container's own disk, which is the self-hosted default. The dotted names "
-                    + "are the properties Spring reports; the SHOUTING ones are what you set in "
-                    + ".env, and a search for either finds this message.");
+                    + "bucket name, or set STORAGE_TYPE=local to keep attachments on the local "
+                    + "filesystem, which is the self-hosted default. The dotted names "
+                    + "are the properties Spring reports; the SHOUTING ones are the environment "
+                    + "variables you set - in .env beside a compose file, or exported in the shell "
+                    + "that starts the JAR - and a search for either finds this message.");
         }
         this.bucket = cfg.bucket();
 

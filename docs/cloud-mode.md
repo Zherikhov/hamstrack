@@ -66,6 +66,19 @@ bucket, an owner's AWS account, and the operational apparatus in
 and is not a self-hosting requirement. This stack is the **model**, not that
 deployment.
 
+**It is also not the only way to get the `cloud` profile, and the alternative costs more
+here than it does on the DC side.** The container-free path —
+[Without Docker](self-hosting.md#without-docker-the-jar-and-what-you-take-on-with-it) in the
+self-hosting guide — runs the published JAR with whatever `SPRING_PROFILES_ACTIVE` you give
+it, `cloud` included, and that section's hand-over list applies unchanged. What it does not
+mention, because it is written for `dc`, is the two things *this* stack does for the cloud
+profile and nothing else would: it runs the S3-compatible store, and it **creates the
+bucket** before the application starts ([below](#the-bucket-is-created-for-you-and-that-is-load-bearing)
+— the app refuses to start without a bucket *name* and will not create the bucket itself, so
+a missing one turns every upload into a `500` long after the install looked fine). Run the
+cloud profile from a JAR and both of those are yours to arrange, on top of everything in that
+list. It is reachable; it is not this page's path.
+
 ## Install
 
 **Needs an x86-64 (`amd64`) host**, the same as the DC stack: the published image
