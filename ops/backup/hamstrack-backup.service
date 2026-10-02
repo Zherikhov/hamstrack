@@ -58,7 +58,13 @@ TasksMax=64
 
 # A runaway write dies instead of filling the volume PostgreSQL lives on. Generous against
 # an expected dump of a few MB; revisit against hamstrack_backup_size_bytes once it has
-# history. Exceeding it is SIGXFSZ, which ExecStopPost above turns into a reported failure.
+# history. Exceeding it sends SIGXFSZ to whichever process is WRITING, which for the dump is
+# the docker client and not this shell: measured (a 2G-shaped limit against an oversized dump),
+# that child dies, `set -e` ends the run, and the EXIT trap publishes dump=0 — so the witness
+# here is the trap, and ExecStopPost stands down because the trap already spoke. ExecStopPost
+# covers it only if the limit is ever small enough to kill the metrics write itself, which
+# bash runs no EXIT trap for. docs/self-hosting.md is why this must not be emulated with
+# `ulimit -f` on the cron path, where no ExecStopPost exists at all.
 LimitFSIZE=2G
 
 # Be the first thing to yield: this runs while the product is meant to be serving.

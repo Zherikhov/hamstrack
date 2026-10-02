@@ -21,7 +21,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static com.hamstrack.ops.OpsYaml.list;
@@ -41,7 +43,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <ol>
  *   <li><strong>timers</strong> — every {@code ops/**&#47;*.timer} has a freshness rule whose
- *       {@code threshold + for} outlives its schedule and stays within four periods;</li>
+ *       {@code threshold + for} outlives its schedule and stays within four periods, <em>and</em>
+ *       (HD-322) so does every schedule the publishable documents <em>prescribe</em> in a crontab
+ *       line, which the {@code *.timer} walk cannot see and which satisfies the same rules because
+ *       freshness leaves the job in a textfile rather than through the scheduler;</li>
  *   <li><strong>delivery</strong> — every rule resolves to a contact point the tree defines,
  *       every contact point some rule reaches has a <em>dated</em> delivery drill within
  *       {@value #MAX_DRILL_AGE_DAYS} days in {@code docs/ops-prod-hardening.md} § 4.1 (with a
@@ -135,30 +140,15 @@ class OpsWitnessContractTest {
         var offenders = new ArrayList<String>();
         for (Timer timer : timers()) {
             var gauges = freshnessGauges(timer);
-            var readings = new ArrayList<String>();
-            boolean covered = false;
-            for (String gauge : gauges) {
-                for (AlertRule rule : rules) {
-                    if (rule.expressions().stream().noneMatch(expr -> expr.contains("time() - " + gauge))) {
-                        continue;
-                    }
-                    long threshold = rule.threshold();
-                    long hold = seconds(rule.forDuration(), rule.where());
-                    long bound = threshold + hold;
-                    readings.add(rule.title() + " (" + threshold + "+" + hold + "=" + bound + "s)");
-                    if (bound > timer.window() && bound <= 4 * timer.periodSeconds()) {
-                        covered = true;
-                    }
-                }
-            }
-            if (!covered) {
+            Optional<String> finding =
+                    uncovered(gauges, timer.window(), timer.periodSeconds(), rules);
+            if (finding.isPresent()) {
                 offenders.add("""
 
                         Timer %s runs every %ds (+%ds jitter) and no alert rule reads its freshness \
                         gauge with threshold+for in (%d, %d] s - a stopped timer would page late or \
                         never (the HD-287 shape).
-                          gauges the script beside it declares: %s
-                          rules reading them (threshold+for): %s
+                          %s
                         Add a rule to observability/grafana/provisioning/alerting/rules.yml shaped like \
                         ConfigDriftCheckStale (uid hamstrack-config-check-stale): expr \
                         'time() - <gauge>', threshold > period+jitter, for >= 15m, threshold+for <= \
@@ -168,11 +158,194 @@ class OpsWitnessContractTest {
                         ops/drift/hamstrack-config-drift.sh. The bound compared with the schedule \
                         is threshold+for, not for: alone.""".formatted(
                         slash(timer.unit()), timer.periodSeconds(), timer.jitterSeconds(), timer.window(),
-                        4 * timer.periodSeconds(), gauges.isEmpty() ? "NONE" : gauges,
-                        readings.isEmpty() ? "NONE" : readings));
+                        4 * timer.periodSeconds(), finding.get()));
             }
         }
         assertThat(offenders).withFailMessage(String.join("\n", offenders)).isEmpty();
+    }
+
+    /**
+     * The freshness question for ONE schedule, shared by both arms of rule 1 so that the bound can
+     * only ever be moved for all schedules at once: empty when some rule reads one of this
+     * schedule's gauges with {@code threshold + for} inside {@code (window, 4 × period]},
+     * otherwise the finding — the gauges found and what reads them — for the caller's message.
+     *
+     * <p>Fails closed in both directions that look like success: no gauge at all and no rule
+     * reading one both report {@code NONE} rather than "nothing to check".
+     */
+    private static Optional<String> uncovered(List<String> gauges, long window, long period,
+                                              List<AlertRule> rules) {
+        var readings = new ArrayList<String>();
+        boolean covered = false;
+        for (String gauge : gauges) {
+            for (AlertRule rule : rules) {
+                if (rule.expressions().stream().noneMatch(expr -> expr.contains("time() - " + gauge))) {
+                    continue;
+                }
+                long threshold = rule.threshold();
+                long hold = seconds(rule.forDuration(), rule.where());
+                long bound = threshold + hold;
+                readings.add(rule.title() + " (" + threshold + "+" + hold + "=" + bound + "s)");
+                if (bound > window && bound <= 4 * period) {
+                    covered = true;
+                }
+            }
+        }
+        return covered ? Optional.empty()
+                : Optional.of("gauges declared by the script: " + (gauges.isEmpty() ? "NONE" : gauges)
+                        + "\n  rules reading them (threshold+for): " + (readings.isEmpty() ? "NONE" : readings));
+    }
+
+    // ============================================================ rule 1b — schedules the DOCUMENTS prescribe
+
+    /**
+     * <strong>A scheduler this repository prescribes in prose is a member of rule 1, not an
+     * exemption from it (HD-322).</strong>
+     *
+     * <p>Rule 1's population is {@code ops/**&#47;*.timer}, which is every scheduler the repository
+     * <em>ships as a file</em>. It is not every scheduler the repository <em>prescribes</em>: the
+     * backup job publishes its freshness into a Prometheus textfile, so any scheduler that runs the
+     * same script satisfies the same two alert rules — which is exactly what makes a cron line a
+     * legitimate answer for a host with no systemd, and exactly what makes it invisible here. A
+     * documented schedule at the wrong period is the HD-287 shape with no unit file to find it on:
+     * nothing in this tree would have noticed a prescribed {@code 15 3 * * 1} against a 26-hour
+     * staleness rule.
+     *
+     * <p>So the population is the crontab lines in the publishable documents that invoke an
+     * {@code /usr/local/bin/hamstrack-*} command, each mapped to the {@code ops/*&#47;<name>.sh} it
+     * is installed from, each asked rule 1's question through the same {@link #uncovered} helper.
+     * The unit is (document, line) — two documents prescribing two periods for one script are two
+     * members, because the thing being judged is the <em>prescription</em>.
+     *
+     * <p><strong>The floor is a presence demand that NAMES its member, for HD-316's reason.</strong>
+     * Deleting the cron section would leave this arm with nothing to iterate and green, which is the
+     * one shape that cannot fail; an operator who may not install host units would again be left
+     * with no answer at all, which is the defect HD-322 closed. So the floor asks for
+     * {@link #MUST_BE_PRESCRIBED} by name rather than for a population size — a count of one is
+     * satisfied by any future sibling prescription while this member walks out of the scan
+     * re-pathed or rewritten {@code @daily}. Everything this scan cannot read is reported rather
+     * than skipped: a command that resolves to no script under {@code ops/}, an unparsable cron
+     * field ({@link #cronPeriod}), and a shortcut schedule ({@link #CRON_SHORTCUT}) each fail with
+     * "teach the parser" — never with "no rule needed".
+     */
+    @Test
+    void everyScheduleTheDocumentsPrescribeIsHeldToTheSameFreshnessBound() {
+        var rules = alertRules();
+        var prescribed = prescribedSchedules();
+
+        // A shortcut form is a prescription whose period nobody can state. Refused here rather than
+        // left unmatched, because "no five fields to read" and "no prescription" are the same
+        // silence, and one of them is a hole.
+        var shortcuts = shortcutSchedules();
+        assertThat(shortcuts)
+                .withFailMessage("""
+
+                        A DOCUMENT PRESCRIBES A SHORTCUT SCHEDULE THIS PARSER CANNOT TURN INTO A \
+                        PERIOD, so nothing here can check that the staleness rule outlives it:
+                        %s
+                        Teach OpsWitnessContractTest.cronPeriod the shortcut form (@daily is 86400s, \
+                        @weekly 604800s, @hourly 3600s) and feed it through the same bound - do not \
+                        exempt the line, and do not document a schedule whose period nobody can \
+                        state. @weekly against a 26-hour staleness rule is the HD-287 shape with no \
+                        unit file to find it on.""".formatted(String.join("\n", shortcuts)))
+                .isEmpty();
+
+        // THE FLOOR, and it names its member rather than counting the category - see
+        // MUST_BE_PRESCRIBED for why a count cannot hold a population of one.
+        var resolved = prescribed.stream()
+                .filter(p -> p.script() != null)
+                .map(p -> slash(p.script()))
+                .collect(Collectors.toCollection(TreeSet::new));
+        assertThat(resolved)
+                .withFailMessage("""
+
+                        NO DOCUMENT PRESCRIBES A SCHEDULE THAT RESOLVES TO %s.
+                        Scripts some crontab line in a publishable document schedules now: %s
+                        (from %d five-field line(s) in all).
+                        Either the scheduler-independent path was deleted - which leaves an operator \
+                        with no systemd, or one who may not install host units, with no way to back \
+                        up on a schedule at all (HD-322) - or the line was re-pathed, reshaped, or \
+                        rewritten as a shortcut and this scan no longer resolves it to that script. \
+                        Restore the prescription or teach the pattern; do not drop this floor. The \
+                        line this was written against is in \
+                        docs/self-hosting.md#without-systemd-one-cron-line.""".formatted(
+                        MUST_BE_PRESCRIBED, resolved.isEmpty() ? "NONE" : resolved, prescribed.size()))
+                .contains(MUST_BE_PRESCRIBED);
+
+        var offenders = new ArrayList<String>();
+        // The derived pass-granting set, refused when it is empty rather than silently excusing
+        // every prescription - and printed in every message it decides.
+        var installPaths = documentedProgramInstallPaths();
+        assertThat(installPaths)
+                .withFailMessage("""
+
+                        NO PUBLISHABLE DOCUMENT HAS AN `install` LINE PLACING A hamstrack-* PROGRAM, \
+                        so the check that a prescribed crontab command is runnable would pass every \
+                        command, however misspelt.
+                        Either the install blocks were reshaped - teach the pattern in \
+                        documentedProgramInstallPaths - or they are gone, in which case the crontab \
+                        lines below them prescribe a program nothing installs.""")
+                .isNotEmpty();
+
+        for (PrescribedSchedule schedule : prescribed) {
+            if (!installPaths.contains(schedule.command())) {
+                offenders.add("""
+
+                        %s prescribes running '%s', and no document installs a program at that \
+                        path. Installed by the documents: %s
+                        A reader who pastes this line gets 'command not found' - a schedule that \
+                        cannot run is not a schedule, and no alert rule can see the difference \
+                        because nothing ever writes the gauge. Re-path the crontab line to match \
+                        the install block it sits under, or move both in one change.""".formatted(
+                        schedule.where(), schedule.command(), installPaths));
+                continue;
+            }
+            if (schedule.script() == null) {
+                offenders.add("""
+
+                        %s prescribes '%s', and no script in ops/ installs as that command \
+                        (expected ops/<dir>/%s.sh). Either the command is misspelled - in which case \
+                        every reader who pastes it gets 'command not found' - or the script moved and \
+                        this line did not. A command this scan cannot resolve is reported rather than \
+                        skipped, because an unresolved one has no gauges and would otherwise be \
+                        excused for having none.""".formatted(
+                        schedule.where(), schedule.command(), schedule.installedName()));
+                continue;
+            }
+            var gauges = gaugesDeclaredBy(schedule.script());
+            Optional<String> finding =
+                    uncovered(gauges, schedule.periodSeconds(), schedule.periodSeconds(), rules);
+            if (finding.isPresent()) {
+                offenders.add("""
+
+                        %s prescribes running %s every %ds, and no alert rule reads that script's \
+                        freshness gauge with threshold+for in (%d, %d] s - so this documented \
+                        schedule stopping would page late or never.
+                          %s
+                        The scheduler is not part of the mechanism (ops/backup/README.md), which is \
+                        what makes a cron line a legitimate alternative to the .timer - and is also \
+                        why a prescribed period has to fit the SAME bound the timer's does. Either \
+                        write a period the existing rule absorbs, or move the rule's threshold and \
+                        the .timer with it, in one change.""".formatted(
+                        schedule.where(), schedule.command(), schedule.periodSeconds(),
+                        schedule.periodSeconds(), 4 * schedule.periodSeconds(), finding.get()));
+            }
+        }
+        assertThat(offenders).withFailMessage(String.join("\n", offenders)).isEmpty();
+
+        // THE GRANULARITY CONTROL. The unit is (document, line): keying on the COMMAND would merge
+        // two documents prescribing two different periods for one script into one member, and the
+        // looser of the two periods would then be answered for by the tighter one.
+        var keys = prescribed.stream().map(PrescribedSchedule::where).collect(Collectors.toSet());
+        assertThat(keys)
+                .withFailMessage("""
+
+                        THIS ARM HAS STOPPED ASKING ITS QUESTION PER PRESCRIPTION.
+                        Members: %d, distinct (document, line) keys: %d.
+                        Fewer keys than members means two prescriptions merged, and a schedule the \
+                        bound does not absorb would then be answered for by a sibling that it does.""",
+                        prescribed.size(), keys.size())
+                .hasSize(prescribed.size());
     }
 
     // ============================================================ rule 2 — delivery
@@ -764,15 +937,194 @@ class OpsWitnessContractTest {
         var gauges = new LinkedHashSet<String>();
         try (Stream<Path> siblings = Files.list(timer.unit().getParent())) {
             for (Path script : siblings.filter(p -> p.getFileName().toString().endsWith(".sh")).sorted().toList()) {
-                var m = FRESHNESS_GAUGE.matcher(PublishedCredentials.read(script));
-                while (m.find()) {
-                    gauges.add(m.group(1));
-                }
+                gauges.addAll(gaugesDeclaredBy(script));
             }
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
         return List.copyOf(gauges);
+    }
+
+    /** Every {@code *_timestamp_seconds} gauge ONE script declares. */
+    static List<String> gaugesDeclaredBy(Path script) {
+        var gauges = new LinkedHashSet<String>();
+        var m = FRESHNESS_GAUGE.matcher(PublishedCredentials.read(script));
+        while (m.find()) {
+            gauges.add(m.group(1));
+        }
+        return List.copyOf(gauges);
+    }
+
+    // ============================================================ prescribed schedules — enumeration
+
+    /**
+     * <strong>The floor NAMES its member instead of counting the category.</strong> A count cannot
+     * hold this population: with one member, today's count <em>is</em> that member, so any reshaping
+     * of the line reds — and the day a second prescription exists (§ 6 of
+     * {@code ops/backup/README.md} invites exactly that, by doctrine) a count of one is satisfied by
+     * the sibling, and the backup line could be re-pathed to {@code /opt/hamstrack/bin/…} or
+     * rewritten {@code @daily} with this arm still green. The script is therefore demanded by name:
+     * whatever else the documents prescribe, a schedule for <em>this</em> script is one of them.
+     */
+    static final String MUST_BE_PRESCRIBED = "ops/backup/hamstrack-backup.sh";
+
+    /**
+     * A crontab line in a document, run through a markdown fence: five schedule fields and a
+     * command whose basename starts {@code hamstrack-}. A leading {@code #} is a comment and does
+     * not match, which is correct — a commented line prescribes nothing.
+     *
+     * <p>The command is matched at <strong>any</strong> absolute path, not at
+     * {@code /usr/local/bin/}: the install prefix is chosen by the same document that writes the
+     * crontab line, so pinning the population to one prefix lets a re-path carry the whole member
+     * out of the population silently. A path this scan cannot resolve to a script under
+     * {@code ops/} is reported, never skipped.
+     */
+    private static final String CRON_FIELD = "([*\\d,\\-/]+)";
+
+    private static final String CRON_COMMAND = "(/[A-Za-z0-9._/-]*hamstrack-[A-Za-z0-9._-]+)";
+
+    private static final Pattern CRON_LINE = Pattern.compile(
+            ("^%s\\s+%s\\s+%s\\s+%s\\s+%s\\s+.*?%s.*$")
+                    .formatted(CRON_FIELD, CRON_FIELD, CRON_FIELD, CRON_FIELD, CRON_FIELD,
+                            CRON_COMMAND));
+
+    /**
+     * The shortcut schedules — {@code @daily}, {@code @weekly}, {@code @reboot} — which have no five
+     * fields to read and are therefore invisible to {@link #CRON_LINE}.
+     *
+     * <p><strong>Invisible is the one answer this arm may not give.</strong> Silently not matching
+     * {@code @daily} is indistinguishable from there being no prescription, so a shortcut is
+     * enumerated and <em>reported</em>, exactly the move {@link #cronPeriod} already makes one level
+     * down for a five-field form it cannot read. Teaching the parser the form is a three-line
+     * change; being quiet about it is the HD-287 shape again.
+     */
+    private static final Pattern CRON_SHORTCUT = Pattern.compile(
+            "^(@\\w+)\\s+.*?%s.*$".formatted(CRON_COMMAND));
+
+    /** A literal cron field: one number, nothing else. A step, a list and a range are not. */
+    private static final Pattern CRON_LITERAL = Pattern.compile("\\d{1,2}");
+
+    /** One documented schedule: where it is written, what it runs, how often, and the script it resolves to. */
+    record PrescribedSchedule(String document, int line, String command, long periodSeconds, Path script) {
+        String where() {
+            return document + ":" + line;
+        }
+
+        /** The basename the script installs as — {@code hamstrack-backup} for {@code hamstrack-backup.sh}. */
+        String installedName() {
+            return command.substring(command.lastIndexOf('/') + 1);
+        }
+    }
+
+    /** Every crontab line for an {@code ops/} script in a publishable document. */
+    static List<PrescribedSchedule> prescribedSchedules() {
+        var found = new ArrayList<PrescribedSchedule>();
+        for (Path file : PublishedCredentials.publishableFiles("*.md")) {
+            String document = slash(file);
+            List<String> lines = rawLines(file);
+            for (int i = 0; i < lines.size(); i++) {
+                var m = CRON_LINE.matcher(lines.get(i).strip());
+                if (!m.matches()) {
+                    continue;
+                }
+                String command = m.group(6);
+                long period = cronPeriod(m.group(1), m.group(2), m.group(3), m.group(4), m.group(5),
+                        document + ":" + (i + 1));
+                found.add(new PrescribedSchedule(document, i + 1, command, period,
+                        scriptInstalledAs(command.substring(command.lastIndexOf('/') + 1))));
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Every destination a publishable document {@code install}s a {@code hamstrack-*} <em>program</em>
+     * to — the last path on an {@code install …} line whose basename starts {@code hamstrack-}, which
+     * is how the two unit-file lines (ending {@code /etc/systemd/system/}) stay out of it.
+     *
+     * <p>This is what makes a re-pathed crontab line visible as the defect it is. Widening
+     * {@link #CRON_COMMAND} to any absolute path stopped a re-path from leaving the population, but
+     * the <em>freshness</em> question it then answers is still "yes" — the period did not change. The
+     * question a re-path actually breaks is whether the reader can run the line at all: a document
+     * whose install block writes {@code /usr/local/bin/hamstrack-backup} and whose crontab line says
+     * {@code /opt/hamstrack/bin/hamstrack-backup} prescribes a `command not found`. So a prescribed
+     * command must name a path these documents install to.
+     *
+     * <p><strong>This set is a predicate that grants a pass, so it is printed and it fails closed.</strong>
+     * An empty set would excuse nothing and look like strictness while actually meaning the scan
+     * stopped finding install lines; the caller refuses that outright, and every failure message
+     * computes and shows the set it admitted.
+     */
+    static Set<String> documentedProgramInstallPaths() {
+        var found = new TreeSet<String>();
+        var pattern = Pattern.compile(
+                "\\binstall\\s+.*?(/[A-Za-z0-9._/-]*hamstrack-[A-Za-z0-9._-]+)\\s*$");
+        for (Path file : PublishedCredentials.publishableFiles("*.md")) {
+            for (String line : rawLines(file)) {
+                var m = pattern.matcher(line.strip());
+                if (m.find()) {
+                    found.add(m.group(1));
+                }
+            }
+        }
+        return found;
+    }
+
+    /**
+     * Every {@code @daily}-style line naming a {@code hamstrack-*} command: a prescription whose
+     * period this parser cannot state, enumerated so it can be refused rather than missed.
+     */
+    static List<String> shortcutSchedules() {
+        var found = new ArrayList<String>();
+        for (Path file : PublishedCredentials.publishableFiles("*.md")) {
+            List<String> lines = rawLines(file);
+            for (int i = 0; i < lines.size(); i++) {
+                var m = CRON_SHORTCUT.matcher(lines.get(i).strip());
+                if (m.matches()) {
+                    found.add(slash(file) + ":" + (i + 1) + " prescribes '" + m.group(1) + " ... "
+                            + m.group(2) + "'");
+                }
+            }
+        }
+        return found;
+    }
+
+    /** The {@code ops/*&#47;<name>.sh} a documented {@code /usr/local/bin/<name>} is installed from, or null. */
+    static Path scriptInstalledAs(String installedName) {
+        try (Stream<Path> tree = Files.walk(OPS)) {
+            return tree.filter(Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().equals(installedName + ".sh"))
+                    .findFirst()
+                    .orElse(null);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * The period of a five-field cron schedule, in the forms this repository prescribes. Anything
+     * else fails closed: a schedule whose period cannot be read cannot be compared with an alert
+     * bound, and "cannot tell" must never answer "no rule needed".
+     */
+    static long cronPeriod(String minute, String hour, String dom, String month, String dow, String where) {
+        boolean everyDay = "*".equals(dom) && "*".equals(month);
+        boolean literalMinute = CRON_LITERAL.matcher(minute).matches();
+        if (everyDay && literalMinute && CRON_LITERAL.matcher(hour).matches()) {
+            if ("*".equals(dow)) {
+                return 86_400;
+            }
+            if (CRON_LITERAL.matcher(dow).matches()) {
+                return 604_800;
+            }
+        }
+        if (everyDay && "*".equals(dow) && literalMinute && "*".equals(hour)) {
+            return 3_600;
+        }
+        throw new AssertionError(where + ": '" + String.join(" ", minute, hour, dom, month, dow)
+                + "' is a cron schedule this test cannot turn into a period, so it cannot check that "
+                + "the staleness rule outlives it. Teach OpsWitnessContractTest.cronPeriod the form "
+                + "- do not exempt the schedule, and do not document a schedule whose period nobody "
+                + "can state.");
     }
 
     // ============================================================ alerting — enumeration

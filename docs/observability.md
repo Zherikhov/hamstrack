@@ -690,7 +690,7 @@ about to be lost, with every local check green — that is the failure that quie
 backup system into a folder, and it is why the metric carries a `stage` label.
 **BackupRunFailed** is the fast one (a stage reported failure). **BackupStale**
 is the slow, load-bearing one, and it is the only rule that can see the job **not running
-at all** — a stopped timer, a hung lock, a box that was down — because a job that does not
+at all** — a stopped schedule, a hung lock, a box that was down — because a job that does not
 run reports nothing for BackupRunFailed to look at. Both are left **unaggregated**, so
 Grafana raises one instance per stage and the notification names which; for BackupStale that
 is not cosmetic but the difference between working and not on a self-hosted install, where
@@ -702,7 +702,7 @@ class as "there is no first copy". The 26-hour threshold is one daily period plu
 anybody while two consecutive missed days cannot hide.
 
 **`noDataState: OK` on both is deliberate, and it has a price worth knowing.** It is what
-keeps the rules dormant on an install that runs this stack without the backup timer — the
+keeps the rules dormant on an install that runs this stack without the backup job — the
 metric simply does not exist there, and an alert about a mechanism you never installed is
 noise. The cost is that **deleting the `.prom` file, or losing node-exporter's bind mount,
 silences the alert instead of firing it**. Installing the job writes zero-timestamp sentinel
@@ -710,7 +710,7 @@ silences the alert instead of firing it**. Installing the job writes zero-timest
 publishes a series that is instantly stale rather than a healthy-looking one — but note what
 that does not do: the **series** appears only once the script has run once and written a
 `.prom`, which is why every install procedure here ends with a manual run rather than with
-enabling the timer. Confirming the series is still present is a step of the periodic restore
+arming a schedule. Confirming the series is still present is a step of the periodic restore
 check in [self-hosting.md](self-hosting.md#verify-a-restore).
 
 **ConfigDrift and DeployImagePinned carry the same `noDataState: OK` and one extra gap that

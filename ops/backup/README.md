@@ -1,8 +1,10 @@
 # `ops/backup` — the scheduled database backup (HD-187)
 
 A daily logical dump of the production database, taken out of the running PostgreSQL
-container by a **host systemd timer** (not a compose service), uploaded to object
-storage, and published as node-exporter textfile metrics so a failure reaches a person.
+container by a **host job** (not a compose service), uploaded to object storage — or kept on
+a local disk, which is what `BACKUP_TARGET=local` is for and the only mode that asks nothing
+of the host beyond the tools below — and published as node-exporter textfile metrics so a
+failure reaches a person.
 
 | File | Installed to | Mode |
 |---|---|---|
@@ -10,6 +12,32 @@ storage, and published as node-exporter textfile metrics so a failure reaches a 
 | `hamstrack-backup.service` | `/etc/systemd/system/` | `0644` |
 | `hamstrack-backup.timer` | `/etc/systemd/system/` | `0644` |
 | `backup.env.example` | `/etc/hamstrack/backup.env` | `0640 root:root` |
+
+**The two unit files are the hosted instance's scheduler, not the mechanism** — see "the
+scheduler is not part of the mechanism" below. An install without systemd skips exactly those
+two rows and runs the same script from
+[cron](../../docs/self-hosting.md#without-systemd-one-cron-line).
+
+**What the script needs is a tool set, not a distribution.** `docker` with the Compose plugin,
+`bash`, `md5sum`, `flock` and `find` always; GNU `find`/`tail`/`cut` and `aws` (v2 ≥ 2.19) only
+when `BACKUP_TARGET=s3`, which is also the only mode whose pre-flight asks for `aws` at all.
+Measured on BusyBox 1.37.0: `local` mode completes, `s3` mode refuses in pre-flight because
+`find -printf` and `tail -z`/`cut -z` are GNU-only and `keep_newest` needs all three.
+
+**What makes root a requirement rather than a convention is the three directories the script
+writes** — `BACKUP_LOCAL_DIR`, `BACKUP_STATE_DIR` and `BACKUP_TEXTFILE_DIR`, all `root:root` from
+the documented install — together with `/etc/hamstrack/backup.env` at `0640 root:root`. It is
+*not* the lock, on most of this audience: `/var/lock` is `1777` on Debian 13 and Ubuntu 24.04 and
+`0755` only on Alpine 3.21 (measured), so the lock blocks an unprivileged run on some
+distributions and on plenty of others it does not. The script never checks who it runs as, and the
+textfile directory is where its failure stops reaching anybody: under the documented permissions a
+non-root run dies at `install -d` *above* pre-flight, and the `EXIT` trap's `write_metrics` cannot
+create its temp file in that root-owned `0755` directory — so it exits 1 with two `install:` lines
+on stderr and **publishes no `.prom` at all**, leaving the previous run's
+`hamstrack_backup_last_status{stage="dump"} 1` standing and `BackupRunFailed` silent until
+`BackupStale` fires 26 hours later (measured in `debian:stable-slim`). A rig whose three
+directories are all writable by that user publishes `{stage="dump"} 0` instead; that is the rig
+talking, not the install.
 
 **A deploy PLACES these files at `/opt/hamstrack/ops/backup/` and INSTALLS none of them**
 (HD-199: `ops/` is in [`ops/deploy/synced-paths.txt`](../deploy/synced-paths.txt), and the
@@ -35,7 +63,8 @@ bucket/IAM/lifecycle/DLM setup and the restore drill live in
 `backup.env.example` is installed **and edited**, never replaced by a shorter file: its
 comments are the only place several of these settings are explained.
 
-Five properties are load-bearing and easy to erase by accident:
+These properties are load-bearing and easy to erase by accident (the list carries no count
+on purpose — a number goes stale one entry before the list does):
 
 1. **The script never deletes a remote object, and cannot overwrite one either.** Retention
    is an S3 lifecycle rule; the instance role has no `s3:DeleteObject` anywhere; and every
@@ -86,6 +115,23 @@ Five properties are load-bearing and easy to erase by accident:
    (`BACKUP_S3_PREFIX=$(some-tool)`): `set -e` is suppressed inside `. "$CONF" || …`, so the
    source would run to EOF and the run would upload to the DEFAULT prefix and call itself a
    success. A broken config is always a refusal, whatever the environment happens to hold.
+
+6. **The scheduler is not part of the mechanism, and nothing here may make it one.** Freshness
+   leaves this script as `hamstrack_backup_last_success_timestamp_seconds` in a textfile, which
+   is the one series `BackupStale` reads; both rules read that file, and neither can tell — nor
+   may be taught to tell — what started the run. That is what lets a host without systemd run the same script from cron and
+   keep the same alarm, which is the only answer available to an operator who cannot install
+   host units. So a freshness signal must never be moved onto something only the unit knows
+   (`$INVOCATION_ID`, `systemctl show`, a journal field): the `--stop-post` handler is allowed
+   to read the invocation because it only decides whether to *overwrite* a stamp the trap may
+   already have written, and it is reached by nothing else. The documented schedules — the
+   `.timer` and the crontab line in `docs/self-hosting.md` — are held against the alert bound
+   together, by `OpsWitnessContractTest`, so a second scheduler cannot be prescribed at a
+   period the 26-hour rule could not absorb. That arm demands a schedule for **this script by
+   name** rather than counting prescriptions, because a count is satisfied by any sibling while
+   this one walks out of the scan re-pathed or rewritten `@daily`; a period it cannot read, a
+   shortcut form and a command resolving to no script here are each a red build saying "teach
+   the parser", never a silent pass.
 
 A backup nobody has restored is a belief. The restore drill is the procedure that
 converts it, and its log table is in `docs/ops-prod-hardening.md` §6.

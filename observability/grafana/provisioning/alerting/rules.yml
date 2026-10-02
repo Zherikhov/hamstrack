@@ -613,29 +613,31 @@ groups:
                   reducer: { type: last, params: [] }
                   type: query
 
-      # HD-187. The backup job is a HOST systemd timer, not a container, so it emits nothing
+      # HD-187. The backup job runs on the HOST, not in a container, so it emits nothing
       # to Loki and nothing to the app's metrics: its only channel to a person is the
       # node-exporter textfile it writes. Two rules, because a backup has two failures and only
-      # one of them is loud — a dump that fails is over in seconds, while a dump that SUCCEEDS
+      # one of them is loud (the scheduler is deliberately not knowable from here — a systemd
+      # timer and the crontab line docs/self-hosting.md documents both land in the same file)
+      # — a dump that fails is over in seconds, while a dump that SUCCEEDS
       # and then fails to upload leaves a perfectly good file on the volume that is about to be
       # lost, with every local check green.
       #
       # BackupRunFailed is the fast one: the last run reported a stage failure, visible within
       # an hour. BackupStale is the slow, load-bearing one: nothing has landed off-box in 26
       # hours — which is the only rule that can see the run NOT HAPPENING AT ALL (a stopped
-      # timer, a hung flock, a box that was down), a condition BackupRunFailed cannot detect
+      # schedule, a hung flock, a box that was down), a condition BackupRunFailed cannot detect
       # because a job that does not run reports nothing.
       #
       # BackupStale is deliberately NOT scoped to stage="upload". That series is never
       # written when the job runs with BACKUP_TARGET=local — the mode docs/self-hosting.md
       # offers a reader with no object store — so scoping to it left the entire DC
-      # configuration with no rule that could see the timer stop, while that page promised
+      # configuration with no rule that could see the schedule stop, while that page promised
       # both rules "start working with no extra configuration". Unaggregated and per-stage,
       # so Grafana raises one instance per stage and the annotation can name which; on Cloud
       # the only change is that a fully stopped timer raises two instances instead of one.
       #
       # noDataState: OK is deliberate and has a cost. It keeps the rules dormant on an
-      # install that runs the observability stack without the backup timer (the metric simply
+      # install that runs the observability stack without the backup job (the metric simply
       # does not exist there). The price is that DELETING the .prom file — or losing the
       # node-exporter bind mount — silences the alert instead of firing it. The installer
       # writes zero-timestamp sentinel STATE files, so the first run to execute at all

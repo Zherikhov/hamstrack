@@ -2072,8 +2072,8 @@ Take a backup **before every minor upgrade**.
 ### On a schedule
 
 The repository ships a ready-made job under [`ops/backup/`](../ops/backup/) — the
-same one the hosted instance is set up with. It is a **host `systemd` timer**, not
-a compose service: it costs nothing until it fires, it takes the dump with the `pg_dump`
+same one the hosted instance is set up with. It is a **host job**, not a compose
+service: it costs nothing until it fires, it takes the dump with the `pg_dump`
 that is already inside your postgres container (so the client can never be a
 different version from the server), and it needs no new image.
 
@@ -2083,18 +2083,88 @@ makes a restore come up *complete*: a fresh database recreates your `hamstrack`
 login role from compose, but not a read-only `pg_monitor` exporter role or any
 role you added by hand.
 
-Install (as root, from a checkout of the tag you are running):
+**Two decisions come before the install, and neither of them needs anything you do not
+already have.**
+
+- **Where it writes.** `BACKUP_TARGET=local` keeps verified dumps on a local disk: no bucket,
+  no credentials, no AWS CLI, nothing to create anywhere else. **If you have no object store,
+  start here** — it is a complete answer to a bad migration or a dropped table, and the
+  paragraph under [Where it writes](#where-it-writes) says plainly what it is not an answer to.
+  `BACKUP_TARGET=s3` uploads off-box and is the only mode that survives losing the machine;
+  it is the one that adds a prerequisite, and it is one line to move to later.
+- **What runs it on a schedule.** A `systemd` timer is what the hosted instance uses and what
+  this repository ships units for. **If your host has no systemd, or you may not install host
+  units, [one cron line](#without-systemd-one-cron-line) does the same job** — the alerting
+  reads a file the script writes and cannot tell which scheduler ran it.
+
+#### What the job needs on the host
+
+Stated here so it is a list you check rather than something the install discovers for you. This
+is the one part of Hamstrack that runs **on the host** instead of in a container, so unlike
+[Requirements](#requirements) it does care what is installed on your machine — but it cares
+about *programs on `PATH`*, not about which distribution shipped them.
+
+- **`docker`, with the Compose plugin.** The dump is taken with `docker exec` into the running
+  postgres container, which is located with `docker compose ps -q`. If the stack is up, this is
+  already met.
+- **`md5sum`, `flock`, `find`** — these, `docker` above, and `aws` in `s3` mode are the five
+  tools pre-flight checks *by name*, before anything is written, so a missing one is an
+  immediate refusal and never a failure after a dump. `flock` comes from `util-linux`.
+  **`bash` is not among them and cannot be:** a bash script cannot pre-flight the interpreter
+  already running it — the shebang decides, and a host without bash fails before line one.
+- **Everything else is coreutils, findutils and util-linux**, which is why the requirement is
+  those three packages rather than a roll-call. `awk`, `xargs`, `df`, `stat`, `head`, `sort`,
+  `tr`, `date`, `grep`, `mktemp` and `install` are all used and none of them gets a message of
+  its own; the five above are the ones worth a specific one.
+- **GNU `find`, `tail` and `cut` — for `BACKUP_TARGET=s3`.** The staged-copy sweep uses
+  `find -printf` and `tail -z`/`cut -z`, which BusyBox does not implement. Measured on BusyBox
+  1.37.0: in `s3` mode the run refuses in pre-flight and takes no dump at all, while
+  `BACKUP_TARGET=local` — which does not use that sweep — completes normally. So a BusyBox
+  userland (Alpine) is a `local`-mode host unless you add `coreutils` and `findutils`.
+- **`aws`, AWS CLI v2 ≥ 2.19 — only for `BACKUP_TARGET=s3`.** Backups are written with
+  `If-None-Match: *` so a key can never be overwritten, and an older CLI does not know that
+  option: it exits 252 *after* a successful dump, which reads as a backup failure rather than a
+  missing package. Check with `aws --version` and expect `aws-cli/2.19` or newer — a
+  distribution package called `awscli` is v1 on several distributions, and v1 will not do.
+  **`BACKUP_TARGET=local` skips this check entirely**, rather than passing it.
+- **Root.** The script never asks who is running it; what needs root is the paths. What actually
+  forces it is **the three directories it writes** — `BACKUP_LOCAL_DIR`, `BACKUP_STATE_DIR` and
+  `BACKUP_TEXTFILE_DIR`, all created `root:root` by the install block below — plus
+  `/etc/hamstrack/backup.env` at `0640 root:root`, and on the systemd path the two unit files.
+  The **lock** path is not the barrier it is sometimes described as: `/var/lock` is `1777`
+  (world-writable, sticky) on Debian 13 and Ubuntu 24.04 and `0755` only on Alpine 3.21
+  (measured), so on most hosts an unprivileged user can take the lock quite happily. And
+  `stat -c '%a %U' /var/lock` will not tell you which kind yours is — `/var/lock` is a symlink
+  to `/run/lock` and `stat` reports the *link*, printing `777 root` on all three of those
+  systems, which reads like confirmation of exactly the opposite. Ask the question you mean:
+  `sudo -u nobody test -w /var/lock && echo writable`.
+
+  **So running it as an unprivileged user is not supported today** — and how that attempt ends
+  is why the three directories matter more than the lock. Measured in `debian:stable-slim`, with
+  the permissions the install block below creates: the run dies at `install -d` on the two
+  root-owned directories — above pre-flight, so it never reaches a tool check or the lock — the
+  `EXIT` trap fires, and `write_metrics` then cannot create its temp file inside the root-owned
+  `0755` textfile directory, so **nothing is published at all**. The previous run's `.prom`
+  stands untouched, yesterday's `hamstrack_backup_last_status{stage="dump"} 1` included,
+  `BackupRunFailed` never fires, and the only witness left is `BackupStale` 26 hours later. A
+  rig whose three directories are *all* writable by that user does publish
+  `{stage="dump"} 0` — which is how this ends up being described as loud. The documented
+  install is the one that is silent. Supporting an unprivileged run means those paths becoming
+  settings, which is a change to the script and not something you can configure.
+- **A scheduler**, which is the one item with two answers: the shipped `systemd` units, or the
+  cron line below.
+
+Install the parts that both schedulers need (as root, from a checkout of the tag you are
+running):
 
 ```bash
 install -m 0750 -o root -g root ops/backup/hamstrack-backup.sh /usr/local/bin/hamstrack-backup
-install -m 0644 ops/backup/hamstrack-backup.service /etc/systemd/system/
-install -m 0644 ops/backup/hamstrack-backup.timer   /etc/systemd/system/
 mkdir -p /etc/hamstrack /var/backups/hamstrack /var/lib/hamstrack-backup
 # node-exporter's textfile directory, where the job publishes its freshness metrics. Create
-# it even if you do not run the observability stack: the script always writes there, and the
-# unit lists it in ReadWritePaths=, which systemd refuses to set up for a path that does not
-# exist. If you DO run the stack, create it before node-exporter starts (or Docker creates
-# it for you at mount time).
+# it even if you do not run the observability stack: the script always writes there, whatever
+# schedules it. On the systemd path it is also listed in the unit's ReadWritePaths=, which
+# systemd refuses to set up for a path that does not exist. If you DO run the stack, create
+# it before node-exporter starts (or Docker creates it for you at mount time).
 mkdir -p /var/lib/node_exporter/textfile_collector
 install -m 0640 -o root -g root ops/backup/backup.env.example /etc/hamstrack/backup.env
 $EDITOR /etc/hamstrack/backup.env      # every variable, its default and its meaning
@@ -2107,25 +2177,8 @@ echo 0 > /var/lib/hamstrack-backup/last_success_dump
 echo 0 > /var/lib/hamstrack-backup/last_success_upload
 ```
 
-**Uploading to S3 needs AWS CLI v2 ≥ 2.19** (`aws --version`). Backups are written with
-`If-None-Match: *` so a key can never be overwritten — an older CLI does not know the
-option and the run fails after the dump. Amazon Linux 2023 ships a new enough one; Debian
-and Ubuntu ship no `aws` at all, and their `awscli` package is v1, which will not do.
-`BACKUP_TARGET=local` needs none of this.
-
-Run it once by hand before you trust the schedule, then enable the timer — and start it
-**through systemd** rather than as a bare command, so that everything the unit adds is
-exercised too:
-
-```bash
-systemctl daemon-reload
-systemctl start hamstrack-backup.service
-journalctl -u hamstrack-backup -n 50 --no-pager
-systemctl enable --now hamstrack-backup.timer
-systemctl list-timers hamstrack-backup.timer
-```
-
-**Two things nothing else will tell you.** `/etc/hamstrack/backup.env` is hand-edited and
+**Two things nothing else will tell you**, whichever scheduler you choose.
+`/etc/hamstrack/backup.env` is hand-edited and
 read by two parsers that disagree. systemd's `EnvironmentFile=` accepts lines bash cannot —
 a stray paren, one quote too few — and the script sources the same file, so the `bash -n`
 above is what catches that kind before 03:15 does. A file bash cannot parse does not silently produce a backup with default settings: the
@@ -2135,25 +2188,140 @@ with no such tool on the box — which `bash -n` cannot see, because it parses w
 the script runs the file in a child shell before sourcing it, precisely so that case ends in a
 refusal rather than in a backup written to the default prefix and reported as a success.
 And if you ever need to abort a run: `systemctl stop hamstrack-backup.service` reaches the
-whole cgroup and finishes in seconds, while a bare hand run you send `TERM` keeps going
+whole cgroup and finishes in seconds, while a bare run you send `TERM` keeps going
 until the dump it is streaming completes (bash runs a trap only once the current foreground
 command returns — 300 s, measured). To stop one of those now, signal its child as well:
-`pkill -TERM -P <pid>`.
+`pkill -TERM -P <pid>`. A cron run is a bare run in that sense — which is one of the reasons the
+crontab line below wraps the command in `timeout`, whose signal reaches the dump child too
+(measured).
 
-It fires daily at 03:15 UTC with up to 10 minutes of jitter, and `Persistent=true`
-means a box that was down at 03:15 runs the job at the next boot instead of
-skipping the day.
+#### With systemd (what the hosted instance runs)
 
-**Where it uploads to.** The full variable reference is in
+Two more files, then run it once by hand before you trust the schedule — and start it
+**through systemd** rather than as a bare command, so that everything the unit adds is
+exercised too:
+
+```bash
+install -m 0644 ops/backup/hamstrack-backup.service /etc/systemd/system/
+install -m 0644 ops/backup/hamstrack-backup.timer   /etc/systemd/system/
+systemctl daemon-reload
+systemctl start hamstrack-backup.service
+journalctl -u hamstrack-backup -n 50 --no-pager
+systemctl enable --now hamstrack-backup.timer
+systemctl list-timers hamstrack-backup.timer
+```
+
+The shipped timer fires daily at 03:15 UTC with up to 10 minutes of jitter, and
+`Persistent=true` means a box that was down at 03:15 runs the job at the next boot instead
+of skipping the day.
+
+#### Without systemd: one cron line
+
+The scheduler is not part of the mechanism. The job records its own freshness in a file
+(below), the alert rules read that file, and nothing in them can tell what started the run —
+so anything that runs the command daily gives you the same backup and the same alarm. Do the
+shared install block above, leave the two unit files out of it, and add one entry to **root's**
+crontab (`sudo crontab -e`):
+
+```cron
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+15 3 * * * nice -n 10 ionice -c 3 timeout -k 90 1800 /usr/local/bin/hamstrack-backup >> /var/log/hamstrack-backup.log 2>&1
+```
+
+About those two lines:
+
+- **The three words before the command are three of the unit's settings**, bought back for free —
+  `nice -n 10 ionice -c 3` is the unit's `Nice=`/`IOSchedulingClass=idle`, and `timeout -k 90 1800`
+  is its `TimeoutStartSec=1800` plus the 90 s systemd leaves between `TERM` and `KILL`. They need
+  no new prerequisite: `ionice` ships in `util-linux`, the same package as the `flock` the script
+  already requires, and `timeout` in `coreutils`, the same as `md5sum`. See
+  [what cron costs you](#what-cron-costs-you) for the three that cannot be recovered this way, and
+  for the one you must not try to.
+
+- **The `PATH=` line is not decoration.** cron runs a job with `PATH=/usr/bin:/bin`, and both
+  `docker` (when installed by Docker's own convenience script) and the AWS CLI v2 live in
+  `/usr/local/bin`. Measured: without it the run refuses in pre-flight with
+  `FATAL docker is not installed or not on PATH` and takes no dump — which is the pre-flight
+  doing its job, in a log you may not be reading.
+- **Redirect the output somewhere you will read it.** On the systemd path this is the journal
+  (`journalctl -u hamstrack-backup`); cron hands it to local mail, which on most hosts goes
+  nowhere. That log is the only place per-run detail exists — including the one
+  `WARN … UNVERIFIED` line that tells you an S3-compatible store is not returning the body MD5,
+  which no metric records.
+- **No jitter, deliberately.** The shipped timer's `RandomizedDelaySec=600` spreads a fleet; one
+  host has nothing to spread, and the 26-hour alert threshold absorbs a daily period plus that
+  jitter either way.
+
+`/etc/hamstrack/backup.env` applies unchanged: the script **sources it itself**, so this path
+needs no `EnvironmentFile=` equivalent. Measured — a run with an empty environment and nothing
+but that file took the dump and honoured the file's `BACKUP_KEEP_LOCAL_DAYS`.
+
+Run it once by hand, exactly as cron will, and then read back what it published:
+
+```bash
+sudo /usr/local/bin/hamstrack-backup
+sudo grep -v '^#' /var/lib/node_exporter/textfile_collector/hamstrack_backup.prom
+```
+
+The second command is the step that makes this a backup rather than a crontab entry. Expect
+`hamstrack_backup_last_status{stage="dump"} 1` and a
+`hamstrack_backup_last_success_timestamp_seconds{stage="dump"}` within seconds of `date +%s`
+(in `s3` mode an `upload` pair as well; in `local` mode there is no `upload` series at all, and
+that is correct).
+
+#### What cron costs you
+
+Both alert rules are unchanged — they read that file, and neither can tell what started the run.
+What the unit adds on top is six things, and the crontab line above already buys back three:
+
+| The unit does | A bare cron line instead | The line above |
+|---|---|---|
+| `ExecStopPost=` stamps a failure when the run is **SIGKILL**ed — an OOM kill runs no exit handler — so `BackupRunFailed` fires within the hour | the file keeps the previous run's `hamstrack_backup_last_status{stage="dump"} 1`, and nothing fires until `BackupStale` at 26 hours | no equivalent |
+| `TimeoutStartSec=1800` ends a run wedged behind a database lock or a hung `dockerd`, so the next one can take the lock | the wedged run holds `/var/lock/hamstrack-backup.lock` indefinitely and every later run exits 0 as the lock loser without touching the metrics — again visible only as `BackupStale` | `timeout -k 90 1800` |
+| `Nice=10`, `IOSchedulingClass=idle`, `MemoryHigh=`/`MemoryMax=` keep the job from competing with the product it is backing up | it competes | `nice -n 10 ionice -c 3` — the memory ceiling has no equivalent |
+| `LimitFSIZE=2G`, so "a runaway write dies instead of filling the volume PostgreSQL lives on" | the disk fills and PostgreSQL is what suffers | nothing, and **not** `ulimit -f` — see below |
+| `TasksMax=64` bounds a fork storm to the one unit | unbounded, shared with everything else on the host | no equivalent |
+| `Persistent=true` runs a job the box was down for at the next boot | the 03:15 slot is simply missed | `anacron` (`/etc/cron.daily`) is the one scheduler that has this |
+
+**They do not all degrade to the same place.** Rows 1, 2 and 6 end as 26-hour staleness, which
+the alerting does see and which is why this path is offered rather than refused. Rows 3, 4 and 5
+degrade to nothing at all: the backup *succeeds*, the gauge is fresh, both backup rules are
+correctly silent, and the thing that suffered is the product — whose witnesses (`HighLatency`,
+`DiskFilling`, `HostMemoryLow`, `HostKernelOOMKill`, `AppDown`) all live in the observability
+stack, which is exactly what the operator reading this section does not run. That is why the
+three recoverable ones are worth the extra words in the crontab line: measured, `timeout -k 90`
+reproduces the graceful half of `TimeoutStartSec=` in full — a run cut off at the limit published
+`hamstrack_backup_last_status{stage="dump"} 0`, removed its partial dump and exited 124, because
+the script traps `TERM` and `timeout` signals the whole process group rather than only the shell
+it started.
+
+**Do not emulate `LimitFSIZE` with `ulimit -f`.** The limit applies to *every* file the run
+writes, the `.prom` witness included, and the field counts 512-byte blocks — so `ulimit -f 2048`,
+written meaning 2 GB, is 1 MB. Measured: a metrics write past the limit kills the shell with
+`SIGXFSZ`, for which bash runs no `EXIT` trap, so the run publishes nothing, the previous run's
+success stands, and under cron there is no `ExecStopPost=` to notice — strictly worse than having
+no limit. A correctly sized one is merely unnecessary rather than harmful (measured: a 2 MB limit
+against a 4 MB dump killed the dump child, and the script's own trap published
+`{stage="dump"} 0` and removed the partial file), but the typo is cheap and the witness is what
+it costs. If you want this bound, give `BACKUP_LOCAL_DIR` its own filesystem, or raise
+`BACKUP_MIN_FREE_MB`, which the script already checks before it dumps.
+
+One thing cron does *not* cost you: the unit's `ReadWritePaths=` trap. Repointing
+`BACKUP_LOCAL_DIR` under systemd needs a drop-in or the run fails with "Read-only file system";
+from cron it simply works.
+
+#### Where it writes
+
+The full variable reference is in
 [`ops/backup/backup.env.example`](../ops/backup/backup.env.example); three settings
 decide the destination.
 
 | You have | Set | Credentials |
 |---|---|---|
+| no object store at all | `BACKUP_TARGET=local` | none, and no `aws` on the host either |
 | AWS S3, on EC2 | `BACKUP_TARGET=s3`, `BACKUP_S3_BUCKET=…`, `BACKUP_S3_REGION=…` | none to set — the instance role arrives over IMDS |
 | AWS S3, not on EC2 | the same | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` in `/etc/hamstrack/backup.env` (it is `0640 root:root` and both systemd and the script export it), or `~/.aws/credentials`. Also set `AWS_EC2_METADATA_DISABLED=true` |
 | MinIO, Backblaze B2, Wasabi, or any S3-compatible store | the same, plus `BACKUP_S3_ENDPOINT=https://…` (passed straight through as `--endpoint-url`; **`https` only** — an `http` endpoint would upload your whole database in the clear, so the run refuses it), a `BACKUP_S3_REGION` your provider expects (B2 `us-west-004`, MinIO usually `us-east-1` — a wrong one is an opaque signature error), and `BACKUP_S3_PATH_STYLE_ACCESS=true` if your store does not do virtual-host URLs (most MinIO deployments) | the same as the row above |
-| no object store at all | `BACKUP_TARGET=local` | none |
 
 `BACKUP_TARGET=local` dumps, verifies and rotates on a local disk
 (`BACKUP_LOCAL_DIR`, kept for `BACKUP_KEEP_LOCAL_DAYS` days) and skips the upload
@@ -2169,27 +2337,68 @@ anyone who gets into the box. For the same reason, if you use AWS, give the
 instance role `s3:PutObject` on the backup bucket and **not** `s3:GetObject` or
 `s3:DeleteObject`.
 
-**Every run writes `hamstrack_backup.prom`** into node-exporter's textfile directory —
-always, which is why the install block above creates that directory even when you do not
-run the observability stack. **If you also run the stack**, two provisioned alert rules —
+#### The freshness metric, and who reads it
+
+**Every run writes `hamstrack_backup.prom`** into `BACKUP_TEXTFILE_DIR` (default
+`/var/lib/node_exporter/textfile_collector`) — always, whatever scheduled it, which is why the
+install block above creates that directory even when you do not run the observability stack.
+The file is `0644` while every other file the job writes is `0600`, on purpose: node-exporter
+runs as `nobody` inside its container, and a metric it cannot read is an alert that never
+fires.
+
+**If you also run the stack**, two provisioned alert rules —
 `BackupStale` (a backup stage has not succeeded in 26 hours, critical) and
 `BackupRunFailed` (the last run failed at a stage, warning) — start working with no extra
 configuration beyond that directory and one run of the job, which is what makes the series
 exist. Both rules are **per stage**, which is what
 makes them work in `local` mode too: there is no `upload` stage there, and the `dump` stage
-is then what shows you a timer that has stopped. They stay silent if you never install the
-timer, because the metric does not exist. See
+is then what shows you a schedule that has stopped. They stay silent if you never install the
+job, because the metric does not exist. See
 [Observability](observability.md) for the wiring and the metric names.
+
+**If you do not run the stack, be clear-eyed about what that file is.** Nothing scrapes it,
+so neither rule exists for you and no alarm is watching the backup — the `.prom` is a record
+you read, which is what the read-back command above and the
+[restore drill](#verify-a-restore) do with it. The smallest alarm that needs nothing new from
+this repository is a second cron entry that reads the same number `BackupStale` reads, and
+refuses the same 93 600 seconds (26 hours), so the two are one number rather than two that
+drift:
+
+```cron
+35 4 * * * awk -v now="$(date +\%s)" '/^hamstrack_backup_last_success_timestamp_seconds/ && now-$2 > 93600 { print "STALE "$0; rc=1 } END { exit rc }' /var/lib/node_exporter/textfile_collector/hamstrack_backup.prom
+```
+
+Measured: silent and exit 0 on a fresh file; prints the offending series and exits 1 on one 27
+hours old, **and** on the `0` sentinel the install block writes, so "installed, never succeeded"
+is caught too; exit 2 if the file is missing, so it notices its own subject being deleted.
+
+**The backslash in `+\%s` is load-bearing**, and it is the reason this is given as a line to paste
+rather than left as an exercise: in a crontab an unescaped `%` is turned into a newline and
+everything after it becomes the job's stdin. Measured against Debian's cron 3.0pl1-197 — the
+unescaped form ran, wrote *nothing at all* (the redirect was past the `%` and never executed) and
+reported no error anywhere; the escaped form printed `STALE …` and exited 1. The escaped form is
+also what you want when pasting it into a shell by hand, where `\%` is simply `%`.
+
+**Then the harder half: that output has to reach you.** cron hands it to local mail, which is the
+same channel this page already said goes nowhere on most hosts — so this entry is an alarm only
+if you have a working MTA and a `MAILTO=` line in that crontab. If you do not, the only form that
+notices its own death is the other direction: have the backup line ping an outbound dead-man's
+switch *on success* (`&& curl -fsS https://…`), and let the service on the other end alert when
+the ping stops. That needs nothing from this repository either, and unlike a local mail it
+cannot be silenced by the host it is watching.
 
 **If — and only if — you run on EC2, there is a second timer worth installing.**
 [`ops/snapshot/`](../ops/snapshot/) holds a check that asks how old the newest completed EBS
 snapshot of your root volume is, and publishes it the same way, for the three
 `VolumeSnapshot*` rules. It exists because a snapshot **schedule** can run green for days
 while snapshotting the wrong volume — that is what happened to the hosted instance, and only
-an outcome check saw it. Install it like the backup timer (`install` the `.sh`, the
-`.service` and the `.timer`) — but **start the service once and read its result before you
-`systemctl enable --now hamstrack-volume-snapshot.timer`**, for the reason set out under
-"sandboxed" below. It needs **`ec2:DescribeVolumes` and
+an outcome check saw it. Install it the way the backup job's **systemd** path is installed
+(`install` the `.sh`, the `.service` and the `.timer`) — but **start the service once and read
+its result before you `systemctl enable --now hamstrack-volume-snapshot.timer`**, for the reason
+set out under "sandboxed" below. Unlike the backup job this one has no cron alternative
+documented here: its freshness reaches the same kind of textfile, so a cron line would work the
+same way, but the `.service` is where its sandbox is declared and nothing below has been measured
+without it. It needs **`ec2:DescribeVolumes` and
 `ec2:DescribeSnapshots` on the instance role**, both read-only, and **there are no
 credentials to configure** — the instance role arrives over IMDS — and no volume id either,
 because it resolves your root volume from instance metadata on every run. What it *does* need

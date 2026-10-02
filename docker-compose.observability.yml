@@ -161,7 +161,8 @@ services:
     command:
       - --path.rootfs=/host
       # Backup freshness (HD-187) is published as a .prom file written by the host
-      # systemd unit hamstrack-backup.service. The bind mount below uses the SAME path
+      # script hamstrack-backup.sh — whatever schedules it, the shipped systemd unit or the
+      # crontab line docs/self-hosting.md documents. The bind mount below uses the SAME path
       # inside and outside the container ON PURPOSE: node-exporter prefixes some paths
       # with --path.rootfs and this directory resolves to the same host directory under
       # either behaviour, so the flag cannot be subtly wrong.
