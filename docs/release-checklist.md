@@ -1356,7 +1356,11 @@ individually true sentences disagree. Do them once per *line* (0.18 → 0.19), n
 **Every numbered step below ends in a `Measured <date>` line, and that is not decoration.**
 `InstallClaimsTest#theInstallChecklistStepsWereRunOnThisReleaseLine` reads this section,
 finds the steps, and fails the build when a step carries no such line or carries one older
-than the newest release tag — so a step is run on the line, or the line does not ship.
+than **the date this line opened** — the creation date of the lowest-numbered tag on it
+(`v0.18.0` for 0.18), read from `git`, never the newest patch. So a step is run on the line,
+or the line does not ship — and a patch ships without re-running anything, which is what
+"not per patch" above means. It held the newest *tag* until 2026-10-07, which turned every
+patch into six stale steps and contradicted this paragraph; `v0.18.3` is what showed it.
 Record what the run actually did, including where it departed from what the documents
 prescribe: the date is the claim, and a date with no output behind it is the failure this
 whole section exists to catch.

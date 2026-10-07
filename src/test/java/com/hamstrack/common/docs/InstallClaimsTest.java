@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -998,10 +999,22 @@ class InstallClaimsTest {
      * assertion about the artefact being shipped that nobody has made about this one. The only way
      * to turn this rule green is to run the command; editing the prose around it does nothing.
      *
-     * <p>The bound is the newest release tag's own date, from {@code git}, never a literal: a
-     * checklist item is due once per <em>line</em>, so the thing it must be newer than is the thing
-     * that moves the line. Holding checklist text in a unit test is established practice here
-     * &mdash; {@code UpgradeNotesCoverageTest} walks this same file's {@code ## Upgrading} anchors.
+     * <p><strong>The bound is the date the current release line OPENED</strong> &mdash; the
+     * creation date of {@link #currentLineOpenedBy}, from {@code git}, never a literal. A checklist
+     * item is due once per <em>line</em>, so the thing it must be newer than is the thing that
+     * <em>moves</em> the line, and a patch is not that thing: this rule compared against
+     * {@code newestRelease().date()} until 2026-10-07, which made every patch re-stale all six
+     * steps while the section, this method's name and its own failure message all said per line.
+     * Holding checklist text in a unit test is established practice here &mdash;
+     * {@code UpgradeNotesCoverageTest} walks this same file's {@code ## Upgrading} anchors.
+     *
+     * <p><strong>What this therefore does not hold, stated so nobody reads it as held:</strong> a
+     * step whose subject is a single tag rather than the line. Step 6 is the one in the tree today
+     * &mdash; the JAR asset on a Release belongs to the tag that cut it &mdash; and what holds its
+     * published half is not a date but the standing block in that step plus
+     * {@code UnpublishedAssetWarningTest}, which keeps every copy of the "no release carries the
+     * assets yet" warning alive or deleted together. Making a step per-tag is a change to the
+     * section's own "once per *line*, not per patch" rule, i.e. a deliberate edit there first.
      */
     @Test
     void theInstallChecklistStepsWereRunOnThisReleaseLine() {
@@ -1046,22 +1059,23 @@ class InstallClaimsTest {
                         steps.size(), headlines, CHECKLIST_STEPS)
                 .hasSizeGreaterThanOrEqualTo(CHECKLIST_STEPS);
 
-        Release release = newestRelease();
+        Release opened = currentLineOpenedBy();
+        Release newest = newestRelease();
         var stale = new ArrayList<String>();
         for (int i = 0; i < steps.size(); i++) {
             String body = section.substring(steps.get(i)[0],
                     i + 1 < steps.size() ? steps.get(i + 1)[0] : section.length());
             var measured = MEASURED.matcher(body);
-            String newest = null;
+            String ran = null;
             while (measured.find()) {                       // the LATEST date in the step is its run
-                newest = newest == null || measured.group(1).compareTo(newest) > 0
-                        ? measured.group(1) : newest;
+                ran = ran == null || measured.group(1).compareTo(ran) > 0
+                        ? measured.group(1) : ran;
             }
-            if (newest == null) {
+            if (ran == null) {
                 stale.add("  step %s - no `Measured <date>` line at all".formatted(headlines.get(i)));
-            } else if (newest.compareTo(release.date()) < 0) {
-                stale.add("  step %s - last measured %s, before %s (%s)"
-                        .formatted(headlines.get(i), newest, release.tag(), release.date()));
+            } else if (ran.compareTo(opened.date()) < 0) {
+                stale.add("  step %s - last measured %s, before the %s line opened at %s (%s)"
+                        .formatted(headlines.get(i), ran, opened.line(), opened.tag(), opened.date()));
             }
         }
 
@@ -1071,18 +1085,27 @@ class InstallClaimsTest {
 
                         %s
 
-                        Newest release tag: %s (%s). Every step carries a `Measured <date>` line no
-                        older than that.
+                        THE BOUND IS THE DATE THIS LINE OPENED: the %s line opened at %s on %s, and
+                        every step carries a `Measured <date>` no older than that. A patch does NOT
+                        move it - the newest tag is %s (%s) and this rule deliberately does not
+                        compare against it, because the section is "once per *line* (0.18 -> 0.19),
+                        not per patch".
 
-                        These are the checks a unit test may not make: they need the network, a
-                        daemon, or a reader. Nothing else in this repository will ever tell you that
-                        `0.4.3` was published (it was not), that the fresh-clone install still works,
-                        that a compose file still interpolates, or that two documents agree about
-                        whether mail is required. Run the step, record what it said including where
-                        the run departed from what the documents prescribe, and date it.
+                        SO THE ONE THING THAT REDS THIS RULE IS THE LINE ADVANCING, and then it reds
+                        every step at once. It is asking for the whole numbered list in
+                        docs/release-checklist.md § "The install path, once per release line", re-run
+                        against the new line: the registry read, the timed fresh-clone install ON A
+                        HOST THAT IS NOT THE BUILD MACHINE, `docker compose config -q` per compose
+                        file, the refusals only a running container makes, the mail read-through, and
+                        the Release JAR against the image of the same tag. Each needs the network, a
+                        daemon or a reader, and two of them need another machine or the `gh` CLI - so
+                        start the list when the `.0` tag is cut, not when the build goes red.
 
-                        Do NOT date a step you did not run: the date is the claim.""",
-                        String.join("\n", stale), release.tag(), release.date())
+                        Record what the run said, including where it departed from what the documents
+                        prescribe, and date it. Do NOT date a step you did not run: the date is the
+                        claim.""",
+                        String.join("\n", stale), opened.line(), opened.tag(), opened.date(),
+                        newest.tag(), newest.date())
                 .isEmpty();
     }
 
@@ -1155,27 +1178,46 @@ class InstallClaimsTest {
     }
 
     /**
-     * The newest release: its tag ({@code v0.18.2}), the line a document may pin ({@code 0.18}) and
-     * the date the tag was created ({@code 2026-09-11}).
+     * One release tag, kept as its three numbers so that <em>every</em> question about it is
+     * answered by this record rather than by parsing the tag again: the tag as git carries it
+     * ({@code v0.18.3}), the line a document may pin ({@code 0.18}), and the date the tag was
+     * created ({@code 2026-10-07}). Ordered by <strong>version</strong>, never by date &mdash; a
+     * patch on an older line can be tagged after a newer one.
      */
-    private record Release(String tag, String line, String date) {
+    private record Release(int major, int minor, int patch, String date) implements Comparable<Release> {
+
+        /** The tag as {@code git tag --list v*} prints it. */
+        String tag() {
+            return "v" + major + "." + minor + "." + patch;
+        }
+
+        /** The release line, which is what a document pins and what this section is dated against. */
+        String line() {
+            return major + "." + minor;
+        }
+
+        @Override
+        public int compareTo(Release other) {
+            return Comparator.comparingInt(Release::major)
+                    .thenComparingInt(Release::minor)
+                    .thenComparingInt(Release::patch)
+                    .compare(this, other);
+        }
     }
 
     /**
-     * The newest {@code v<major>.<minor>.<patch>} tag, by version rather than by tag date &mdash; a
-     * patch on an older line can be tagged after a newer one, and {@code --sort=-creatordate} would
-     * then hand back the wrong line.
+     * Every {@code v<major>.<minor>.<patch>} tag in this checkout, with its creation date.
      *
      * <p><strong>From git, never from {@code pom.xml}</strong>, which carries the placeholder
      * {@code 0.0.0-DEV} - the real version is injected at image build time. CI checks out with
      * {@code fetch-depth: 0} on the job that runs this suite, so the tags are here.
      *
-     * <p>One derivation for two rules: the pin rule compares documents against {@link Release#line()},
-     * and {@link #theInstallChecklistStepsWereRunOnThisReleaseLine} compares a step's run date
-     * against {@link Release#date()}. Two walks of {@code git tag} would be two answers to "which
-     * release is current" the day somebody sorts one of them differently.
+     * <p>One walk for every question: {@link #newestRelease} answers "which release is current" for
+     * the pin rule, {@link #currentLineOpenedBy} answers "when did this line begin" for the
+     * checklist rule. Two walks of {@code git tag} would be two answers the day somebody sorts one
+     * of them differently.
      */
-    private static Release newestRelease() {
+    private static List<Release> releaseTags() {
         // `Path.of(".")`, not `Path.of("")` - measured: ProcessBuilder rejects an empty directory,
         // and the failure reads as "git tag failed", which would send a reader looking for a git
         // problem that is not there.
@@ -1188,28 +1230,17 @@ class InstallClaimsTest {
                         result.status(), result.detail())
                 .isTrue();
 
-        int bestMajor = -1;
-        int bestMinor = -1;
-        int bestPatch = -1;
-        String date = "";
+        var releases = new ArrayList<Release>();
         for (String tag : result.output().split("\\R", -1)) {
             var matcher = RELEASE_TAG.matcher(tag.strip());
-            if (!matcher.matches()) {
-                continue;
-            }
-            int major = Integer.parseInt(matcher.group(1));
-            int minor = Integer.parseInt(matcher.group(2));
-            int patch = Integer.parseInt(matcher.group(3));
-            if (major > bestMajor
-                || (major == bestMajor && minor > bestMinor)
-                || (major == bestMajor && minor == bestMinor && patch > bestPatch)) {
-                bestMajor = major;
-                bestMinor = minor;
-                bestPatch = patch;
-                date = matcher.group(4);
+            if (matcher.matches()) {
+                releases.add(new Release(Integer.parseInt(matcher.group(1)),
+                        Integer.parseInt(matcher.group(2)),
+                        Integer.parseInt(matcher.group(3)),
+                        matcher.group(4)));
             }
         }
-        assertThat(bestMajor)
+        assertThat(releases)
                 .withFailMessage("""
                         NO RELEASE TAG WAS FOUND, so the pin rule has nothing to hold the documents
                         to and would pass whatever they say, and the checklist rule has no date to
@@ -1218,9 +1249,43 @@ class InstallClaimsTest {
                         (it needs git 2.13).
                           locally: git fetch --tags
                           CI:      actions/checkout with `fetch-depth: 0`""")
-                .isNotNegative();
-        return new Release("v" + bestMajor + "." + bestMinor + "." + bestPatch,
-                bestMajor + "." + bestMinor, date);
+                .isNotEmpty();
+        return releases;
+    }
+
+    /**
+     * The newest release, by version rather than by tag date. Its {@link Release#line()} is the line
+     * a document may pin; its {@link Release#date()} is <em>not</em> what the checklist rule
+     * compares against &mdash; see {@link #currentLineOpenedBy}.
+     */
+    private static Release newestRelease() {
+        return releaseTags().stream().max(Comparator.naturalOrder()).orElseThrow();
+    }
+
+    /**
+     * <strong>The tag that opened the current release line</strong> &mdash; the lowest-versioned tag
+     * sharing the newest release's {@link Release#line()}, i.e. {@code v0.18.0} while {@code 0.18}
+     * is current. Its date is the bound the checklist steps are held to.
+     *
+     * <p>Lowest <em>version</em> on the line rather than earliest date, and the lowest one PRESENT
+     * rather than a literal {@code .0}: the question is which tag moved the line, and a line whose
+     * {@code .0} was never published (or was deleted) still began somewhere.
+     *
+     * <p>Why not {@code newestRelease().date()}, which this was until 2026-10-07: that is the date
+     * of the newest <em>patch</em>, so every patch re-staled all six steps and the rule enforced
+     * once-per-tag while its own name, its message and
+     * {@code docs/release-checklist.md} § <em>The install path, once per release line</em> ("Do
+     * them once per *line* (0.18 &rarr; 0.19), not per patch") all said once-per-line. It went red
+     * on {@code v0.18.3} with nothing about the steps changed &mdash; all six at once, which is the
+     * signature of a bound moving under a population rather than of work going undone.
+     */
+    private static Release currentLineOpenedBy() {
+        List<Release> tags = releaseTags();
+        String line = tags.stream().max(Comparator.naturalOrder()).orElseThrow().line();
+        return tags.stream()
+                .filter(release -> release.line().equals(line))
+                .min(Comparator.naturalOrder())
+                .orElseThrow();
     }
 
     /**
